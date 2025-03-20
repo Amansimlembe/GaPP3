@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Route, Switch } from 'react-router-dom';
-import LoginScreen from './screens/LoginScreen';        // Correct import
-import JobSeekerScreen from './screens/JobSeekerScreen';  // Correct import
-import EmployerScreen from './screens/EmployerScreen';    // Correct import
-import FeedScreen from './screens/FeedScreen';            // Correct import
-import ChatScreen from './screens/ChatScreen';            // Correct import
-import ProfileScreen from './screens/ProfileScreen';      // Correct import
+import LoginScreen from './screens/LoginScreen';       // Corrected path
+import JobSeekerScreen from './screens/JobSeekerScreen'; // Corrected path
+import EmployerScreen from './screens/EmployerScreen';   // Corrected path
+import FeedScreen from './screens/FeedScreen';           // Corrected path
+import ChatScreen from './screens/ChatScreen';           // Corrected path
+import ProfileScreen from './screens/ProfileScreen';     // Corrected path
 
 const App = () => {
   const [userId, setUserId] = useState(null);

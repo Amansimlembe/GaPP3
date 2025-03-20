@@ -6,10 +6,14 @@ const LoginScreen = ({ setUser }) => {
   const [password, setPassword] = useState('');
 
   const login = async () => {
-    const { data } = await axios.post('/auth/login', { email, password });
-    if (data.userId) {
-      localStorage.setItem('user', JSON.stringify(data));
-      setUser(data.userId, data.role);
+    try {
+      const { data } = await axios.post('/auth/login', { email, password });
+      if (data.userId) {
+        localStorage.setItem('user', JSON.stringify(data));
+        setUser(data.userId, data.role);
+      }
+    } catch (error) {
+      console.error('Login failed:', error);
     }
   };
 
