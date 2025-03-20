@@ -15,5 +15,17 @@
     "react-scripts": "5.0.1",
     "socket.io-client": "^4.7.5"
   },
-  "proxy": "http://localhost:8000"
+  "proxy": "http://localhost:8000",
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  }
 }
