@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Route, Switch } from 'react-router-dom';
-import LoginScreen from './screens/LoginScreen';
+import LoginScreen from './screens/LoginScreen'; // Ensure this path is correct
 import JobSeekerScreen from './screens/JobSeekerScreen';
 import EmployerScreen from './screens/EmployerScreen';
 import FeedScreen from './screens/FeedScreen';
