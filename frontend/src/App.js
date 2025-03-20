@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Route, Switch } from 'react-router-dom';
-import LoginScreen from './screens/LoginScreen';
-import JobSeekerScreen from './screens/JobSeekerScreen';
-import EmployerScreen from './screens/EmployerScreen';
-import FeedScreen from './screens/FeedScreen';
-import ChatScreen from './screens/ChatScreen';
-import ProfileScreen from './screens/ProfileScreen';
+import LoginScreen from './screens/LoginScreen';        // Correct import
+import JobSeekerScreen from './screens/JobSeekerScreen';  // Correct import
+import EmployerScreen from './screens/EmployerScreen';    // Correct import
+import FeedScreen from './screens/FeedScreen';            // Correct import
+import ChatScreen from './screens/ChatScreen';            // Correct import
+import ProfileScreen from './screens/ProfileScreen';      // Correct import
 
 const App = () => {
   const [userId, setUserId] = useState(null);

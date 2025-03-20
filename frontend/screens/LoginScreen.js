@@ -6,30 +6,17 @@ const LoginScreen = ({ setUser }) => {
   const [password, setPassword] = useState('');
 
   const login = async () => {
-    try {
-      const { data } = await axios.post('/auth/login', { email, password });
-      if (data.userId) {
-        localStorage.setItem('user', JSON.stringify(data));
-        setUser(data.userId, data.role);
-      }
-    } catch (error) {
-      console.error('Login failed:', error);
+    const { data } = await axios.post('/auth/login', { email, password });
+    if (data.userId) {
+      localStorage.setItem('user', JSON.stringify(data));
+      setUser(data.userId, data.role);
     }
   };
 
   return (
     <div>
-      <input
-        placeholder="Email"
-        value={email}
-        onChange={(e) => setEmail(e.target.value)}
-      />
-      <input
-        type="password"
-        placeholder="Password"
-        value={password}
-        onChange={(e) => setPassword(e.target.value)}
-      />
+      <input placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} />
+      <input type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} />
       <button onClick={login}>Login</button>
     </div>
   );
