@@ -1,0 +1,48 @@
+GaPP3/
+├── backend/                    # Node.js backend
+│   ├── config/
+│   │   └── db.js
+│   ├── models/
+│   │   ├── User.js
+│   │   ├── Job.js
+│   │   ├── Message.js
+│   │   ├── Group.js
+│   │   └── Post.js
+│   ├── routes/
+│   │   ├── auth.js
+│   │   ├── jobseeker.js
+│   │   ├── employer.js
+│   │   └── social.js
+│   ├── utils/
+│   │   ├── cvParser.js
+│   │   └── jobMatcher.js
+│   ├── uploads/
+│   ├── server.js              # Updated to serve frontend
+│   ├── package.json
+│   └── .env
+├── frontend/                   # React (web) frontend
+│   ├── public/
+│   │   ├── index.html
+│   │   └── favicon.ico
+│   ├── src/
+│   │   ├── components/
+│   │   │   ├── JobCard.js
+│   │   │   ├── PostCard.js
+│   │   │   └── ChatBubble.js
+│   │   ├── screens/
+│   │   │   ├── LoginScreen.js
+│   │   │   ├── JobSeekerScreen.js
+│   │   │   ├── EmployerScreen.js
+│   │   │   ├── FeedScreen.js
+│   │   │   ├── ChatScreen.js
+│   │   │   └── ProfileScreen.js
+│   │   ├── navigation/
+│   │   │   └── AppNavigator.js
+│   │   ├── services/
+│   │   │   ├── api.js
+│   │   │   └── socket.js
+│   │   └── App.js
+│   ├── package.json
+│   └── .env
+├── README.md
+└── .gitignore
