@@ -1,5 +1,6 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const router = express.Router();
 const cloudinary = require('cloudinary').v2;
@@ -16,7 +17,8 @@ router.post('/register', async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
     const user = new User({ email, password: hashedPassword, role: role || 0 });
     await user.save();
-    res.status(201).json({ userId: user._id, role: user.role, message: 'User registered successfully' });
+    const token = jwt.sign({ userId: user._id, role: user.role }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    res.status(201).json({ token, userId: user._id, role: user.role, message: 'User registered successfully' });
   } catch (error) {
     console.error('Registration error:', error);
     res.status(500).json({ error: 'Server error during registration' });
@@ -30,7 +32,8 @@ router.post('/login', async (req, res) => {
     if (!user || !(await bcrypt.compare(password, user.password))) {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
-    res.json({ userId: user._id, role: user.role, photo: user.photo || '', message: 'Login successful' });
+    const token = jwt.sign({ userId: user._id, role: user.role }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    res.json({ token, userId: user._id, role: user.role, photo: user.photo || '', message: 'Login successful' });
   } catch (error) {
     console.error('Login error:', error);
     res.status(500).json({ error: 'Server error during login' });

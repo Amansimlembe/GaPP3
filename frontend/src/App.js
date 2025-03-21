@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { BrowserRouter as Router, Route, Switch, Link, Redirect } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { FaSignOutAlt, FaBars } from 'react-icons/fa';
@@ -10,34 +10,24 @@ import ChatScreen from './screens/ChatScreen';
 import ProfileScreen from './screens/ProfileScreen';
 
 const App = () => {
+  const [token, setToken] = useState(null);
   const [userId, setUserId] = useState(null);
   const [role, setRole] = useState(null);
   const [photo, setPhoto] = useState('');
   const [isNavOpen, setIsNavOpen] = useState(false);
 
-  useEffect(() => {
-    const user = localStorage.getItem('user');
-    if (user) {
-      const { userId, role, photo } = JSON.parse(user);
-      setUserId(userId);
-      setRole(role);
-      setPhoto(photo || '');
-    }
-  }, []);
-
   const logout = () => {
-    localStorage.removeItem('user');
+    setToken(null);
     setUserId(null);
     setRole(null);
     setPhoto('');
   };
 
-  if (!userId) return <LoginScreen setUser={(id, r, p) => { setUserId(id); setRole(r); setPhoto(p); }} />;
+  if (!token) return <LoginScreen setAuth={(t, id, r, p) => { setToken(t); setUserId(id); setRole(r); setPhoto(p); }} />;
 
   return (
     <Router>
       <div className="min-h-screen flex flex-col">
-        {/* Top Navigation for Small Devices */}
         <div className="md:hidden bg-primary text-white p-4 flex justify-between items-center shadow-lg">
           <h1 className="text-2xl font-bold">GaPP</h1>
           <FaBars className="text-2xl cursor-pointer hover:text-secondary transition duration-300" onClick={() => setIsNavOpen(!isNavOpen)} />
@@ -56,7 +46,6 @@ const App = () => {
           </nav>
         </motion.div>
 
-        {/* Sidebar for Larger Devices */}
         <motion.div
           initial={{ x: -250 }}
           animate={{ x: 0 }}
@@ -72,19 +61,18 @@ const App = () => {
           </nav>
         </motion.div>
 
-        {/* Main Content */}
         <div className="flex-1 md:ml-64 container relative">
           <div className="absolute top-4 right-4 flex items-center">
-            {photo && <img src={`https://gapp-6yc3.onrender.com${photo}`} alt="Profile" className="w-10 h-10 rounded-full mr-2 border-2 border-primary" />}
+            {photo && <img src={photo} alt="Profile" className="w-10 h-10 rounded-full mr-2 border-2 border-primary" />}
             <FaSignOutAlt className="text-2xl text-primary cursor-pointer hover:text-secondary transition duration-300" onClick={logout} />
           </div>
           <Switch>
-            <Route path="/jobs" component={role === 0 ? JobSeekerScreen : EmployerScreen} />
-            <Route path="/feed" component={FeedScreen} />
+            <Route path="/jobs" render={() => (role === 0 ? <JobSeekerScreen token={token} /> : <EmployerScreen token={token} />)} />
+            <Route path="/feed" render={() => <FeedScreen token={token} userId={userId} />} />
             <Route path="/chat" component={ChatScreen} />
-            <Route path="/profile" component={ProfileScreen} />
+            <Route path="/profile" render={() => <ProfileScreen token={token} userId={userId} />} />
             <Route path="/" exact>
-              <Redirect to="/feed" /> {/* Default to Feed on login */}
+              <Redirect to="/feed" />
             </Route>
           </Switch>
         </div>

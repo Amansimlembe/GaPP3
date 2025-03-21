@@ -1,70 +1,49 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import axios from 'axios';
 import { motion } from 'framer-motion';
 
-const ProfileScreen = () => {
+const ProfileScreen = ({ token, userId }) => {
   const [cvFile, setCvFile] = useState(null);
   const [photoFile, setPhotoFile] = useState(null);
   const [error, setError] = useState('');
-  const [userId, setUserId] = useState('');
   const [photoUrl, setPhotoUrl] = useState('');
 
-  useEffect(() => {
-    // Fetch user data from API instead of local storage
-    const fetchUserData = async () => {
-      try {
-        const { data } = await axios.post('/auth/login', {
-          email: 'user@example.com', // Replace with actual auth logic
-          password: 'password',      // Replace with actual auth logic
-        });
-        setUserId(data.userId);
-        setPhotoUrl(data.photo || '');
-      } catch (err) {
-        console.error('Failed to fetch user data:', err);
-        setError('Unable to load user data');
-      }
-    };
-    fetchUserData();
-  }, []);
-
   const uploadCV = async () => {
-    if (!cvFile || !userId) {
+    if (!cvFile) {
       setError('Please select a CV file');
       return;
     }
     const formData = new FormData();
     formData.append('cv_file', cvFile);
-    formData.append('userId', userId);
     try {
       const { data } = await axios.post('/jobseeker/update_cv', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
+        headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
       });
       alert('CV uploaded successfully');
       setError('');
     } catch (error) {
       console.error('CV upload error:', error);
-      setError(error.response?.data?.error || 'Failed to upload CV. Please try again.');
+      setError(error.response?.data?.error || 'Failed to upload CV');
     }
   };
 
   const uploadPhoto = async () => {
-    if (!photoFile || !userId) {
+    if (!photoFile) {
       setError('Please select a photo');
       return;
     }
     const formData = new FormData();
     formData.append('photo', photoFile);
-    formData.append('userId', userId);
     try {
       const { data } = await axios.post('/auth/update_photo', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
+        headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
       });
       setPhotoUrl(data.photo);
       alert('Photo uploaded successfully');
       setError('');
     } catch (error) {
       console.error('Photo upload error:', error);
-      setError(error.response?.data?.error || 'Failed to upload photo. Please try again.');
+      setError(error.response?.data?.error || 'Failed to upload photo');
     }
   };
 

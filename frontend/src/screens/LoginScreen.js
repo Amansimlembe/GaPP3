@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import axios from 'axios';
 import { motion } from 'framer-motion';
 
-const LoginScreen = ({ setUser }) => {
+const LoginScreen = ({ setAuth }) => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [role, setRole] = useState('0');
@@ -25,9 +25,7 @@ const LoginScreen = ({ setUser }) => {
   const login = async () => {
     try {
       const { data } = await axios.post('/auth/login', { email, password });
-      const userData = { userId: data.userId, role: data.role, photo: data.photo || '' };
-      localStorage.setItem('user', JSON.stringify(userData));
-      setUser(data.userId, data.role, data.photo || '');
+      setAuth(data.token, data.userId, data.role, data.photo || '');
       setError('');
       setSuccess(data.message);
     } catch (err) {

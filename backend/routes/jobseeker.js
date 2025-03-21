@@ -5,13 +5,14 @@ const Job = require('../models/Job');
 const cloudinary = require('cloudinary').v2;
 const multer = require('multer');
 const { jobMatcher } = require('../utils/jobMatcher');
+const authMiddleware = require('../middleware/auth');
 
-const upload = multer({ storage: multer.memoryStorage() }); // Use memory storage for Cloudinary
+const upload = multer({ storage: multer.memoryStorage() });
 
-router.post('/update_cv', upload.single('cv_file'), async (req, res) => {
+router.post('/update_cv', authMiddleware, upload.single('cv_file'), async (req, res) => {
   try {
-    const { userId } = req.body;
-    if (!userId || !req.file) return res.status(400).json({ error: 'User ID and CV file are required' });
+    const { userId } = req.user; // From token
+    if (!req.file) return res.status(400).json({ error: 'CV file is required' });
 
     const result = await cloudinary.uploader.upload_stream(
       { resource_type: 'raw', public_id: `cv_${userId}`, folder: 'gapp_cv' },
@@ -30,9 +31,9 @@ router.post('/update_cv', upload.single('cv_file'), async (req, res) => {
   }
 });
 
-router.get('/jobs', async (req, res) => {
+router.get('/jobs', authMiddleware, async (req, res) => {
   try {
-    const { userId } = req.query;
+    const { userId } = req.user;
     const user = await User.findById(userId);
     if (!user) return res.status(404).json({ error: 'User not found' });
     const internalJobs = await Job.find({ status: 'open' });
@@ -47,9 +48,10 @@ router.get('/jobs', async (req, res) => {
   }
 });
 
-router.post('/apply', upload.fields([{ name: 'cv_file' }, { name: 'cover_letter' }]), async (req, res) => {
+router.post('/apply', authMiddleware, upload.fields([{ name: 'cv_file' }, { name: 'cover_letter' }]), async (req, res) => {
   try {
-    const { userId, jobId } = req.body;
+    const { userId } = req.user;
+    const { jobId } = req.body;
     const user = await User.findById(userId);
     const job = await Job.findById(jobId);
     if (!user || !job) return res.status(404).json({ error: 'User or job not found' });

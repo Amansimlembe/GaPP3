@@ -3,7 +3,7 @@ import axios from 'axios';
 import PostCard from '../components/PostCard';
 import { motion } from 'framer-motion';
 
-const FeedScreen = () => {
+const FeedScreen = ({ token, userId }) => {
   const [posts, setPosts] = useState([]);
   const [stories, setStories] = useState([]);
   const [contentType, setContentType] = useState('text');
@@ -11,26 +11,13 @@ const FeedScreen = () => {
   const [file, setFile] = useState(null);
   const [isStory, setIsStory] = useState(false);
   const [error, setError] = useState('');
-  const [userId, setUserId] = useState('');
 
   useEffect(() => {
-    const fetchUserData = async () => {
-      try {
-        const { data } = await axios.post('/auth/login', {
-          email: 'user@example.com', // Replace with actual auth logic
-          password: 'password',      // Replace with actual auth logic
-        });
-        setUserId(data.userId);
-      } catch (err) {
-        console.error('Failed to fetch user data:', err);
-        setError('Unable to load user data');
-      }
-    };
-    fetchUserData();
-
     const fetchFeed = async () => {
       try {
-        const { data } = await axios.get('/social/feed');
+        const { data } = await axios.get('/social/feed', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
         setPosts(data.filter(post => !post.isStory));
         setStories(data.filter(post => post.isStory && new Date(post.expiresAt) > new Date()));
         setError('');
@@ -40,7 +27,7 @@ const FeedScreen = () => {
       }
     };
     fetchFeed();
-  }, []);
+  }, [token]);
 
   const postContent = async () => {
     if (!userId || (!caption && !file)) {
@@ -48,13 +35,14 @@ const FeedScreen = () => {
       return;
     }
     const formData = new FormData();
-    formData.append('userId', userId);
     formData.append('contentType', contentType);
     formData.append('caption', caption);
     if (file) formData.append('content', file);
     const endpoint = isStory ? '/social/story' : '/social/post';
     try {
-      await axios.post(endpoint, formData, { headers: { 'Content-Type': 'multipart/form-data' } });
+      await axios.post(endpoint, formData, {
+        headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
+      });
       window.location.reload();
     } catch (error) {
       console.error('Post error:', error);
@@ -134,4 +122,6 @@ const FeedScreen = () => {
   );
 };
 
-export default FeedScreen;
+
+
+

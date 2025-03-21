@@ -3,6 +3,7 @@ const router = express.Router();
 const Post = require('../models/Post');
 const cloudinary = require('cloudinary').v2;
 const multer = require('multer');
+const authMiddleware = require('../middleware/auth');
 
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -16,10 +17,11 @@ router.get('/feed', async (req, res) => {
   }
 });
 
-router.post('/post', upload.single('content'), async (req, res) => {
+router.post('/post', authMiddleware, upload.single('content'), async (req, res) => {
   try {
-    const { userId, contentType, caption } = req.body;
-    if (!userId || !contentType) return res.status(400).json({ error: 'User ID and content type are required' });
+    const { userId } = req.user;
+    const { contentType, caption } = req.body;
+    if (!contentType) return res.status(400).json({ error: 'Content type is required' });
 
     let contentUrl = caption;
     if (req.file) {
@@ -43,10 +45,11 @@ router.post('/post', upload.single('content'), async (req, res) => {
   }
 });
 
-router.post('/story', upload.single('content'), async (req, res) => {
+router.post('/story', authMiddleware, upload.single('content'), async (req, res) => {
   try {
-    const { userId, contentType, caption } = req.body;
-    if (!userId || !contentType) return res.status(400).json({ error: 'User ID and content type are required' });
+    const { userId } = req.user;
+    const { contentType, caption } = req.body;
+    if (!contentType) return res.status(400).json({ error: 'Content type is required' });
 
     let contentUrl = caption;
     if (req.file) {
