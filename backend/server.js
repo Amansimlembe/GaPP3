@@ -5,7 +5,7 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 const path = require('path');
 const cloudinary = require('cloudinary').v2;
-const connectDB = require('./config/db');
+const mongoose = require('mongoose');
 const authRoutes = require('./routes/auth');
 const jobseekerRoutes = require('./routes/jobseeker');
 const employerRoutes = require('./routes/employer');
@@ -24,16 +24,25 @@ cloudinary.config({
 });
 
 app.use(cors());
-app.use(express.json({ limit: '50mb' })); // Increase payload limit for uploads
+app.use(express.json({ limit: '50mb' }));
 
 // Serve React build files
 app.use(express.static(path.join(__dirname, '../frontend/build')));
 
 // MongoDB connection
-connectDB().catch(err => {
-  console.error('Failed to connect to MongoDB:', err);
-  process.exit(1);
-});
+const connectDB = async () => {
+  try {
+    await mongoose.connect(process.env.MONGO_URI, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+    });
+    console.log('MongoDB Atlas connected');
+  } catch (error) {
+    console.error('MongoDB connection error:', error);
+    process.exit(1);
+  }
+};
+connectDB();
 
 // API Routes
 app.use('/auth', authRoutes);
@@ -60,8 +69,8 @@ io.on('connection', (socket) => {
 
 // Error handling middleware
 app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({ error: 'Internal Server Error' });
+  console.error('Global error:', err.stack);
+  res.status(500).json({ error: 'Internal Server Error', details: err.message });
 });
 
 // Catch-all route for React app
