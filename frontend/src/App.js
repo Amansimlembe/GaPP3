@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { BrowserRouter as Router, Route, Switch, Link, useHistory } from 'react-router-dom';
+import { BrowserRouter as Router, Route, Switch, Link, Redirect } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { FaSignOutAlt, FaBars } from 'react-icons/fa';
 import LoginScreen from './screens/LoginScreen';
@@ -14,7 +14,6 @@ const App = () => {
   const [role, setRole] = useState(null);
   const [photo, setPhoto] = useState('');
   const [isNavOpen, setIsNavOpen] = useState(false);
-  const history = useHistory();
 
   useEffect(() => {
     const user = localStorage.getItem('user');
@@ -23,9 +22,8 @@ const App = () => {
       setUserId(userId);
       setRole(role);
       setPhoto(photo || '');
-      history.push('/feed'); // Redirect to Feed on login
     }
-  }, [history]);
+  }, []);
 
   const logout = () => {
     localStorage.removeItem('user');
@@ -85,7 +83,9 @@ const App = () => {
             <Route path="/feed" component={FeedScreen} />
             <Route path="/chat" component={ChatScreen} />
             <Route path="/profile" component={ProfileScreen} />
-            <Route path="/" component={FeedScreen} exact /> {/* Default to Feed */}
+            <Route path="/" exact>
+              <Redirect to="/feed" /> {/* Default to Feed on login */}
+            </Route>
           </Switch>
         </div>
       </div>
