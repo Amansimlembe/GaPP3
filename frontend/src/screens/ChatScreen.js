@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import io from 'socket.io-client';
 import axios from 'axios';
 import { motion } from 'framer-motion';
+import { FaPaperPlane, FaPaperclip } from 'react-icons/fa';
 
 const socket = io('https://gapp-6yc3.onrender.com');
 
@@ -12,6 +13,7 @@ const ChatScreen = ({ token, userId }) => {
   const [message, setMessage] = useState('');
   const [file, setFile] = useState(null);
   const [contentType, setContentType] = useState('text');
+  const [showPicker, setShowPicker] = useState(false);
 
   useEffect(() => {
     if (!userId) return;
@@ -69,6 +71,7 @@ const ChatScreen = ({ token, userId }) => {
       setMessages((prev) => [...prev, data]);
       setMessage('');
       setFile(null);
+      setShowPicker(false);
     } catch (error) {
       console.error('Send message error:', error);
     }
@@ -99,25 +102,43 @@ const ChatScreen = ({ token, userId }) => {
                 </div>
               ))}
             </div>
-            <div className="flex flex-col space-y-2">
-              <select value={contentType} onChange={(e) => setContentType(e.target.value)} className="p-2 border rounded-lg">
-                <option value="text">Text</option>
-                <option value="image">Image</option>
-                <option value="video">Video</option>
-                <option value="audio">Audio</option>
-                <option value="raw">Document</option>
-              </select>
+            <div className="relative flex items-center">
+              {showPicker && (
+                <div className="absolute bottom-12 left-0 bg-white p-2 rounded-lg shadow-lg flex space-x-2">
+                  {['image', 'video', 'audio', 'raw'].map((type) => (
+                    <button
+                      key={type}
+                      onClick={() => { setContentType(type); setShowPicker(false); }}
+                      className="p-2 hover:bg-gray-200 rounded"
+                    >
+                      {type.charAt(0).toUpperCase() + type.slice(1)}
+                    </button>
+                  ))}
+                </div>
+              )}
               {contentType === 'text' ? (
-                <input value={message} onChange={(e) => setMessage(e.target.value)} className="w-full p-2 border rounded-lg" />
+                <input
+                  value={message}
+                  onChange={(e) => setMessage(e.target.value)}
+                  className="flex-1 p-2 border rounded-lg mr-2"
+                  placeholder="Type a message"
+                />
               ) : (
                 <input
                   type="file"
                   accept={contentType === 'image' ? 'image/*' : contentType === 'video' ? 'video/*' : contentType === 'audio' ? 'audio/*' : '*/*'}
                   onChange={(e) => setFile(e.target.files[0])}
-                  className="w-full p-2 border rounded-lg"
+                  className="flex-1 p-2 border rounded-lg mr-2"
                 />
               )}
-              <button onClick={sendMessage} className="bg-primary text-white p-2 rounded-lg hover:bg-secondary transition duration-300 w-full">Send</button>
+              <FaPaperclip
+                className="text-2xl text-primary cursor-pointer hover:text-secondary mr-2"
+                onClick={() => setShowPicker(!showPicker)}
+              />
+              <FaPaperPlane
+                className="text-2xl text-primary cursor-pointer hover:text-secondary"
+                onClick={sendMessage}
+              />
             </div>
           </>
         ) : (

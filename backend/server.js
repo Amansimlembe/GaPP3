@@ -14,7 +14,7 @@ const Message = require('./models/Message');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*' } });
+const io = new Server(server, { cors: { origin: '*' }, pingTimeout: 60000, pingInterval: 25000 });
 
 cloudinary.config({
   cloud_name: 'dsygdul20',
@@ -52,8 +52,9 @@ io.on('connection', (socket) => {
   });
   socket.on('message', (data) => {
     io.to(data.recipientId).emit('message', data);
-    io.to(data.senderId).emit('message', data); // Echo back to sender
+    io.to(data.senderId).emit('message', data);
   });
+  socket.on('error', (error) => console.error('Socket error:', error));
   socket.on('disconnect', () => console.log('User disconnected'));
 });
 

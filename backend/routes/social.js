@@ -6,7 +6,7 @@ const cloudinary = require('cloudinary').v2;
 const multer = require('multer');
 const authMiddleware = require('../middleware/auth');
 
-const upload = multer({ storage: multer.memoryStorage() });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } }); // 50MB limit
 
 router.get('/feed', async (req, res) => {
   try {
@@ -26,7 +26,7 @@ router.post('/post', authMiddleware, upload.single('content'), async (req, res) 
 
     let contentUrl = caption || '';
     if (req.file) {
-      const resourceType = contentType === 'text' ? 'raw' : contentType;
+      const resourceType = ['image', 'video', 'audio', 'raw'].includes(contentType) ? contentType : 'raw';
       const result = await new Promise((resolve, reject) => {
         cloudinary.uploader.upload_stream(
           { resource_type: resourceType, public_id: `${contentType}_${userId}_${Date.now()}`, folder: `gapp_${contentType}s` },
@@ -37,7 +37,7 @@ router.post('/post', authMiddleware, upload.single('content'), async (req, res) 
         ).end(req.file.buffer);
       });
       contentUrl = result.secure_url;
-      console.log('Uploaded media URL:', contentUrl);
+      console.log('Post media URL:', contentUrl);
     }
 
     const post = new Post({ userId, contentType, content: contentUrl });
@@ -46,35 +46,6 @@ router.post('/post', authMiddleware, upload.single('content'), async (req, res) 
   } catch (error) {
     console.error('Post error:', { message: error.message, stack: error.stack, body: req.body, file: !!req.file });
     res.status(500).json({ error: 'Failed to post', details: error.message });
-  }
-});
-
-router.post('/message', authMiddleware, upload.single('content'), async (req, res) => {
-  try {
-    const { senderId, recipientId, contentType } = req.body;
-    if (!senderId || !recipientId || !contentType) {
-      return res.status(400).json({ error: 'Sender ID, recipient ID, and content type are required' });
-    }
-
-    let contentUrl = req.body.content || '';
-    if (req.file) {
-      const resourceType = contentType === 'text' ? 'raw' : contentType;
-      const result = await cloudinary.uploader.upload_stream(
-        { resource_type: resourceType, public_id: `${contentType}_${senderId}_${Date.now()}`, folder: `gapp_chat_${contentType}s` },
-        (error, result) => {
-          if (error) throw error;
-          return result;
-        }
-      ).end(req.file.buffer);
-      contentUrl = result.secure_url;
-    }
-
-    const message = new Message({ senderId, recipientId, contentType, content: contentUrl });
-    await message.save();
-    res.json(message);
-  } catch (error) {
-    console.error('Message error:', error);
-    res.status(500).json({ error: 'Failed to send message' });
   }
 });
 
@@ -92,6 +63,38 @@ router.get('/messages', authMiddleware, async (req, res) => {
   } catch (error) {
     console.error('Fetch messages error:', error);
     res.status(500).json({ error: 'Failed to fetch messages', details: error.message });
+  }
+});
+
+router.post('/message', authMiddleware, upload.single('content'), async (req, res) => {
+  try {
+    const { senderId, recipientId, contentType } = req.body;
+    if (!senderId || !recipientId || !contentType) {
+      return res.status(400).json({ error: 'Sender ID, recipient ID, and content type are required' });
+    }
+
+    let contentUrl = req.body.content || '';
+    if (req.file) {
+      const resourceType = ['image', 'video', 'audio', 'raw'].includes(contentType) ? contentType : 'raw';
+      const result = await new Promise((resolve, reject) => {
+        cloudinary.uploader.upload_stream(
+          { resource_type: resourceType, public_id: `${contentType}_${senderId}_${Date.now()}`, folder: `gapp_chat_${contentType}s` },
+          (error, result) => {
+            if (error) reject(error);
+            else resolve(result);
+          }
+        ).end(req.file.buffer);
+      });
+      contentUrl = result.secure_url;
+      console.log('Message media URL:', contentUrl);
+    }
+
+    const message = new Message({ senderId, recipientId, contentType, content: contentUrl });
+    await message.save();
+    res.json(message);
+  } catch (error) {
+    console.error('Message error:', { message: error.message, stack: error.stack, body: req.body, file: !!req.file });
+    res.status(500).json({ error: 'Failed to send message', details: error.message });
   }
 });
 
