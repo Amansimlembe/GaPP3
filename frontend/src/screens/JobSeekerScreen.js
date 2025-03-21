@@ -33,12 +33,14 @@ const JobSeekerScreen = ({ token, userId }) => {
     formData.append('content', file);
     formData.append('contentType', contentType);
     try {
-      await axios.post('/social/post', formData, {
+      const { data } = await axios.post('/social/post', formData, {
         headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
       });
-      alert('Media posted successfully');
+      setJobs((prev) => [...prev, { _id: data._id, title: 'Posted Media', content: data.content, contentType: data.contentType }]);
       setFile(null);
+      setError('');
     } catch (error) {
+      console.error('Post media error:', error);
       setError(error.response?.data?.error || 'Failed to post media');
     }
   };
@@ -50,7 +52,12 @@ const JobSeekerScreen = ({ token, userId }) => {
           <option value="image">Image</option>
           <option value="video">Video</option>
         </select>
-        <input type="file" accept={contentType === 'image' ? 'image/*' : 'video/*'} onChange={(e) => setFile(e.target.files[0])} className="p-2 border rounded-lg ml-2" />
+        <input
+          type="file"
+          accept={contentType === 'image' ? 'image/*' : 'video/*'}
+          onChange={(e) => setFile(e.target.files[0])}
+          className="p-2 border rounded-lg ml-2"
+        />
         <button onClick={postMedia} className="bg-primary text-white p-2 rounded-lg hover:bg-secondary transition duration-300 ml-2">Post Media</button>
       </div>
       {error && <p className="text-red-500 mb-4">{error}</p>}
@@ -58,13 +65,13 @@ const JobSeekerScreen = ({ token, userId }) => {
         {jobs.map((job) => (
           <div key={job._id} className="bg-white p-4 rounded-lg shadow-md">
             <h3 className="text-lg font-semibold text-primary">{job.title}</h3>
-            <p className="text-gray-600 mt-2">{job.description}</p>
+            <p className="text-gray-600 mt-2">{job.description || 'Media Post'}</p>
             {job.content && (
               job.contentType === 'image' ? (
-                <img src={job.content} alt="Job" className="mt-2 w-full h-auto" />
-              ) : (
-                <video controls src={job.content} className="mt-2 w-full h-auto" />
-              )
+                <img src={job.content} alt="Job" className="mt-2 max-w-full h-auto" onError={(e) => console.log('Image load error:', job.content)} />
+              ) : job.contentType === 'video' ? (
+                <video controls src={job.content} className="mt-2 max-w-full h-auto" onError={(e) => console.log('Video load error:', job.content)} />
+              ) : null
             )}
           </div>
         ))}

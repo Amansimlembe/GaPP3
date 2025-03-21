@@ -40,10 +40,13 @@ const FeedScreen = ({ token, userId }) => {
     if (file) formData.append('content', file);
     const endpoint = isStory ? '/social/story' : '/social/post';
     try {
-      await axios.post(endpoint, formData, {
+      const { data } = await axios.post(endpoint, formData, {
         headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
       });
-      window.location.reload();
+      setPosts([data, ...posts]); // Add new post immediately
+      setCaption('');
+      setFile(null);
+      setError('');
     } catch (error) {
       console.error('Post error:', error);
       setError(error.response?.data?.error || 'Failed to post');
@@ -51,18 +54,9 @@ const FeedScreen = ({ token, userId }) => {
   };
 
   return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      transition={{ duration: 0.5 }}
-      className="space-y-6 p-4 md:p-6 max-h-screen overflow-y-auto"
-    >
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5 }} className="space-y-6 p-4 md:p-6 max-h-screen overflow-y-auto">
       <div className="bg-white p-4 rounded-lg shadow-md sticky top-0 z-10">
-        <select
-          value={contentType}
-          onChange={(e) => setContentType(e.target.value)}
-          className="w-full p-2 mb-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary"
-        >
+        <select value={contentType} onChange={(e) => setContentType(e.target.value)} className="w-full p-2 mb-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary">
           <option value="text">Text</option>
           <option value="image">Image</option>
           <option value="video">Video</option>
@@ -70,11 +64,7 @@ const FeedScreen = ({ token, userId }) => {
           <option value="raw">Document</option>
         </select>
         {contentType === 'text' ? (
-          <textarea
-            value={caption}
-            onChange={(e) => setCaption(e.target.value)}
-            className="w-full p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary"
-          />
+          <textarea value={caption} onChange={(e) => setCaption(e.target.value)} className="w-full p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary" />
         ) : (
           <input
             type="file"
@@ -84,16 +74,10 @@ const FeedScreen = ({ token, userId }) => {
           />
         )}
         <div className="flex mt-2">
-          <button
-            onClick={postContent}
-            className="flex-1 bg-primary text-white p-2 rounded-lg hover:bg-secondary transition duration-300"
-          >
+          <button onClick={postContent} className="flex-1 bg-primary text-white p-2 rounded-lg hover:bg-secondary transition duration-300">
             {isStory ? 'Post Story' : 'Post'}
           </button>
-          <button
-            onClick={() => setIsStory(!isStory)}
-            className="ml-2 bg-accent text-white p-2 rounded-lg hover:bg-yellow-600 transition duration-300"
-          >
+          <button onClick={() => setIsStory(!isStory)} className="ml-2 bg-accent text-white p-2 rounded-lg hover:bg-yellow-600 transition duration-300">
             {isStory ? 'Switch to Post' : 'Switch to Story'}
           </button>
         </div>
@@ -106,8 +90,12 @@ const FeedScreen = ({ token, userId }) => {
             <motion.div key={story._id} whileHover={{ scale: 1.05 }} className="flex-shrink-0 w-32">
               {story.contentType === 'text' ? (
                 <div className="bg-gray-200 p-2 rounded text-sm">{story.content}</div>
-              ) : (
+              ) : story.contentType === 'image' ? (
                 <img src={story.content} alt="Story" className="w-full h-32 object-cover rounded" />
+              ) : story.contentType === 'video' ? (
+                <video controls src={story.content} className="w-full h-32 object-cover rounded" />
+              ) : (
+                <p>{story.content}</p>
               )}
             </motion.div>
           ))}
@@ -115,11 +103,18 @@ const FeedScreen = ({ token, userId }) => {
       </div>
       <div className="space-y-6">
         {posts.map((post) => (
-          <PostCard key={post._id} post={post} />
+          <div key={post._id} className="bg-white p-4 rounded-lg shadow-md">
+            <p>User: {post.userId}</p>
+            {post.contentType === 'text' && <p>{post.content}</p>}
+            {post.contentType === 'image' && <img src={post.content} alt="Post" className="max-w-full h-auto" />}
+            {post.contentType === 'video' && <video controls src={post.content} className="max-w-full h-auto" />}
+            {post.contentType === 'audio' && <audio controls src={post.content} />}
+            {post.contentType === 'raw' && <a href={post.content} target="_blank" rel="noopener noreferrer">Download</a>}
+          </div>
         ))}
       </div>
     </motion.div>
   );
 };
 
-export default FeedScreen; // Ensure default export
+export default FeedScreen;

@@ -27,14 +27,17 @@ router.post('/post', authMiddleware, upload.single('content'), async (req, res) 
     let contentUrl = req.body.caption || '';
     if (req.file) {
       const resourceType = contentType === 'text' ? 'raw' : contentType;
-      const result = await cloudinary.uploader.upload_stream(
-        { resource_type: resourceType, public_id: `${contentType}_${userId}_${Date.now()}`, folder: `gapp_${contentType}s` },
-        (error, result) => {
-          if (error) throw error;
-          return result;
-        }
-      ).end(req.file.buffer);
+      const result = await new Promise((resolve, reject) => {
+        cloudinary.uploader.upload_stream(
+          { resource_type: resourceType, public_id: `${contentType}_${userId}_${Date.now()}`, folder: `gapp_${contentType}s` },
+          (error, result) => {
+            if (error) reject(error);
+            else resolve(result);
+          }
+        ).end(req.file.buffer);
+      });
       contentUrl = result.secure_url;
+      console.log('Uploaded media URL:', contentUrl); // Log for debugging
     }
 
     const post = new Post({ userId, contentType, content: contentUrl });
@@ -42,7 +45,7 @@ router.post('/post', authMiddleware, upload.single('content'), async (req, res) 
     res.json(post);
   } catch (error) {
     console.error('Post error:', error);
-    res.status(500).json({ error: 'Failed to post' });
+    res.status(500).json({ error: 'Failed to post', details: error.message });
   }
 });
 
