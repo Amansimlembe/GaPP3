@@ -1,83 +1,109 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import io from 'socket.io-client';
-import ChatBubble from '../components/ChatBubble';
+import axios from 'axios';
 import { motion } from 'framer-motion';
-import Peer from 'simple-peer';
 
 const socket = io('https://gapp-6yc3.onrender.com');
 
-const ChatScreen = () => {
+const ChatScreen = ({ token, userId }) => {
+  const [users, setUsers] = useState([]);
+  const [selectedUser, setSelectedUser] = useState(null);
   const [messages, setMessages] = useState([]);
-  const [input, setInput] = useState('');
-  const [recipientId, setRecipientId] = useState('');
-  const [isVideoCall, setIsVideoCall] = useState(false);
-  const [peer, setPeer] = useState(null);
-  const videoRef = useRef();
-  const remoteVideoRef = useRef();
+  const [message, setMessage] = useState('');
+  const [file, setFile] = useState(null);
+  const [contentType, setContentType] = useState('text');
 
   useEffect(() => {
-    const user = JSON.parse(localStorage.getItem('user'));
-    socket.emit('join', user.userId);
-    socket.on('message', (msg) => setMessages((prev) => [...prev, msg]));
-    socket.on('webrtc_signal', (data) => {
-      if (peer) peer.signal(data.signal);
-    });
-    return () => {
-      socket.off('message');
-      socket.off('webrtc_signal');
+    if (!userId) return;
+    socket.emit('join', userId);
+
+    const fetchUsers = async () => {
+      try {
+        const { data } = await axios.get('/social/feed', { headers: { Authorization: `Bearer ${token}` } });
+        setUsers(data.map(post => post.userId).filter(id => id !== userId));
+      } catch (error) {
+        console.error('Failed to fetch users:', error);
+      }
     };
-  }, [peer]);
+    fetchUsers();
 
-  const sendMessage = () => {
-    const user = JSON.parse(localStorage.getItem('user'));
-    const message = { senderId: user.userId, recipientId, messageType: 'text', content: input };
-    socket.emit('message', message);
-    setInput('');
-  };
+    socket.on('message', (msg) => {
+      setMessages((prev) => [...prev, msg]);
+    });
 
-  const startVideoCall = async () => {
-    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-    videoRef.current.srcObject = stream;
-    const newPeer = new Peer({ initiator: true, stream });
-    newPeer.on('signal', (signal) => {
-      socket.emit('webrtc_signal', { to: recipientId, signal });
-    });
-    newPeer.on('stream', (remoteStream) => {
-      remoteVideoRef.current.srcObject = remoteStream;
-    });
-    setPeer(newPeer);
-    setIsVideoCall(true);
+    return () => socket.off('message');
+  }, [token, userId]);
+
+  const sendMessage = async () => {
+    if (!selectedUser || (!message && !file)) return;
+    const formData = new FormData();
+    formData.append('senderId', userId);
+    formData.append('recipientId', selectedUser);
+    formData.append('contentType', contentType);
+    if (file) formData.append('content', file);
+    else formData.append('content', message);
+
+    try {
+      const { data } = await axios.post('/social/message', formData, {
+        headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
+      });
+      socket.emit('message', data);
+      setMessages((prev) => [...prev, data]);
+      setMessage('');
+      setFile(null);
+    } catch (error) {
+      console.error('Send message error:', error);
+    }
   };
 
   return (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex flex-col h-[80vh] bg-white rounded-lg shadow-lg p-4">
-      <div className="flex mb-4">
-        <input
-          placeholder="Recipient ID"
-          value={recipientId}
-          onChange={(e) => setRecipientId(e.target.value)}
-          className="flex-1 p-2 border rounded-l focus:outline-none focus:ring-2 focus:ring-primary"
-        />
-        <button onClick={startVideoCall} className="bg-accent text-white p-2 rounded-r hover:bg-yellow-600 transition duration-300">Video Call</button>
-      </div>
-      {isVideoCall && (
-        <div className="flex mb-4">
-          <video ref={videoRef} autoPlay className="w-1/2 rounded" />
-          <video ref={remoteVideoRef} autoPlay className="w-1/2 rounded" />
-        </div>
-      )}
-      <div className="flex-1 overflow-y-auto">
-        {messages.map((msg, idx) => (
-          <ChatBubble key={idx} message={msg} isSender={msg.senderId === JSON.parse(localStorage.getItem('user')).userId} />
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5 }} className="flex h-screen p-6">
+      <div className="w-1/4 bg-white p-4 rounded-lg shadow-md">
+        <h2 className="text-xl font-bold text-primary mb-4">Users</h2>
+        {users.map((id) => (
+          <button key={id} onClick={() => setSelectedUser(id)} className="block w-full text-left p-2 hover:bg-gray-200 rounded">{id}</button>
         ))}
       </div>
-      <div className="flex mt-4">
-        <input
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          className="flex-1 p-3 border rounded-l focus:outline-none focus:ring-2 focus:ring-primary"
-        />
-        <button onClick={sendMessage} className="bg-primary text-white p-3 rounded-r hover:bg-secondary transition duration-300">Send</button>
+      <div className="w-3/4 ml-4 bg-white p-4 rounded-lg shadow-md flex flex-col">
+        {selectedUser ? (
+          <>
+            <h2 className="text-xl font-bold text-primary mb-4">Chat with {selectedUser}</h2>
+            <div className="flex-1 overflow-y-auto mb-4">
+              {messages.filter(msg => (msg.senderId === userId && msg.recipientId === selectedUser) || (msg.senderId === selectedUser && msg.recipientId === userId)).map((msg, idx) => (
+                <div key={idx} className={`mb-2 ${msg.senderId === userId ? 'text-right' : 'text-left'}`}>
+                  {msg.contentType === 'text' ? (
+                    <p className="inline-block p-2 bg-gray-200 rounded">{msg.content}</p>
+                  ) : msg.contentType === 'image' ? (
+                    <img src={msg.content} alt="Chat" className="max-w-xs" />
+                  ) : msg.contentType === 'video' ? (
+                    <video controls src={msg.content} className="max-w-xs" />
+                  ) : msg.contentType === 'audio' ? (
+                    <audio controls src={msg.content} />
+                  ) : (
+                    <a href={msg.content} target="_blank" rel="noopener noreferrer" className="text-blue-500">Download Document</a>
+                  )}
+                </div>
+              ))}
+            </div>
+            <div>
+              <select value={contentType} onChange={(e) => setContentType(e.target.value)} className="p-2 border rounded-lg">
+                <option value="text">Text</option>
+                <option value="image">Image</option>
+                <option value="video">Video</option>
+                <option value="audio">Audio</option>
+                <option value="raw">Document</option>
+              </select>
+              {contentType === 'text' ? (
+                <input value={message} onChange={(e) => setMessage(e.target.value)} className="w-full p-2 border rounded-lg mt-2" />
+              ) : (
+                <input type="file" accept={contentType === 'image' ? 'image/*' : contentType === 'video' ? 'video/*' : contentType === 'audio' ? 'audio/*' : '*/*'} onChange={(e) => setFile(e.target.files[0])} className="mt-2" />
+              )}
+              <button onClick={sendMessage} className="mt-2 bg-primary text-white p-2 rounded-lg hover:bg-secondary transition duration-300 w-full">Send</button>
+            </div>
+          </>
+        ) : (
+          <p className="text-gray-600">Select a user to chat</p>
+        )}
       </div>
     </motion.div>
   );

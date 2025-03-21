@@ -5,7 +5,7 @@ import { FaSignOutAlt, FaBars } from 'react-icons/fa';
 import LoginScreen from './screens/LoginScreen';
 import JobSeekerScreen from './screens/JobSeekerScreen';
 import EmployerScreen from './screens/EmployerScreen';
-import FeedScreen from './screens/FeedScreen'; // Default import
+import FeedScreen from './screens/FeedScreen';
 import ChatScreen from './screens/ChatScreen';
 import ProfileScreen from './screens/ProfileScreen';
 
@@ -14,7 +14,13 @@ const App = () => {
   const [userId, setUserId] = useState(null);
   const [role, setRole] = useState(null);
   const [photo, setPhoto] = useState('');
-  const [isNavOpen, setIsNavOpen] = useState(false);
+
+  const setAuth = (newToken, newUserId, newRole, newPhoto) => {
+    setToken(newToken);
+    setUserId(newUserId);
+    setRole(newRole);
+    setPhoto(newPhoto || '');
+  };
 
   const logout = () => {
     setToken(null);
@@ -23,29 +29,17 @@ const App = () => {
     setPhoto('');
   };
 
-  if (!token) return <LoginScreen setAuth={(t, id, r, p) => { setToken(t); setUserId(id); setRole(r); setPhoto(p); }} />;
+  if (!token || !userId) return <LoginScreen setAuth={setAuth} />;
 
   return (
     <Router>
       <div className="min-h-screen flex flex-col">
+        {/* Mobile Nav */}
         <div className="md:hidden bg-primary text-white p-4 flex justify-between items-center shadow-lg">
           <h1 className="text-2xl font-bold">GaPP</h1>
           <FaBars className="text-2xl cursor-pointer hover:text-secondary transition duration-300" onClick={() => setIsNavOpen(!isNavOpen)} />
         </div>
-        <motion.div
-          initial={{ height: 0 }}
-          animate={{ height: isNavOpen ? 'auto' : 0 }}
-          transition={{ duration: 0.3 }}
-          className="md:hidden bg-primary text-white overflow-hidden shadow-lg"
-        >
-          <nav className="flex flex-col p-4">
-            <Link to="/jobs" className="py-2 px-4 hover:bg-secondary rounded transition duration-300" onClick={() => setIsNavOpen(false)}>Jobs</Link>
-            <Link to="/feed" className="py-2 px-4 hover:bg-secondary rounded transition duration-300" onClick={() => setIsNavOpen(false)}>Feed</Link>
-            <Link to="/chat" className="py-2 px-4 hover:bg-secondary rounded transition duration-300" onClick={() => setIsNavOpen(false)}>Chat</Link>
-            <Link to="/profile" className="py-2 px-4 hover:bg-secondary rounded transition duration-300" onClick={() => setIsNavOpen(false)}>Profile</Link>
-          </nav>
-        </motion.div>
-
+        {/* Sidebar */}
         <motion.div
           initial={{ x: -250 }}
           animate={{ x: 0 }}
@@ -67,9 +61,9 @@ const App = () => {
             <FaSignOutAlt className="text-2xl text-primary cursor-pointer hover:text-secondary transition duration-300" onClick={logout} />
           </div>
           <Switch>
-            <Route path="/jobs" render={() => (role === 0 ? <JobSeekerScreen token={token} /> : <EmployerScreen token={token} />)} />
+            <Route path="/jobs" render={() => (parseInt(role) === 0 ? <JobSeekerScreen token={token} userId={userId} /> : <EmployerScreen token={token} userId={userId} />)} />
             <Route path="/feed" render={() => <FeedScreen token={token} userId={userId} />} />
-            <Route path="/chat" component={ChatScreen} />
+            <Route path="/chat" render={() => <ChatScreen token={token} userId={userId} />} />
             <Route path="/profile" render={() => <ProfileScreen token={token} userId={userId} />} />
             <Route path="/" exact>
               <Redirect to="/feed" />

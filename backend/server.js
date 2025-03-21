@@ -16,7 +16,6 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
-// Configure Cloudinary
 cloudinary.config({
   cloud_name: 'dsygdul20',
   api_key: '442966176347917',
@@ -25,11 +24,8 @@ cloudinary.config({
 
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
-
-// Serve React build files
 app.use(express.static(path.join(__dirname, '../frontend/build')));
 
-// MongoDB connection
 const connectDB = async () => {
   try {
     await mongoose.connect(process.env.MONGO_URI, {
@@ -44,36 +40,28 @@ const connectDB = async () => {
 };
 connectDB();
 
-// API Routes
 app.use('/auth', authRoutes);
 app.use('/jobseeker', jobseekerRoutes);
 app.use('/employer', employerRoutes);
 app.use('/social', socialRoutes);
 
-// Socket.IO for real-time chat
 io.on('connection', (socket) => {
-  socket.on('join', (userId) => socket.join(userId));
-  socket.on('message', async (data) => {
-    try {
-      const message = new Message(data);
-      await message.save();
-      io.to(data.recipientId).emit('message', message);
-      socket.emit('message', message);
-    } catch (error) {
-      console.error('Socket.IO message error:', error);
-    }
+  socket.on('join', (userId) => {
+    socket.join(userId);
+    console.log(`${userId} joined`);
   });
-  socket.on('webrtc_signal', (data) => io.to(data.to).emit('webrtc_signal', data));
-  socket.on('error', (err) => console.error('Socket.IO error:', err));
+  socket.on('message', (data) => {
+    io.to(data.recipientId).emit('message', data);
+    io.to(data.senderId).emit('message', data); // Echo back to sender
+  });
+  socket.on('disconnect', () => console.log('User disconnected'));
 });
 
-// Error handling middleware
 app.use((err, req, res, next) => {
   console.error('Global error:', err.stack);
   res.status(500).json({ error: 'Internal Server Error', details: err.message });
 });
 
-// Catch-all route for React app
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../frontend/build', 'index.html'));
 });

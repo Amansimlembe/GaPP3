@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const Post = require('../models/Post');
+const Message = require('../models/Message');
 const cloudinary = require('cloudinary').v2;
 const multer = require('multer');
 const authMiddleware = require('../middleware/auth');
@@ -20,10 +21,10 @@ router.get('/feed', async (req, res) => {
 router.post('/post', authMiddleware, upload.single('content'), async (req, res) => {
   try {
     const { userId } = req.user;
-    const { contentType, caption } = req.body;
+    const { contentType } = req.body;
     if (!contentType) return res.status(400).json({ error: 'Content type is required' });
 
-    let contentUrl = caption;
+    let contentUrl = req.body.caption || '';
     if (req.file) {
       const resourceType = contentType === 'text' ? 'raw' : contentType;
       const result = await cloudinary.uploader.upload_stream(
@@ -45,17 +46,18 @@ router.post('/post', authMiddleware, upload.single('content'), async (req, res) 
   }
 });
 
-router.post('/story', authMiddleware, upload.single('content'), async (req, res) => {
+router.post('/message', authMiddleware, upload.single('content'), async (req, res) => {
   try {
-    const { userId } = req.user;
-    const { contentType, caption } = req.body;
-    if (!contentType) return res.status(400).json({ error: 'Content type is required' });
+    const { senderId, recipientId, contentType } = req.body;
+    if (!senderId || !recipientId || !contentType) {
+      return res.status(400).json({ error: 'Sender ID, recipient ID, and content type are required' });
+    }
 
-    let contentUrl = caption;
+    let contentUrl = req.body.content || '';
     if (req.file) {
       const resourceType = contentType === 'text' ? 'raw' : contentType;
       const result = await cloudinary.uploader.upload_stream(
-        { resource_type: resourceType, public_id: `${contentType}_${userId}_${Date.now()}`, folder: `gapp_${contentType}s` },
+        { resource_type: resourceType, public_id: `${contentType}_${senderId}_${Date.now()}`, folder: `gapp_chat_${contentType}s` },
         (error, result) => {
           if (error) throw error;
           return result;
@@ -64,13 +66,12 @@ router.post('/story', authMiddleware, upload.single('content'), async (req, res)
       contentUrl = result.secure_url;
     }
 
-    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
-    const post = new Post({ userId, contentType, content: contentUrl, isStory: true, expiresAt });
-    await post.save();
-    res.json(post);
+    const message = new Message({ senderId, recipientId, contentType, content: contentUrl });
+    await message.save();
+    res.json(message);
   } catch (error) {
-    console.error('Story error:', error);
-    res.status(500).json({ error: 'Failed to post story' });
+    console.error('Message error:', error);
+    res.status(500).json({ error: 'Failed to send message' });
   }
 });
 
