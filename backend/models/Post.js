@@ -1,13 +1,13 @@
 const mongoose = require('mongoose');
 
 const postSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  contentType: { type: String, required: true },
-  content: { type: String, required: true },
-  createdAt: { type: Date, default: Date.now },
-  expiresAt: Date, // For stories
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  contentType: { type: String, enum: ['text', 'image', 'video'] },
+  content: String,
+  isStory: { type: Boolean, default: false },
+  createdAt: Date,
   likes: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
-  comments: [{ userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, text: String }],
+  comments: [{ userId: mongoose.Schema.Types.ObjectId, text: String }],
 });
 
 module.exports = mongoose.model('Post', postSchema);

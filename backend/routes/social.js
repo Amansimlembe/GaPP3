@@ -1,28 +1,32 @@
 const express = require('express');
-const multer = require('multer');
-const Post = require('../models/Post');
 const router = express.Router();
-
-const upload = multer({ dest: 'uploads/' });
+const Post = require('../models/Post');
 
 router.get('/feed', async (req, res) => {
-  const posts = await Post.find({ expiresAt: { $exists: false } }).populate('userId', 'email');
-  res.json(posts);
+  try {
+    const posts = await Post.find().sort({ createdAt: -1 });
+    res.json(posts);
+  } catch (error) {
+    console.error('Feed error:', error);
+    res.status(500).json({ error: 'Failed to load feed' });
+  }
 });
 
-router.post('/post', upload.single('content'), async (req, res) => {
-  const { userId, contentType } = req.body;
-  const content = req.file ? `/uploads/${req.file.filename}` : req.body.content;
-  const post = new Post({ userId, contentType, content });
+router.post('/post', async (req, res) => {
+  const { userId, contentType, content } = req.body;
+  const post = new Post({ userId, contentType, content, createdAt: new Date() });
   await post.save();
   res.json(post);
 });
 
-router.post('/story', upload.single('content'), async (req, res) => {
-  const { userId, contentType } = req.body;
-  const content = req.file ? `/uploads/${req.file.filename}` : req.body.content;
-  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
-  const story = new Post({ userId, contentType, content, expiresAt });
+router.get('/stories', async (req, res) => {
+  const stories = await Post.find({ isStory: true, createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } });
+  res.json(stories);
+});
+
+router.post('/story', async (req, res) => {
+  const { userId, contentType, content } = req.body;
+  const story = new Post({ userId, contentType, content, isStory: true, createdAt: new Date() });
   await story.save();
   res.json(story);
 });

@@ -9,6 +9,7 @@ const authRoutes = require('./routes/auth');
 const jobseekerRoutes = require('./routes/jobseeker');
 const employerRoutes = require('./routes/employer');
 const socialRoutes = require('./routes/social');
+const multer = require('multer');
 
 const app = express();
 const server = http.createServer(app);
@@ -23,6 +24,13 @@ app.use(express.static(path.join(__dirname, '../frontend/build')));
 
 connectDB();
 
+// File upload setup
+const storage = multer.diskStorage({
+  destination: 'uploads/',
+  filename: (req, file, cb) => cb(null, `${req.body.userId}-${Date.now()}${path.extname(file.originalname)}`),
+});
+const upload = multer({ storage });
+
 // API Routes
 app.use('/auth', authRoutes);
 app.use('/jobseeker', jobseekerRoutes);
@@ -34,7 +42,7 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../frontend/build', 'index.html'));
 });
 
-// Socket.io for real-time chat
+// Socket.io for real-time chat and video calling
 io.on('connection', (socket) => {
   socket.on('join', (userId) => socket.join(userId));
   socket.on('message', async (data) => {
