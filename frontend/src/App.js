@@ -38,20 +38,21 @@ const App = () => {
     <Router>
       <div className="min-h-screen flex flex-col">
         {/* Top Navigation for Small Devices */}
-        <div className="md:hidden bg-primary text-white p-4 flex justify-between items-center">
+        <div className="md:hidden bg-primary text-white p-4 flex justify-between items-center shadow-lg">
           <h1 className="text-2xl font-bold">GaPP</h1>
-          <FaBars className="text-2xl cursor-pointer" onClick={() => setIsNavOpen(!isNavOpen)} />
+          <FaBars className="text-2xl cursor-pointer hover:text-secondary transition duration-300" onClick={() => setIsNavOpen(!isNavOpen)} />
         </div>
         <motion.div
           initial={{ height: 0 }}
           animate={{ height: isNavOpen ? 'auto' : 0 }}
-          className="md:hidden bg-primary text-white overflow-hidden"
+          transition={{ duration: 0.3 }}
+          className="md:hidden bg-primary text-white overflow-hidden shadow-lg"
         >
           <nav className="flex flex-col p-4">
-            <Link to="/jobs" className="py-2 hover:bg-secondary rounded" onClick={() => setIsNavOpen(false)}>Jobs</Link>
-            <Link to="/feed" className="py-2 hover:bg-secondary rounded" onClick={() => setIsNavOpen(false)}>Feed</Link>
-            <Link to="/chat" className="py-2 hover:bg-secondary rounded" onClick={() => setIsNavOpen(false)}>Chat</Link>
-            <Link to="/profile" className="py-2 hover:bg-secondary rounded" onClick={() => setIsNavOpen(false)}>Profile</Link>
+            <Link to="/jobs" className="py-2 px-4 hover:bg-secondary rounded transition duration-300" onClick={() => setIsNavOpen(false)}>Jobs</Link>
+            <Link to="/feed" className="py-2 px-4 hover:bg-secondary rounded transition duration-300" onClick={() => setIsNavOpen(false)}>Feed</Link>
+            <Link to="/chat" className="py-2 px-4 hover:bg-secondary rounded transition duration-300" onClick={() => setIsNavOpen(false)}>Chat</Link>
+            <Link to="/profile" className="py-2 px-4 hover:bg-secondary rounded transition duration-300" onClick={() => setIsNavOpen(false)}>Profile</Link>
           </nav>
         </motion.div>
 
@@ -59,21 +60,22 @@ const App = () => {
         <motion.div
           initial={{ x: -250 }}
           animate={{ x: 0 }}
-          className="hidden md:block w-64 bg-primary text-white p-4 h-screen fixed"
+          transition={{ duration: 0.5 }}
+          className="hidden md:block w-64 bg-primary text-white p-4 h-screen fixed shadow-lg"
         >
           <h1 className="text-2xl font-bold mb-6">GaPP</h1>
           <nav>
-            <Link to="/jobs" className="block py-2 px-4 hover:bg-secondary rounded">Jobs</Link>
-            <Link to="/feed" className="block py-2 px-4 hover:bg-secondary rounded">Feed</Link>
-            <Link to="/chat" className="block py-2 px-4 hover:bg-secondary rounded">Chat</Link>
-            <Link to="/profile" className="block py-2 px-4 hover:bg-secondary rounded">Profile</Link>
+            <Link to="/jobs" className="block py-2 px-4 hover:bg-secondary rounded transition duration-300">Jobs</Link>
+            <Link to="/feed" className="block py-2 px-4 hover:bg-secondary rounded transition duration-300">Feed</Link>
+            <Link to="/chat" className="block py-2 px-4 hover:bg-secondary rounded transition duration-300">Chat</Link>
+            <Link to="/profile" className="block py-2 px-4 hover:bg-secondary rounded transition duration-300">Profile</Link>
           </nav>
         </motion.div>
 
         {/* Main Content */}
         <div className="flex-1 md:ml-64 container relative">
           <div className="absolute top-4 right-4 flex items-center">
-            {photo && <img src={`https://gapp-6yc3.onrender.com${photo}`} alt="Profile" className="w-10 h-10 rounded-full mr-2" />}
+            {photo && <img src={`https://gapp-6yc3.onrender.com${photo}`} alt="Profile" className="w-10 h-10 rounded-full mr-2 border-2 border-primary" />}
             <FaSignOutAlt className="text-2xl text-primary cursor-pointer hover:text-secondary transition duration-300" onClick={logout} />
           </div>
           <Switch>
