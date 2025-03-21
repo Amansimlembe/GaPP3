@@ -4,27 +4,27 @@ const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const path = require('path');
-const fs = require('fs');
+const cloudinary = require('cloudinary').v2;
 const connectDB = require('./config/db');
 const authRoutes = require('./routes/auth');
 const jobseekerRoutes = require('./routes/jobseeker');
 const employerRoutes = require('./routes/employer');
 const socialRoutes = require('./routes/social');
-const Message = require('./models/Message'); // Import Message model
+const Message = require('./models/Message');
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
-app.use(cors());
-app.use(express.json());
+// Configure Cloudinary
+cloudinary.config({
+  cloud_name: 'dsygdul20',
+  api_key: '442966176347917',
+  api_secret: '78quUIGGD4YkjmLe87FJG21EOfk',
+});
 
-// Create uploads directory if it doesn’t exist
-const uploadsDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir);
-}
-app.use('/uploads', express.static(uploadsDir));
+app.use(cors());
+app.use(express.json({ limit: '50mb' })); // Increase payload limit for uploads
 
 // Serve React build files
 app.use(express.static(path.join(__dirname, '../frontend/build')));

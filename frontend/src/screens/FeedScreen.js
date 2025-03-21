@@ -11,8 +11,23 @@ const FeedScreen = () => {
   const [file, setFile] = useState(null);
   const [isStory, setIsStory] = useState(false);
   const [error, setError] = useState('');
+  const [userId, setUserId] = useState('');
 
   useEffect(() => {
+    const fetchUserData = async () => {
+      try {
+        const { data } = await axios.post('/auth/login', {
+          email: 'user@example.com', // Replace with actual auth logic
+          password: 'password',      // Replace with actual auth logic
+        });
+        setUserId(data.userId);
+      } catch (err) {
+        console.error('Failed to fetch user data:', err);
+        setError('Unable to load user data');
+      }
+    };
+    fetchUserData();
+
     const fetchFeed = async () => {
       try {
         const { data } = await axios.get('/social/feed');
@@ -21,16 +36,19 @@ const FeedScreen = () => {
         setError('');
       } catch (error) {
         console.error('Failed to fetch feed:', error);
-        setError(error.response?.data?.error || 'Failed to load feed. Please try again.');
+        setError(error.response?.data?.error || 'Failed to load feed');
       }
     };
     fetchFeed();
   }, []);
 
   const postContent = async () => {
+    if (!userId || (!caption && !file)) {
+      setError('Please provide content');
+      return;
+    }
     const formData = new FormData();
-    const user = JSON.parse(localStorage.getItem('user'));
-    formData.append('userId', user.userId);
+    formData.append('userId', userId);
     formData.append('contentType', contentType);
     formData.append('caption', caption);
     if (file) formData.append('content', file);
@@ -40,7 +58,7 @@ const FeedScreen = () => {
       window.location.reload();
     } catch (error) {
       console.error('Post error:', error);
-      setError(error.response?.data?.error || 'Failed to post. Please try again.');
+      setError(error.response?.data?.error || 'Failed to post');
     }
   };
 
@@ -60,6 +78,8 @@ const FeedScreen = () => {
           <option value="text">Text</option>
           <option value="image">Image</option>
           <option value="video">Video</option>
+          <option value="audio">Audio</option>
+          <option value="raw">Document</option>
         </select>
         {contentType === 'text' ? (
           <textarea
@@ -70,7 +90,7 @@ const FeedScreen = () => {
         ) : (
           <input
             type="file"
-            accept={contentType === 'image' ? 'image/*' : 'video/*'}
+            accept={contentType === 'image' ? 'image/*' : contentType === 'video' ? 'video/*' : contentType === 'audio' ? 'audio/*' : '*/*'}
             onChange={(e) => setFile(e.target.files[0])}
             className="w-full p-2 border rounded-lg"
           />
@@ -95,17 +115,11 @@ const FeedScreen = () => {
         <h2 className="text-xl font-bold text-primary mb-2">Stories</h2>
         <div className="flex space-x-4 overflow-x-auto pb-2">
           {stories.map((story) => (
-            <motion.div
-              key={story._id}
-              whileHover={{ scale: 1.05 }}
-              className="flex-shrink-0 w-32"
-            >
+            <motion.div key={story._id} whileHover={{ scale: 1.05 }} className="flex-shrink-0 w-32">
               {story.contentType === 'text' ? (
                 <div className="bg-gray-200 p-2 rounded text-sm">{story.content}</div>
-              ) : story.contentType === 'image' ? (
-                <img src={`https://gapp-6yc3.onrender.com${story.content}`} alt="Story" className="w-full h-32 object-cover rounded" />
               ) : (
-                <video src={`https://gapp-6yc3.onrender.com${story.content}`} controls className="w-full h-32 rounded" />
+                <img src={story.content} alt="Story" className="w-full h-32 object-cover rounded" />
               )}
             </motion.div>
           ))}

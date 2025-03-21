@@ -2,21 +2,26 @@ const express = require('express');
 const router = express.Router();
 const User = require('../models/User');
 const Job = require('../models/Job');
+const cloudinary = require('cloudinary').v2;
 const multer = require('multer');
 const { jobMatcher } = require('../utils/jobMatcher');
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, 'uploads/'),
-  filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`),
-});
-const upload = multer({ storage });
+const upload = multer({ storage: multer.memoryStorage() }); // Use memory storage for Cloudinary
 
 router.post('/update_cv', upload.single('cv_file'), async (req, res) => {
   try {
     const { userId } = req.body;
     if (!userId || !req.file) return res.status(400).json({ error: 'User ID and CV file are required' });
-    const cvPath = `/uploads/${req.file.filename}`;
-    const user = await User.findByIdAndUpdate(userId, { cv: cvPath }, { new: true });
+
+    const result = await cloudinary.uploader.upload_stream(
+      { resource_type: 'raw', public_id: `cv_${userId}`, folder: 'gapp_cv' },
+      (error, result) => {
+        if (error) throw error;
+        return result;
+      }
+    ).end(req.file.buffer);
+
+    const user = await User.findByIdAndUpdate(userId, { cv: result.secure_url }, { new: true });
     if (!user) return res.status(404).json({ error: 'User not found' });
     res.json({ cv: user.cv });
   } catch (error) {
@@ -48,12 +53,32 @@ router.post('/apply', upload.fields([{ name: 'cv_file' }, { name: 'cover_letter'
     const user = await User.findById(userId);
     const job = await Job.findById(jobId);
     if (!user || !job) return res.status(404).json({ error: 'User or job not found' });
-    const application = {
-      userId,
-      photo: user.photo,
-      cv: req.files['cv_file'] ? `/uploads/${req.files['cv_file'][0].filename}` : user.cv,
-      coverLetter: req.files['cover_letter'] ? `/uploads/${req.files['cover_letter'][0].filename}` : null,
-    };
+
+    let cvUrl = user.cv;
+    if (req.files['cv_file']) {
+      const cvResult = await cloudinary.uploader.upload_stream(
+        { resource_type: 'raw', public_id: `cv_${userId}_${Date.now()}`, folder: 'gapp_cv' },
+        (error, result) => {
+          if (error) throw error;
+          return result;
+        }
+      ).end(req.files['cv_file'][0].buffer);
+      cvUrl = cvResult.secure_url;
+    }
+
+    let coverLetterUrl = null;
+    if (req.files['cover_letter']) {
+      const clResult = await cloudinary.uploader.upload_stream(
+        { resource_type: 'raw', public_id: `cl_${userId}_${Date.now()}`, folder: 'gapp_cover_letters' },
+        (error, result) => {
+          if (error) throw error;
+          return result;
+        }
+      ).end(req.files['cover_letter'][0].buffer);
+      coverLetterUrl = clResult.secure_url;
+    }
+
+    const application = { userId, photo: user.photo, cv: cvUrl, coverLetter: coverLetterUrl };
     job.applications = job.applications || [];
     job.applications.push(application);
     await job.save();

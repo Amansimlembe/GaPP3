@@ -2,13 +2,10 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const router = express.Router();
+const cloudinary = require('cloudinary').v2;
 const multer = require('multer');
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, 'uploads/'),
-  filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`),
-});
-const upload = multer({ storage });
+const upload = multer({ storage: multer.memoryStorage() });
 
 router.post('/register', async (req, res) => {
   const { email, password, role } = req.body;
@@ -44,8 +41,16 @@ router.post('/update_photo', upload.single('photo'), async (req, res) => {
   try {
     const { userId } = req.body;
     if (!userId || !req.file) return res.status(400).json({ error: 'User ID and photo are required' });
-    const photoPath = `/uploads/${req.file.filename}`;
-    const user = await User.findByIdAndUpdate(userId, { photo: photoPath }, { new: true });
+
+    const result = await cloudinary.uploader.upload_stream(
+      { resource_type: 'image', public_id: `photo_${userId}`, folder: 'gapp_photos' },
+      (error, result) => {
+        if (error) throw error;
+        return result;
+      }
+    ).end(req.file.buffer);
+
+    const user = await User.findByIdAndUpdate(userId, { photo: result.secure_url }, { new: true });
     if (!user) return res.status(404).json({ error: 'User not found' });
     res.json({ photo: user.photo });
   } catch (error) {

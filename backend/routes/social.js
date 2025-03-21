@@ -1,13 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const Post = require('../models/Post');
+const cloudinary = require('cloudinary').v2;
 const multer = require('multer');
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, 'uploads/'),
-  filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`),
-});
-const upload = multer({ storage });
+const upload = multer({ storage: multer.memoryStorage() });
 
 router.get('/feed', async (req, res) => {
   try {
@@ -23,9 +20,21 @@ router.post('/post', upload.single('content'), async (req, res) => {
   try {
     const { userId, contentType, caption } = req.body;
     if (!userId || !contentType) return res.status(400).json({ error: 'User ID and content type are required' });
-    const content = contentType === 'text' ? caption : req.file ? `/uploads/${req.file.filename}` : null;
-    if (!content) return res.status(400).json({ error: 'Content is required' });
-    const post = new Post({ userId, contentType, content });
+
+    let contentUrl = caption;
+    if (req.file) {
+      const resourceType = contentType === 'text' ? 'raw' : contentType;
+      const result = await cloudinary.uploader.upload_stream(
+        { resource_type: resourceType, public_id: `${contentType}_${userId}_${Date.now()}`, folder: `gapp_${contentType}s` },
+        (error, result) => {
+          if (error) throw error;
+          return result;
+        }
+      ).end(req.file.buffer);
+      contentUrl = result.secure_url;
+    }
+
+    const post = new Post({ userId, contentType, content: contentUrl });
     await post.save();
     res.json(post);
   } catch (error) {
@@ -38,10 +47,22 @@ router.post('/story', upload.single('content'), async (req, res) => {
   try {
     const { userId, contentType, caption } = req.body;
     if (!userId || !contentType) return res.status(400).json({ error: 'User ID and content type are required' });
-    const content = contentType === 'text' ? caption : req.file ? `/uploads/${req.file.filename}` : null;
-    if (!content) return res.status(400).json({ error: 'Content is required' });
+
+    let contentUrl = caption;
+    if (req.file) {
+      const resourceType = contentType === 'text' ? 'raw' : contentType;
+      const result = await cloudinary.uploader.upload_stream(
+        { resource_type: resourceType, public_id: `${contentType}_${userId}_${Date.now()}`, folder: `gapp_${contentType}s` },
+        (error, result) => {
+          if (error) throw error;
+          return result;
+        }
+      ).end(req.file.buffer);
+      contentUrl = result.secure_url;
+    }
+
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
-    const post = new Post({ userId, contentType, content, isStory: true, expiresAt });
+    const post = new Post({ userId, contentType, content: contentUrl, isStory: true, expiresAt });
     await post.save();
     res.json(post);
   } catch (error) {
