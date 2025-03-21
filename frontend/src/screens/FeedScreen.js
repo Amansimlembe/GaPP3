@@ -1,6 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
-import PostCard from '../components/PostCard';
 import { motion } from 'framer-motion';
 
 const FeedScreen = ({ token, userId }) => {
@@ -11,6 +10,7 @@ const FeedScreen = ({ token, userId }) => {
   const [file, setFile] = useState(null);
   const [isStory, setIsStory] = useState(false);
   const [error, setError] = useState('');
+  const mediaRefs = useRef({});
 
   useEffect(() => {
     const fetchFeed = async () => {
@@ -27,7 +27,33 @@ const FeedScreen = ({ token, userId }) => {
       }
     };
     fetchFeed();
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          const video = entry.target;
+          if (entry.isIntersecting) {
+            video.play();
+          } else {
+            video.pause();
+          }
+        });
+      },
+      { threshold: 0.5 }
+    );
+
+    document.querySelectorAll('video').forEach((video) => observer.observe(video));
+    return () => observer.disconnect();
   }, [token]);
+
+  const handleMediaPlay = (id, type) => {
+    Object.keys(mediaRefs.current).forEach((key) => {
+      if (key !== id && mediaRefs.current[key]) {
+        if (type === 'video' && mediaRefs.current[key].tagName === 'VIDEO') mediaRefs.current[key].pause();
+        if (type === 'audio' && mediaRefs.current[key].tagName === 'AUDIO') mediaRefs.current[key].pause();
+      }
+    });
+  };
 
   const postContent = async () => {
     if (!userId || (!caption && !file)) {
@@ -43,7 +69,8 @@ const FeedScreen = ({ token, userId }) => {
       const { data } = await axios.post(endpoint, formData, {
         headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
       });
-      setPosts([data, ...posts]); // Add new post immediately
+      if (isStory) setStories([data, ...stories]);
+      else setPosts([data, ...posts]);
       setCaption('');
       setFile(null);
       setError('');
@@ -93,9 +120,11 @@ const FeedScreen = ({ token, userId }) => {
               ) : story.contentType === 'image' ? (
                 <img src={story.content} alt="Story" className="w-full h-32 object-cover rounded" />
               ) : story.contentType === 'video' ? (
-                <video controls src={story.content} className="w-full h-32 object-cover rounded" />
+                <video ref={(el) => (mediaRefs.current[story._id] = el)} onPlay={() => handleMediaPlay(story._id, 'video')} controls src={story.content} className="w-full h-32 object-cover rounded" />
+              ) : story.contentType === 'audio' ? (
+                <audio ref={(el) => (mediaRefs.current[story._id] = el)} onPlay={() => handleMediaPlay(story._id, 'audio')} controls src={story.content} className="w-full" />
               ) : (
-                <p>{story.content}</p>
+                <a href={story.content} target="_blank" rel="noopener noreferrer" className="text-blue-500">Download</a>
               )}
             </motion.div>
           ))}
@@ -107,9 +136,13 @@ const FeedScreen = ({ token, userId }) => {
             <p>User: {post.userId}</p>
             {post.contentType === 'text' && <p>{post.content}</p>}
             {post.contentType === 'image' && <img src={post.content} alt="Post" className="max-w-full h-auto" />}
-            {post.contentType === 'video' && <video controls src={post.content} className="max-w-full h-auto" />}
-            {post.contentType === 'audio' && <audio controls src={post.content} />}
-            {post.contentType === 'raw' && <a href={post.content} target="_blank" rel="noopener noreferrer">Download</a>}
+            {post.contentType === 'video' && (
+              <video ref={(el) => (mediaRefs.current[post._id] = el)} onPlay={() => handleMediaPlay(post._id, 'video')} controls src={post.content} className="max-w-full h-auto" />
+            )}
+            {post.contentType === 'audio' && (
+              <audio ref={(el) => (mediaRefs.current[post._id] = el)} onPlay={() => handleMediaPlay(post._id, 'audio')} controls src={post.content} className="w-full" />
+            )}
+            {post.contentType === 'raw' && <a href={post.content} target="_blank" rel="noopener noreferrer" className="text-blue-500">Download</a>}
           </div>
         ))}
       </div>
