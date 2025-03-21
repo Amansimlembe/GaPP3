@@ -5,7 +5,7 @@ import { FaSignOutAlt, FaBars } from 'react-icons/fa';
 import LoginScreen from './screens/LoginScreen';
 import JobSeekerScreen from './screens/JobSeekerScreen';
 import EmployerScreen from './screens/EmployerScreen';
-import FeedScreen from './screens/FeedScreen';
+import FeedScreen from './screens/FeedScreen'; // Default import
 import ChatScreen from './screens/ChatScreen';
 import ProfileScreen from './screens/ProfileScreen';
 

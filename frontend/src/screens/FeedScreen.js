@@ -122,6 +122,4 @@ const FeedScreen = ({ token, userId }) => {
   );
 };
 
-
-
-
+export default FeedScreen; // Ensure default export
