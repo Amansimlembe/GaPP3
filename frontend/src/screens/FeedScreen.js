@@ -14,7 +14,7 @@ const FeedScreen = () => {
   }, []);
 
   return (
-    <div>
+    <div className="space-y-6">
       {posts.map((post) => (
         <PostCard key={post._id} post={post} />
       ))}

@@ -1,9 +1,15 @@
 import React from 'react';
+import { motion } from 'framer-motion';
 
 const ChatBubble = ({ message, isSender }) => (
-  <div style={{ padding: 10, alignSelf: isSender ? 'flex-end' : 'flex-start', backgroundColor: isSender ? '#DCF8C6' : '#FFF', margin: 5, borderRadius: 5 }}>
+  <motion.div
+    initial={{ y: 20, opacity: 0 }}
+    animate={{ y: 0, opacity: 1 }}
+    className={`p-3 rounded-lg mb-2 ${isSender ? 'bg-primary text-white self-end' : 'bg-gray-200 text-gray-800 self-start'}`}
+    style={{ maxWidth: '70%' }}
+  >
     <p>{message.content}</p>
-  </div>
+  </motion.div>
 );
 
 export default ChatBubble;

@@ -1,14 +1,24 @@
 import React from 'react';
+import { motion } from 'framer-motion';
 
 const PostCard = ({ post }) => (
-  <div style={{ padding: 10, borderBottom: '1px solid #ccc' }}>
+  <motion.div
+    whileHover={{ scale: 1.02 }}
+    className="bg-white p-4 rounded-lg shadow-md"
+  >
     {post.contentType === 'text' ? (
-      <p>{post.content}</p>
+      <p className="text-gray-800">{post.content}</p>
     ) : (
-      <img src={`https://gapp-6yc3.onrender.com${post.content}`} alt="Post" style={{ width: 200, height: 200 }} />
+      <img
+        src={`https://gapp-6yc3.onrender.com${post.content}`}
+        alt="Post"
+        className="w-full h-48 object-cover rounded"
+      />
     )}
-    <button>Like</button>
-  </div>
+    <button className="mt-2 bg-secondary text-white p-2 rounded hover:bg-purple-700 transition duration-300">
+      Like
+    </button>
+  </motion.div>
 );
 
 export default PostCard;
