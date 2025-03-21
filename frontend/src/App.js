@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Route, Switch, Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { FaSignOutAlt } from 'react-icons/fa';
+import { FaSignOutAlt, FaBars } from 'react-icons/fa';
 import LoginScreen from './screens/LoginScreen';
 import JobSeekerScreen from './screens/JobSeekerScreen';
 import EmployerScreen from './screens/EmployerScreen';
@@ -13,6 +13,7 @@ const App = () => {
   const [userId, setUserId] = useState(null);
   const [role, setRole] = useState(null);
   const [photo, setPhoto] = useState('');
+  const [isNavOpen, setIsNavOpen] = useState(false);
 
   useEffect(() => {
     const user = localStorage.getItem('user');
@@ -35,8 +36,31 @@ const App = () => {
 
   return (
     <Router>
-      <div className="flex min-h-screen">
-        <motion.div initial={{ x: -250 }} animate={{ x: 0 }} className="w-64 bg-primary text-white p-4">
+      <div className="min-h-screen flex flex-col">
+        {/* Top Navigation for Small Devices */}
+        <div className="md:hidden bg-primary text-white p-4 flex justify-between items-center">
+          <h1 className="text-2xl font-bold">GaPP</h1>
+          <FaBars className="text-2xl cursor-pointer" onClick={() => setIsNavOpen(!isNavOpen)} />
+        </div>
+        <motion.div
+          initial={{ height: 0 }}
+          animate={{ height: isNavOpen ? 'auto' : 0 }}
+          className="md:hidden bg-primary text-white overflow-hidden"
+        >
+          <nav className="flex flex-col p-4">
+            <Link to="/jobs" className="py-2 hover:bg-secondary rounded" onClick={() => setIsNavOpen(false)}>Jobs</Link>
+            <Link to="/feed" className="py-2 hover:bg-secondary rounded" onClick={() => setIsNavOpen(false)}>Feed</Link>
+            <Link to="/chat" className="py-2 hover:bg-secondary rounded" onClick={() => setIsNavOpen(false)}>Chat</Link>
+            <Link to="/profile" className="py-2 hover:bg-secondary rounded" onClick={() => setIsNavOpen(false)}>Profile</Link>
+          </nav>
+        </motion.div>
+
+        {/* Sidebar for Larger Devices */}
+        <motion.div
+          initial={{ x: -250 }}
+          animate={{ x: 0 }}
+          className="hidden md:block w-64 bg-primary text-white p-4 h-screen fixed"
+        >
           <h1 className="text-2xl font-bold mb-6">GaPP</h1>
           <nav>
             <Link to="/jobs" className="block py-2 px-4 hover:bg-secondary rounded">Jobs</Link>
@@ -45,10 +69,12 @@ const App = () => {
             <Link to="/profile" className="block py-2 px-4 hover:bg-secondary rounded">Profile</Link>
           </nav>
         </motion.div>
-        <div className="flex-1 container relative">
+
+        {/* Main Content */}
+        <div className="flex-1 md:ml-64 container relative">
           <div className="absolute top-4 right-4 flex items-center">
-            {photo && <img src={photo} alt="Profile" className="w-10 h-10 rounded-full mr-2" />}
-            <FaSignOutAlt className="text-2xl text-primary cursor-pointer" onClick={logout} />
+            {photo && <img src={`https://gapp-6yc3.onrender.com${photo}`} alt="Profile" className="w-10 h-10 rounded-full mr-2" />}
+            <FaSignOutAlt className="text-2xl text-primary cursor-pointer hover:text-secondary transition duration-300" onClick={logout} />
           </div>
           <Switch>
             <Route path="/jobs" component={role === 0 ? JobSeekerScreen : EmployerScreen} />

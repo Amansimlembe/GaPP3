@@ -10,6 +10,7 @@ const jobseekerRoutes = require('./routes/jobseeker');
 const employerRoutes = require('./routes/employer');
 const socialRoutes = require('./routes/social');
 const multer = require('multer');
+const fs = require('fs');
 
 const app = express();
 const server = http.createServer(app);
@@ -17,20 +18,20 @@ const io = new Server(server, { cors: { origin: '*' } });
 
 app.use(cors());
 app.use(express.json());
-app.use('/uploads', express.static('uploads'));
+
+// Ensure uploads directory exists
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
+app.use('/uploads', express.static(uploadsDir));
 
 // Serve React build files
 app.use(express.static(path.join(__dirname, '../frontend/build')));
 
-// Multer setup for file uploads
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, 'uploads/'),
-  filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`),
-});
-const upload = multer({ storage });
-
 // MongoDB connection
-connectDB();
+connectDB().catch(err => {
+  console.error('Failed to connect to MongoDB:', err);
+  process.exit(1);
+});
 
 // API Routes
 app.use('/auth', authRoutes);
@@ -38,7 +39,7 @@ app.use('/jobseeker', jobseekerRoutes);
 app.use('/employer', employerRoutes);
 app.use('/social', socialRoutes);
 
-// Socket.IO for real-time chat
+// Socket.IO
 io.on('connection', (socket) => {
   socket.on('join', (userId) => socket.join(userId));
   socket.on('message', async (data) => {
@@ -51,13 +52,13 @@ io.on('connection', (socket) => {
   socket.on('webrtc_signal', (data) => io.to(data.to).emit('webrtc_signal', data));
 });
 
-// Error handling middleware
+// Error handling
 app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).json({ error: 'Internal Server Error' });
 });
 
-// Catch-all route for React app
+// Catch-all route
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../frontend/build', 'index.html'));
 });
