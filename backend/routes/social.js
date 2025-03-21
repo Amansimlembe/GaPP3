@@ -1,34 +1,49 @@
 const express = require('express');
 const router = express.Router();
 const Post = require('../models/Post');
+const multer = require('multer');
 
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, 'uploads/'),
+  filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`),
+});
+const upload = multer({ storage });
+
+// Get feed
 router.get('/feed', async (req, res) => {
   try {
     const posts = await Post.find().sort({ createdAt: -1 });
     res.json(posts);
   } catch (error) {
-    console.error('Feed error:', error);
-    res.status(500).json({ error: 'Failed to load feed' });
+    res.status(500).json({ error: 'Failed to fetch feed' });
   }
 });
 
-router.post('/post', async (req, res) => {
-  const { userId, contentType, content } = req.body;
-  const post = new Post({ userId, contentType, content, createdAt: new Date() });
-  await post.save();
-  res.json(post);
+// Post content
+router.post('/post', upload.single('content'), async (req, res) => {
+  try {
+    const { userId, contentType, caption } = req.body;
+    const content = contentType === 'text' ? caption : `/uploads/${req.file.filename}`;
+    const post = new Post({ userId, contentType, content });
+    await post.save();
+    res.json(post);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to post' });
+  }
 });
 
-router.get('/stories', async (req, res) => {
-  const stories = await Post.find({ isStory: true, createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } });
-  res.json(stories);
-});
-
-router.post('/story', async (req, res) => {
-  const { userId, contentType, content } = req.body;
-  const story = new Post({ userId, contentType, content, isStory: true, createdAt: new Date() });
-  await story.save();
-  res.json(story);
+// Post story (24-hour expiration)
+router.post('/story', upload.single('content'), async (req, res) => {
+  try {
+    const { userId, contentType, caption } = req.body;
+    const content = contentType === 'text' ? caption : `/uploads/${req.file.filename}`;
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+    const post = new Post({ userId, contentType, content, isStory: true, expiresAt });
+    await post.save();
+    res.json(post);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to post story' });
+  }
 });
 
 module.exports = router;

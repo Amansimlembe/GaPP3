@@ -22,14 +22,15 @@ app.use('/uploads', express.static('uploads'));
 // Serve React build files
 app.use(express.static(path.join(__dirname, '../frontend/build')));
 
-connectDB();
-
-// File upload setup
+// Multer setup for file uploads
 const storage = multer.diskStorage({
-  destination: 'uploads/',
-  filename: (req, file, cb) => cb(null, `${req.body.userId}-${Date.now()}${path.extname(file.originalname)}`),
+  destination: (req, file, cb) => cb(null, 'uploads/'),
+  filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`),
 });
 const upload = multer({ storage });
+
+// MongoDB connection
+connectDB();
 
 // API Routes
 app.use('/auth', authRoutes);
@@ -37,12 +38,7 @@ app.use('/jobseeker', jobseekerRoutes);
 app.use('/employer', employerRoutes);
 app.use('/social', socialRoutes);
 
-// Catch-all route to serve React app
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, '../frontend/build', 'index.html'));
-});
-
-// Socket.io for real-time chat and video calling
+// Socket.IO for real-time chat
 io.on('connection', (socket) => {
   socket.on('join', (userId) => socket.join(userId));
   socket.on('message', async (data) => {
@@ -53,6 +49,17 @@ io.on('connection', (socket) => {
     socket.emit('message', message);
   });
   socket.on('webrtc_signal', (data) => io.to(data.to).emit('webrtc_signal', data));
+});
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({ error: 'Internal Server Error' });
+});
+
+// Catch-all route for React app
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, '../frontend/build', 'index.html'));
 });
 
 const PORT = process.env.PORT || 8000;

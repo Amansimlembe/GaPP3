@@ -8,5 +8,4 @@ const JobCard = ({ job, onApply }) => (
     <button onClick={onApply} className="mt-2 bg-accent text-white p-2 rounded hover:bg-yellow-600 transition duration-300">Apply</button>
   </motion.div>
 );
-
 export default JobCard;

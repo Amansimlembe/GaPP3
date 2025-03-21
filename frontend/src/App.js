@@ -12,14 +12,15 @@ import ProfileScreen from './screens/ProfileScreen';
 const App = () => {
   const [userId, setUserId] = useState(null);
   const [role, setRole] = useState(null);
-  const [photo, setPhoto] = useState(null);
+  const [photo, setPhoto] = useState('');
 
   useEffect(() => {
-    const user = JSON.parse(localStorage.getItem('user'));
+    const user = localStorage.getItem('user');
     if (user) {
-      setUserId(user.userId);
-      setRole(user.role);
-      setPhoto(user.photo);
+      const { userId, role, photo } = JSON.parse(user);
+      setUserId(userId);
+      setRole(role);
+      setPhoto(photo || '');
     }
   }, []);
 
@@ -27,7 +28,7 @@ const App = () => {
     localStorage.removeItem('user');
     setUserId(null);
     setRole(null);
-    setPhoto(null);
+    setPhoto('');
   };
 
   if (!userId) return <LoginScreen setUser={(id, r, p) => { setUserId(id); setRole(r); setPhoto(p); }} />;
@@ -44,10 +45,10 @@ const App = () => {
             <Link to="/profile" className="block py-2 px-4 hover:bg-secondary rounded">Profile</Link>
           </nav>
         </motion.div>
-        <div className="flex-1 container">
-          <div className="flex justify-end p-4">
-            {photo && <img src={photo} alt="User" className="w-10 h-10 rounded-full mr-4" />}
-            <FaSignOutAlt onClick={logout} className="text-2xl text-primary cursor-pointer" />
+        <div className="flex-1 container relative">
+          <div className="absolute top-4 right-4 flex items-center">
+            {photo && <img src={photo} alt="Profile" className="w-10 h-10 rounded-full mr-2" />}
+            <FaSignOutAlt className="text-2xl text-primary cursor-pointer" onClick={logout} />
           </div>
           <Switch>
             <Route path="/jobs" component={role === 0 ? JobSeekerScreen : EmployerScreen} />
