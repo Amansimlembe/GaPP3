@@ -96,32 +96,23 @@ const ChatScreen = ({ token, userId }) => {
   };
 
   return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      transition={{ duration: 0.5 }}
-      className="flex h-screen p-4 flex-col bg-gray-100"
-    >
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5 }} className="flex flex-col h-screen p-4 bg-gray-100">
       <div className="w-full bg-white p-4 rounded-lg shadow-md mb-4 overflow-x-auto flex space-x-2">
         {users.map((id) => (
           <motion.button
             key={id}
             whileHover={{ scale: 1.05 }}
             onClick={() => setSelectedUser(id)}
-            className="p-2 bg-primary text-white rounded-full shadow hover:bg-secondary transition duration-300 whitespace-nowrap"
+            className="p-2 bg-primary text-white rounded-full shadow hover:bg-secondary"
           >
             {id}
           </motion.button>
         ))}
       </div>
-      <div className="w-full bg-white p-4 rounded-lg shadow-md flex flex-col h-full">
+      <div className="w-full bg-white p-4 rounded-lg shadow-md flex flex-col flex-1 overflow-hidden">
         {selectedUser ? (
           <>
-            <motion.h2
-              initial={{ y: -20 }}
-              animate={{ y: 0 }}
-              className="text-xl font-bold text-primary mb-4"
-            >
+            <motion.h2 initial={{ y: -20 }} animate={{ y: 0 }} className="text-xl font-bold text-primary mb-4">
               Chat with {selectedUser}
             </motion.h2>
             <div ref={chatRef} className="flex-1 overflow-y-auto mb-4 space-y-2">
@@ -144,23 +135,19 @@ const ChatScreen = ({ token, userId }) => {
                 </motion.div>
               ))}
             </div>
-            <motion.div
-              initial={{ y: 20 }}
-              animate={{ y: 0 }}
-              className="relative flex items-center"
-            >
+            <motion.div initial={{ y: 20 }} animate={{ y: 0 }} className="relative flex items-center pb-16">
               {showPicker && (
                 <motion.div
                   initial={{ opacity: 0, scale: 0.8 }}
                   animate={{ opacity: 1, scale: 1 }}
-                  className="absolute bottom-12 left-0 bg-white p-2 rounded-lg shadow-lg flex space-x-2"
+                  className="absolute bottom-20 left-0 bg-white p-2 rounded-lg shadow-lg flex space-x-2"
                 >
                   {['image', 'video', 'audio', 'raw', 'contact'].map((type) => (
                     <motion.button
                       key={type}
                       whileHover={{ scale: 1.1 }}
                       onClick={() => { setContentType(type); setShowPicker(false); }}
-                      className="p-2 bg-primary text-white rounded hover:bg-secondary transition duration-300"
+                      className="p-2 bg-primary text-white rounded hover:bg-secondary"
                     >
                       {type.charAt(0).toUpperCase() + type.slice(1)}
                     </motion.button>
@@ -192,11 +179,11 @@ const ChatScreen = ({ token, userId }) => {
                 </div>
               )}
               <FaPaperclip
-                className="absolute right-8 text-xl text-primary cursor-pointer hover:text-secondary transition duration-200"
+                className="absolute right-8 text-xl text-primary cursor-pointer hover:text-secondary"
                 onClick={() => setShowPicker(!showPicker)}
               />
               <FaPaperPlane
-                className="absolute right-3 text-xl text-primary cursor-pointer hover:text-secondary transition duration-200"
+                className="absolute right-3 text-xl text-primary cursor-pointer hover:text-secondary"
                 onClick={sendMessage}
               />
             </motion.div>

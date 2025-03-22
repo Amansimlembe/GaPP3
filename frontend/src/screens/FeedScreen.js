@@ -11,6 +11,7 @@ const FeedScreen = ({ token, userId }) => {
   const [showPostModal, setShowPostModal] = useState(false);
   const [error, setError] = useState('');
   const [comment, setComment] = useState('');
+  const [showComments, setShowComments] = useState(null);
   const mediaRefs = useRef({});
 
   useEffect(() => {
@@ -32,28 +33,15 @@ const FeedScreen = ({ token, userId }) => {
       (entries) => {
         entries.forEach((entry) => {
           const media = entry.target;
-          if (entry.isIntersecting) {
-            media.play();
-          } else {
-            media.pause();
-          }
+          if (entry.isIntersecting) media.play();
+          else media.pause();
         });
       },
       { threshold: 0.8 }
     );
 
-    document.querySelectorAll('video, audio').forEach((media) => observer.observe(media));
     return () => observer.disconnect();
   }, [token]);
-
-  const handleMediaPlay = (id, type) => {
-    Object.keys(mediaRefs.current).forEach((key) => {
-      if (key !== id && mediaRefs.current[key]) {
-        if (type === 'video' && mediaRefs.current[key].tagName === 'VIDEO') mediaRefs.current[key].pause();
-        if (type === 'audio' && mediaRefs.current[key].tagName === 'AUDIO') mediaRefs.current[key].pause();
-      }
-    });
-  };
 
   const postContent = async () => {
     if (!userId || (!caption && !file && contentType !== 'text')) {
@@ -81,8 +69,14 @@ const FeedScreen = ({ token, userId }) => {
 
   const likePost = async (postId) => {
     try {
-      await axios.post('/social/like', { postId }, { headers: { Authorization: `Bearer ${token}` } });
-      setPosts(posts.map(post => post._id === postId ? { ...post, likes: (post.likes || 0) + 1 } : post));
+      const post = posts.find(p => p._id === postId);
+      if (post.likedBy?.includes(userId)) {
+        await axios.post('/social/unlike', { postId }, { headers: { Authorization: `Bearer ${token}` } });
+        setPosts(posts.map(p => p._id === postId ? { ...p, likes: p.likes - 1, likedBy: p.likedBy.filter(id => id !== userId) } : p));
+      } else {
+        await axios.post('/social/like', { postId }, { headers: { Authorization: `Bearer ${token}` } });
+        setPosts(posts.map(p => p._id === postId ? { ...p, likes: (p.likes || 0) + 1, likedBy: [...(p.likedBy || []), userId] } : p));
+      }
     } catch (error) {
       console.error('Like error:', error);
     }
@@ -120,12 +114,7 @@ const FeedScreen = ({ token, userId }) => {
   };
 
   return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      transition={{ duration: 0.5 }}
-      className="h-screen overflow-y-auto snap-y snap-mandatory bg-gray-100"
-    >
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5 }} className="h-screen overflow-y-auto snap-y snap-mandatory bg-black">
       <div className="fixed bottom-16 right-4 z-20">
         <motion.button
           whileHover={{ scale: 1.1, rotate: 90 }}
@@ -141,7 +130,7 @@ const FeedScreen = ({ token, userId }) => {
           initial={{ opacity: 0, y: 50 }}
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: 50 }}
-          className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-30"
+          className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-30"
         >
           <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
             <select value={contentType} onChange={(e) => setContentType(e.target.value)} className="w-full p-2 mb-4 border rounded-lg">
@@ -178,76 +167,86 @@ const FeedScreen = ({ token, userId }) => {
                 placeholder="Add a caption (optional)"
               />
             )}
-            <button onClick={() => setShowPostModal(false)} className="mt-4 w-full bg-gray-300 p-2 rounded-lg hover:bg-gray-400 transition duration-300">Cancel</button>
+            <button onClick={() => setShowPostModal(false)} className="mt-4 w-full bg-gray-300 p-2 rounded-lg hover:bg-gray-400">Cancel</button>
           </div>
         </motion.div>
       )}
-      {error && <p className="text-red-500 text-center py-2">{error}</p>}
-      <div className="space-y-6 p-4">
+      {error && <p className="text-red-500 text-center py-2 z-10 relative">{error}</p>}
+      <div className="space-y-0">
         {posts.map((post) => (
           <motion.div
             key={post._id}
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
             transition={{ duration: 0.3 }}
-            className="bg-white rounded-lg shadow-lg p-4 snap-start"
+            className="h-screen snap-start flex flex-col items-center justify-center text-white relative"
           >
-            <div className="flex items-center mb-2">
+            <div className="absolute top-4 left-4 flex items-center">
               <img src={post.photo || 'https://via.placeholder.com/40'} alt="Profile" className="w-10 h-10 rounded-full mr-2" />
               <div>
-                <span className="font-semibold text-primary">{post.username || post.userId}</span>
-                <span className="text-xs text-gray-500 ml-2">{timeAgo(post.createdAt)}</span>
+                <span className="font-semibold">{post.username || post.userId}</span>
+                <span className="text-xs ml-2">{timeAgo(post.createdAt)}</span>
               </div>
             </div>
-            {post.contentType === 'text' && <p className="text-lg mb-2">{post.content}</p>}
-            {post.contentType === 'image' && <img src={post.content} alt="Post" className="w-full h-auto rounded-lg mb-2" />}
+            {post.contentType === 'text' && <p className="text-lg">{post.content}</p>}
+            {post.contentType === 'image' && <img src={post.content} alt="Post" className="w-full h-full object-cover" />}
             {post.contentType === 'video' && (
               <video
                 ref={(el) => (mediaRefs.current[post._id] = el)}
-                onPlay={() => handleMediaPlay(post._id, 'video')}
-                controls
+                autoPlay
+                loop
+                muted
                 src={post.content}
-                className="w-full h-auto rounded-lg mb-2"
+                className="w-full h-full object-cover"
               />
             )}
             {post.contentType === 'audio' && (
               <audio
                 ref={(el) => (mediaRefs.current[post._id] = el)}
-                onPlay={() => handleMediaPlay(post._id, 'audio')}
+                autoPlay
                 controls
                 src={post.content}
-                className="w-full mb-2"
+                className="w-full"
               />
             )}
-            {post.contentType === 'raw' && <a href={post.content} target="_blank" rel="noopener noreferrer" className="text-blue-500 mb-2">Download</a>}
-            {post.caption && <p className="text-sm text-gray-600 mb-2">{post.caption}</p>}
-            <div className="flex space-x-6 mb-2">
-              <motion.div whileHover={{ scale: 1.2 }} className="flex items-center">
-                <FaHeart onClick={() => likePost(post._id)} className="text-xl cursor-pointer hover:text-red-500 transition duration-200" />
-                <span className="ml-1">{post.likes || 0}</span>
+            {post.contentType === 'raw' && <a href={post.content} target="_blank" rel="noopener noreferrer" className="text-blue-500">Download</a>}
+            {post.caption && <p className="text-sm absolute bottom-16 left-4">{post.caption}</p>}
+            <div className="absolute bottom-16 right-4 flex flex-col space-y-4">
+              <motion.div whileHover={{ scale: 1.2 }} className="flex flex-col items-center">
+                <FaHeart
+                  onClick={() => likePost(post._id)}
+                  className={`text-2xl cursor-pointer transition duration-200 ${post.likedBy?.includes(userId) ? 'text-red-500' : 'text-white'}`}
+                />
+                <span>{post.likes || 0}</span>
               </motion.div>
-              <motion.div whileHover={{ scale: 1.2 }} className="flex items-center">
-                <FaComment className="text-xl cursor-pointer hover:text-primary transition duration-200" />
-                <span className="ml-1">{post.comments?.length || 0}</span>
+              <motion.div whileHover={{ scale: 1.2 }} className="flex flex-col items-center">
+                <FaComment onClick={() => setShowComments(post._id)} className="text-2xl cursor-pointer hover:text-primary" />
+                <span>{post.comments?.length || 0}</span>
               </motion.div>
               <motion.div whileHover={{ scale: 1.2 }}>
-                <FaShare onClick={() => sharePost(post._id)} className="text-xl cursor-pointer hover:text-primary transition duration-200" />
+                <FaShare onClick={() => sharePost(post._id)} className="text-2xl cursor-pointer hover:text-primary" />
               </motion.div>
             </div>
-            <div className="space-y-1 mb-2">
-              {post.comments?.map((c, i) => (
-                <p key={i} className="text-sm"><span className="font-semibold">{c.userId}</span> {c.comment}</p>
-              ))}
-            </div>
-            <div className="flex items-center">
-              <input
-                value={comment}
-                onChange={(e) => setComment(e.target.value)}
-                className="flex-1 p-2 border rounded-lg mr-2 focus:ring-2 focus:ring-primary"
-                placeholder="Add a comment..."
-              />
-              <FaPaperPlane onClick={() => commentPost(post._id)} className="text-xl text-primary cursor-pointer hover:text-secondary" />
-            </div>
+            {showComments === post._id && (
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="absolute bottom-16 left-4 w-3/4 bg-white p-4 rounded-lg shadow-lg max-h-40 overflow-y-auto"
+              >
+                {post.comments?.map((c, i) => (
+                  <p key={i} className="text-sm text-black"><span className="font-semibold">{c.userId}</span> {c.comment}</p>
+                ))}
+                <div className="flex items-center mt-2">
+                  <input
+                    value={comment}
+                    onChange={(e) => setComment(e.target.value)}
+                    className="flex-1 p-2 border rounded-lg text-black"
+                    placeholder="Add a comment..."
+                  />
+                  <FaPaperPlane onClick={() => commentPost(post._id)} className="ml-2 text-xl text-primary cursor-pointer hover:text-secondary" />
+                </div>
+              </motion.div>
+            )}
           </motion.div>
         ))}
       </div>

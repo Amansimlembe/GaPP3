@@ -7,9 +7,8 @@ const cloudinary = require('cloudinary').v2;
 const multer = require('multer');
 const authMiddleware = require('../middleware/auth');
 
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } }); // 50MB limit
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
-// Fetch all posts for the feed
 router.get('/feed', async (req, res) => {
   try {
     const posts = await Post.find().sort({ createdAt: -1 });
@@ -20,7 +19,6 @@ router.get('/feed', async (req, res) => {
   }
 });
 
-// Create a new post
 router.post('/post', authMiddleware, upload.single('content'), async (req, res) => {
   try {
     const { userId } = req.user;
@@ -40,7 +38,6 @@ router.post('/post', authMiddleware, upload.single('content'), async (req, res) 
         ).end(req.file.buffer);
       });
       contentUrl = result.secure_url;
-      console.log('Post media URL:', contentUrl);
     }
 
     const user = await User.findById(userId);
@@ -51,6 +48,7 @@ router.post('/post', authMiddleware, upload.single('content'), async (req, res) 
       caption,
       username: user.username,
       photo: user.photo,
+      likedBy: [],
     });
     await post.save();
     res.json(post);
@@ -60,50 +58,6 @@ router.post('/post', authMiddleware, upload.single('content'), async (req, res) 
   }
 });
 
-// Create a new story (similar to post but with expiration)
-router.post('/story', authMiddleware, upload.single('content'), async (req, res) => {
-  try {
-    const { userId } = req.user;
-    const { contentType, caption } = req.body;
-    if (!contentType) return res.status(400).json({ error: 'Content type is required' });
-
-    let contentUrl = caption || '';
-    if (req.file) {
-      const resourceType = ['image', 'video', 'audio', 'raw'].includes(contentType) ? contentType : 'raw';
-      const result = await new Promise((resolve, reject) => {
-        cloudinary.uploader.upload_stream(
-          { resource_type: resourceType, public_id: `${contentType}_${userId}_${Date.now()}`, folder: `gapp_${contentType}s` },
-          (error, result) => {
-            if (error) reject(error);
-            else resolve(result);
-          }
-        ).end(req.file.buffer);
-      });
-      contentUrl = result.secure_url;
-      console.log('Story media URL:', contentUrl);
-    }
-
-    const user = await User.findById(userId);
-    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours expiration
-    const story = new Post({
-      userId,
-      contentType,
-      content: contentUrl,
-      caption,
-      username: user.username,
-      photo: user.photo,
-      isStory: true,
-      expiresAt,
-    });
-    await story.save();
-    res.json(story);
-  } catch (error) {
-    console.error('Story error:', { message: error.message, stack: error.stack, body: req.body, file: !!req.file });
-    res.status(500).json({ error: 'Failed to post story', details: error.message });
-  }
-});
-
-// Fetch messages between two users
 router.get('/messages', authMiddleware, async (req, res) => {
   try {
     const { userId, recipientId } = req.query;
@@ -121,7 +75,6 @@ router.get('/messages', authMiddleware, async (req, res) => {
   }
 });
 
-// Send a new message
 router.post('/message', authMiddleware, upload.single('content'), async (req, res) => {
   try {
     const { senderId, recipientId, contentType, caption } = req.body;
@@ -142,7 +95,6 @@ router.post('/message', authMiddleware, upload.single('content'), async (req, re
         ).end(req.file.buffer);
       });
       contentUrl = result.secure_url;
-      console.log('Message media URL:', contentUrl);
     }
 
     const message = new Message({ senderId, recipientId, contentType, content: contentUrl, caption });
@@ -154,13 +106,16 @@ router.post('/message', authMiddleware, upload.single('content'), async (req, re
   }
 });
 
-// Like a post
 router.post('/like', authMiddleware, async (req, res) => {
   try {
     const { postId } = req.body;
+    const { userId } = req.user;
     const post = await Post.findById(postId);
     if (!post) return res.status(404).json({ error: 'Post not found' });
+    if (!post.likedBy) post.likedBy = [];
+    if (post.likedBy.includes(userId)) return res.status(400).json({ error: 'Already liked' });
     post.likes = (post.likes || 0) + 1;
+    post.likedBy.push(userId);
     await post.save();
     res.json(post);
   } catch (error) {
@@ -169,7 +124,23 @@ router.post('/like', authMiddleware, async (req, res) => {
   }
 });
 
-// Comment on a post
+router.post('/unlike', authMiddleware, async (req, res) => {
+  try {
+    const { postId } = req.body;
+    const { userId } = req.user;
+    const post = await Post.findById(postId);
+    if (!post) return res.status(404).json({ error: 'Post not found' });
+    if (!post.likedBy?.includes(userId)) return res.status(400).json({ error: 'Not liked yet' });
+    post.likes = (post.likes || 0) - 1;
+    post.likedBy = post.likedBy.filter(id => id !== userId);
+    await post.save();
+    res.json(post);
+  } catch (error) {
+    console.error('Unlike error:', error);
+    res.status(500).json({ error: 'Failed to unlike post', details: error.message });
+  }
+});
+
 router.post('/comment', authMiddleware, async (req, res) => {
   try {
     const { postId, comment } = req.body;

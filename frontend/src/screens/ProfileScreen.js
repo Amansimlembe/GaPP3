@@ -1,13 +1,30 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { motion } from 'framer-motion';
+import { FaEdit } from 'react-icons/fa';
 
 const ProfileScreen = ({ token, userId }) => {
   const [cvFile, setCvFile] = useState(null);
   const [photoFile, setPhotoFile] = useState(null);
   const [username, setUsername] = useState('');
+  const [editUsername, setEditUsername] = useState(false);
   const [error, setError] = useState('');
-  const [photoUrl, setPhotoUrl] = useState('');
+  const [photoUrl, setPhotoUrl] = useState(localStorage.getItem('photo') || '');
+
+  useEffect(() => {
+    const fetchUser = async () => {
+      try {
+        const { data } = await axios.get(`/auth/user/${userId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        setUsername(data.username || '');
+        setPhotoUrl(data.photo || '');
+      } catch (error) {
+        console.error('Fetch user error:', error);
+      }
+    };
+    fetchUser();
+  }, [token, userId]);
 
   const uploadCV = async () => {
     if (!cvFile) {
@@ -18,7 +35,7 @@ const ProfileScreen = ({ token, userId }) => {
     formData.append('cv_file', cvFile);
     formData.append('userId', userId);
     try {
-      const { data } = await axios.post('/jobseeker/update_cv', formData, {
+      await axios.post('/jobseeker/update_cv', formData, {
         headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
       });
       alert('CV uploaded successfully');
@@ -42,6 +59,7 @@ const ProfileScreen = ({ token, userId }) => {
         headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
       });
       setPhotoUrl(data.photo);
+      localStorage.setItem('photo', data.photo);
       alert('Photo uploaded successfully');
       setError('');
     } catch (error) {
@@ -60,6 +78,7 @@ const ProfileScreen = ({ token, userId }) => {
         headers: { Authorization: `Bearer ${token}` },
       });
       alert('Username updated successfully');
+      setEditUsername(false);
       setError('');
     } catch (error) {
       console.error('Username update error:', error);
@@ -68,31 +87,36 @@ const ProfileScreen = ({ token, userId }) => {
   };
 
   return (
-    <motion.div initial={{ y: 50, opacity: 0 }} animate={{ y: 0, opacity: 1 }} transition={{ duration: 0.5 }} className="bg-white p-6 rounded-lg shadow-lg max-w-md mx-auto mt-6">
+    <motion.div initial={{ y: 50, opacity: 0 }} animate={{ y: 0, opacity: 1 }} transition={{ duration: 0.5 }} className="bg-white p-6 rounded-lg shadow-lg max-w-md mx-auto mt-6 mb-16">
       <h2 className="text-xl font-bold text-primary mb-4">Profile</h2>
       <p className="text-gray-700 mb-4">Your User ID: <span className="font-semibold">{userId}</span></p>
       {photoUrl && <img src={photoUrl} alt="Profile" className="w-20 h-20 rounded-full mb-4 mx-auto" />}
       {error && <p className="text-red-500 mb-4">{error}</p>}
-      <div className="mb-4">
-        <label className="block text-gray-700 mb-2">Set Username</label>
-        <input
-          type="text"
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
-          className="w-full p-3 border rounded-lg"
-          placeholder="Enter unique username"
-        />
-        <button onClick={updateUsername} className="mt-2 bg-primary text-white p-2 rounded-lg hover:bg-secondary transition duration-300 w-full">Update Username</button>
+      <div className="mb-4 flex items-center">
+        <label className="block text-gray-700 mr-2">Username:</label>
+        {editUsername ? (
+          <input
+            type="text"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            className="flex-1 p-2 border rounded-lg"
+            placeholder="Enter unique username"
+          />
+        ) : (
+          <span className="flex-1">{username || 'Not set'}</span>
+        )}
+        <FaEdit onClick={() => setEditUsername(!editUsername)} className="ml-2 text-xl text-primary cursor-pointer hover:text-secondary" />
+        {editUsername && <button onClick={updateUsername} className="ml-2 bg-primary text-white p-1 rounded-lg">Save</button>}
       </div>
       <div className="mb-4">
         <label className="block text-gray-700 mb-2">Upload CV (PDF)</label>
         <input type="file" accept=".pdf" onChange={(e) => setCvFile(e.target.files[0])} className="w-full p-3 border rounded-lg" />
-        <button onClick={uploadCV} className="mt-2 bg-primary text-white p-2 rounded-lg hover:bg-secondary transition duration-300 w-full">Upload CV</button>
+        <button onClick={uploadCV} className="mt-2 bg-primary text-white p-2 rounded-lg hover:bg-secondary w-full">Upload CV</button>
       </div>
       <div>
         <label className="block text-gray-700 mb-2">Upload Profile Photo</label>
         <input type="file" accept="image/*" onChange={(e) => setPhotoFile(e.target.files[0])} className="w-full p-3 border rounded-lg" />
-        <button onClick={uploadPhoto} className="mt-2 bg-primary text-white p-2 rounded-lg hover:bg-secondary transition duration-300 w-full">Upload Photo</button>
+        <button onClick={uploadPhoto} className="mt-2 bg-primary text-white p-2 rounded-lg hover:bg-secondary w-full">Upload Photo</button>
       </div>
     </motion.div>
   );

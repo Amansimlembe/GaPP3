@@ -5,7 +5,7 @@ const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const cloudinary = require('cloudinary').v2;
 const multer = require('multer');
-const authMiddleware = require('../middleware/auth'); // Add this import
+const authMiddleware = require('../middleware/auth');
 
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -14,15 +14,10 @@ router.post('/register', upload.single('photo'), async (req, res) => {
     const { name, email, password, role } = req.body;
     let photoUrl = '';
     if (req.file) {
-      const result = await new Promise((resolve, reject) => {
-        cloudinary.uploader.upload_stream(
-          { resource_type: 'image', folder: 'gapp_photos' },
-          (error, result) => {
-            if (error) reject(error);
-            else resolve(result);
-          }
-        ).end(req.file.buffer);
-      });
+      const result = await cloudinary.uploader.upload_stream(
+        { resource_type: 'image', folder: 'gapp_photos' },
+        (error, result) => result
+      ).end(req.file.buffer);
       photoUrl = result.secure_url;
     }
 
@@ -30,7 +25,7 @@ router.post('/register', upload.single('photo'), async (req, res) => {
     const user = new User({ name, email, password: hashedPassword, role: parseInt(role), photo: photoUrl });
     await user.save();
 
-    const token = jwt.sign({ userId: user._id, role: user.role }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    const token = jwt.sign({ userId: user._id, role: user.role }, process.env.JWT_SECRET, { expiresIn: '7d' }); // 7 days
     res.json({ token, userId: user._id, role: user.role, photo: user.photo });
   } catch (error) {
     console.error('Registration error:', error);
@@ -45,7 +40,7 @@ router.post('/login', async (req, res) => {
     if (!user || !(await bcrypt.compare(password, user.password))) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
-    const token = jwt.sign({ userId: user._id, role: user.role }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    const token = jwt.sign({ userId: user._id, role: user.role }, process.env.JWT_SECRET, { expiresIn: '7d' }); // 7 days
     res.json({ token, userId: user._id, role: user.role, photo: user.photo });
   } catch (error) {
     console.error('Login error:', error);
