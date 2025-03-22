@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import io from 'socket.io-client';
 import axios from 'axios';
 import { motion } from 'framer-motion';
-import { FaPaperPlane, FaPaperclip } from 'react-icons/fa';
+import { FaPaperPlane, FaPaperclip, FaTrash } from 'react-icons/fa';
 
 const socket = io('https://gapp-6yc3.onrender.com');
 
@@ -16,6 +16,8 @@ const ChatScreen = ({ token, userId }) => {
   const [contentType, setContentType] = useState('text');
   const [showPicker, setShowPicker] = useState(false);
   const [sending, setSending] = useState(null);
+  const [notifications, setNotifications] = useState({});
+  const [selectedMessage, setSelectedMessage] = useState(null);
   const chatRef = useRef(null);
 
   useEffect(() => {
@@ -40,6 +42,7 @@ const ChatScreen = ({ token, userId }) => {
         });
         setMessages(data);
         chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
+        setNotifications((prev) => ({ ...prev, [selectedUser]: 0 }));
       } catch (error) {
         console.error('Failed to fetch messages:', error);
       }
@@ -54,6 +57,8 @@ const ChatScreen = ({ token, userId }) => {
           chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
           return updated;
         });
+      } else if (msg.recipientId === userId) {
+        setNotifications((prev) => ({ ...prev, [msg.senderId]: (prev[msg.senderId] || 0) + 1 }));
       }
     });
 
@@ -95,6 +100,18 @@ const ChatScreen = ({ token, userId }) => {
     }
   };
 
+  const deleteMessage = async (messageId) => {
+    try {
+      await axios.delete(`/social/message/${messageId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setMessages(messages.filter(msg => msg._id !== messageId));
+      setSelectedMessage(null);
+    } catch (error) {
+      console.error('Delete message error:', error);
+    }
+  };
+
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5 }} className="flex flex-col h-screen p-4 bg-gray-100">
       <div className="w-full bg-white p-4 rounded-lg shadow-md mb-4 overflow-x-auto flex space-x-2">
@@ -103,9 +120,14 @@ const ChatScreen = ({ token, userId }) => {
             key={id}
             whileHover={{ scale: 1.05 }}
             onClick={() => setSelectedUser(id)}
-            className="p-2 bg-primary text-white rounded-full shadow hover:bg-secondary"
+            className="p-2 bg-primary text-white rounded-full shadow hover:bg-secondary relative"
           >
             {id}
+            {notifications[id] > 0 && (
+              <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
+                {notifications[id]}
+              </span>
+            )}
           </motion.button>
         ))}
       </div>
@@ -123,24 +145,28 @@ const ChatScreen = ({ token, userId }) => {
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.3 }}
                   className={`mb-2 ${msg.senderId === userId ? 'text-right' : 'text-left'}`}
+                  onClick={() => setSelectedMessage(msg._id === selectedMessage ? null : msg._id)}
                 >
-                  <div className={`inline-block p-3 rounded-lg shadow ${msg.senderId === userId ? 'bg-primary text-white' : 'bg-gray-200 text-black'}`}>
+                  <div className={`inline-block p-3 rounded-lg shadow ${msg.senderId === userId ? 'bg-primary text-white' : 'bg-gray-200 text-black'} ${msg._id === selectedMessage ? 'border-2 border-primary' : ''}`}>
                     {msg.contentType === 'text' && <p>{msg.content}</p>}
-                    {msg.contentType === 'image' && <img src={msg.content} alt="Chat" className="max-w-xs rounded" />}
-                    {msg.contentType === 'video' && <video controls src={msg.content} className="max-w-xs rounded" />}
-                    {msg.contentType === 'audio' && <audio controls src={msg.content} />}
+                    {msg.contentType === 'image' && <img src={msg.content} alt="Chat" className="max-w-xs rounded cursor-pointer" onClick={(e) => e.stopPropagation() || window.open(msg.content)} />}
+                    {msg.contentType === 'video' && <video src={msg.content} className="max-w-xs rounded cursor-pointer" onClick={(e) => e.stopPropagation() || window.open(msg.content)} />}
+                    {msg.contentType === 'audio' && <audio src={msg.content} onClick={(e) => e.stopPropagation() || window.open(msg.content)} />}
                     {msg.contentType === 'raw' && <a href={msg.content} target="_blank" rel="noopener noreferrer" className="text-blue-500">Download</a>}
                     {msg.caption && <p className="text-sm mt-1 italic">{msg.caption}</p>}
                   </div>
+                  {msg._id === selectedMessage && msg.senderId === userId && (
+                    <FaTrash onClick={() => deleteMessage(msg._id)} className="ml-2 text-red-500 cursor-pointer hover:text-red-700" />
+                  )}
                 </motion.div>
               ))}
             </div>
-            <motion.div initial={{ y: 20 }} animate={{ y: 0 }} className="relative flex items-center pb-16">
+            <motion.div initial={{ y: 20 }} animate={{ y: 0 }} className="relative flex items-center pb-20">
               {showPicker && (
                 <motion.div
                   initial={{ opacity: 0, scale: 0.8 }}
                   animate={{ opacity: 1, scale: 1 }}
-                  className="absolute bottom-20 left-0 bg-white p-2 rounded-lg shadow-lg flex space-x-2"
+                  className="absolute bottom-24 left-0 bg-white p-2 rounded-lg shadow-lg flex space-x-2"
                 >
                   {['image', 'video', 'audio', 'raw', 'contact'].map((type) => (
                     <motion.button

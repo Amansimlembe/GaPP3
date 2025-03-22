@@ -19,6 +19,16 @@ router.get('/feed', async (req, res) => {
   }
 });
 
+router.get('/my-posts/:userId', authMiddleware, async (req, res) => {
+  try {
+    const posts = await Post.find({ userId: req.params.userId }).sort({ createdAt: -1 });
+    res.json(posts);
+  } catch (error) {
+    console.error('My posts fetch error:', error);
+    res.status(500).json({ error: 'Failed to fetch posts', details: error.message });
+  }
+});
+
 router.post('/post', authMiddleware, upload.single('content'), async (req, res) => {
   try {
     const { userId } = req.user;
@@ -55,6 +65,18 @@ router.post('/post', authMiddleware, upload.single('content'), async (req, res) 
   } catch (error) {
     console.error('Post error:', { message: error.message, stack: error.stack, body: req.body, file: !!req.file });
     res.status(500).json({ error: 'Failed to post', details: error.message });
+  }
+});
+
+router.delete('/post/:postId', authMiddleware, async (req, res) => {
+  try {
+    const post = await Post.findById(req.params.postId);
+    if (!post || post.userId !== req.user.userId) return res.status(403).json({ error: 'Not authorized' });
+    await post.remove();
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Delete post error:', error);
+    res.status(500).json({ error: 'Failed to delete post', details: error.message });
   }
 });
 
@@ -103,6 +125,18 @@ router.post('/message', authMiddleware, upload.single('content'), async (req, re
   } catch (error) {
     console.error('Message error:', { message: error.message, stack: error.stack, body: req.body, file: !!req.file });
     res.status(500).json({ error: 'Failed to send message', details: error.message });
+  }
+});
+
+router.delete('/message/:messageId', authMiddleware, async (req, res) => {
+  try {
+    const message = await Message.findById(req.params.messageId);
+    if (!message || message.senderId !== req.user.userId) return res.status(403).json({ error: 'Not authorized' });
+    await message.remove();
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Delete message error:', error);
+    res.status(500).json({ error: 'Failed to delete message', details: error.message });
   }
 });
 

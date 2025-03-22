@@ -2,6 +2,9 @@ import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { motion } from 'framer-motion';
 import { FaPlus, FaPaperPlane, FaHeart, FaComment, FaShare } from 'react-icons/fa';
+import io from 'socket.io-client';
+
+const socket = io('https://gapp-6yc3.onrender.com');
 
 const FeedScreen = ({ token, userId }) => {
   const [posts, setPosts] = useState([]);
@@ -12,6 +15,7 @@ const FeedScreen = ({ token, userId }) => {
   const [error, setError] = useState('');
   const [comment, setComment] = useState('');
   const [showComments, setShowComments] = useState(null);
+  const [uploadProgress, setUploadProgress] = useState(null);
   const mediaRefs = useRef({});
 
   useEffect(() => {
@@ -29,6 +33,18 @@ const FeedScreen = ({ token, userId }) => {
     };
     fetchFeed();
 
+    socket.on('newPost', (post) => {
+      setPosts((prev) => [post, ...prev.filter(p => p._id !== post._id)]);
+    });
+
+    socket.on('postUpdate', (updatedPost) => {
+      setPosts((prev) => prev.map(p => p._id === updatedPost._id ? updatedPost : p));
+    });
+
+    socket.on('postDeleted', (postId) => {
+      setPosts((prev) => prev.filter(p => p._id !== postId));
+    });
+
     const observer = new IntersectionObserver(
       (entries) => {
         entries.forEach((entry) => {
@@ -40,7 +56,12 @@ const FeedScreen = ({ token, userId }) => {
       { threshold: 0.8 }
     );
 
-    return () => observer.disconnect();
+    return () => {
+      observer.disconnect();
+      socket.off('newPost');
+      socket.off('postUpdate');
+      socket.off('postDeleted');
+    };
   }, [token]);
 
   const postContent = async () => {
@@ -53,17 +74,26 @@ const FeedScreen = ({ token, userId }) => {
     formData.append('caption', caption);
     if (file) formData.append('content', file);
     try {
+      setUploadProgress(0);
       const { data } = await axios.post('/social/post', formData, {
         headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
+        onUploadProgress: (progressEvent) => {
+          const percent = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+          setUploadProgress(percent);
+        },
       });
-      setPosts([data, ...posts]);
+      socket.emit('newPost', data);
+      setPosts((prev) => [data, ...prev]);
       setCaption('');
       setFile(null);
       setShowPostModal(false);
+      setUploadProgress(null);
+      alert('Post uploaded successfully!');
       setError('');
     } catch (error) {
       console.error('Post error:', error);
       setError(error.response?.data?.error || 'Failed to post');
+      setUploadProgress(null);
     }
   };
 
@@ -71,11 +101,11 @@ const FeedScreen = ({ token, userId }) => {
     try {
       const post = posts.find(p => p._id === postId);
       if (post.likedBy?.includes(userId)) {
-        await axios.post('/social/unlike', { postId }, { headers: { Authorization: `Bearer ${token}` } });
-        setPosts(posts.map(p => p._id === postId ? { ...p, likes: p.likes - 1, likedBy: p.likedBy.filter(id => id !== userId) } : p));
+        const { data } = await axios.post('/social/unlike', { postId }, { headers: { Authorization: `Bearer ${token}` } });
+        socket.emit('postUpdate', data);
       } else {
-        await axios.post('/social/like', { postId }, { headers: { Authorization: `Bearer ${token}` } });
-        setPosts(posts.map(p => p._id === postId ? { ...p, likes: (p.likes || 0) + 1, likedBy: [...(p.likedBy || []), userId] } : p));
+        const { data } = await axios.post('/social/like', { postId }, { headers: { Authorization: `Bearer ${token}` } });
+        socket.emit('postUpdate', data);
       }
     } catch (error) {
       console.error('Like error:', error);
@@ -86,7 +116,8 @@ const FeedScreen = ({ token, userId }) => {
     if (!comment) return;
     try {
       const { data } = await axios.post('/social/comment', { postId, comment }, { headers: { Authorization: `Bearer ${token}` } });
-      setPosts(posts.map(post => post._id === postId ? { ...post, comments: [...(post.comments || []), data] } : post));
+      const updatedPost = { ...posts.find(p => p._id === postId), comments: [...(posts.find(p => p._id === postId).comments || []), data] };
+      socket.emit('postUpdate', updatedPost);
       setComment('');
     } catch (error) {
       console.error('Comment error:', error);
@@ -113,9 +144,16 @@ const FeedScreen = ({ token, userId }) => {
     return `${days}d`;
   };
 
+  const handleDoubleClick = (postId) => likePost(postId);
+
   return (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5 }} className="h-screen overflow-y-auto snap-y snap-mandatory bg-black">
-      <div className="fixed bottom-16 right-4 z-20">
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.5 }}
+      className="h-screen overflow-y-auto snap-y snap-mandatory bg-black"
+    >
+      <div className="fixed bottom-20 right-4 z-20">
         <motion.button
           whileHover={{ scale: 1.1, rotate: 90 }}
           whileTap={{ scale: 0.9 }}
@@ -132,7 +170,31 @@ const FeedScreen = ({ token, userId }) => {
           exit={{ opacity: 0, y: 50 }}
           className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-30"
         >
-          <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
+          <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md relative">
+            {uploadProgress !== null && (
+              <div className="absolute inset-0 flex items-center justify-center bg-gray-200 bg-opacity-75">
+                <div className="relative w-20 h-20">
+                  <svg className="w-full h-full" viewBox="0 0 36 36">
+                    <path
+                      className="text-gray-300"
+                      d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="3"
+                    />
+                    <path
+                      className="text-primary"
+                      d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="3"
+                      strokeDasharray={`${uploadProgress}, 100`}
+                    />
+                  </svg>
+                  <span className="absolute inset-0 flex items-center justify-center text-primary">{uploadProgress}%</span>
+                </div>
+              </div>
+            )}
             <select value={contentType} onChange={(e) => setContentType(e.target.value)} className="w-full p-2 mb-4 border rounded-lg">
               <option value="text">Text</option>
               <option value="image">Image</option>
@@ -171,7 +233,7 @@ const FeedScreen = ({ token, userId }) => {
           </div>
         </motion.div>
       )}
-      {error && <p className="text-red-500 text-center py-2 z-10 relative">{error}</p>}
+      {error && <p className="text-red-500 text-center py-2 z-10 fixed top-0 w-full">{error}</p>}
       <div className="space-y-0">
         {posts.map((post) => (
           <motion.div
@@ -180,8 +242,9 @@ const FeedScreen = ({ token, userId }) => {
             animate={{ opacity: 1 }}
             transition={{ duration: 0.3 }}
             className="h-screen snap-start flex flex-col items-center justify-center text-white relative"
+            onDoubleClick={() => handleDoubleClick(post._id)}
           >
-            <div className="absolute top-4 left-4 flex items-center">
+            <div className="absolute top-4 left-0 w-full px-4 flex items-center">
               <img src={post.photo || 'https://via.placeholder.com/40'} alt="Profile" className="w-10 h-10 rounded-full mr-2" />
               <div>
                 <span className="font-semibold">{post.username || post.userId}</span>
@@ -189,15 +252,15 @@ const FeedScreen = ({ token, userId }) => {
               </div>
             </div>
             {post.contentType === 'text' && <p className="text-lg">{post.content}</p>}
-            {post.contentType === 'image' && <img src={post.content} alt="Post" className="w-full h-full object-cover" />}
+            {post.contentType === 'image' && <img src={post.content} alt="Post" className="w-screen h-screen object-contain" />}
             {post.contentType === 'video' && (
               <video
                 ref={(el) => (mediaRefs.current[post._id] = el)}
                 autoPlay
                 loop
-                muted
+                playsInline
                 src={post.content}
-                className="w-full h-full object-cover"
+                className="w-screen h-screen object-contain"
               />
             )}
             {post.contentType === 'audio' && (
@@ -210,8 +273,8 @@ const FeedScreen = ({ token, userId }) => {
               />
             )}
             {post.contentType === 'raw' && <a href={post.content} target="_blank" rel="noopener noreferrer" className="text-blue-500">Download</a>}
-            {post.caption && <p className="text-sm absolute bottom-16 left-4">{post.caption}</p>}
-            <div className="absolute bottom-16 right-4 flex flex-col space-y-4">
+            {post.caption && <p className="text-sm absolute bottom-20 left-4">{post.caption}</p>}
+            <div className="absolute bottom-20 right-4 flex flex-col space-y-4">
               <motion.div whileHover={{ scale: 1.2 }} className="flex flex-col items-center">
                 <FaHeart
                   onClick={() => likePost(post._id)}
@@ -231,7 +294,8 @@ const FeedScreen = ({ token, userId }) => {
               <motion.div
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
-                className="absolute bottom-16 left-4 w-3/4 bg-white p-4 rounded-lg shadow-lg max-h-40 overflow-y-auto"
+                className="absolute bottom-20 left-0 right-0 mx-4 bg-white p-4 rounded-lg shadow-lg max-h-40 overflow-y-auto z-10"
+                onClick={(e) => e.stopPropagation()}
               >
                 {post.comments?.map((c, i) => (
                   <p key={i} className="text-sm text-black"><span className="font-semibold">{c.userId}</span> {c.comment}</p>
@@ -240,7 +304,7 @@ const FeedScreen = ({ token, userId }) => {
                   <input
                     value={comment}
                     onChange={(e) => setComment(e.target.value)}
-                    className="flex-1 p-2 border rounded-lg text-black"
+                    className="flex-1 p-2 border rounded-full text-black focus:ring-2 focus:ring-primary"
                     placeholder="Add a comment..."
                   />
                   <FaPaperPlane onClick={() => commentPost(post._id)} className="ml-2 text-xl text-primary cursor-pointer hover:text-secondary" />
@@ -250,6 +314,7 @@ const FeedScreen = ({ token, userId }) => {
           </motion.div>
         ))}
       </div>
+      {showComments && <div className="fixed inset-0" onClick={() => setShowComments(null)} />}
     </motion.div>
   );
 };

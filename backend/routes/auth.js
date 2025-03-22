@@ -86,4 +86,15 @@ router.post('/update_username', authMiddleware, async (req, res) => {
   }
 });
 
+router.get('/user/:userId', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.params.userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    res.json({ username: user.username, photo: user.photo });
+  } catch (error) {
+    console.error('Fetch user error:', error);
+    res.status(500).json({ error: 'Failed to fetch user', details: error.message });
+  }
+});
+
 module.exports = router;

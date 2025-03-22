@@ -1,15 +1,20 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { motion } from 'framer-motion';
-import { FaEdit } from 'react-icons/fa';
+import { FaEdit, FaSignOutAlt, FaTrash } from 'react-icons/fa';
+import io from 'socket.io-client';
 
-const ProfileScreen = ({ token, userId }) => {
+const socket = io('https://gapp-6yc3.onrender.com');
+
+const ProfileScreen = ({ token, userId, setAuth }) => {
   const [cvFile, setCvFile] = useState(null);
   const [photoFile, setPhotoFile] = useState(null);
-  const [username, setUsername] = useState('');
+  const [username, setUsername] = useState(localStorage.getItem('username') || '');
   const [editUsername, setEditUsername] = useState(false);
   const [error, setError] = useState('');
   const [photoUrl, setPhotoUrl] = useState(localStorage.getItem('photo') || '');
+  const [myPosts, setMyPosts] = useState([]);
+  const [showPosts, setShowPosts] = useState(false);
 
   useEffect(() => {
     const fetchUser = async () => {
@@ -18,12 +23,26 @@ const ProfileScreen = ({ token, userId }) => {
           headers: { Authorization: `Bearer ${token}` },
         });
         setUsername(data.username || '');
+        localStorage.setItem('username', data.username || '');
         setPhotoUrl(data.photo || '');
+        localStorage.setItem('photo', data.photo || '');
       } catch (error) {
         console.error('Fetch user error:', error);
       }
     };
     fetchUser();
+
+    const fetchMyPosts = async () => {
+      try {
+        const { data } = await axios.get(`/social/my-posts/${userId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        setMyPosts(data);
+      } catch (error) {
+        console.error('Fetch my posts error:', error);
+      }
+    };
+    fetchMyPosts();
   }, [token, userId]);
 
   const uploadCV = async () => {
@@ -77,6 +96,7 @@ const ProfileScreen = ({ token, userId }) => {
       await axios.post('/auth/update_username', { userId, username }, {
         headers: { Authorization: `Bearer ${token}` },
       });
+      localStorage.setItem('username', username);
       alert('Username updated successfully');
       setEditUsername(false);
       setError('');
@@ -86,9 +106,29 @@ const ProfileScreen = ({ token, userId }) => {
     }
   };
 
+  const deletePost = async (postId) => {
+    try {
+      await axios.delete(`/social/post/${postId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      socket.emit('postDeleted', postId);
+      setMyPosts(myPosts.filter(post => post._id !== postId));
+    } catch (error) {
+      console.error('Delete post error:', error);
+    }
+  };
+
+  const logout = () => {
+    setAuth(null, null, null, '');
+    localStorage.clear();
+  };
+
   return (
-    <motion.div initial={{ y: 50, opacity: 0 }} animate={{ y: 0, opacity: 1 }} transition={{ duration: 0.5 }} className="bg-white p-6 rounded-lg shadow-lg max-w-md mx-auto mt-6 mb-16">
-      <h2 className="text-xl font-bold text-primary mb-4">Profile</h2>
+    <motion.div initial={{ y: 50, opacity: 0 }} animate={{ y: 0, opacity: 1 }} transition={{ duration: 0.5 }} className="bg-white p-6 rounded-lg shadow-lg max-w-md mx-auto mt-6 mb-20">
+      <div className="flex justify-between items-center mb-4">
+        <h2 className="text-xl font-bold text-primary">Profile</h2>
+        <FaSignOutAlt onClick={logout} className="text-2xl text-primary cursor-pointer hover:text-secondary" />
+      </div>
       <p className="text-gray-700 mb-4">Your User ID: <span className="font-semibold">{userId}</span></p>
       {photoUrl && <img src={photoUrl} alt="Profile" className="w-20 h-20 rounded-full mb-4 mx-auto" />}
       {error && <p className="text-red-500 mb-4">{error}</p>}
@@ -113,11 +153,28 @@ const ProfileScreen = ({ token, userId }) => {
         <input type="file" accept=".pdf" onChange={(e) => setCvFile(e.target.files[0])} className="w-full p-3 border rounded-lg" />
         <button onClick={uploadCV} className="mt-2 bg-primary text-white p-2 rounded-lg hover:bg-secondary w-full">Upload CV</button>
       </div>
-      <div>
+      <div className="mb-4">
         <label className="block text-gray-700 mb-2">Upload Profile Photo</label>
         <input type="file" accept="image/*" onChange={(e) => setPhotoFile(e.target.files[0])} className="w-full p-3 border rounded-lg" />
         <button onClick={uploadPhoto} className="mt-2 bg-primary text-white p-2 rounded-lg hover:bg-secondary w-full">Upload Photo</button>
       </div>
+      <button onClick={() => setShowPosts(!showPosts)} className="bg-primary text-white p-2 rounded-lg w-full hover:bg-secondary">
+        {showPosts ? 'Hide My Posts' : 'Show My Posts'}
+      </button>
+      {showPosts && (
+        <div className="mt-4 grid grid-cols-3 gap-2">
+          {myPosts.map((post) => (
+            <div key={post._id} className="relative">
+              {post.contentType === 'image' && <img src={post.content} alt="Post" className="w-full h-32 object-cover rounded" />}
+              {post.contentType === 'video' && <video src={post.content} className="w-full h-32 object-cover rounded" />}
+              <FaTrash
+                onClick={() => deletePost(post._id)}
+                className="absolute top-1 right-1 text-red-500 cursor-pointer hover:text-red-700"
+              />
+            </div>
+          ))}
+        </div>
+      )}
     </motion.div>
   );
 };
