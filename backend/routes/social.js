@@ -6,8 +6,22 @@ const User = require('../models/User');
 const cloudinary = require('cloudinary').v2;
 const multer = require('multer');
 const authMiddleware = require('../middleware/auth');
+const cache = require('memory-cache');
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
+
+// Define cacheMiddleware before using it
+const cacheMiddleware = (duration) => (req, res, next) => {
+  const key = '__express__' + req.originalUrl || req.url;
+  const cachedBody = cache.get(key);
+  if (cachedBody) return res.send(cachedBody);
+  res.sendResponse = res.send;
+  res.send = (body) => {
+    cache.put(key, body, duration * 1000);
+    res.sendResponse(body);
+  };
+  next();
+};
 
 router.get('/feed', cacheMiddleware(60), async (req, res) => {
   try {
@@ -18,7 +32,6 @@ router.get('/feed', cacheMiddleware(60), async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch feed', details: error.message });
   }
 });
-
 
 router.get('/my-posts/:userId', authMiddleware, cacheMiddleware(60), async (req, res) => {
   try {
@@ -98,7 +111,6 @@ router.get('/messages', authMiddleware, async (req, res) => {
   }
 });
 
-
 router.post('/message', authMiddleware, upload.single('content'), async (req, res) => {
   try {
     const { senderId, recipientId, contentType, caption } = req.body;
@@ -130,6 +142,18 @@ router.post('/message', authMiddleware, upload.single('content'), async (req, re
   }
 });
 
+router.delete('/message/:messageId', authMiddleware, async (req, res) => {
+  try {
+    const message = await Message.findById(req.params.messageId);
+    if (!message || message.senderId !== req.user.userId) return res.status(403).json({ error: 'Not authorized' });
+    await message.remove();
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Delete message error:', error);
+    res.status(500).json({ error: 'Failed to delete message', details: error.message });
+  }
+});
+
 router.post('/message/status', authMiddleware, async (req, res) => {
   try {
     const { messageId, status, recipientId } = req.body;
@@ -142,32 +166,6 @@ router.post('/message/status', authMiddleware, async (req, res) => {
   } catch (error) {
     console.error('Message status error:', error);
     res.status(500).json({ error: 'Failed to update status', details: error.message });
-  }
-});
-
-// Add caching middleware (example using memory-cache)
-const cache = require('memory-cache');
-const cacheMiddleware = (duration) => (req, res, next) => {
-  const key = '__express__' + req.originalUrl || req.url;
-  const cachedBody = cache.get(key);
-  if (cachedBody) return res.send(cachedBody);
-  res.sendResponse = res.send;
-  res.send = (body) => {
-    cache.put(key, body, duration * 1000);
-    res.sendResponse(body);
-  };
-  next();
-};
-
-router.delete('/message/:messageId', authMiddleware, async (req, res) => {
-  try {
-    const message = await Message.findById(req.params.messageId);
-    if (!message || message.senderId !== req.user.userId) return res.status(403).json({ error: 'Not authorized' });
-    await message.remove();
-    res.json({ success: true });
-  } catch (error) {
-    console.error('Delete message error:', error);
-    res.status(500).json({ error: 'Failed to delete message', details: error.message });
   }
 });
 
