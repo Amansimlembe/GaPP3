@@ -8,6 +8,7 @@ const postSchema = new mongoose.Schema({
   username: { type: String },
   photo: { type: String },
   likes: { type: Number, default: 0 },
+  comments: [{ userId: String, comment: String, createdAt: Date }],
   isStory: { type: Boolean, default: false },
   expiresAt: { type: Date },
   createdAt: { type: Date, default: Date.now },
