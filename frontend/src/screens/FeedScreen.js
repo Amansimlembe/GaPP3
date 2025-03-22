@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { motion } from 'framer-motion';
-import { FaPlus } from 'react-icons/fa';
+import { FaPlus, FaPaperPlane } from 'react-icons/fa'; // Added FaPaperPlane import
 
 const FeedScreen = ({ token, userId }) => {
   const [posts, setPosts] = useState([]);
@@ -84,15 +84,20 @@ const FeedScreen = ({ token, userId }) => {
   };
 
   return (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5 }} className="relative h-screen overflow-y-auto snap-y snap-mandatory">
-      <div className="fixed bottom-4 right-4 z-20">
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.5 }}
+      className="relative h-screen overflow-y-auto snap-y snap-mandatory md:ml-64 p-4 md:p-6"
+    >
+      <div className="fixed bottom-8 right-8 z-20">
         <motion.button
           whileHover={{ scale: 1.1 }}
           whileTap={{ scale: 0.9 }}
           onClick={() => setShowPostModal(true)}
-          className="bg-primary text-white p-4 rounded-full shadow-lg"
+          className="bg-primary text-white p-4 md:p-6 rounded-full shadow-lg"
         >
-          <FaPlus className="text-2xl" />
+          <FaPlus className="text-2xl md:text-3xl" />
         </motion.button>
       </div>
       {showPostModal && (
@@ -102,8 +107,12 @@ const FeedScreen = ({ token, userId }) => {
           exit={{ opacity: 0, y: 50 }}
           className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-30"
         >
-          <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
-            <select value={contentType} onChange={(e) => setContentType(e.target.value)} className="w-full p-2 mb-4 border rounded-lg">
+          <div className="bg-white p-4 md:p-6 rounded-lg shadow-lg w-11/12 max-w-md">
+            <select
+              value={contentType}
+              onChange={(e) => setContentType(e.target.value)}
+              className="w-full p-2 mb-4 border rounded-lg font-sans text-base md:text-lg"
+            >
               <option value="text">Text</option>
               <option value="image">Image</option>
               <option value="video">Video</option>
@@ -115,10 +124,13 @@ const FeedScreen = ({ token, userId }) => {
                 <textarea
                   value={caption}
                   onChange={(e) => setCaption(e.target.value)}
-                  className="flex-1 p-2 border rounded-lg"
+                  className="flex-1 p-2 border rounded-lg font-sans text-base md:text-lg"
                   placeholder="What's on your mind?"
                 />
-                <FaPaperPlane onClick={postContent} className="ml-2 text-2xl text-primary cursor-pointer hover:text-secondary" />
+                <FaPaperPlane
+                  onClick={postContent}
+                  className="ml-2 text-2xl md:text-3xl text-primary cursor-pointer hover:text-secondary"
+                />
               </div>
             ) : (
               <div className="flex items-center">
@@ -126,30 +138,35 @@ const FeedScreen = ({ token, userId }) => {
                   type="file"
                   accept={contentType === 'image' ? 'image/*' : contentType === 'video' ? 'video/*' : contentType === 'audio' ? 'audio/*' : '*/*'}
                   onChange={(e) => setFile(e.target.files[0])}
-                  className="flex-1 p-2 border rounded-lg"
+                  className="flex-1 p-2 border rounded-lg text-sm md:text-base"
                 />
-                <FaPaperPlane onClick={postContent} className="ml-2 text-2xl text-primary cursor-pointer hover:text-secondary" />
+                <FaPaperPlane
+                  onClick={postContent}
+                  className="ml-2 text-2xl md:text-3xl text-primary cursor-pointer hover:text-secondary"
+                />
               </div>
             )}
-            <button onClick={() => setShowPostModal(false)} className="mt-4 w-full bg-gray-300 p-2 rounded-lg">Cancel</button>
+            <button onClick={() => setShowPostModal(false)} className="mt-4 w-full bg-gray-300 p-2 rounded-lg font-sans text-base md:text-lg">
+              Cancel
+            </button>
           </div>
         </motion.div>
       )}
-      {error && <p className="text-red-500 text-center py-2">{error}</p>}
+      {error && <p className="text-red-500 text-center py-2 font-sans text-base md:text-lg">{error}</p>}
       <div className="space-y-0">
         {posts.map((post) => (
           <div key={post._id} className="h-screen snap-start flex items-center justify-center bg-black text-white">
-            <div className="w-full max-w-md">
-              <p className="text-sm mb-2">User: {post.userId}</p>
-              {post.contentType === 'text' && <p className="text-lg">{post.content}</p>}
-              {post.contentType === 'image' && <img src={post.content} alt="Post" className="w-full h-auto" />}
+            <div className="w-full max-w-md p-4">
+              <p className="text-sm md:text-base font-sans mb-2">@{post.userId}</p>
+              {post.contentType === 'text' && <p className="text-lg md:text-xl font-sans">{post.content}</p>}
+              {post.contentType === 'image' && <img src={post.content} alt="Post" className="w-full h-auto rounded-lg" />}
               {post.contentType === 'video' && (
                 <video
                   ref={(el) => (mediaRefs.current[post._id] = el)}
                   onPlay={() => handleMediaPlay(post._id, 'video')}
                   controls
                   src={post.content}
-                  className="w-full h-auto"
+                  className="w-full h-auto rounded-lg"
                 />
               )}
               {post.contentType === 'audio' && (
@@ -161,7 +178,11 @@ const FeedScreen = ({ token, userId }) => {
                   className="w-full"
                 />
               )}
-              {post.contentType === 'raw' && <a href={post.content} target="_blank" rel="noopener noreferrer" className="text-blue-500">Download</a>}
+              {post.contentType === 'raw' && (
+                <a href={post.content} target="_blank" rel="noopener noreferrer" className="text-blue-500 font-sans text-base md:text-lg">
+                  Download Document
+                </a>
+              )}
             </div>
           </div>
         ))}

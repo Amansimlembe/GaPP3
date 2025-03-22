@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import io from 'socket.io-client';
 import axios from 'axios';
 import { motion } from 'framer-motion';
@@ -14,6 +14,7 @@ const ChatScreen = ({ token, userId }) => {
   const [file, setFile] = useState(null);
   const [contentType, setContentType] = useState('text');
   const [showPicker, setShowPicker] = useState(false);
+  const chatRef = useRef(null);
 
   useEffect(() => {
     if (!userId) return;
@@ -48,6 +49,7 @@ const ChatScreen = ({ token, userId }) => {
           const exists = prev.some(m => m._id === msg._id);
           return exists ? prev : [...prev, msg];
         });
+        chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
       }
     });
 
@@ -72,32 +74,52 @@ const ChatScreen = ({ token, userId }) => {
       setMessage('');
       setFile(null);
       setShowPicker(false);
+      chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
     } catch (error) {
       console.error('Send message error:', error);
     }
   };
 
   return (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5 }} className="flex h-screen p-4 md:p-6 flex-col md:flex-row">
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.5 }}
+      className="flex h-screen p-4 md:p-6 flex-col md:flex-row md:ml-64"
+    >
       <div className="w-full md:w-1/4 bg-white p-4 rounded-lg shadow-md mb-4 md:mb-0">
-        <h2 className="text-xl font-bold text-primary mb-4">Users</h2>
+        <h2 className="text-xl font-bold text-primary mb-4 font-sans">Users</h2>
         {users.map((id) => (
-          <button key={id} onClick={() => setSelectedUser(id)} className="block w-full text-left p-2 hover:bg-gray-200 rounded">{id}</button>
+          <button
+            key={id}
+            onClick={() => setSelectedUser(id)}
+            className="block w-full text-left p-2 hover:bg-gray-200 rounded font-sans text-base md:text-lg"
+          >
+            {id}
+          </button>
         ))}
       </div>
       <div className="w-full md:w-3/4 md:ml-4 bg-white p-4 rounded-lg shadow-md flex flex-col h-full">
         {selectedUser ? (
           <>
-            <h2 className="text-xl font-bold text-primary mb-4">Chat with {selectedUser}</h2>
-            <div className="flex-1 overflow-y-auto mb-4">
+            <h2 className="text-xl font-bold text-primary mb-4 font-sans">Chat with {selectedUser}</h2>
+            <div ref={chatRef} className="flex-1 overflow-y-auto mb-4">
               {messages.map((msg) => (
                 <div key={msg._id} className={`mb-2 ${msg.senderId === userId ? 'text-right' : 'text-left'}`}>
-                  <div className={`inline-block p-2 rounded-lg ${msg.senderId === userId ? 'bg-primary text-white' : 'bg-gray-200 text-black'}`}>
+                  <div
+                    className={`inline-block p-2 rounded-lg font-sans text-base md:text-lg ${
+                      msg.senderId === userId ? 'bg-primary text-white' : 'bg-gray-200 text-black'
+                    }`}
+                  >
                     {msg.contentType === 'text' && <p>{msg.content}</p>}
-                    {msg.contentType === 'image' && <img src={msg.content} alt="Chat" className="max-w-xs" />}
-                    {msg.contentType === 'video' && <video controls src={msg.content} className="max-w-xs" />}
-                    {msg.contentType === 'audio' && <audio controls src={msg.content} />}
-                    {msg.contentType === 'raw' && <a href={msg.content} target="_blank" rel="noopener noreferrer" className="text-blue-500">Download</a>}
+                    {msg.contentType === 'image' && <img src={msg.content} alt="Chat" className="max-w-xs rounded" />}
+                    {msg.contentType === 'video' && <video controls src={msg.content} className="max-w-xs rounded" />}
+                    {msg.contentType === 'audio' && <audio controls src={msg.content} className="w-full" />}
+                    {msg.contentType === 'raw' && (
+                      <a href={msg.content} target="_blank" rel="noopener noreferrer" className="text-blue-500">
+                        Download
+                      </a>
+                    )}
                   </div>
                 </div>
               ))}
@@ -108,8 +130,11 @@ const ChatScreen = ({ token, userId }) => {
                   {['image', 'video', 'audio', 'raw'].map((type) => (
                     <button
                       key={type}
-                      onClick={() => { setContentType(type); setShowPicker(false); }}
-                      className="p-2 hover:bg-gray-200 rounded"
+                      onClick={() => {
+                        setContentType(type);
+                        setShowPicker(false);
+                      }}
+                      className="p-2 hover:bg-gray-200 rounded font-sans text-base md:text-lg"
                     >
                       {type.charAt(0).toUpperCase() + type.slice(1)}
                     </button>
@@ -120,7 +145,7 @@ const ChatScreen = ({ token, userId }) => {
                 <input
                   value={message}
                   onChange={(e) => setMessage(e.target.value)}
-                  className="flex-1 p-2 border rounded-lg mr-2"
+                  className="flex-1 p-2 border rounded-lg font-sans text-base md:text-lg"
                   placeholder="Type a message"
                 />
               ) : (
@@ -128,21 +153,21 @@ const ChatScreen = ({ token, userId }) => {
                   type="file"
                   accept={contentType === 'image' ? 'image/*' : contentType === 'video' ? 'video/*' : contentType === 'audio' ? 'audio/*' : '*/*'}
                   onChange={(e) => setFile(e.target.files[0])}
-                  className="flex-1 p-2 border rounded-lg mr-2"
+                  className="flex-1 p-2 border rounded-lg text-sm md:text-base"
                 />
               )}
               <FaPaperclip
-                className="text-2xl text-primary cursor-pointer hover:text-secondary mr-2"
+                className="text-2xl md:text-3xl text-primary cursor-pointer hover:text-secondary mr-2"
                 onClick={() => setShowPicker(!showPicker)}
               />
               <FaPaperPlane
-                className="text-2xl text-primary cursor-pointer hover:text-secondary"
+                className="text-2xl md:text-3xl text-primary cursor-pointer hover:text-secondary"
                 onClick={sendMessage}
               />
             </div>
           </>
         ) : (
-          <p className="text-gray-600 flex-1 flex items-center justify-center">Select a user to chat</p>
+          <p className="text-gray-600 flex-1 flex items-center justify-center font-sans text-base md:text-lg">Select a user to chat</p>
         )}
       </div>
     </motion.div>

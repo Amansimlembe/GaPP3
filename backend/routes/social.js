@@ -65,7 +65,6 @@ router.get('/messages', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch messages', details: error.message });
   }
 });
-
 router.post('/message', authMiddleware, upload.single('content'), async (req, res) => {
   try {
     const { senderId, recipientId, contentType } = req.body;
