@@ -34,4 +34,8 @@ body {
   .overflow-x-auto {
     -webkit-overflow-scrolling: touch;
   }
+  .chat-media {
+    max-width: 100%;
+    overflow-x: hidden;
+  }
 }

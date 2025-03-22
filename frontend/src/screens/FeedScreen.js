@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { motion } from 'framer-motion';
-import { FaPlus, FaPaperPlane, FaHeart, FaComment, FaShare } from 'react-icons/fa';
+import { FaPlus, FaPaperPlane, FaHeart, FaComment, FaShare, FaArrowLeft } from 'react-icons/fa';
 import io from 'socket.io-client';
 
 const socket = io('https://gapp-6yc3.onrender.com');
@@ -18,6 +18,7 @@ const FeedScreen = ({ token, userId }) => {
   const [uploadProgress, setUploadProgress] = useState(null);
   const [playingPostId, setPlayingPostId] = useState(null);
   const [expandedCaption, setExpandedCaption] = useState(null);
+  const [fullScreenPost, setFullScreenPost] = useState(null);
   const mediaRefs = useRef({});
 
   useEffect(() => {
@@ -26,8 +27,11 @@ const FeedScreen = ({ token, userId }) => {
         const { data } = await axios.get('/social/feed', {
           headers: { Authorization: `Bearer ${token}` },
         });
-        const randomizedPosts = data.filter(post => !post.isStory).sort(() => Math.random() - 0.5); // Randomize for personalization
-        setPosts(randomizedPosts);
+        const randomizedPosts = data.filter(post => !post.isStory).sort(() => Math.random() - 0.5);
+        setPosts(randomizedPosts.map(post => ({
+          ...post,
+          username: post.username || localStorage.getItem('username') || 'Unknown',
+        })));
         setError('');
       } catch (error) {
         console.error('Failed to fetch feed:', error);
@@ -45,10 +49,10 @@ const FeedScreen = ({ token, userId }) => {
         entries.forEach((entry) => {
           const media = entry.target;
           const postId = media.dataset.postId;
-          if (entry.isIntersecting) {
+          if (entry.isIntersecting && !playingPostId) {
             setPlayingPostId(postId);
             media.play();
-          } else if (playingPostId === postId) {
+          } else if (playingPostId === postId && !entry.isIntersecting) {
             media.pause();
             setPlayingPostId(null);
           }
@@ -57,7 +61,6 @@ const FeedScreen = ({ token, userId }) => {
       { threshold: 0.8 }
     );
 
-    Object.values(mediaRefs.current).forEach((media) => observer.observe(media));
     return () => {
       observer.disconnect();
       socket.off('newPost');
@@ -145,6 +148,18 @@ const FeedScreen = ({ token, userId }) => {
     }
   };
 
+  const handleTripleClick = (post) => {
+    if (fullScreenPost?._id === post._id) {
+      setFullScreenPost(null);
+    } else {
+      setFullScreenPost(post);
+      if (post.contentType === 'video' && mediaRefs.current[post._id]) {
+        mediaRefs.current[post._id].pause();
+        setPlayingPostId(null);
+      }
+    }
+  };
+
   const timeAgo = (date) => {
     const now = new Date();
     const diff = now - new Date(date);
@@ -165,17 +180,29 @@ const FeedScreen = ({ token, userId }) => {
       transition={{ duration: 0.5 }}
       className="h-screen overflow-y-auto snap-y snap-mandatory bg-black"
     >
-      <div className="fixed bottom-24 right-4 z-20 flex flex-col space-y-4">
-        <motion.div whileHover={{ scale: 1.2 }}>
-          <FaShare className="text-2xl text-white cursor-pointer hover:text-primary" />
+      <div className="fixed bottom-20 right-4 z-20 flex flex-col space-y-6 items-center">
+        <motion.div whileHover={{ scale: 1.2 }} className="flex flex-col items-center">
+          <FaHeart
+            onClick={() => likePost(posts.find(p => p._id === playingPostId)?._id)}
+            className={`text-3xl cursor-pointer transition duration-200 ${posts.find(p => p._id === playingPostId)?.likedBy?.includes(userId) ? 'text-red-500' : 'text-white'}`}
+          />
+          <span className="text-white text-sm">{posts.find(p => p._id === playingPostId)?.likes || 0}</span>
+        </motion.div>
+        <motion.div whileHover={{ scale: 1.2 }} className="flex flex-col items-center">
+          <FaComment onClick={() => setShowComments(posts.find(p => p._id === playingPostId)?._id)} className="text-3xl cursor-pointer text-white hover:text-primary" />
+          <span className="text-white text-sm">{posts.find(p => p._id === playingPostId)?.comments?.length || 0}</span>
+        </motion.div>
+        <motion.div whileHover={{ scale: 1.2 }} className="flex flex-col items-center">
+          <FaShare onClick={() => sharePost(posts.find(p => p._id === playingPostId)?._id)} className="text-3xl cursor-pointer text-white hover:text-primary" />
+          <span className="text-white text-sm">Share</span>
         </motion.div>
         <motion.button
           whileHover={{ scale: 1.1, rotate: 90 }}
           whileTap={{ scale: 0.9 }}
           onClick={() => setShowPostModal(true)}
-          className="bg-transparent text-white p-4 rounded-full shadow-lg"
+          className="bg-transparent text-white p-2 rounded-full"
         >
-          <FaPlus className="text-2xl" />
+          <FaPlus className="text-3xl" />
         </motion.button>
       </div>
       {showPostModal && (
@@ -258,11 +285,15 @@ const FeedScreen = ({ token, userId }) => {
             transition={{ duration: 0.3 }}
             className="h-screen snap-start flex flex-col items-center justify-center text-white relative"
             onDoubleClick={() => handleDoubleClick(post._id)}
+            onClick={(e) => {
+              if (e.detail === 3) handleTripleClick(post);
+              else if (post.contentType === 'video' || post.contentType === 'audio') togglePlay(post._id);
+            }}
           >
             <div className="absolute top-4 left-0 w-full px-4 flex items-center">
               <img src={post.photo || 'https://via.placeholder.com/40'} alt="Profile" className="w-10 h-10 rounded-full mr-2" />
               <div>
-                <span className="font-semibold">{post.username || 'Unknown'}</span>
+                <span className="font-semibold">{post.username}</span>
                 <span className="text-xs ml-2">{timeAgo(post.createdAt)}</span>
               </div>
             </div>
@@ -272,29 +303,27 @@ const FeedScreen = ({ token, userId }) => {
             )}
             {post.contentType === 'video' && (
               <video
-                ref={(el) => (mediaRefs.current[post._id] = el)}
+                ref={(el) => { if (el) { mediaRefs.current[post._id] = el; } }}
                 data-post-id={post._id}
                 playsInline
                 loop
                 src={post.content}
                 className="w-screen h-screen object-contain lazy-load"
                 loading="lazy"
-                onClick={() => togglePlay(post._id)}
               />
             )}
             {post.contentType === 'audio' && (
               <audio
-                ref={(el) => (mediaRefs.current[post._id] = el)}
+                ref={(el) => { if (el) { mediaRefs.current[post._id] = el; } }}
                 data-post-id={post._id}
                 controls
                 src={post.content}
                 className="w-full"
-                onClick={() => togglePlay(post._id)}
               />
             )}
             {post.contentType === 'raw' && <a href={post.content} target="_blank" rel="noopener noreferrer" className="text-blue-500">Download</a>}
             {post.caption && (
-              <div className="absolute bottom-24 left-4 right-4 text-sm bg-black bg-opacity-50 p-2 rounded">
+              <div className="absolute bottom-28 left-4 right-4 text-sm bg-black bg-opacity-50 p-2 rounded max-w-full">
                 {expandedCaption === post._id || post.caption.length <= 50 ? (
                   post.caption
                 ) : (
@@ -302,7 +331,7 @@ const FeedScreen = ({ token, userId }) => {
                     {post.caption.slice(0, 50)}...
                     <span
                       className="text-primary cursor-pointer ml-1"
-                      onClick={() => setExpandedCaption(post._id)}
+                      onClick={(e) => { e.stopPropagation(); setExpandedCaption(post._id); }}
                     >
                       more
                     </span>
@@ -311,31 +340,18 @@ const FeedScreen = ({ token, userId }) => {
                 {expandedCaption === post._id && post.caption.length > 50 && (
                   <span
                     className="text-primary cursor-pointer ml-1"
-                    onClick={() => setExpandedCaption(null)}
+                    onClick={(e) => { e.stopPropagation(); setExpandedCaption(null); }}
                   >
                     less
                   </span>
                 )}
               </div>
             )}
-            <div className="absolute bottom-24 right-4 flex flex-col space-y-4">
-              <motion.div whileHover={{ scale: 1.2 }} className="flex flex-col items-center">
-                <FaHeart
-                  onClick={() => likePost(post._id)}
-                  className={`text-2xl cursor-pointer transition duration-200 ${post.likedBy?.includes(userId) ? 'text-red-500' : 'text-white'}`}
-                />
-                <span>{post.likes || 0}</span>
-              </motion.div>
-              <motion.div whileHover={{ scale: 1.2 }} className="flex flex-col items-center">
-                <FaComment onClick={() => setShowComments(post._id)} className="text-2xl cursor-pointer hover:text-primary" />
-                <span>{post.comments?.length || 0}</span>
-              </motion.div>
-            </div>
             {showComments === post._id && (
               <motion.div
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
-                className="absolute bottom-24 left-0 right-0 mx-4 bg-white p-4 rounded-lg shadow-lg max-h-40 overflow-y-auto z-10"
+                className="absolute bottom-28 left-0 right-0 mx-4 bg-white p-4 rounded-lg shadow-lg max-h-40 overflow-y-auto z-10"
                 onClick={(e) => e.stopPropagation()}
               >
                 {post.comments?.map((c, i) => (
@@ -356,6 +372,21 @@ const FeedScreen = ({ token, userId }) => {
         ))}
       </div>
       {showComments && <div className="fixed inset-0" onClick={() => setShowComments(null)} />}
+      {fullScreenPost && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          className="fixed inset-0 bg-black flex items-center justify-center z-50"
+        >
+          <FaArrowLeft
+            onClick={() => setFullScreenPost(null)}
+            className="absolute top-4 left-4 text-white text-2xl cursor-pointer hover:text-primary"
+          />
+          {fullScreenPost.contentType === 'image' && <img src={fullScreenPost.content} alt="Full" className="max-w-full max-h-full object-contain" />}
+          {fullScreenPost.contentType === 'video' && <video controls src={fullScreenPost.content} className="max-w-full max-h-full object-contain" />}
+          {fullScreenPost.contentType === 'audio' && <audio controls src={fullScreenPost.content} className="w-full" />}
+        </motion.div>
+      )}
     </motion.div>
   );
 };

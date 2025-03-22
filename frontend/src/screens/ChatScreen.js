@@ -105,6 +105,7 @@ const ChatScreen = ({ token, userId }) => {
       setMessage('');
       setFile(null);
       setCaption('');
+      setContentType('text'); // Reset to text input
       setShowPicker(false);
       setUploadProgress(null);
       socket.emit('messageStatus', { messageId: data._id, status: 'delivered', recipientId: selectedUser });
@@ -171,11 +172,11 @@ const ChatScreen = ({ token, userId }) => {
                 >
                   <div className={`inline-block p-3 rounded-lg shadow ${msg.senderId === userId ? 'bg-primary text-white' : 'bg-gray-200 text-black'} ${msg._id === selectedMessage ? 'border-2 border-primary' : ''}`}>
                     {msg.contentType === 'text' && <p>{msg.content}</p>}
-                    {msg.contentType === 'image' && <img src={msg.content} alt="Chat" className="max-w-xs rounded cursor-pointer" onClick={(e) => e.stopPropagation() || viewMessage(msg)} />}
-                    {msg.contentType === 'video' && <video src={msg.content} className="max-w-xs rounded cursor-pointer" onClick={(e) => e.stopPropagation() || viewMessage(msg)} />}
-                    {msg.contentType === 'audio' && <audio src={msg.content} onClick={(e) => e.stopPropagation() || viewMessage(msg)} />}
+                    {msg.contentType === 'image' && <img src={msg.content} alt="Chat" className="max-w-full w-auto h-auto rounded cursor-pointer" onClick={(e) => e.stopPropagation() || viewMessage(msg)} />}
+                    {msg.contentType === 'video' && <video src={msg.content} className="max-w-full w-auto h-auto rounded cursor-pointer" onClick={(e) => e.stopPropagation() || viewMessage(msg)} />}
+                    {msg.contentType === 'audio' && <audio src={msg.content} className="w-full" onClick={(e) => e.stopPropagation() || viewMessage(msg)} />}
                     {msg.contentType === 'raw' && <a href={msg.content} target="_blank" rel="noopener noreferrer" className="text-blue-500">Download</a>}
-                    {msg.caption && <p className="text-sm mt-1 italic">{msg.caption}</p>}
+                    {msg.caption && <p className="text-sm mt-1 italic max-w-full overflow-hidden">{msg.caption}</p>}
                     {msg.senderId === userId && (
                       <span className="text-xs flex justify-end">
                         {msg.status === 'sent' && '✓'}

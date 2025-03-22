@@ -16,6 +16,7 @@ const ProfileScreen = ({ token, userId, setAuth }) => {
   const [myPosts, setMyPosts] = useState([]);
   const [showPosts, setShowPosts] = useState(false);
   const [selectedPost, setSelectedPost] = useState(null);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(null);
 
   useEffect(() => {
     const fetchUser = async () => {
@@ -112,13 +113,18 @@ const ProfileScreen = ({ token, userId, setAuth }) => {
 
   const deletePost = async (postId) => {
     try {
-      await axios.delete(`/social/post/${postId}`, {
+      const response = await axios.delete(`/social/post/${postId}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      socket.emit('postDeleted', postId);
-      setSelectedPost(null);
+      if (response.data.success) {
+        socket.emit('postDeleted', postId);
+        setMyPosts((prev) => prev.filter(post => post._id !== postId));
+        setShowDeleteConfirm(null);
+        setSelectedPost(null);
+      }
     } catch (error) {
-      console.error('Delete post error:', error);
+      console.error('Delete post error:', error.response?.data || error);
+      setError(error.response?.data?.error || 'Failed to delete post');
     }
   };
 
@@ -178,16 +184,33 @@ const ProfileScreen = ({ token, userId, setAuth }) => {
                 />
                 {selectedPost === post._id && (
                   <div className="absolute top-6 right-1 bg-white p-2 rounded shadow-lg">
-                    <button onClick={() => deletePost(post._id)} className="flex items-center text-red-500 hover:text-red-700">
+                    <button
+                      onClick={() => setShowDeleteConfirm(post._id)}
+                      className="flex items-center text-red-500 hover:text-red-700"
+                    >
                       <FaTrash className="mr-1" /> Delete
                     </button>
-                    {/* Add Save option here if needed */}
                   </div>
                 )}
               </div>
             ))}
           </div>
         </div>
+      )}
+      {showDeleteConfirm && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
+        >
+          <div className="bg-white p-4 rounded-lg shadow-lg">
+            <p className="mb-4">Are you sure you want to delete this post?</p>
+            <div className="flex justify-end space-x-2">
+              <button onClick={() => setShowDeleteConfirm(null)} className="bg-gray-300 p-2 rounded hover:bg-gray-400">Cancel</button>
+              <button onClick={() => deletePost(showDeleteConfirm)} className="bg-red-500 text-white p-2 rounded hover:bg-red-700">Delete</button>
+            </div>
+          </div>
+        </motion.div>
       )}
     </motion.div>
   );

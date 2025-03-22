@@ -85,8 +85,10 @@ router.post('/post', authMiddleware, upload.single('content'), async (req, res) 
 router.delete('/post/:postId', authMiddleware, async (req, res) => {
   try {
     const post = await Post.findById(req.params.postId);
-    if (!post || post.userId !== req.user.userId) return res.status(403).json({ error: 'Not authorized' });
-    await post.remove();
+    if (!post) return res.status(404).json({ error: 'Post not found' });
+    if (post.userId !== req.user.userId) return res.status(403).json({ error: 'Not authorized' });
+    await Post.deleteOne({ _id: req.params.postId }); // Ensure deletion from DB
+    io.emit('postDeleted', req.params.postId);
     res.json({ success: true });
   } catch (error) {
     console.error('Delete post error:', error);
