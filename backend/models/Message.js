@@ -6,6 +6,7 @@ const messageSchema = new mongoose.Schema({
   contentType: { type: String, required: true },
   content: { type: String, required: true },
   caption: { type: String },
+  status: { type: String, default: 'sent', enum: ['sent', 'delivered', 'read'] },
   createdAt: { type: Date, default: Date.now },
 });
 

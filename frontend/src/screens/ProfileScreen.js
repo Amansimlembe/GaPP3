@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { motion } from 'framer-motion';
-import { FaEdit, FaSignOutAlt, FaTrash } from 'react-icons/fa';
+import { FaEdit, FaSignOutAlt, FaTrash, FaEllipsisH } from 'react-icons/fa';
 import io from 'socket.io-client';
 
 const socket = io('https://gapp-6yc3.onrender.com');
@@ -15,6 +15,7 @@ const ProfileScreen = ({ token, userId, setAuth }) => {
   const [photoUrl, setPhotoUrl] = useState(localStorage.getItem('photo') || '');
   const [myPosts, setMyPosts] = useState([]);
   const [showPosts, setShowPosts] = useState(false);
+  const [selectedPost, setSelectedPost] = useState(null);
 
   useEffect(() => {
     const fetchUser = async () => {
@@ -43,6 +44,9 @@ const ProfileScreen = ({ token, userId, setAuth }) => {
       }
     };
     fetchMyPosts();
+
+    socket.on('postDeleted', (postId) => setMyPosts((prev) => prev.filter(p => p._id !== postId)));
+    return () => socket.off('postDeleted');
   }, [token, userId]);
 
   const uploadCV = async () => {
@@ -112,7 +116,7 @@ const ProfileScreen = ({ token, userId, setAuth }) => {
         headers: { Authorization: `Bearer ${token}` },
       });
       socket.emit('postDeleted', postId);
-      setMyPosts(myPosts.filter(post => post._id !== postId));
+      setSelectedPost(null);
     } catch (error) {
       console.error('Delete post error:', error);
     }
@@ -162,17 +166,27 @@ const ProfileScreen = ({ token, userId, setAuth }) => {
         {showPosts ? 'Hide My Posts' : 'Show My Posts'}
       </button>
       {showPosts && (
-        <div className="mt-4 grid grid-cols-3 gap-2">
-          {myPosts.map((post) => (
-            <div key={post._id} className="relative">
-              {post.contentType === 'image' && <img src={post.content} alt="Post" className="w-full h-32 object-cover rounded" />}
-              {post.contentType === 'video' && <video src={post.content} className="w-full h-32 object-cover rounded" />}
-              <FaTrash
-                onClick={() => deletePost(post._id)}
-                className="absolute top-1 right-1 text-red-500 cursor-pointer hover:text-red-700"
-              />
-            </div>
-          ))}
+        <div className="mt-4 overflow-y-auto max-h-96">
+          <div className="grid grid-cols-3 gap-2">
+            {myPosts.map((post) => (
+              <div key={post._id} className="relative">
+                {post.contentType === 'image' && <img src={post.content} alt="Post" className="w-full h-32 object-cover rounded lazy-load" loading="lazy" />}
+                {post.contentType === 'video' && <video src={post.content} className="w-full h-32 object-cover rounded lazy-load" loading="lazy" />}
+                <FaEllipsisH
+                  onClick={() => setSelectedPost(selectedPost === post._id ? null : post._id)}
+                  className="absolute top-1 right-1 text-white cursor-pointer hover:text-primary"
+                />
+                {selectedPost === post._id && (
+                  <div className="absolute top-6 right-1 bg-white p-2 rounded shadow-lg">
+                    <button onClick={() => deletePost(post._id)} className="flex items-center text-red-500 hover:text-red-700">
+                      <FaTrash className="mr-1" /> Delete
+                    </button>
+                    {/* Add Save option here if needed */}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </motion.div>

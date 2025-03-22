@@ -11,6 +11,15 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+.lazy-load {
+  opacity: 0;
+  transition: opacity 0.3s ease-in;
+}
+
+.lazy-load[src] {
+  opacity: 1;
+}
+
 @media (max-width: 640px) {
   .container {
     padding: 0 !important;
@@ -21,5 +30,8 @@ body {
   .snap-start {
     margin: 0 !important;
     padding: 0 !important;
+  }
+  .overflow-x-auto {
+    -webkit-overflow-scrolling: touch;
   }
 }

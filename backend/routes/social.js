@@ -9,7 +9,7 @@ const authMiddleware = require('../middleware/auth');
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
-router.get('/feed', async (req, res) => {
+router.get('/feed', cacheMiddleware(60), async (req, res) => {
   try {
     const posts = await Post.find().sort({ createdAt: -1 });
     res.json(posts);
@@ -19,7 +19,8 @@ router.get('/feed', async (req, res) => {
   }
 });
 
-router.get('/my-posts/:userId', authMiddleware, async (req, res) => {
+
+router.get('/my-posts/:userId', authMiddleware, cacheMiddleware(60), async (req, res) => {
   try {
     const posts = await Post.find({ userId: req.params.userId }).sort({ createdAt: -1 });
     res.json(posts);
@@ -97,6 +98,7 @@ router.get('/messages', authMiddleware, async (req, res) => {
   }
 });
 
+
 router.post('/message', authMiddleware, upload.single('content'), async (req, res) => {
   try {
     const { senderId, recipientId, contentType, caption } = req.body;
@@ -119,7 +121,7 @@ router.post('/message', authMiddleware, upload.single('content'), async (req, re
       contentUrl = result.secure_url;
     }
 
-    const message = new Message({ senderId, recipientId, contentType, content: contentUrl, caption });
+    const message = new Message({ senderId, recipientId, contentType, content: contentUrl, caption, status: 'sent' });
     await message.save();
     res.json(message);
   } catch (error) {
@@ -127,6 +129,35 @@ router.post('/message', authMiddleware, upload.single('content'), async (req, re
     res.status(500).json({ error: 'Failed to send message', details: error.message });
   }
 });
+
+router.post('/message/status', authMiddleware, async (req, res) => {
+  try {
+    const { messageId, status, recipientId } = req.body;
+    const message = await Message.findById(messageId);
+    if (!message) return res.status(404).json({ error: 'Message not found' });
+    message.status = status;
+    await message.save();
+    io.emit('messageStatus', { messageId, status });
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Message status error:', error);
+    res.status(500).json({ error: 'Failed to update status', details: error.message });
+  }
+});
+
+// Add caching middleware (example using memory-cache)
+const cache = require('memory-cache');
+const cacheMiddleware = (duration) => (req, res, next) => {
+  const key = '__express__' + req.originalUrl || req.url;
+  const cachedBody = cache.get(key);
+  if (cachedBody) return res.send(cachedBody);
+  res.sendResponse = res.send;
+  res.send = (body) => {
+    cache.put(key, body, duration * 1000);
+    res.sendResponse(body);
+  };
+  next();
+};
 
 router.delete('/message/:messageId', authMiddleware, async (req, res) => {
   try {

@@ -16,6 +16,8 @@ const FeedScreen = ({ token, userId }) => {
   const [comment, setComment] = useState('');
   const [showComments, setShowComments] = useState(null);
   const [uploadProgress, setUploadProgress] = useState(null);
+  const [playingPostId, setPlayingPostId] = useState(null);
+  const [expandedCaption, setExpandedCaption] = useState(null);
   const mediaRefs = useRef({});
 
   useEffect(() => {
@@ -24,7 +26,8 @@ const FeedScreen = ({ token, userId }) => {
         const { data } = await axios.get('/social/feed', {
           headers: { Authorization: `Bearer ${token}` },
         });
-        setPosts(data.filter(post => !post.isStory));
+        const randomizedPosts = data.filter(post => !post.isStory).sort(() => Math.random() - 0.5); // Randomize for personalization
+        setPosts(randomizedPosts);
         setError('');
       } catch (error) {
         console.error('Failed to fetch feed:', error);
@@ -33,29 +36,28 @@ const FeedScreen = ({ token, userId }) => {
     };
     fetchFeed();
 
-    socket.on('newPost', (post) => {
-      setPosts((prev) => [post, ...prev.filter(p => p._id !== post._id)]);
-    });
-
-    socket.on('postUpdate', (updatedPost) => {
-      setPosts((prev) => prev.map(p => p._id === updatedPost._id ? updatedPost : p));
-    });
-
-    socket.on('postDeleted', (postId) => {
-      setPosts((prev) => prev.filter(p => p._id !== postId));
-    });
+    socket.on('newPost', (post) => setPosts((prev) => [post, ...prev.filter(p => p._id !== post._id)]));
+    socket.on('postUpdate', (updatedPost) => setPosts((prev) => prev.map(p => p._id === updatedPost._id ? updatedPost : p)));
+    socket.on('postDeleted', (postId) => setPosts((prev) => prev.filter(p => p._id !== postId)));
 
     const observer = new IntersectionObserver(
       (entries) => {
         entries.forEach((entry) => {
           const media = entry.target;
-          if (entry.isIntersecting) media.play();
-          else media.pause();
+          const postId = media.dataset.postId;
+          if (entry.isIntersecting) {
+            setPlayingPostId(postId);
+            media.play();
+          } else if (playingPostId === postId) {
+            media.pause();
+            setPlayingPostId(null);
+          }
         });
       },
       { threshold: 0.8 }
     );
 
+    Object.values(mediaRefs.current).forEach((media) => observer.observe(media));
     return () => {
       observer.disconnect();
       socket.off('newPost');
@@ -100,13 +102,9 @@ const FeedScreen = ({ token, userId }) => {
   const likePost = async (postId) => {
     try {
       const post = posts.find(p => p._id === postId);
-      if (post.likedBy?.includes(userId)) {
-        const { data } = await axios.post('/social/unlike', { postId }, { headers: { Authorization: `Bearer ${token}` } });
-        socket.emit('postUpdate', data);
-      } else {
-        const { data } = await axios.post('/social/like', { postId }, { headers: { Authorization: `Bearer ${token}` } });
-        socket.emit('postUpdate', data);
-      }
+      const action = post.likedBy?.includes(userId) ? '/social/unlike' : '/social/like';
+      const { data } = await axios.post(action, { postId }, { headers: { Authorization: `Bearer ${token}` } });
+      socket.emit('postUpdate', data);
     } catch (error) {
       console.error('Like error:', error);
     }
@@ -133,6 +131,20 @@ const FeedScreen = ({ token, userId }) => {
     }
   };
 
+  const togglePlay = (postId) => {
+    const media = mediaRefs.current[postId];
+    if (media) {
+      if (playingPostId === postId) {
+        media.pause();
+        setPlayingPostId(null);
+      } else {
+        Object.values(mediaRefs.current).forEach(m => m !== media && m.pause());
+        media.play();
+        setPlayingPostId(postId);
+      }
+    }
+  };
+
   const timeAgo = (date) => {
     const now = new Date();
     const diff = now - new Date(date);
@@ -153,12 +165,15 @@ const FeedScreen = ({ token, userId }) => {
       transition={{ duration: 0.5 }}
       className="h-screen overflow-y-auto snap-y snap-mandatory bg-black"
     >
-      <div className="fixed bottom-20 right-4 z-20">
+      <div className="fixed bottom-24 right-4 z-20 flex flex-col space-y-4">
+        <motion.div whileHover={{ scale: 1.2 }}>
+          <FaShare className="text-2xl text-white cursor-pointer hover:text-primary" />
+        </motion.div>
         <motion.button
           whileHover={{ scale: 1.1, rotate: 90 }}
           whileTap={{ scale: 0.9 }}
           onClick={() => setShowPostModal(true)}
-          className="bg-primary text-white p-4 rounded-full shadow-lg"
+          className="bg-transparent text-white p-4 rounded-full shadow-lg"
         >
           <FaPlus className="text-2xl" />
         </motion.button>
@@ -247,34 +262,63 @@ const FeedScreen = ({ token, userId }) => {
             <div className="absolute top-4 left-0 w-full px-4 flex items-center">
               <img src={post.photo || 'https://via.placeholder.com/40'} alt="Profile" className="w-10 h-10 rounded-full mr-2" />
               <div>
-                <span className="font-semibold">{post.username || post.userId}</span>
+                <span className="font-semibold">{post.username || 'Unknown'}</span>
                 <span className="text-xs ml-2">{timeAgo(post.createdAt)}</span>
               </div>
             </div>
             {post.contentType === 'text' && <p className="text-lg">{post.content}</p>}
-            {post.contentType === 'image' && <img src={post.content} alt="Post" className="w-screen h-screen object-contain" />}
+            {post.contentType === 'image' && (
+              <img src={post.content} alt="Post" className="w-screen h-screen object-contain lazy-load" loading="lazy" />
+            )}
             {post.contentType === 'video' && (
               <video
                 ref={(el) => (mediaRefs.current[post._id] = el)}
-                autoPlay
-                loop
+                data-post-id={post._id}
                 playsInline
+                loop
                 src={post.content}
-                className="w-screen h-screen object-contain"
+                className="w-screen h-screen object-contain lazy-load"
+                loading="lazy"
+                onClick={() => togglePlay(post._id)}
               />
             )}
             {post.contentType === 'audio' && (
               <audio
                 ref={(el) => (mediaRefs.current[post._id] = el)}
-                autoPlay
+                data-post-id={post._id}
                 controls
                 src={post.content}
                 className="w-full"
+                onClick={() => togglePlay(post._id)}
               />
             )}
             {post.contentType === 'raw' && <a href={post.content} target="_blank" rel="noopener noreferrer" className="text-blue-500">Download</a>}
-            {post.caption && <p className="text-sm absolute bottom-20 left-4">{post.caption}</p>}
-            <div className="absolute bottom-20 right-4 flex flex-col space-y-4">
+            {post.caption && (
+              <div className="absolute bottom-24 left-4 right-4 text-sm bg-black bg-opacity-50 p-2 rounded">
+                {expandedCaption === post._id || post.caption.length <= 50 ? (
+                  post.caption
+                ) : (
+                  <>
+                    {post.caption.slice(0, 50)}...
+                    <span
+                      className="text-primary cursor-pointer ml-1"
+                      onClick={() => setExpandedCaption(post._id)}
+                    >
+                      more
+                    </span>
+                  </>
+                )}
+                {expandedCaption === post._id && post.caption.length > 50 && (
+                  <span
+                    className="text-primary cursor-pointer ml-1"
+                    onClick={() => setExpandedCaption(null)}
+                  >
+                    less
+                  </span>
+                )}
+              </div>
+            )}
+            <div className="absolute bottom-24 right-4 flex flex-col space-y-4">
               <motion.div whileHover={{ scale: 1.2 }} className="flex flex-col items-center">
                 <FaHeart
                   onClick={() => likePost(post._id)}
@@ -286,15 +330,12 @@ const FeedScreen = ({ token, userId }) => {
                 <FaComment onClick={() => setShowComments(post._id)} className="text-2xl cursor-pointer hover:text-primary" />
                 <span>{post.comments?.length || 0}</span>
               </motion.div>
-              <motion.div whileHover={{ scale: 1.2 }}>
-                <FaShare onClick={() => sharePost(post._id)} className="text-2xl cursor-pointer hover:text-primary" />
-              </motion.div>
             </div>
             {showComments === post._id && (
               <motion.div
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
-                className="absolute bottom-20 left-0 right-0 mx-4 bg-white p-4 rounded-lg shadow-lg max-h-40 overflow-y-auto z-10"
+                className="absolute bottom-24 left-0 right-0 mx-4 bg-white p-4 rounded-lg shadow-lg max-h-40 overflow-y-auto z-10"
                 onClick={(e) => e.stopPropagation()}
               >
                 {post.comments?.map((c, i) => (
