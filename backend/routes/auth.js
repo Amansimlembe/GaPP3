@@ -114,4 +114,21 @@ router.post('/update_photo', upload.single('photo'), async (req, res) => {
   }
 });
 
+router.post('/update_username', authMiddleware, async (req, res) => {
+  try {
+    const { userId, username } = req.body;
+    if (!username) return res.status(400).json({ error: 'Username is required' });
+    const existingUser = await User.findOne({ username });
+    if (existingUser && existingUser._id.toString() !== userId) {
+      return res.status(400).json({ error: 'Username already taken' });
+    }
+    const user = await User.findByIdAndUpdate(userId, { username }, { new: true });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    res.json({ username: user.username });
+  } catch (error) {
+    console.error('Username update error:', error);
+    res.status(500).json({ error: 'Failed to update username', details: error.message });
+  }
+});
+
 module.exports = router;

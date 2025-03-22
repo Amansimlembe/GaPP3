@@ -12,8 +12,10 @@ const ChatScreen = ({ token, userId }) => {
   const [messages, setMessages] = useState([]);
   const [message, setMessage] = useState('');
   const [file, setFile] = useState(null);
+  const [caption, setCaption] = useState('');
   const [contentType, setContentType] = useState('text');
   const [showPicker, setShowPicker] = useState(false);
+  const [sending, setSending] = useState(null);
   const chatRef = useRef(null);
 
   useEffect(() => {
@@ -37,6 +39,7 @@ const ChatScreen = ({ token, userId }) => {
           params: { userId, recipientId: selectedUser },
         });
         setMessages(data);
+        chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
       } catch (error) {
         console.error('Failed to fetch messages:', error);
       }
@@ -47,9 +50,10 @@ const ChatScreen = ({ token, userId }) => {
       if ((msg.senderId === userId && msg.recipientId === selectedUser) || (msg.senderId === selectedUser && msg.recipientId === userId)) {
         setMessages((prev) => {
           const exists = prev.some(m => m._id === msg._id);
-          return exists ? prev : [...prev, msg];
+          const updated = exists ? prev : [...prev, msg];
+          chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
+          return updated;
         });
-        chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
       }
     });
 
@@ -57,69 +61,61 @@ const ChatScreen = ({ token, userId }) => {
   }, [token, userId, selectedUser]);
 
   const sendMessage = async () => {
-    if (!selectedUser || (!message && !file)) return;
+    if (!selectedUser || (!message && !file && contentType === 'text')) return;
     const formData = new FormData();
     formData.append('senderId', userId);
     formData.append('recipientId', selectedUser);
     formData.append('contentType', contentType);
+    formData.append('caption', caption);
     if (file) formData.append('content', file);
     else formData.append('content', message);
+
+    const tempId = Date.now(); // Temporary ID for loading state
+    if (file) {
+      setSending({ _id: tempId, senderId: userId, recipientId: selectedUser, contentType, content: URL.createObjectURL(file), caption });
+      setMessages((prev) => [...prev, sending]);
+      chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
+    }
 
     try {
       const { data } = await axios.post('/social/message', formData, {
         headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
       });
       socket.emit('message', data);
-      setMessages((prev) => [...prev, data]);
+      setMessages((prev) => prev.map(msg => msg._id === tempId ? data : msg));
       setMessage('');
       setFile(null);
+      setCaption('');
       setShowPicker(false);
-      chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
+      setSending(null);
     } catch (error) {
       console.error('Send message error:', error);
+      setMessages((prev) => prev.filter(msg => msg._id !== tempId));
+      setSending(null);
     }
   };
 
   return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      transition={{ duration: 0.5 }}
-      className="flex h-screen p-4 md:p-6 flex-col md:flex-row md:ml-64"
-    >
-      <div className="w-full md:w-1/4 bg-white p-4 rounded-lg shadow-md mb-4 md:mb-0">
-        <h2 className="text-xl font-bold text-primary mb-4 font-sans">Users</h2>
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5 }} className="flex h-screen p-4 flex-col">
+      <div className="w-full bg-white p-4 rounded-lg shadow-md mb-4 overflow-x-auto flex space-x-2">
         {users.map((id) => (
-          <button
-            key={id}
-            onClick={() => setSelectedUser(id)}
-            className="block w-full text-left p-2 hover:bg-gray-200 rounded font-sans text-base md:text-lg"
-          >
-            {id}
-          </button>
+          <button key={id} onClick={() => setSelectedUser(id)} className="p-2 hover:bg-gray-200 rounded whitespace-nowrap">{id}</button>
         ))}
       </div>
-      <div className="w-full md:w-3/4 md:ml-4 bg-white p-4 rounded-lg shadow-md flex flex-col h-full">
+      <div className="w-full bg-white p-4 rounded-lg shadow-md flex flex-col h-full">
         {selectedUser ? (
           <>
-            <h2 className="text-xl font-bold text-primary mb-4 font-sans">Chat with {selectedUser}</h2>
+            <h2 className="text-xl font-bold text-primary mb-4">Chat with {selectedUser}</h2>
             <div ref={chatRef} className="flex-1 overflow-y-auto mb-4">
               {messages.map((msg) => (
                 <div key={msg._id} className={`mb-2 ${msg.senderId === userId ? 'text-right' : 'text-left'}`}>
-                  <div
-                    className={`inline-block p-2 rounded-lg font-sans text-base md:text-lg ${
-                      msg.senderId === userId ? 'bg-primary text-white' : 'bg-gray-200 text-black'
-                    }`}
-                  >
+                  <div className={`inline-block p-2 rounded-lg ${msg.senderId === userId ? 'bg-primary text-white' : 'bg-gray-200 text-black'}`}>
                     {msg.contentType === 'text' && <p>{msg.content}</p>}
-                    {msg.contentType === 'image' && <img src={msg.content} alt="Chat" className="max-w-xs rounded" />}
-                    {msg.contentType === 'video' && <video controls src={msg.content} className="max-w-xs rounded" />}
-                    {msg.contentType === 'audio' && <audio controls src={msg.content} className="w-full" />}
-                    {msg.contentType === 'raw' && (
-                      <a href={msg.content} target="_blank" rel="noopener noreferrer" className="text-blue-500">
-                        Download
-                      </a>
-                    )}
+                    {msg.contentType === 'image' && <img src={msg.content} alt="Chat" className="max-w-xs" />}
+                    {msg.contentType === 'video' && <video controls src={msg.content} className="max-w-xs" />}
+                    {msg.contentType === 'audio' && <audio controls src={msg.content} />}
+                    {msg.contentType === 'raw' && <a href={msg.content} target="_blank" rel="noopener noreferrer" className="text-blue-500">Download</a>}
+                    {msg.caption && <p className="text-sm mt-1">{msg.caption}</p>}
                   </div>
                 </div>
               ))}
@@ -127,47 +123,53 @@ const ChatScreen = ({ token, userId }) => {
             <div className="relative flex items-center">
               {showPicker && (
                 <div className="absolute bottom-12 left-0 bg-white p-2 rounded-lg shadow-lg flex space-x-2">
-                  {['image', 'video', 'audio', 'raw'].map((type) => (
+                  {['image', 'video', 'audio', 'raw', 'contact'].map((type) => (
                     <button
                       key={type}
-                      onClick={() => {
-                        setContentType(type);
-                        setShowPicker(false);
-                      }}
-                      className="p-2 hover:bg-gray-200 rounded font-sans text-base md:text-lg"
+                      onClick={() => { setContentType(type); setShowPicker(false); }}
+                      className="p-2 hover:bg-gray-200 rounded"
                     >
                       {type.charAt(0).toUpperCase() + type.slice(1)}
                     </button>
                   ))}
                 </div>
               )}
-              {contentType === 'text' ? (
+              {contentType === 'text' || contentType === 'contact' ? (
                 <input
                   value={message}
                   onChange={(e) => setMessage(e.target.value)}
-                  className="flex-1 p-2 border rounded-lg font-sans text-base md:text-lg"
+                  className="flex-1 p-2 border rounded-lg pr-16"
                   placeholder="Type a message"
                 />
               ) : (
-                <input
-                  type="file"
-                  accept={contentType === 'image' ? 'image/*' : contentType === 'video' ? 'video/*' : contentType === 'audio' ? 'audio/*' : '*/*'}
-                  onChange={(e) => setFile(e.target.files[0])}
-                  className="flex-1 p-2 border rounded-lg text-sm md:text-base"
-                />
+                <div className="flex-1 flex items-center p-2 border rounded-lg pr-16">
+                  <input
+                    type="file"
+                    accept={contentType === 'image' ? 'image/*' : contentType === 'video' ? 'video/*' : contentType === 'audio' ? 'audio/*' : '*/*'}
+                    onChange={(e) => setFile(e.target.files[0])}
+                    className="flex-1"
+                  />
+                  <input
+                    type="text"
+                    value={caption}
+                    onChange={(e) => setCaption(e.target.value)}
+                    className="w-full p-2 mt-2 border rounded-lg"
+                    placeholder="Add a caption (optional)"
+                  />
+                </div>
               )}
               <FaPaperclip
-                className="text-2xl md:text-3xl text-primary cursor-pointer hover:text-secondary mr-2"
+                className="absolute right-8 text-xl text-primary cursor-pointer hover:text-secondary"
                 onClick={() => setShowPicker(!showPicker)}
               />
               <FaPaperPlane
-                className="text-2xl md:text-3xl text-primary cursor-pointer hover:text-secondary"
+                className="absolute right-2 text-xl text-primary cursor-pointer hover:text-secondary"
                 onClick={sendMessage}
               />
             </div>
           </>
         ) : (
-          <p className="text-gray-600 flex-1 flex items-center justify-center font-sans text-base md:text-lg">Select a user to chat</p>
+          <p className="text-gray-600 flex-1 flex items-center justify-center">Select a user to chat</p>
         )}
       </div>
     </motion.div>
