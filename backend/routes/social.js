@@ -96,51 +96,51 @@ router.delete('/post/:postId', authMiddleware, async (req, res) => {
   }
 });
 
-router.get('/messages', authMiddleware, async (req, res) => {
-  try {
-    const { userId, recipientId } = req.query;
-    if (!userId || !recipientId) return res.status(400).json({ error: 'User ID and recipient ID are required' });
-    const messages = await Message.find({
-      $or: [
-        { senderId: userId, recipientId },
-        { senderId: recipientId, recipientId: userId },
-      ],
-    }).sort({ createdAt: 1 });
-    res.json(messages);
-  } catch (error) {
-    console.error('Fetch messages error:', error);
-    res.status(500).json({ error: 'Failed to fetch messages', details: error.message });
-  }
-});
 
 router.post('/message', authMiddleware, upload.single('content'), async (req, res) => {
   try {
-    const { senderId, recipientId, contentType, caption } = req.body;
+    const { senderId, recipientId, contentType, caption, replyTo } = req.body;
     if (!senderId || !recipientId || !contentType) {
       return res.status(400).json({ error: 'Sender ID, recipient ID, and content type are required' });
     }
-
     let contentUrl = req.body.content || '';
     if (req.file) {
       const resourceType = ['image', 'video', 'audio', 'raw'].includes(contentType) ? contentType : 'raw';
       const result = await new Promise((resolve, reject) => {
         cloudinary.uploader.upload_stream(
           { resource_type: resourceType, public_id: `${contentType}_${senderId}_${Date.now()}`, folder: `gapp_chat_${contentType}s` },
-          (error, result) => {
-            if (error) reject(error);
-            else resolve(result);
-          }
+          (error, result) => error ? reject(error) : resolve(result)
         ).end(req.file.buffer);
       });
       contentUrl = result.secure_url;
     }
-
-    const message = new Message({ senderId, recipientId, contentType, content: contentUrl, caption, status: 'sent' });
+    const message = new Message({ senderId, recipientId, contentType, content: contentUrl, caption, status: 'sent', replyTo });
     await message.save();
     res.json(message);
   } catch (error) {
-    console.error('Message error:', { message: error.message, stack: error.stack, body: req.body, file: !!req.file });
+    console.error('Message error:', error);
     res.status(500).json({ error: 'Failed to send message', details: error.message });
+  }
+});
+
+router.get('/messages', authMiddleware, async (req, res) => {
+  try {
+    const { userId, recipientId, limit = 20, skip = 0 } = req.query;
+    if (!userId || !recipientId) return res.status(400).json({ error: 'User ID and recipient ID are required' });
+    const messages = await Message.find({
+      $or: [
+        { senderId: userId, recipientId },
+        { senderId: recipientId, recipientId: userId },
+      ],
+    })
+      .sort({ createdAt: -1 })
+      .skip(parseInt(skip))
+      .limit(parseInt(limit))
+      .populate('replyTo', 'content');
+    res.json(messages.reverse());
+  } catch (error) {
+    console.error('Fetch messages error:', error);
+    res.status(500).json({ error: 'Failed to fetch messages', details: error.message });
   }
 });
 
@@ -210,9 +210,10 @@ router.post('/comment', authMiddleware, async (req, res) => {
   try {
     const { postId, comment } = req.body;
     const { userId } = req.user;
+    const user = await User.findById(userId);
     const post = await Post.findById(postId);
     if (!post) return res.status(404).json({ error: 'Post not found' });
-    const commentData = { userId, comment, createdAt: new Date() };
+    const commentData = { userId, username: user.username, photo: user.photo, comment, createdAt: new Date() };
     post.comments = [...(post.comments || []), commentData];
     await post.save();
     res.json(commentData);
