@@ -6,54 +6,36 @@ const User = require('../models/User');
 const cloudinary = require('cloudinary').v2;
 const multer = require('multer');
 const authMiddleware = require('../middleware/auth');
-const { getCountries, generateNumber, getCountryCallingCode } = require('libphonenumber-js');
+const { getCountries, getCountryCallingCode } = require('libphonenumber-js');
 
 const upload = multer({ storage: multer.memoryStorage() });
 
 // Helper function to generate a virtual phone number
 const generateVirtualNumber = (countryCode) => {
   try {
-    console.log(`Generating virtual number for country: ${countryCode}`);
     const countryCallingCode = getCountryCallingCode(countryCode);
     console.log(`Country calling code: ${countryCallingCode}`);
     
-    // Fallback to 9 digits if example number fails
-    const exampleNumber = generateNumber(countryCode) || `+${countryCallingCode}123456789`;
-    const numberLength = exampleNumber.replace(/[^0-9]/g, '').length - countryCallingCode.length || 9;
-    console.log(`Number length: ${numberLength}`);
-    
+    // Use a fixed length of 9 digits for the subscriber number (common for many countries)
+    const numberLength = 9;
     const randomNum = Math.floor(Math.random() * Math.pow(10, numberLength)).toString().padStart(numberLength, '0');
-    const virtualNumber = `+${countryCallingCode}${randomNum}`;
-    console.log(`Generated virtual number: ${virtualNumber}`);
-    
-    return virtualNumber;
+    return `+${countryCallingCode}${randomNum}`;
   } catch (error) {
-    console.error('generateVirtualNumber error:', error.message, error.stack);
+    console.error('generateVirtualNumber error:', error.message);
     throw new Error(`Failed to generate virtual number: ${error.message}`);
   }
 };
 
+// ... (other routes remain unchanged)
 
 router.post('/update_country', authMiddleware, async (req, res) => {
   try {
     const { userId, country } = req.body;
     console.log('Incoming request to /update_country:', { userId, country });
 
-    // Validate inputs
-    if (!userId) {
-      console.error('Missing userId');
-      return res.status(400).json({ error: 'userId is required' });
-    }
     if (!country || !getCountries().includes(country)) {
-      console.error('Invalid or missing country code:', country);
+      console.error('Invalid country code:', country);
       return res.status(400).json({ error: 'Invalid country code' });
-    }
-
-    // Check MongoDB connection
-    const mongoose = require('mongoose');
-    if (mongoose.connection.readyState !== 1) {
-      console.error('MongoDB not connected:', mongoose.connection.readyState);
-      return res.status(500).json({ error: 'Database connection error' });
     }
 
     console.log(`Fetching user with ID: ${userId}`);
@@ -62,23 +44,15 @@ router.post('/update_country', authMiddleware, async (req, res) => {
       console.error('User not found:', userId);
       return res.status(404).json({ error: 'User not found' });
     }
+    console.log('User found:', user.email);
 
-    console.log(`User found: ${user.email}`);
     user.country = country;
     if (!user.virtualNumber) {
+      console.log(`Generating virtual number for country: ${country}`);
       user.virtualNumber = generateVirtualNumber(country);
-      
-      // Check for uniqueness
-      const existingUser = await User.findOne({ virtualNumber: user.virtualNumber });
-      if (existingUser) {
-        console.log('Virtual number collision, regenerating...');
-        user.virtualNumber = generateVirtualNumber(country); // Retry once
-      }
     }
-
-    console.log('Saving user with updated data:', { country: user.country, virtualNumber: user.virtualNumber });
     await user.save();
-    console.log('User saved successfully');
+    console.log('User updated:', { userId, country, virtualNumber: user.virtualNumber });
 
     res.json({ virtualNumber: user.virtualNumber, country: user.country });
   } catch (error) {
