@@ -45,6 +45,7 @@ const CountrySelector = ({ token, userId, onComplete }) => {
       return;
     }
     try {
+      console.log('Sending request to update_country:', { userId, country: selectedCountry }); // Debug log
       const { data } = await axios.post('/auth/update_country', { userId, country: selectedCountry }, { headers: { Authorization: `Bearer ${token}` } });
       onComplete(data.virtualNumber);
     } catch (error) {
