@@ -52,7 +52,7 @@ const FeedScreen = ({ token, userId }) => {
           const postId = media.dataset.postId;
           if (entry.isIntersecting) {
             setPlayingPostId(postId);
-            media.play().catch(() => {});
+            media.play().catch((err) => console.log('Autoplay failed:', err));
           } else if (playingPostId === postId) {
             media.pause();
             setPlayingPostId(null);
@@ -61,6 +61,8 @@ const FeedScreen = ({ token, userId }) => {
       },
       { threshold: 0.8 }
     );
+
+    Object.values(mediaRefs.current).forEach(media => media && observer.observe(media));
 
     return () => {
       observer.disconnect();
@@ -255,6 +257,7 @@ const FeedScreen = ({ token, userId }) => {
                 data-post-id={post._id}
                 playsInline
                 loop
+                preload="auto"
                 muted
                 src={cache.get(post.content) || post.content}
                 className="w-screen h-screen object-contain lazy-load"

@@ -25,7 +25,9 @@ const cacheMiddleware = (duration) => (req, res, next) => {
 
 router.get('/feed', cacheMiddleware(60), async (req, res) => {
   try {
-    const posts = await Post.find().sort({ createdAt: -1 }).populate('userId', 'username photo');
+    const posts = await Post.find()
+      .sort({ createdAt: -1 })
+      .populate('userId', 'username photo');
     res.json(posts);
   } catch (error) {
     console.error('Feed fetch error:', error);
@@ -120,21 +122,25 @@ router.post('/message', authMiddleware, upload.single('content'), async (req, re
 
 router.get('/messages', authMiddleware, async (req, res) => {
   try {
-    const { userId, recipientId, limit = 20, skip = 0 } = req.query;
-    if (!userId || !recipientId) return res.status(400).json({ error: 'User ID and recipient ID are required' });
+    const { userId, recipientId } = req.query;
+    console.log('Fetching messages for:', { userId, recipientId }); // Debug log
+
+    if (!userId || !recipientId) {
+      console.error('Missing userId or recipientId');
+      return res.status(400).json({ error: 'User ID and Recipient ID are required' });
+    }
+
     const messages = await Message.find({
       $or: [
         { senderId: userId, recipientId },
-        { senderId: recipientId, recipientId: userId },
-      ],
-    })
-      .sort({ createdAt: -1 })
-      .skip(parseInt(skip))
-      .limit(parseInt(limit))
-      .populate('replyTo', 'content');
-    res.json(messages.reverse());
+        { senderId: recipientId, recipientId: userId }
+      ]
+    }).sort({ createdAt: 1 });
+
+    console.log('Messages fetched:', messages.length);
+    res.json(messages);
   } catch (error) {
-    console.error('Fetch messages error:', error);
+    console.error('Fetch messages error:', error.message, error.stack);
     res.status(500).json({ error: 'Failed to fetch messages', details: error.message });
   }
 });

@@ -41,6 +41,7 @@ const ChatScreen = ({ token, userId }) => {
     fetchUsers();
 
     const fetchMessages = async () => {
+      if (!selectedUser) return;
       try {
         const { data } = await axios.get('/social/messages', {
           headers: { Authorization: `Bearer ${token}` },
@@ -51,9 +52,11 @@ const ChatScreen = ({ token, userId }) => {
         setNotifications((prev) => ({ ...prev, [selectedUser]: 0 }));
       } catch (error) {
         console.error('Failed to fetch messages:', error);
+        setError('Could not load messages. Please try again.');
       }
     };
-    if (selectedUser) fetchMessages();
+    fetchMessages();
+
 
     socket.on('message', (msg) => {
       if ((msg.senderId === userId && msg.recipientId === selectedUser) || (msg.senderId === selectedUser && msg.recipientId === userId)) {
@@ -179,8 +182,19 @@ const ChatScreen = ({ token, userId }) => {
     }
   };
 
-  return (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5 }} className="flex flex-col h-screen bg-gray-100">
+  const handleOutsideClick = (e) => {
+    if (showMenu && !e.target.closest('.menu-container')) {
+      setShowMenu(false);
+    }
+  };
+
+  useEffect(() => {
+    document.addEventListener('click', handleOutsideClick);
+    return () => document.removeEventListener('click', handleOutsideClick);
+  }, [showMenu]);
+
+return (
+    <motion.div className="flex flex-col h-screen bg-gray-100">
       {!selectedUser ? (
         <div className="flex-1 overflow-y-auto relative">
           <FaEllipsisH onClick={() => setShowMenu(true)} className="absolute top-4 right-4 text-2xl text-primary cursor-pointer hover:text-secondary" />
@@ -205,23 +219,23 @@ const ChatScreen = ({ token, userId }) => {
           ))}
           {showMenu && (
             <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="absolute top-12 right-4 bg-white dark:bg-gray-800 p-4 rounded-lg shadow-lg"
-            >
-              <input
-                type="text"
-                value={newContact}
-                onChange={(e) => setNewContact(e.target.value)}
-                className="w-full p-2 mb-2 border rounded-lg dark:bg-gray-700 dark:text-white"
-                placeholder="Enter virtual number"
-              />
-              <button onClick={addContact} className="flex items-center text-primary hover:text-secondary">
-                <FaSave className="mr-1" /> Save
-              </button>
-            </motion.div>
-          )}
-        </div>
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="absolute top-12 right-4 bg-white dark:bg-gray-800 p-4 rounded-lg shadow-lg menu-container"
+          >
+            <input
+              type="text"
+              value={newContact}
+              onChange={(e) => setNewContact(e.target.value)}
+              className="w-full p-2 mb-2 border rounded-lg dark:bg-gray-700 dark:text-white"
+              placeholder="Enter virtual number"
+            />
+            <button onClick={addContact} className="flex items-center text-primary hover:text-secondary">
+              <FaSave className="mr-1" /> Save
+            </button>
+          </motion.div>
+        )}
+      </div>
       ) : (
         <div className="flex flex-col flex-1">
           <div className="bg-white p-3 flex items-center border-b border-gray-200">
