@@ -26,7 +26,6 @@ const generateVirtualNumber = (countryCode) => {
   }
 };
 
-// ... (other routes remain unchanged)
 
 router.post('/update_country', authMiddleware, async (req, res) => {
   try {
@@ -60,7 +59,6 @@ router.post('/update_country', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Failed to update country', details: error.message });
   }
 });
-
 
 router.post('/register', upload.single('photo'), async (req, res) => {
   try {
@@ -142,13 +140,12 @@ router.get('/user/:userId', authMiddleware, async (req, res) => {
   try {
     const user = await User.findById(req.params.userId);
     if (!user) return res.status(404).json({ error: 'User not found' });
-    res.json({ username: user.username, photo: user.photo, country: user.country, virtualNumber: user.virtualNumber });
+    res.json({ username: user.username, photo: user.photo, virtualNumber: user.virtualNumber });
   } catch (error) {
     console.error('Fetch user error:', error);
     res.status(500).json({ error: 'Failed to fetch user', details: error.message });
   }
 });
-
 
 
 

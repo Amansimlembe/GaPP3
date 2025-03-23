@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { motion } from 'framer-motion';
-import { getCountries, getCountryCallingCode } from 'libphonenumber-js';
+import { getCountries } from 'libphonenumber-js';
 const countryList = require('country-list');
 
 const CountrySelector = ({ token, userId, onComplete }) => {
@@ -45,7 +45,7 @@ const CountrySelector = ({ token, userId, onComplete }) => {
       return;
     }
     try {
-      console.log('Sending request to update_country:', { userId, country: selectedCountry }); // Debug log
+      console.log('Sending request to update_country:', { userId, country: selectedCountry });
       const { data } = await axios.post('/auth/update_country', { userId, country: selectedCountry }, { headers: { Authorization: `Bearer ${token}` } });
       onComplete(data.virtualNumber);
     } catch (error) {
@@ -54,10 +54,10 @@ const CountrySelector = ({ token, userId, onComplete }) => {
     }
   };
 
-  const countriesData = countryList.getData(); // [{code: 'TZ', name: 'Tanzania'}, ...]
-  const validCountryCodes = getCountries(); // ['TZ', 'US', ...]
+  const countriesData = countryList.getData();
+  const validCountryCodes = getCountries();
   const countries = countriesData
-    .filter(c => validCountryCodes.includes(c.code)) // Ensure only valid phone country codes
+    .filter(c => validCountryCodes.includes(c.code))
     .map(c => ({ code: c.code, name: c.name }));
   const filteredCountries = countries.filter(c => 
     c.name.toLowerCase().includes(search.toLowerCase()) || 
@@ -65,8 +65,17 @@ const CountrySelector = ({ token, userId, onComplete }) => {
   );
 
   return (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg w-full max-w-md">
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
+      onClick={() => onComplete(null)} // Dismiss when clicking outside
+    >
+      <div
+        className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg w-full max-w-md"
+        onClick={(e) => e.stopPropagation()} // Prevent dismissal when clicking inside
+      >
         <h2 className="text-xl font-bold text-primary dark:text-gray-300 mb-4">Select Your Country</h2>
         {error && <p className="text-red-500 mb-4">{error}</p>}
         <input
