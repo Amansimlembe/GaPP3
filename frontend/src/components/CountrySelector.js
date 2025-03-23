@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { motion } from 'framer-motion';
-import { getCountries, getCountryCallingCode, getMetadata } from 'libphonenumber-js';
+import { getCountries, getCountryCallingCode } from 'libphonenumber-js';
+const countryList = require('country-list');
 
 const CountrySelector = ({ token, userId, onComplete }) => {
   const [selectedCountry, setSelectedCountry] = useState('');
@@ -52,11 +53,11 @@ const CountrySelector = ({ token, userId, onComplete }) => {
     }
   };
 
-  const metadata = getMetadata();
-  const countries = getCountries().map(code => ({
-    code,
-    name: metadata.countries[code]?.[0] || code, // Full name from metadata, fallback to code
-  }));
+  const countriesData = countryList.getData(); // [{code: 'TZ', name: 'Tanzania'}, ...]
+  const validCountryCodes = getCountries(); // ['TZ', 'US', ...]
+  const countries = countriesData
+    .filter(c => validCountryCodes.includes(c.code)) // Ensure only valid phone country codes
+    .map(c => ({ code: c.code, name: c.name }));
   const filteredCountries = countries.filter(c => 
     c.name.toLowerCase().includes(search.toLowerCase()) || 
     c.code.toLowerCase().includes(search.toLowerCase())
