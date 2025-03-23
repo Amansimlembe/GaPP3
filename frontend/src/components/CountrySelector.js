@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import { motion, AnimatePresence } from 'framer-motion';
-import { getCountries } from 'libphonenumber-js';
+import { motion } from 'framer-motion';
+import { getCountries, getCountryCallingCode, getMetadata } from 'libphonenumber-js';
 
 const CountrySelector = ({ token, userId, onComplete }) => {
   const [selectedCountry, setSelectedCountry] = useState('');
@@ -52,8 +52,15 @@ const CountrySelector = ({ token, userId, onComplete }) => {
     }
   };
 
-  const countries = getCountries();
-  const filteredCountries = countries.filter(c => c.toLowerCase().includes(search.toLowerCase()));
+  const metadata = getMetadata();
+  const countries = getCountries().map(code => ({
+    code,
+    name: metadata.countries[code]?.[0] || code, // Full name from metadata, fallback to code
+  }));
+  const filteredCountries = countries.filter(c => 
+    c.name.toLowerCase().includes(search.toLowerCase()) || 
+    c.code.toLowerCase().includes(search.toLowerCase())
+  );
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
@@ -74,7 +81,7 @@ const CountrySelector = ({ token, userId, onComplete }) => {
           size="5"
         >
           {filteredCountries.map(c => (
-            <option key={c} value={c}>{c}</option>
+            <option key={c.code} value={c.code}>{c.name}</option>
           ))}
         </select>
         <button onClick={saveCountry} className="w-full bg-primary text-white p-2 rounded-lg hover:bg-secondary dark:bg-gray-700">Save</button>
@@ -83,4 +90,4 @@ const CountrySelector = ({ token, userId, onComplete }) => {
   );
 };
 
-export default CountrySelector;              
+export default CountrySelector;

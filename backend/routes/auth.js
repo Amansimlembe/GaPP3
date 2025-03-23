@@ -6,20 +6,27 @@ const User = require('../models/User');
 const cloudinary = require('cloudinary').v2;
 const multer = require('multer');
 const authMiddleware = require('../middleware/auth');
-const { getCountries, generateNumber } = require('libphonenumber-js');
+const { getCountries, generateNumber, getCountryCallingCode, getMetadata } = require('libphonenumber-js');
 
 const upload = multer({ storage: multer.memoryStorage() });
 
 // Helper function to generate a virtual phone number
 const generateVirtualNumber = (countryCode) => {
-  const countryData = getCountries().find(c => c === countryCode);
-  if (!countryData) throw new Error('Invalid country code');
-  
-  // Generate a random number based on typical length for the country
-  const exampleNumber = generateNumber(countryCode);
-  const numberLength = exampleNumber.replace(/[^0-9]/g, '').length - countryCode.length;
-  const randomNum = Math.floor(Math.random() * Math.pow(10, numberLength)).toString().padStart(numberLength, '0');
-  return `+${countryCode}${randomNum}`;
+  try {
+    const countryCallingCode = getCountryCallingCode(countryCode);
+    const metadata = getMetadata();
+    const countryData = metadata.countries[countryCode];
+    if (!countryData) throw new Error(`Invalid country code: ${countryCode}`);
+    
+    // Get typical number length from metadata (excluding country code)
+    const exampleNumber = generateNumber(countryCode);
+    const numberLength = exampleNumber.replace(/[^0-9]/g, '').length - countryCallingCode.length;
+    const randomNum = Math.floor(Math.random() * Math.pow(10, numberLength)).toString().padStart(numberLength, '0');
+    return `+${countryCallingCode}${randomNum}`;
+  } catch (error) {
+    console.error('generateVirtualNumber error:', error.message);
+    throw error;
+  }
 };
 
 router.post('/register', upload.single('photo'), async (req, res) => {
@@ -112,18 +119,29 @@ router.get('/user/:userId', authMiddleware, async (req, res) => {
 router.post('/update_country', authMiddleware, async (req, res) => {
   try {
     const { userId, country } = req.body;
-    if (!country || !getCountries().includes(country)) return res.status(400).json({ error: 'Invalid country code' });
+    console.log('Request body:', { userId, country }); // Debug log
+    
+    if (!country || !getCountries().includes(country)) {
+      console.error('Invalid country code:', country);
+      return res.status(400).json({ error: 'Invalid country code' });
+    }
+    
     const user = await User.findById(userId);
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (!user) {
+      console.error('User not found:', userId);
+      return res.status(404).json({ error: 'User not found' });
+    }
     
     user.country = country;
     if (!user.virtualNumber) {
       user.virtualNumber = generateVirtualNumber(country);
     }
     await user.save();
+    console.log('User updated:', { userId, country, virtualNumber: user.virtualNumber });
+    
     res.json({ virtualNumber: user.virtualNumber, country: user.country });
   } catch (error) {
-    console.error('Update country error:', error);
+    console.error('Update country error:', error.message, error.stack);
     res.status(500).json({ error: 'Failed to update country', details: error.message });
   }
 });
