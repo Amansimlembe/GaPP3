@@ -25,7 +25,7 @@ const cacheMiddleware = (duration) => (req, res, next) => {
 
 router.get('/feed', cacheMiddleware(60), async (req, res) => {
   try {
-    const posts = await Post.find().sort({ createdAt: -1 });
+    const posts = await Post.find().sort({ createdAt: -1 }).populate('userId', 'username photo');
     res.json(posts);
   } catch (error) {
     console.error('Feed fetch error:', error);
@@ -35,7 +35,7 @@ router.get('/feed', cacheMiddleware(60), async (req, res) => {
 
 router.get('/my-posts/:userId', authMiddleware, cacheMiddleware(60), async (req, res) => {
   try {
-    const posts = await Post.find({ userId: req.params.userId }).sort({ createdAt: -1 });
+    const posts = await Post.find({ userId: req.params.userId }).sort({ createdAt: -1 }).populate('userId', 'username photo');
     res.json(posts);
   } catch (error) {
     console.error('My posts fetch error:', error);
@@ -48,22 +48,17 @@ router.post('/post', authMiddleware, upload.single('content'), async (req, res) 
     const { userId } = req.user;
     const { contentType, caption } = req.body;
     if (!contentType) return res.status(400).json({ error: 'Content type is required' });
-
     let contentUrl = caption || '';
     if (req.file) {
       const resourceType = ['image', 'video', 'audio', 'raw'].includes(contentType) ? contentType : 'raw';
       const result = await new Promise((resolve, reject) => {
         cloudinary.uploader.upload_stream(
           { resource_type: resourceType, public_id: `${contentType}_${userId}_${Date.now()}`, folder: `gapp_${contentType}s` },
-          (error, result) => {
-            if (error) reject(error);
-            else resolve(result);
-          }
+          (error, result) => error ? reject(error) : resolve(result)
         ).end(req.file.buffer);
       });
       contentUrl = result.secure_url;
     }
-
     const user = await User.findById(userId);
     const post = new Post({
       userId,
@@ -77,7 +72,7 @@ router.post('/post', authMiddleware, upload.single('content'), async (req, res) 
     await post.save();
     res.json(post);
   } catch (error) {
-    console.error('Post error:', { message: error.message, stack: error.stack, body: req.body, file: !!req.file });
+    console.error('Post error:', error);
     res.status(500).json({ error: 'Failed to post', details: error.message });
   }
 });

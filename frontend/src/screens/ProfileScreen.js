@@ -10,6 +10,7 @@ const ProfileScreen = ({ token, userId, setAuth }) => {
   const [cvFile, setCvFile] = useState(null);
   const [photoFile, setPhotoFile] = useState(null);
   const [username, setUsername] = useState(localStorage.getItem('username') || '');
+  const [virtualNumber, setVirtualNumber] = useState(localStorage.getItem('virtualNumber') || '');
   const [editUsername, setEditUsername] = useState(false);
   const [error, setError] = useState('');
   const [photoUrl, setPhotoUrl] = useState(localStorage.getItem('photo') || '');
@@ -22,11 +23,11 @@ const ProfileScreen = ({ token, userId, setAuth }) => {
   useEffect(() => {
     const fetchUser = async () => {
       try {
-        const { data } = await axios.get(`/auth/user/${userId}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
+        const { data } = await axios.get(`/auth/user/${userId}`, { headers: { Authorization: `Bearer ${token}` } });
         setUsername(data.username || '');
+        setVirtualNumber(data.virtualNumber || '');
         localStorage.setItem('username', data.username || '');
+        localStorage.setItem('virtualNumber', data.virtualNumber || '');
         setPhotoUrl(data.photo || '');
         localStorage.setItem('photo', data.photo || '');
       } catch (error) {
@@ -37,9 +38,7 @@ const ProfileScreen = ({ token, userId, setAuth }) => {
 
     const fetchMyPosts = async () => {
       try {
-        const { data } = await axios.get(`/social/my-posts/${userId}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
+        const { data } = await axios.get(`/social/my-posts/${userId}`, { headers: { Authorization: `Bearer ${token}` } });
         setMyPosts(data);
       } catch (error) {
         console.error('Fetch my posts error:', error);
@@ -130,7 +129,7 @@ const ProfileScreen = ({ token, userId, setAuth }) => {
           <FaSignOutAlt onClick={logout} className="text-2xl text-primary dark:text-gray-300 cursor-pointer hover:text-secondary" />
         </div>
       </div>
-      <p className="text-gray-700 dark:text-gray-300 mb-4">Your User ID: <span className="font-semibold">{userId}</span></p>
+      <p className="text-gray-700 dark:text-gray-300 mb-4">Your Virtual Number: <span className="font-semibold">{virtualNumber}</span></p>
       {photoUrl && <img src={photoUrl} alt="Profile" className="w-20 h-20 rounded-full mb-4 mx-auto" />}
       {error && <p className="text-red-500 mb-4">{error}</p>}
       <div className="mb-4 flex items-center">
@@ -174,11 +173,7 @@ const ProfileScreen = ({ token, userId, setAuth }) => {
                   className="absolute top-1 right-1 text-white dark:text-gray-300 cursor-pointer hover:text-primary"
                 />
                 {selectedPost === post._id && (
-                  <motion.div
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    className="absolute top-6 right-1 bg-white dark:bg-gray-800 p-2 rounded shadow-lg"
-                  >
+                  <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="absolute top-6 right-1 bg-white dark:bg-gray-800 p-2 rounded shadow-lg">
                     <button onClick={() => setShowDeleteConfirm(post._id)} className="flex items-center text-red-500 hover:text-red-700 dark:text-red-400">
                       <FaTrash className="mr-1" /> Delete
                     </button>
@@ -190,11 +185,7 @@ const ProfileScreen = ({ token, userId, setAuth }) => {
         </div>
       )}
       {showDeleteConfirm && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
-        >
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
           <div className="bg-white dark:bg-gray-800 p-4 rounded-lg shadow-lg">
             <p className="mb-4 text-black dark:text-gray-300">Are you sure you want to delete this post?</p>
             <div className="flex justify-end space-x-2">

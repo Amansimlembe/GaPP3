@@ -5,7 +5,7 @@ import { FaPlus, FaPaperPlane, FaHeart, FaComment, FaShare, FaArrowLeft } from '
 import io from 'socket.io-client';
 
 const socket = io('https://gapp-6yc3.onrender.com');
-const cache = new Map(); // Local storage cache for media
+const cache = new Map();
 
 const FeedScreen = ({ token, userId }) => {
   const [posts, setPosts] = useState([]);
@@ -29,14 +29,9 @@ const FeedScreen = ({ token, userId }) => {
           headers: { Authorization: `Bearer ${token}` },
         });
         const randomizedPosts = data.filter(post => !post.isStory).sort(() => Math.random() - 0.5);
-        setPosts(randomizedPosts.map(post => ({
-          ...post,
-          username: post.username || localStorage.getItem('username') || 'Unknown',
-        })));
+        setPosts(randomizedPosts);
         randomizedPosts.forEach(post => {
-          if (post.contentType === 'image' || post.contentType === 'video') {
-            cache.set(post.content, post.content); // Cache media URLs
-          }
+          if (post.contentType === 'image' || post.contentType === 'video') cache.set(post.content, post.content);
         });
         setError('');
       } catch (error) {
@@ -46,11 +41,9 @@ const FeedScreen = ({ token, userId }) => {
     };
     fetchFeed();
 
-    
     socket.on('newPost', (post) => setPosts((prev) => [post, ...prev.filter(p => p._id !== post._id)]));
     socket.on('postUpdate', (updatedPost) => setPosts((prev) => prev.map(p => p._id === updatedPost._id ? updatedPost : p)));
     socket.on('postDeleted', (postId) => setPosts((prev) => prev.filter(p => p._id !== postId)));
-
 
     const observer = new IntersectionObserver(
       (entries) => {
@@ -59,7 +52,7 @@ const FeedScreen = ({ token, userId }) => {
           const postId = media.dataset.postId;
           if (entry.isIntersecting) {
             setPlayingPostId(postId);
-            media.play();
+            media.play().catch(() => {});
           } else if (playingPostId === postId) {
             media.pause();
             setPlayingPostId(null);
@@ -90,10 +83,7 @@ const FeedScreen = ({ token, userId }) => {
       setUploadProgress(0);
       const { data } = await axios.post('/social/post', formData, {
         headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
-        onUploadProgress: (progressEvent) => {
-          const percent = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-          setUploadProgress(percent);
-        },
+        onUploadProgress: (progressEvent) => setUploadProgress(Math.round((progressEvent.loaded * 100) / progressEvent.total)),
       });
       socket.emit('newPost', data);
       setPosts((prev) => [data, ...prev]);
@@ -101,7 +91,6 @@ const FeedScreen = ({ token, userId }) => {
       setFile(null);
       setShowPostModal(false);
       setUploadProgress(null);
-      alert('Post uploaded successfully!');
       setError('');
     } catch (error) {
       console.error('Post error:', error);
@@ -142,23 +131,7 @@ const FeedScreen = ({ token, userId }) => {
     }
   };
 
-  const togglePlay = (postId) => {
-    const media = mediaRefs.current[postId];
-    if (media) {
-      if (playingPostId === postId) {
-        media.pause();
-        setPlayingPostId(null);
-      } else {
-        Object.values(mediaRefs.current).forEach(m => m !== media && m.pause());
-        media.play();
-        setPlayingPostId(postId);
-      }
-    }
-  };
-
-  const handleTripleClick = (post) => {
-    setFullScreenPost(fullScreenPost?._id === post._id ? null : post);
-  };
+  const handleTripleClick = (post) => setFullScreenPost(fullScreenPost?._id === post._id ? null : post);
 
   const timeAgo = (date) => {
     const now = new Date();
@@ -180,12 +153,7 @@ const FeedScreen = ({ token, userId }) => {
   };
 
   return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      transition={{ duration: 0.5 }}
-      className="h-screen overflow-y-auto snap-y snap-mandatory bg-black dark:bg-gray-900"
-    >
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5 }} className="h-screen overflow-y-auto snap-y snap-mandatory bg-black dark:bg-gray-900">
       <div className="fixed bottom-20 right-4 z-20 flex flex-col space-y-6 items-center">
         <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }} className="flex flex-col items-center">
           <FaHeart
@@ -202,22 +170,12 @@ const FeedScreen = ({ token, userId }) => {
           <FaShare onClick={() => sharePost(posts.find(p => p._id === playingPostId)?._id)} className="text-3xl cursor-pointer text-white dark:text-gray-300 hover:text-primary" />
           <span className="text-white dark:text-gray-300 text-sm">Share</span>
         </motion.div>
-        <motion.button
-          whileHover={{ scale: 1.1, rotate: 90 }}
-          whileTap={{ scale: 0.9 }}
-          onClick={() => setShowPostModal(true)}
-          className="bg-transparent text-white dark:text-gray-300 p-2 rounded-full"
-        >
+        <motion.button whileHover={{ scale: 1.1, rotate: 90 }} whileTap={{ scale: 0.9 }} onClick={() => setShowPostModal(true)} className="bg-transparent text-white dark:text-gray-300 p-2 rounded-full">
           <FaPlus className="text-3xl" />
         </motion.button>
       </div>
       {showPostModal && (
-        <motion.div
-          initial={{ opacity: 0, y: 50 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: 50 }}
-          className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-30"
-        >
+        <motion.div initial={{ opacity: 0, y: 50 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 50 }} className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-30">
           <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg w-full max-w-md relative">
             {uploadProgress !== null && (
               <div className="absolute inset-0 flex items-center justify-center bg-gray-200 bg-opacity-75">
@@ -289,7 +247,7 @@ const FeedScreen = ({ token, userId }) => {
             </div>
             {post.contentType === 'text' && <p className="text-lg">{post.content}</p>}
             {post.contentType === 'image' && (
-              <img src={cache.get(post.content) || post.content} alt="Post" className="w-screen h-screen object-contain lazy-load" loading="lazy" />
+              <img src={cache.get(post.content) || post.content} alt="Post" className="w-screen h-screen object-contain lazy-load" loading="lazy" data-post-id={post._id} />
             )}
             {post.contentType === 'video' && (
               <video
@@ -297,10 +255,10 @@ const FeedScreen = ({ token, userId }) => {
                 data-post-id={post._id}
                 playsInline
                 loop
+                muted
                 src={cache.get(post.content) || post.content}
                 className="w-screen h-screen object-contain lazy-load"
                 loading="lazy"
-                onClick={() => togglePlay(post._id)}
               />
             )}
             {post.contentType === 'audio' && (
@@ -310,7 +268,6 @@ const FeedScreen = ({ token, userId }) => {
                 controls
                 src={post.content}
                 className="w-full"
-                onClick={() => togglePlay(post._id)}
               />
             )}
             {post.contentType === 'raw' && <a href={post.content} target="_blank" rel="noopener noreferrer" className="text-blue-500">Download</a>}
@@ -340,7 +297,7 @@ const FeedScreen = ({ token, userId }) => {
                 {post.comments?.map((c, i) => (
                   <div key={i} className="flex items-center mb-2">
                     <img src={c.photo || 'https://via.placeholder.com/30'} alt="Profile" className="w-8 h-8 rounded-full mr-2" />
-                    <p className="text-sm text-black dark:text-gray-300"><span className="font-semibold">{c.username || c.userId}</span> {c.comment}</p>
+                    <p className="text-sm text-black dark:text-gray-300"><span className="font-semibold">{c.username}</span> {c.comment}</p>
                   </div>
                 ))}
                 <div className="flex items-center mt-2">

@@ -1,8 +1,8 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import io from 'socket.io-client';
 import axios from 'axios';
 import { motion } from 'framer-motion';
-import { FaPaperPlane, FaPaperclip, FaTrash, FaArrowLeft, FaReply } from 'react-icons/fa';
+import { FaPaperPlane, FaPaperclip, FaTrash, FaArrowLeft, FaReply, FaEllipsisH, FaSave } from 'react-icons/fa';
 
 const socket = io('https://gapp-6yc3.onrender.com');
 
@@ -22,8 +22,9 @@ const ChatScreen = ({ token, userId }) => {
   const [typing, setTyping] = useState(false);
   const [isTyping, setIsTyping] = useState({});
   const [replyTo, setReplyTo] = useState(null);
+  const [showMenu, setShowMenu] = useState(false);
+  const [newContact, setNewContact] = useState('');
   const chatRef = useRef(null);
-  const observerRef = useRef(null);
 
   useEffect(() => {
     if (!userId) return;
@@ -31,13 +32,8 @@ const ChatScreen = ({ token, userId }) => {
 
     const fetchUsers = async () => {
       try {
-        const { data } = await axios.get('/social/feed', { headers: { Authorization: `Bearer ${token}` } });
-        const uniqueUsers = [...new Set(data.map(post => ({
-          id: post.userId,
-          username: post.username || localStorage.getItem('username') || 'Unknown',
-          photo: post.photo || 'https://via.placeholder.com/40',
-        })))].filter(u => u.id !== userId);
-        setUsers(uniqueUsers);
+        const { data } = await axios.get('/auth/contacts', { headers: { Authorization: `Bearer ${token}` } });
+        setUsers(data);
       } catch (error) {
         console.error('Failed to fetch users:', error);
       }
@@ -48,7 +44,7 @@ const ChatScreen = ({ token, userId }) => {
       try {
         const { data } = await axios.get('/social/messages', {
           headers: { Authorization: `Bearer ${token}` },
-          params: { userId, recipientId: selectedUser, limit: 20 },
+          params: { userId, recipientId: selectedUser },
         });
         setMessages(data.map(msg => ({ ...msg, status: msg.status || 'sent' })));
         chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
@@ -69,6 +65,9 @@ const ChatScreen = ({ token, userId }) => {
         });
       } else if (msg.recipientId === userId) {
         setNotifications((prev) => ({ ...prev, [msg.senderId]: (prev[msg.senderId] || 0) + 1 }));
+        if (!users.some(u => u.id === msg.senderId)) {
+          setUsers((prev) => [...prev, { id: msg.senderId, virtualNumber: msg.senderVirtualNumber, username: msg.senderUsername, photo: msg.senderPhoto }]);
+        }
       }
     });
 
@@ -92,32 +91,6 @@ const ChatScreen = ({ token, userId }) => {
     };
   }, [token, userId, selectedUser]);
 
-  const loadMoreMessages = useCallback(async () => {
-    if (!selectedUser || messages.length < 20) return;
-    try {
-      const { data } = await axios.get('/social/messages', {
-        headers: { Authorization: `Bearer ${token}` },
-        params: { userId, recipientId: selectedUser, limit: 20, skip: messages.length },
-      });
-      setMessages((prev) => [...data.reverse(), ...prev]);
-    } catch (error) {
-      console.error('Failed to load more messages:', error);
-    }
-  }, [token, userId, selectedUser, messages.length]);
-
-  useEffect(() => {
-    if (!chatRef.current || !selectedUser) return;
-    observerRef.current = new IntersectionObserver(
-      (entries) => {
-        if (entries[0].isIntersecting) loadMoreMessages();
-      },
-      { root: chatRef.current, threshold: 0.1 }
-    );
-    const firstMessage = chatRef.current.querySelector('.message:first-child');
-    if (firstMessage) observerRef.current.observe(firstMessage);
-    return () => observerRef.current?.disconnect();
-  }, [loadMoreMessages, selectedUser]);
-
   const sendMessage = async () => {
     if (!selectedUser || (!message && !file && contentType === 'text')) return;
     socket.emit('stopTyping', { userId, recipientId: selectedUser });
@@ -133,16 +106,7 @@ const ChatScreen = ({ token, userId }) => {
     if (replyTo) formData.append('replyTo', replyTo._id);
 
     const tempId = Date.now();
-    const tempMsg = {
-      _id: tempId,
-      senderId: userId,
-      recipientId: selectedUser,
-      contentType,
-      content: file ? URL.createObjectURL(file) : message,
-      caption,
-      status: 'sent',
-      replyTo,
-    };
+    const tempMsg = { _id: tempId, senderId: userId, recipientId: selectedUser, contentType, content: file ? URL.createObjectURL(file) : message, caption, status: 'sent', replyTo };
     setMessages((prev) => [...prev, tempMsg]);
     chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
 
@@ -154,7 +118,7 @@ const ChatScreen = ({ token, userId }) => {
           if (file) setUploadProgress(Math.round((progressEvent.loaded * 100) / progressEvent.total));
         },
       });
-      socket.emit('message', { ...data, status: 'sent' });
+      socket.emit('message', { ...data, senderVirtualNumber: localStorage.getItem('virtualNumber'), senderUsername: localStorage.getItem('username'), senderPhoto: localStorage.getItem('photo') });
       setMessages((prev) => prev.map(msg => msg._id === tempId ? { ...data, status: 'sent' } : msg));
       setMessage('');
       setFile(null);
@@ -199,10 +163,27 @@ const ChatScreen = ({ token, userId }) => {
     setViewMedia(msg.content);
   };
 
+  const addContact = async () => {
+    try {
+      const { data } = await axios.post('/auth/add_contact', { userId, virtualNumber: newContact }, { headers: { Authorization: `Bearer ${token}` } });
+      if (data.userId) {
+        setUsers((prev) => [...prev, { id: data.userId, virtualNumber: newContact, username: data.username, photo: data.photo }]);
+        setNewContact('');
+        setShowMenu(false);
+      } else {
+        setError('Number not registered');
+      }
+    } catch (error) {
+      console.error('Add contact error:', error);
+      setError(error.response?.data?.error || 'Number not available');
+    }
+  };
+
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5 }} className="flex flex-col h-screen bg-gray-100">
       {!selectedUser ? (
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex-1 overflow-y-auto relative">
+          <FaEllipsisH onClick={() => setShowMenu(true)} className="absolute top-4 right-4 text-2xl text-primary cursor-pointer hover:text-secondary" />
           {users.map((user) => (
             <motion.div
               key={user.id}
@@ -211,7 +192,10 @@ const ChatScreen = ({ token, userId }) => {
               className="flex items-center p-3 border-b border-gray-200 cursor-pointer"
             >
               <img src={user.photo} alt="Profile" className="w-12 h-12 rounded-full mr-3" />
-              <span className="font-semibold">{user.username}</span>
+              <div>
+                <span className="font-semibold">{user.virtualNumber}</span>
+                <span className="text-sm ml-2">{user.username}</span>
+              </div>
               {notifications[user.id] > 0 && (
                 <span className="ml-auto bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
                   {notifications[user.id]}
@@ -219,13 +203,31 @@ const ChatScreen = ({ token, userId }) => {
               )}
             </motion.div>
           ))}
+          {showMenu && (
+            <motion.div
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="absolute top-12 right-4 bg-white dark:bg-gray-800 p-4 rounded-lg shadow-lg"
+            >
+              <input
+                type="text"
+                value={newContact}
+                onChange={(e) => setNewContact(e.target.value)}
+                className="w-full p-2 mb-2 border rounded-lg dark:bg-gray-700 dark:text-white"
+                placeholder="Enter virtual number"
+              />
+              <button onClick={addContact} className="flex items-center text-primary hover:text-secondary">
+                <FaSave className="mr-1" /> Save
+              </button>
+            </motion.div>
+          )}
         </div>
       ) : (
         <div className="flex flex-col flex-1">
           <div className="bg-white p-3 flex items-center border-b border-gray-200">
             <FaArrowLeft onClick={() => setSelectedUser(null)} className="text-xl text-primary cursor-pointer mr-3 hover:text-secondary" />
             <img src={users.find(u => u.id === selectedUser)?.photo} alt="Profile" className="w-10 h-10 rounded-full mr-2" />
-            <span className="font-semibold">{users.find(u => u.id === selectedUser)?.username}</span>
+            <span className="font-semibold">{users.find(u => u.id === selectedUser)?.virtualNumber}</span>
           </div>
           <div ref={chatRef} className="flex-1 overflow-y-auto bg-gray-50">
             {messages.map((msg) => (
@@ -304,14 +306,8 @@ const ChatScreen = ({ token, userId }) => {
                 />
               </div>
             )}
-            <FaPaperclip
-              className="mx-2 text-xl text-primary cursor-pointer hover:text-secondary"
-              onClick={() => setShowPicker(!showPicker)}
-            />
-            <FaPaperPlane
-              className="text-xl text-primary cursor-pointer hover:text-secondary"
-              onClick={sendMessage}
-            />
+            <FaPaperclip className="mx-2 text-xl text-primary cursor-pointer hover:text-secondary" onClick={() => setShowPicker(!showPicker)} />
+            <FaPaperPlane className="text-xl text-primary cursor-pointer hover:text-secondary" onClick={sendMessage} />
             {showPicker && (
               <motion.div
                 initial={{ opacity: 0, scale: 0.8 }}
@@ -334,16 +330,8 @@ const ChatScreen = ({ token, userId }) => {
         </div>
       )}
       {viewMedia && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="fixed inset-0 bg-black flex items-center justify-center z-50"
-          onClick={() => setViewMedia(null)}
-        >
-          <FaArrowLeft
-            onClick={(e) => { e.stopPropagation(); setViewMedia(null); }}
-            className="absolute top-4 left-4 text-white text-2xl cursor-pointer hover:text-primary"
-          />
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="fixed inset-0 bg-black flex items-center justify-center z-50" onClick={() => setViewMedia(null)}>
+          <FaArrowLeft onClick={(e) => { e.stopPropagation(); setViewMedia(null); }} className="absolute top-4 left-4 text-white text-2xl cursor-pointer hover:text-primary" />
           {contentType === 'image' && <img src={viewMedia} alt="Full" className="max-w-full max-h-full object-contain cursor-grab" />}
           {contentType === 'video' && <video controls src={viewMedia} className="max-w-full max-h-full object-contain cursor-grab" />}
           {contentType === 'audio' && <audio controls src={viewMedia} className="w-full" />}

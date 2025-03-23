@@ -8,23 +8,26 @@ import EmployerScreen from './screens/EmployerScreen';
 import FeedScreen from './screens/FeedScreen';
 import ChatScreen from './screens/ChatScreen';
 import ProfileScreen from './screens/ProfileScreen';
+import CountrySelector from './components/CountrySelector';
 import io from 'socket.io-client';
 
 const socket = io('https://gapp-6yc3.onrender.com');
 
 const App = () => {
-  const [token, setToken] = useState(localStorage.getItem('token'));
-  const [userId, setUserId] = useState(localStorage.getItem('userId'));
-  const [role, setRole] = useState(localStorage.getItem('role'));
+  const [token, setToken] = useState(localStorage.getItem('token') || '');
+  const [userId, setUserId] = useState(localStorage.getItem('userId') || '');
+  const [role, setRole] = useState(localStorage.getItem('role') || '');
   const [photo, setPhoto] = useState(localStorage.getItem('photo') || '');
+  const [virtualNumber, setVirtualNumber] = useState(localStorage.getItem('virtualNumber') || '');
   const [chatNotifications, setChatNotifications] = useState(0);
   const [feedKey, setFeedKey] = useState(0);
 
   useEffect(() => {
-    localStorage.setItem('token', token || '');
-    localStorage.setItem('userId', userId || '');
-    localStorage.setItem('role', role || '');
-    localStorage.setItem('photo', photo || '');
+    localStorage.setItem('token', token);
+    localStorage.setItem('userId', userId);
+    localStorage.setItem('role', role);
+    localStorage.setItem('photo', photo);
+    localStorage.setItem('virtualNumber', virtualNumber);
 
     if (userId) {
       socket.emit('join', userId);
@@ -36,13 +39,14 @@ const App = () => {
     }
 
     return () => socket.off('message');
-  }, [token, userId, role, photo]);
+  }, [token, userId, role, photo, virtualNumber]);
 
-  const setAuth = (newToken, newUserId, newRole, newPhoto) => {
+  const setAuth = (newToken, newUserId, newRole, newPhoto, newVirtualNumber) => {
     setToken(newToken);
     setUserId(newUserId);
     setRole(newRole);
     setPhoto(newPhoto || '');
+    setVirtualNumber(newVirtualNumber || '');
   };
 
   if (!token || !userId) return <LoginScreen setAuth={setAuth} />;
@@ -50,6 +54,7 @@ const App = () => {
   return (
     <Router>
       <div className="min-h-screen flex flex-col">
+        {!virtualNumber && <CountrySelector token={token} userId={userId} onComplete={(vn) => setAuth(token, userId, role, photo, vn)} />}
         <div className="flex-1 container p-0 relative">
           <Switch>
             <Route path="/jobs" render={() => (parseInt(role) === 0 ? <JobSeekerScreen token={token} userId={userId} /> : <EmployerScreen token={token} userId={userId} />)} />
