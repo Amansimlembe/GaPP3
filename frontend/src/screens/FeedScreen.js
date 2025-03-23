@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
-import { motion } from 'framer-motion';
+import { motion, AnimatePresence } from 'framer-motion';
 import { FaPlus, FaPaperPlane, FaHeart, FaComment, FaShare, FaArrowLeft } from 'react-icons/fa';
 import io from 'socket.io-client';
 
