@@ -23,25 +23,29 @@ const App = () => {
   const [feedKey, setFeedKey] = useState(0);
 
   useEffect(() => {
+    console.log('Current token:', token); // Debug log
     localStorage.setItem('token', token);
     localStorage.setItem('userId', userId);
     localStorage.setItem('role', role);
     localStorage.setItem('photo', photo);
     localStorage.setItem('virtualNumber', virtualNumber);
 
-    if (userId) {
+    if (userId && token) {
       socket.emit('join', userId);
       socket.on('message', (msg) => {
         if (msg.recipientId === userId) {
           setChatNotifications((prev) => prev + 1);
         }
       });
+    } else {
+      console.error('Missing userId or token for socket join:', { userId, token });
     }
 
     return () => socket.off('message');
   }, [token, userId, role, photo, virtualNumber]);
 
   const setAuth = (newToken, newUserId, newRole, newPhoto, newVirtualNumber) => {
+    console.log('Setting auth:', { newToken, newUserId, newRole, newPhoto, newVirtualNumber });
     setToken(newToken);
     setUserId(newUserId);
     setRole(newRole);
@@ -49,7 +53,10 @@ const App = () => {
     setVirtualNumber(newVirtualNumber || '');
   };
 
-  if (!token || !userId) return <LoginScreen setAuth={setAuth} />;
+  if (!token || !userId) {
+    console.log('Redirecting to login due to missing token or userId');
+    return <LoginScreen setAuth={setAuth} />;
+  }
 
   return (
     <Router>

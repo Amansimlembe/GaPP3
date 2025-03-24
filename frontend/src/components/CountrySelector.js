@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { motion } from 'framer-motion';
 import { getCountries, getCountryCallingCode } from 'libphonenumber-js';
@@ -9,12 +9,15 @@ const CountrySelector = ({ token, userId, onComplete }) => {
   const [search, setSearch] = useState('');
   const [error, setError] = useState('');
   const [locationConfirmed, setLocationConfirmed] = useState(false);
+  const wrapperRef = useRef(null);
 
   useEffect(() => {
     const checkCountry = async () => {
       try {
+        console.log('Checking user country with token:', token); // Debug log
         const { data } = await axios.get(`/auth/user/${userId}`, { headers: { Authorization: `Bearer ${token}` } });
         if (data.virtualNumber) {
+          console.log('Virtual number found:', data.virtualNumber);
           onComplete(data.virtualNumber);
           return;
         }
@@ -23,16 +26,29 @@ const CountrySelector = ({ token, userId, onComplete }) => {
             const { latitude, longitude } = position.coords;
             const response = await axios.get(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=en`);
             const currentCountryCode = response.data.countryCode;
-            if (currentCountryCode === selectedCountry) setLocationConfirmed(true);
-            else setError('Selected country does not match your current location.');
+            if (currentCountryCode === selectedCountry) {
+              setLocationConfirmed(true);
+            } else {
+              setError('Selected country does not match your current location.');
+            }
           },
           () => setError('Unable to detect location. Please select your current country.')
         );
       } catch (error) {
         console.error('Check country error:', error);
+        setError('Failed to load user data');
       }
     };
     if (selectedCountry) checkCountry();
+
+    const handleClickOutside = (event) => {
+      if (wrapperRef.current && !wrapperRef.current.contains(event.target)) {
+        console.log('Clicked outside, dismissing CountrySelector');
+        onComplete(null);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [token, userId, selectedCountry, onComplete]);
 
   const saveCountry = async () => {
@@ -45,8 +61,9 @@ const CountrySelector = ({ token, userId, onComplete }) => {
       return;
     }
     try {
-      console.log('Sending request to update_country:', { userId, country: selectedCountry }); // Debug log
+      console.log('Sending request to update_country:', { userId, country: selectedCountry });
       const { data } = await axios.post('/auth/update_country', { userId, country: selectedCountry }, { headers: { Authorization: `Bearer ${token}` } });
+      console.log('Country saved, virtual number:', data.virtualNumber);
       onComplete(data.virtualNumber);
     } catch (error) {
       console.error('Save country error:', error);
@@ -54,10 +71,10 @@ const CountrySelector = ({ token, userId, onComplete }) => {
     }
   };
 
-  const countriesData = countryList.getData(); // [{code: 'TZ', name: 'Tanzania'}, ...]
-  const validCountryCodes = getCountries(); // ['TZ', 'US', ...]
+  const countriesData = countryList.getData();
+  const validCountryCodes = getCountries();
   const countries = countriesData
-    .filter(c => validCountryCodes.includes(c.code)) // Ensure only valid phone country codes
+    .filter(c => validCountryCodes.includes(c.code))
     .map(c => ({ code: c.code, name: c.name }));
   const filteredCountries = countries.filter(c => 
     c.name.toLowerCase().includes(search.toLowerCase()) || 
@@ -66,7 +83,7 @@ const CountrySelector = ({ token, userId, onComplete }) => {
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg w-full max-w-md">
+      <div ref={wrapperRef} className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg w-full max-w-md">
         <h2 className="text-xl font-bold text-primary dark:text-gray-300 mb-4">Select Your Country</h2>
         {error && <p className="text-red-500 mb-4">{error}</p>}
         <input
