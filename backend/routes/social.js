@@ -28,11 +28,7 @@ router.get('/feed', cacheMiddleware(60), async (req, res) => {
     const posts = await Post.find()
       .sort({ createdAt: -1 })
       .populate('userId', 'username photo');
-    res.json(posts.map(post => ({
-      ...post._doc,
-      username: post.userId?.username || 'Unknown',
-      photo: post.userId?.photo || '',
-    })));
+    res.json(posts);
   } catch (error) {
     console.error('Feed fetch error:', error);
     res.status(500).json({ error: 'Failed to fetch feed', details: error.message });
@@ -127,7 +123,7 @@ router.post('/message', authMiddleware, upload.single('content'), async (req, re
 router.get('/messages', authMiddleware, async (req, res) => {
   try {
     const { userId, recipientId } = req.query;
-    console.log('Fetching messages for:', { userId, recipientId });
+    console.log('Fetching messages for:', { userId, recipientId }); // Debug log
 
     if (!userId || !recipientId) {
       console.error('Missing userId or recipientId');
@@ -137,8 +133,8 @@ router.get('/messages', authMiddleware, async (req, res) => {
     const messages = await Message.find({
       $or: [
         { senderId: userId, recipientId },
-        { senderId: recipientId, recipientId: userId },
-      ],
+        { senderId: recipientId, recipientId: userId }
+      ]
     }).sort({ createdAt: 1 });
 
     console.log('Messages fetched:', messages.length);
