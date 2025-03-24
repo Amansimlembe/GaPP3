@@ -9,7 +9,7 @@ const socket = io('https://gapp-6yc3.onrender.com');
 const ProfileScreen = ({ token, userId, setAuth }) => {
   const [cvFile, setCvFile] = useState(null);
   const [photoFile, setPhotoFile] = useState(null);
-  const [username, setUsername] = useState(localStorage.getItem('username') || '');
+  const [username, setUsername] = useState('');
   const [virtualNumber, setVirtualNumber] = useState(localStorage.getItem('virtualNumber') || '');
   const [editUsername, setEditUsername] = useState(false);
   const [error, setError] = useState('');
@@ -24,14 +24,15 @@ const ProfileScreen = ({ token, userId, setAuth }) => {
     const fetchUser = async () => {
       try {
         const { data } = await axios.get(`/auth/user/${userId}`, { headers: { Authorization: `Bearer ${token}` } });
-        setUsername(data.username || '');
+        setUsername(data.username || 'Not Set');
         setVirtualNumber(data.virtualNumber || '');
+        setPhotoUrl(data.photo || '');
         localStorage.setItem('username', data.username || '');
         localStorage.setItem('virtualNumber', data.virtualNumber || '');
-        setPhotoUrl(data.photo || '');
         localStorage.setItem('photo', data.photo || '');
       } catch (error) {
         console.error('Fetch user error:', error);
+        setError('Failed to load user data');
       }
     };
     fetchUser();
@@ -42,6 +43,7 @@ const ProfileScreen = ({ token, userId, setAuth }) => {
         setMyPosts(data);
       } catch (error) {
         console.error('Fetch my posts error:', error);
+        setError('Failed to load posts');
       }
     };
     fetchMyPosts();
@@ -114,7 +116,7 @@ const ProfileScreen = ({ token, userId, setAuth }) => {
   };
 
   const logout = () => {
-    setAuth(null, null, null, '');
+    setAuth(null, null, null, '', '');
     localStorage.clear();
   };
 
@@ -143,7 +145,7 @@ const ProfileScreen = ({ token, userId, setAuth }) => {
             placeholder="Enter unique username"
           />
         ) : (
-          <span className="flex-1">{username || 'Not set'}</span>
+          <span className="flex-1">{username}</span>
         )}
         <FaEdit onClick={() => setEditUsername(!editUsername)} className="ml-2 text-xl text-primary dark:text-gray-300 cursor-pointer hover:text-secondary" />
         {editUsername && <button onClick={updateUsername} className="ml-2 bg-primary text-white p-1 rounded-lg dark:bg-gray-700">Save</button>}
@@ -199,4 +201,4 @@ const ProfileScreen = ({ token, userId, setAuth }) => {
   );
 };
 
-export default ProfileScreen;
+export default ProfileScreen;      

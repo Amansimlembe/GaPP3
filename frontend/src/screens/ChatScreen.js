@@ -24,6 +24,7 @@ const ChatScreen = ({ token, userId }) => {
   const [replyTo, setReplyTo] = useState(null);
   const [showMenu, setShowMenu] = useState(false);
   const [newContact, setNewContact] = useState('');
+  const [error, setError] = useState('');
   const chatRef = useRef(null);
 
   useEffect(() => {
@@ -36,6 +37,7 @@ const ChatScreen = ({ token, userId }) => {
         setUsers(data);
       } catch (error) {
         console.error('Failed to fetch users:', error);
+        setError('Failed to load contacts');
       }
     };
     fetchUsers();
@@ -51,6 +53,7 @@ const ChatScreen = ({ token, userId }) => {
         setNotifications((prev) => ({ ...prev, [selectedUser]: 0 }));
       } catch (error) {
         console.error('Failed to fetch messages:', error);
+        setError('Failed to load messages');
       }
     };
     if (selectedUser) fetchMessages();
@@ -92,7 +95,10 @@ const ChatScreen = ({ token, userId }) => {
   }, [token, userId, selectedUser]);
 
   const sendMessage = async () => {
-    if (!selectedUser || (!message && !file && contentType === 'text')) return;
+    if (!selectedUser || (!message && !file && contentType === 'text')) {
+      setError('Please enter a message or select a file');
+      return;
+    }
     socket.emit('stopTyping', { userId, recipientId: selectedUser });
     setTyping(false);
 
@@ -127,15 +133,18 @@ const ChatScreen = ({ token, userId }) => {
       setShowPicker(false);
       setUploadProgress(null);
       setReplyTo(null);
+      setError('');
       socket.emit('messageStatus', { messageId: data._id, status: 'delivered', recipientId: selectedUser });
     } catch (error) {
       console.error('Send message error:', error);
       setMessages((prev) => prev.filter(msg => msg._id !== tempId));
       setUploadProgress(null);
+      setError('Failed to send message');
     }
   };
 
-  const handleTyping = () => {
+  const handleTyping = (e) => {
+    setMessage(e.target.value);
     if (!typing) {
       socket.emit('typing', { userId, recipientId: selectedUser });
       setTyping(true);
@@ -153,6 +162,7 @@ const ChatScreen = ({ token, userId }) => {
       setSelectedMessage(null);
     } catch (error) {
       console.error('Delete message error:', error);
+      setError('Failed to delete message');
     }
   };
 
@@ -170,6 +180,7 @@ const ChatScreen = ({ token, userId }) => {
         setUsers((prev) => [...prev, { id: data.userId, virtualNumber: newContact, username: data.username, photo: data.photo }]);
         setNewContact('');
         setShowMenu(false);
+        setError('');
       } else {
         setError('Number not registered');
       }
@@ -181,6 +192,7 @@ const ChatScreen = ({ token, userId }) => {
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5 }} className="flex flex-col h-screen bg-gray-100">
+      {error && <p className="text-red-500 text-center py-2 z-10 fixed top-0 w-full">{error}</p>}
       {!selectedUser ? (
         <div className="flex-1 overflow-y-auto relative">
           <FaEllipsisH onClick={() => setShowMenu(true)} className="absolute top-4 right-4 text-2xl text-primary cursor-pointer hover:text-secondary" />
@@ -191,10 +203,10 @@ const ChatScreen = ({ token, userId }) => {
               onClick={() => setSelectedUser(user.id)}
               className="flex items-center p-3 border-b border-gray-200 cursor-pointer"
             >
-              <img src={user.photo} alt="Profile" className="w-12 h-12 rounded-full mr-3" />
+              <img src={user.photo || 'https://via.placeholder.com/40'} alt="Profile" className="w-12 h-12 rounded-full mr-3" />
               <div>
                 <span className="font-semibold">{user.virtualNumber}</span>
-                <span className="text-sm ml-2">{user.username}</span>
+                <span className="text-sm ml-2">{user.username || 'Unknown'}</span>
               </div>
               {notifications[user.id] > 0 && (
                 <span className="ml-auto bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
@@ -226,10 +238,10 @@ const ChatScreen = ({ token, userId }) => {
         <div className="flex flex-col flex-1">
           <div className="bg-white p-3 flex items-center border-b border-gray-200">
             <FaArrowLeft onClick={() => setSelectedUser(null)} className="text-xl text-primary cursor-pointer mr-3 hover:text-secondary" />
-            <img src={users.find(u => u.id === selectedUser)?.photo} alt="Profile" className="w-10 h-10 rounded-full mr-2" />
-            <span className="font-semibold">{users.find(u => u.id === selectedUser)?.virtualNumber}</span>
+            <img src={users.find(u => u.id === selectedUser)?.photo || 'https://via.placeholder.com/40'} alt="Profile" className="w-10 h-10 rounded-full mr-2" />
+            <span className="font-semibold">{users.find(u => u.id === selectedUser)?.virtualNumber || 'Unknown'}</span>
           </div>
-          <div ref={chatRef} className="flex-1 overflow-y-auto bg-gray-50">
+          <div ref={chatRef} className="flex-1 overflow-y-auto bg-gray-50 p-2">
             {messages.map((msg) => (
               <motion.div
                 key={msg._id}
@@ -247,8 +259,8 @@ const ChatScreen = ({ token, userId }) => {
                   onClick={() => setSelectedMessage(msg._id === selectedMessage ? null : msg._id)}
                 >
                   {msg.contentType === 'text' && <p>{msg.content}</p>}
-                  {msg.contentType === 'image' && <img src={msg.content} alt="Chat" className="max-w-full w-auto h-auto rounded cursor-pointer" onClick={(e) => e.stopPropagation() || viewMessage(msg)} />}
-                  {msg.contentType === 'video' && <video src={msg.content} controls className="max-w-full w-auto h-auto rounded cursor-pointer" onClick={(e) => e.stopPropagation() || viewMessage(msg)} />}
+                  {msg.contentType === 'image' && <img src={msg.content} alt="Chat" className="max-w-full w-auto h-auto rounded cursor-pointer" onClick={(e) => { e.stopPropagation(); viewMessage(msg); }} />}
+                  {msg.contentType === 'video' && <video src={msg.content} controls className="max-w-full w-auto h-auto rounded cursor-pointer" onClick={(e) => { e.stopPropagation(); viewMessage(msg); }} />}
                   {msg.contentType === 'audio' && <audio src={msg.content} controls className="w-full" />}
                   {msg.contentType === 'raw' && <a href={msg.content} target="_blank" rel="noopener noreferrer" className="text-blue-500">Download</a>}
                   {msg.caption && <p className="text-sm mt-1 italic max-w-full">{msg.caption}</p>}
@@ -285,7 +297,7 @@ const ChatScreen = ({ token, userId }) => {
             {contentType === 'text' ? (
               <input
                 value={message}
-                onChange={(e) => { setMessage(e.target.value); handleTyping(); }}
+                onChange={handleTyping}
                 className="flex-1 p-2 border rounded-full focus:ring-2 focus:ring-primary"
                 placeholder="Type a message"
               />

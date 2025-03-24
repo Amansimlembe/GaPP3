@@ -29,7 +29,10 @@ const FeedScreen = ({ token, userId }) => {
           headers: { Authorization: `Bearer ${token}` },
         });
         const randomizedPosts = data.filter(post => !post.isStory).sort(() => Math.random() - 0.5);
-        setPosts(randomizedPosts);
+        setPosts(randomizedPosts.map(post => ({
+          ...post,
+          username: post.username || 'Unknown', // Fallback if username is missing
+        })));
         randomizedPosts.forEach(post => {
           if (post.contentType === 'image' || post.contentType === 'video') cache.set(post.content, post.content);
         });
@@ -52,15 +55,22 @@ const FeedScreen = ({ token, userId }) => {
           const postId = media.dataset.postId;
           if (entry.isIntersecting) {
             setPlayingPostId(postId);
-            media.play().catch(() => {});
+            if (media.tagName === 'VIDEO') {
+              media.play().catch((err) => console.error('Play error:', err));
+            }
           } else if (playingPostId === postId) {
-            media.pause();
+            if (media.tagName === 'VIDEO') {
+              media.pause();
+            }
             setPlayingPostId(null);
           }
         });
       },
       { threshold: 0.8 }
     );
+
+    const mediaElements = document.querySelectorAll('[data-post-id]');
+    mediaElements.forEach((el) => observer.observe(el));
 
     return () => {
       observer.disconnect();
@@ -256,6 +266,7 @@ const FeedScreen = ({ token, userId }) => {
                 playsInline
                 loop
                 muted
+                autoPlay
                 src={cache.get(post.content) || post.content}
                 className="w-screen h-screen object-contain lazy-load"
                 loading="lazy"
@@ -324,7 +335,7 @@ const FeedScreen = ({ token, userId }) => {
         >
           <FaArrowLeft onClick={() => setFullScreenPost(null)} className="absolute top-4 left-4 text-white text-2xl cursor-pointer hover:text-primary" />
           {fullScreenPost.contentType === 'image' && <img src={fullScreenPost.content} alt="Full" className="max-w-full max-h-full object-contain" />}
-          {fullScreenPost.contentType === 'video' && <video controls src={fullScreenPost.content} className="max-w-full max-h-full object-contain" />}
+          {fullScreenPost.contentType === 'video' && <video controls autoPlay src={fullScreenPost.content} className="max-w-full max-h-full object-contain" />}
           {fullScreenPost.contentType === 'audio' && <audio controls src={fullScreenPost.content} className="w-full" />}
         </motion.div>
       )}

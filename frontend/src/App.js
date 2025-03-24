@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Route, Switch, Link, Redirect } from 'react-router-dom';
-import { motion, AnimatePresence } from 'framer-motion';
-import { FaHome, FaBriefcase, FaComments, FaUser } from 'react-icons/fa'; // Correct import
+import { motion } from 'framer-motion';
+import { FaHome, FaBriefcase, FaComments, FaUser } from 'react-icons/fa';
 import LoginScreen from './screens/LoginScreen';
 import JobSeekerScreen from './screens/JobSeekerScreen';
 import EmployerScreen from './screens/EmployerScreen';
