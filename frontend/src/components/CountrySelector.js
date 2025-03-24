@@ -1,14 +1,14 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { motion } from 'framer-motion';
-const countries = require('country-list')().getData();
+import { getCountries, getCountryCallingCode } from 'libphonenumber-js';
+const countryList = require('country-list');
 
 const CountrySelector = ({ token, userId, onComplete }) => {
   const [selectedCountry, setSelectedCountry] = useState('');
   const [search, setSearch] = useState('');
   const [error, setError] = useState('');
   const [locationConfirmed, setLocationConfirmed] = useState(false);
-  const wrapperRef = useRef(null);
 
   useEffect(() => {
     const checkCountry = async () => {
@@ -24,23 +24,15 @@ const CountrySelector = ({ token, userId, onComplete }) => {
             const response = await axios.get(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=en`);
             const currentCountryCode = response.data.countryCode;
             if (currentCountryCode === selectedCountry) setLocationConfirmed(true);
+            else setError('Selected country does not match your current location.');
           },
           () => setError('Unable to detect location. Please select your current country.')
         );
       } catch (error) {
         console.error('Check country error:', error);
-        setError('Failed to load user data');
       }
     };
-    checkCountry();
-
-    const handleClickOutside = (event) => {
-      if (wrapperRef.current && !wrapperRef.current.contains(event.target)) {
-        onComplete(null); // Dismiss without saving
-      }
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
+    if (selectedCountry) checkCountry();
   }, [token, userId, selectedCountry, onComplete]);
 
   const saveCountry = async () => {
@@ -49,10 +41,11 @@ const CountrySelector = ({ token, userId, onComplete }) => {
       return;
     }
     if (!locationConfirmed) {
-      setError('Selected country does not match your current location. Please select your current country.');
+      setError('Please confirm your location matches the selected country.');
       return;
     }
     try {
+      console.log('Sending request to update_country:', { userId, country: selectedCountry }); // Debug log
       const { data } = await axios.post('/auth/update_country', { userId, country: selectedCountry }, { headers: { Authorization: `Bearer ${token}` } });
       onComplete(data.virtualNumber);
     } catch (error) {
@@ -61,11 +54,19 @@ const CountrySelector = ({ token, userId, onComplete }) => {
     }
   };
 
-  const filteredCountries = countries.filter(c => c.name.toLowerCase().includes(search.toLowerCase()));
+  const countriesData = countryList.getData(); // [{code: 'TZ', name: 'Tanzania'}, ...]
+  const validCountryCodes = getCountries(); // ['TZ', 'US', ...]
+  const countries = countriesData
+    .filter(c => validCountryCodes.includes(c.code)) // Ensure only valid phone country codes
+    .map(c => ({ code: c.code, name: c.name }));
+  const filteredCountries = countries.filter(c => 
+    c.name.toLowerCase().includes(search.toLowerCase()) || 
+    c.code.toLowerCase().includes(search.toLowerCase())
+  );
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div ref={wrapperRef} className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg w-full max-w-md">
+      <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg w-full max-w-md">
         <h2 className="text-xl font-bold text-primary dark:text-gray-300 mb-4">Select Your Country</h2>
         {error && <p className="text-red-500 mb-4">{error}</p>}
         <input
