@@ -20,7 +20,6 @@ const io = new Server(server, {
   pingInterval: 25000,
 });
 
-// Make io globally available for routes
 global.io = io;
 
 // Cloudinary configuration
@@ -35,20 +34,21 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, '../frontend/build')));
 
+// Request logging middleware
+app.use((req, res, next) => {
+  console.log(`Incoming request: ${req.method} ${req.url}`);
+  next();
+});
+
 // MongoDB connection
 const connectDB = async () => {
   try {
-    await mongoose.connect(process.env.MONGO_URI, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-    });
+    await mongoose.connect(process.env.MONGO_URI);
     console.log('MongoDB Atlas connected');
 
-    // Create index for messages
     await Message.collection.createIndex({ senderId: 1, recipientId: 1, createdAt: -1 });
     console.log('Messages index created');
 
-    // Set up MongoDB Change Streams
     const messageChangeStream = Message.watch();
     messageChangeStream.on('change', (change) => {
       if (change.operationType === 'insert') {
@@ -118,11 +118,19 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal Server Error', details: err.message });
 });
 
-// Fallback for SPA
+// SPA fallback with logging
 app.get('*', (req, res) => {
+  console.log('Serving frontend index.html');
   res.sendFile(path.join(__dirname, '../frontend/build', 'index.html'));
 });
 
 // Start server
 const PORT = process.env.PORT || 8000;
-server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`Server running on port ${PORT}`);
+});
+
+// Server error logging
+server.on('error', (error) => {
+  console.error('Server startup error:', error);
+});
