@@ -172,21 +172,21 @@ router.post('/message/status', authMiddleware, async (req, res) => {
   }
 });
 
-router.post('/like', authMiddleware, async (req, res) => {
+router.post('/like', auth, async (req, res) => {
+  const { postId } = req.body;
+  const userId = req.user.id;
   try {
-    const { postId } = req.body;
-    const { userId } = req.user;
     const post = await Post.findById(postId);
     if (!post) return res.status(404).json({ error: 'Post not found' });
-    if (!post.likedBy) post.likedBy = [];
-    if (post.likedBy.includes(userId)) return res.status(400).json({ error: 'Already liked' });
-    post.likes = (post.likes || 0) + 1;
-    post.likedBy.push(userId);
-    await post.save();
+    if (!post.likedBy.includes(userId)) {
+      post.likedBy.push(userId);
+      post.likes += 1;
+      await post.save();
+    }
     res.json(post);
   } catch (error) {
     console.error('Like error:', error);
-    res.status(500).json({ error: 'Failed to like post', details: error.message });
+    res.status(500).json({ error: 'Server error' });
   }
 });
 

@@ -193,170 +193,188 @@ const ChatScreen = ({ token, userId }) => {
   };
 
   return (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5 }} className="flex flex-col h-screen bg-gray-100">
-      {error && <p className="text-red-500 text-center py-2 z-10 fixed top-0 w-full">{error}</p>}
-      {!selectedUser ? (
-        <div className="flex-1 overflow-y-auto relative">
-          <FaEllipsisH onClick={() => setShowMenu(true)} className="absolute top-4 right-4 text-2xl text-primary cursor-pointer hover:text-secondary" />
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5 }} className="flex h-screen bg-gray-100">
+      {/* Contact List */}
+      <div className="w-1/3 bg-white border-r border-gray-200 flex flex-col">
+        <div className="p-4 flex justify-between items-center border-b border-gray-200">
+          <h2 className="text-xl font-bold text-primary">Chats</h2>
+          <FaEllipsisH onClick={() => setShowMenu(true)} className="text-2xl text-primary cursor-pointer hover:text-secondary" />
+        </div>
+        <div className="flex-1 overflow-y-auto">
           {users.map((user) => (
             <motion.div
               key={user.id}
               whileHover={{ backgroundColor: '#f0f0f0' }}
               onClick={() => setSelectedUser(user.id)}
-              className="flex items-center p-3 border-b border-gray-200 cursor-pointer"
+              className={`flex items-center p-3 border-b border-gray-200 cursor-pointer ${selectedUser === user.id ? 'bg-gray-100' : ''}`}
             >
-              <img src={user.photo || 'https://via.placeholder.com/40'} alt="Profile" className="w-12 h-12 rounded-full mr-3" />
-              <div>
+              <img src={user.photo || 'https://placehold.co/40x40'} alt="Profile" className="w-12 h-12 rounded-full mr-3" />
+              <div className="flex-1">
                 <span className="font-semibold">{user.virtualNumber}</span>
-                <span className="text-sm ml-2">{user.username || 'Unknown'}</span>
+                <span className="text-sm ml-2 text-gray-600">{user.username || 'Unknown'}</span>
               </div>
               {notifications[user.id] > 0 && (
-                <span className="ml-auto bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
+                <span className="ml-auto bg-green-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
                   {notifications[user.id]}
                 </span>
               )}
             </motion.div>
           ))}
-          {showMenu && (
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="absolute top-12 right-4 bg-white dark:bg-gray-800 p-4 rounded-lg shadow-lg"
-            >
-              <input
-                type="text"
-                value={newContact}
-                onChange={(e) => setNewContact(e.target.value)}
-                className="w-full p-2 mb-2 border rounded-lg dark:bg-gray-700 dark:text-white"
-                placeholder="Enter virtual number"
-              />
-              <button onClick={addContact} className="flex items-center text-primary hover:text-secondary">
-                <FaSave className="mr-1" /> Save
-              </button>
-            </motion.div>
-          )}
         </div>
-      ) : (
-        <div className="flex flex-col flex-1">
-          <div className="bg-white p-3 flex items-center border-b border-gray-200">
-            <FaArrowLeft onClick={() => setSelectedUser(null)} className="text-xl text-primary cursor-pointer mr-3 hover:text-secondary" />
-            <img src={users.find(u => u.id === selectedUser)?.photo || 'https://via.placeholder.com/40'} alt="Profile" className="w-10 h-10 rounded-full mr-2" />
-            <span className="font-semibold">{users.find(u => u.id === selectedUser)?.virtualNumber || 'Unknown'}</span>
-          </div>
-          <div ref={chatRef} className="flex-1 overflow-y-auto bg-gray-50 p-2">
-            {messages.length === 0 ? (
-              <p className="text-center text-gray-500 mt-4">Start a new conversation</p>
-            ) : (
-              messages.map((msg) => (
-                <motion.div
-                  key={msg._id}
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className={`message p-2 ${msg.senderId === userId ? 'text-right' : 'text-left'}`}
-                >
-                  {msg.replyTo && (
-                    <div className="bg-gray-200 p-2 rounded mb-1 text-sm italic">
-                      <p>Replying to: {msg.replyTo.content.slice(0, 20)}...</p>
-                    </div>
-                  )}
-                  <div
-                    className={`inline-block p-2 rounded-lg ${msg.senderId === userId ? 'bg-primary text-white' : 'bg-white text-black'} shadow`}
-                    onClick={() => setSelectedMessage(msg._id === selectedMessage ? null : msg._id)}
+        {showMenu && (
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="absolute top-16 right-4 bg-white p-4 rounded-lg shadow-lg"
+          >
+            <input
+              type="text"
+              value={newContact}
+              onChange={(e) => setNewContact(e.target.value)}
+              className="w-full p-2 mb-2 border rounded-lg"
+              placeholder="Enter virtual number"
+            />
+            <button onClick={addContact} className="flex items-center text-primary hover:text-secondary">
+              <FaSave className="mr-1" /> Save
+            </button>
+          </motion.div>
+        )}
+      </div>
+
+      {/* Chat Area */}
+      <div className="flex-1 flex flex-col">
+        {selectedUser ? (
+          <>
+            <div className="bg-white p-3 flex items-center border-b border-gray-200">
+              <FaArrowLeft onClick={() => setSelectedUser(null)} className="text-xl text-primary cursor-pointer mr-3 hover:text-secondary md:hidden" />
+              <img src={users.find(u => u.id === selectedUser)?.photo || 'https://placehold.co/40x40'} alt="Profile" className="w-10 h-10 rounded-full mr-2" />
+              <div>
+                <span className="font-semibold">{users.find(u => u.id === selectedUser)?.virtualNumber || 'Unknown'}</span>
+                {isTyping[selectedUser] && <span className="text-sm text-green-500 ml-2">Typing...</span>}
+              </div>
+            </div>
+            <div ref={chatRef} className="flex-1 overflow-y-auto bg-gray-50 p-4">
+              {messages.length === 0 ? (
+                <p className="text-center text-gray-500 mt-4">Start a new conversation</p>
+              ) : (
+                messages.map((msg) => (
+                  <motion.div
+                    key={msg._id}
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className={`flex ${msg.senderId === userId ? 'justify-end' : 'justify-start'} mb-4`}
                   >
-                    {msg.contentType === 'text' && <p>{msg.content}</p>}
-                    {msg.contentType === 'image' && <img src={msg.content} alt="Chat" className="max-w-full w-auto h-auto rounded cursor-pointer" onClick={(e) => { e.stopPropagation(); viewMessage(msg); }} />}
-                    {msg.contentType === 'video' && <video src={msg.content} controls className="max-w-full w-auto h-auto rounded cursor-pointer" onClick={(e) => { e.stopPropagation(); viewMessage(msg); }} />}
-                    {msg.contentType === 'audio' && <audio src={msg.content} controls className="w-full" />}
-                    {msg.contentType === 'raw' && <a href={msg.content} target="_blank" rel="noopener noreferrer" className="text-blue-500">Download</a>}
-                    {msg.caption && <p className="text-sm mt-1 italic max-w-full">{msg.caption}</p>}
-                    {msg.senderId === userId && (
-                      <span className="text-xs flex justify-end">
-                        {msg.status === 'sent' && '✓'}
-                        {msg.status === 'delivered' && '✓✓'}
-                        {msg.status === 'read' && <span className="text-green-500">✅✅</span>}
-                      </span>
-                    )}
-                    {msg._id === uploadProgress?._id && uploadProgress !== null && (
-                      <div className="text-xs">Uploading: {uploadProgress}%</div>
-                    )}
-                  </div>
-                  {msg._id === selectedMessage && (
-                    <div className="flex justify-end mt-1">
-                      <FaReply onClick={() => setReplyTo(msg)} className="text-primary cursor-pointer hover:text-secondary mr-2" />
+                    <div
+                      className={`max-w-xs p-3 rounded-lg shadow ${msg.senderId === userId ? 'bg-green-500 text-white' : 'bg-white text-black'}`}
+                      onClick={() => setSelectedMessage(msg._id === selectedMessage ? null : msg._id)}
+                    >
+                      {msg.replyTo && (
+                        <div className="bg-gray-200 p-2 rounded mb-1 text-sm italic">
+                          <p>Replying to: {msg.replyTo.content.slice(0, 20)}...</p>
+                        </div>
+                      )}
+                      {msg.contentType === 'text' && <p>{msg.content}</p>}
+                      {msg.contentType === 'image' && <img src={msg.content} alt="Chat" className="max-w-full rounded cursor-pointer" onClick={(e) => { e.stopPropagation(); viewMessage(msg); }} />}
+                      {msg.contentType === 'video' && <video src={msg.content} controls className="max-w-full rounded cursor-pointer" onClick={(e) => { e.stopPropagation(); viewMessage(msg); }} />}
+                      {msg.contentType === 'audio' && <audio src={msg.content} controls className="w-full" />}
+                      {msg.contentType === 'raw' && <a href={msg.content} target="_blank" rel="noopener noreferrer" className="text-blue-500">Download</a>}
+                      {msg.caption && <p className="text-sm mt-1 italic">{msg.caption}</p>}
                       {msg.senderId === userId && (
-                        <FaTrash onClick={() => deleteMessage(msg._id)} className="text-red-500 cursor-pointer hover:text-red-700" />
+                        <span className="text-xs flex justify-end mt-1">
+                          {msg.status === 'sent' && '✓'}
+                          {msg.status === 'delivered' && '✓✓'}
+                          {msg.status === 'read' && <span className="text-blue-300">✓✓</span>}
+                        </span>
                       )}
                     </div>
-                  )}
+                    {msg._id === selectedMessage && (
+                      <div className="flex items-center mt-1">
+                        <FaReply onClick={() => setReplyTo(msg)} className="text-primary cursor-pointer hover:text-secondary mx-2" />
+                        {msg.senderId === userId && (
+                          <FaTrash onClick={() => deleteMessage(msg._id)} className="text-red-500 cursor-pointer hover:text-red-700" />
+                        )}
+                      </div>
+                    )}
+                  </motion.div>
+                ))
+              )}
+            </div>
+            <div className="bg-white p-4 border-t border-gray-200">
+              {replyTo && (
+                <div className="bg-gray-100 p-2 mb-2 rounded">
+                  <p className="text-sm italic">Replying to: {replyTo.content.slice(0, 20)}...</p>
+                  <button onClick={() => setReplyTo(null)} className="text-red-500 text-xs">Cancel</button>
+                </div>
+              )}
+              <div className="flex items-center">
+                <FaPaperclip className="text-xl text-primary cursor-pointer hover:text-secondary mr-2" onClick={() => setShowPicker(!showPicker)} />
+                {contentType === 'text' ? (
+                  <input
+                    value={message}
+                    onChange={handleTyping}
+                    onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
+                    className="flex-1 p-2 border rounded-full focus:ring-2 focus:ring-primary"
+                    placeholder="Type a message..."
+                  />
+                ) : (
+                  <div className="flex-1 flex flex-col">
+                    <input
+                      type="file"
+                      accept={contentType === 'image' ? 'image/*' : contentType === 'video' ? 'video/*' : contentType === 'audio' ? 'audio/*' : '*/*'}
+                      onChange={(e) => setFile(e.target.files[0])}
+                      className="mb-2"
+                    />
+                    <input
+                      type="text"
+                      value={caption}
+                      onChange={(e) => setCaption(e.target.value)}
+                      className="p-2 border rounded-lg focus:ring-2 focus:ring-primary"
+                      placeholder="Add a caption (optional)"
+                    />
+                  </div>
+                )}
+                <FaPaperPlane className="text-xl text-primary cursor-pointer hover:text-secondary ml-2" onClick={sendMessage} />
+              </div>
+              {showPicker && (
+                <motion.div
+                  initial={{ opacity: 0, scale: 0.8 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  className="absolute bottom-20 left-4 bg-white p-2 rounded-lg shadow-lg flex space-x-2"
+                >
+                  {['image', 'video', 'audio', 'raw'].map((type) => (
+                    <motion.button
+                      key={type}
+                      whileHover={{ scale: 1.1 }}
+                      onClick={() => { setContentType(type); setShowPicker(false); }}
+                      className="p-2 bg-primary text-white rounded hover:bg-secondary"
+                    >
+                      {type.charAt(0).toUpperCase() + type.slice(1)}
+                    </motion.button>
+                  ))}
                 </motion.div>
-              ))
-            )}
-            {isTyping[selectedUser] && <p className="text-sm text-gray-500 p-2">User is typing...</p>}
+              )}
+            </div>
+          </>
+        ) : (
+          <div className="flex-1 flex items-center justify-center">
+            <p className="text-gray-500">Select a chat to start messaging</p>
           </div>
-          <motion.div initial={{ y: 20 }} animate={{ y: 0 }} className="bg-white p-2 flex items-center">
-            {replyTo && (
-              <div className="bg-gray-100 p-2 mb-2 rounded w-full">
-                <p className="text-sm italic">Replying to: {replyTo.content.slice(0, 20)}...</p>
-                <button onClick={() => setReplyTo(null)} className="text-red-500 text-xs">Cancel</button>
-              </div>
-            )}
-            {contentType === 'text' ? (
-              <input
-                value={message}
-                onChange={handleTyping}
-                className="flex-1 p-2 border rounded-full focus:ring-2 focus:ring-primary"
-                placeholder="Type a message"
-              />
-            ) : (
-              <div className="flex-1 flex flex-col p-2 border rounded-lg">
-                <input
-                  type="file"
-                  accept={contentType === 'image' ? 'image/*' : contentType === 'video' ? 'video/*' : contentType === 'audio' ? 'audio/*' : '*/*'}
-                  onChange={(e) => setFile(e.target.files[0])}
-                  className="flex-1 mb-2"
-                />
-                <input
-                  type="text"
-                  value={caption}
-                  onChange={(e) => setCaption(e.target.value)}
-                  className="w-full p-2 border rounded-lg focus:ring-2 focus:ring-primary"
-                  placeholder="Add a caption (optional)"
-                />
-              </div>
-            )}
-            <FaPaperclip className="mx-2 text-xl text-primary cursor-pointer hover:text-secondary" onClick={() => setShowPicker(!showPicker)} />
-            <FaPaperPlane className="text-xl text-primary cursor-pointer hover:text-secondary" onClick={sendMessage} />
-            {showPicker && (
-              <motion.div
-                initial={{ opacity: 0, scale: 0.8 }}
-                animate={{ opacity: 1, scale: 1 }}
-                className="absolute bottom-16 left-2 bg-white p-2 rounded-lg shadow-lg flex space-x-2"
-              >
-                {['image', 'video', 'audio', 'raw'].map((type) => (
-                  <motion.button
-                    key={type}
-                    whileHover={{ scale: 1.1 }}
-                    onClick={() => { setContentType(type); setShowPicker(false); }}
-                    className="p-2 bg-primary text-white rounded hover:bg-secondary"
-                  >
-                    {type.charAt(0).toUpperCase() + type.slice(1)}
-                  </motion.button>
-                ))}
-              </motion.div>
-            )}
-          </motion.div>
-        </div>
-      )}
+        )}
+      </div>
+
+      {/* Media Viewer */}
       {viewMedia && (
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="fixed inset-0 bg-black flex items-center justify-center z-50" onClick={() => setViewMedia(null)}>
           <FaArrowLeft onClick={(e) => { e.stopPropagation(); setViewMedia(null); }} className="absolute top-4 left-4 text-white text-2xl cursor-pointer hover:text-primary" />
-          {contentType === 'image' && <img src={viewMedia} alt="Full" className="max-w-full max-h-full object-contain cursor-grab" />}
-          {contentType === 'video' && <video controls src={viewMedia} className="max-w-full max-h-full object-contain cursor-grab" />}
+          {contentType === 'image' && <img src={viewMedia} alt="Full" className="max-w-full max-h-full object-contain" />}
+          {contentType === 'video' && <video controls src={viewMedia} className="max-w-full max-h-full object-contain" />}
           {contentType === 'audio' && <audio controls src={viewMedia} className="w-full" />}
         </motion.div>
       )}
+
+      {error && <p className="text-red-500 text-center py-2 z-10 fixed top-0 w-full">{error}</p>}
     </motion.div>
   );
 };
 
-export default ChatScreen;    
+export default ChatScreen;

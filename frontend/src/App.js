@@ -20,9 +20,11 @@ const App = () => {
   const [virtualNumber, setVirtualNumber] = useState(localStorage.getItem('virtualNumber') || '');
   const [chatNotifications, setChatNotifications] = useState(0);
   const [feedKey, setFeedKey] = useState(0);
+  const [isAuthenticated, setIsAuthenticated] = useState(!!localStorage.getItem('token') && !!localStorage.getItem('userId'));
 
   useEffect(() => {
     console.log('Current token:', token);
+    console.log('Current userId:', userId);
     localStorage.setItem('token', token);
     localStorage.setItem('userId', userId);
     localStorage.setItem('role', role);
@@ -36,23 +38,32 @@ const App = () => {
           setChatNotifications((prev) => prev + 1);
         }
       });
+      setIsAuthenticated(true);
     } else {
       console.error('Missing userId or token for socket join:', { userId, token });
+      setIsAuthenticated(false);
     }
 
     return () => socket.off('message');
   }, [token, userId, role, photo, virtualNumber]);
 
+  
   const setAuth = (newToken, newUserId, newRole, newPhoto, newVirtualNumber) => {
     console.log('Setting auth:', { newToken, newUserId, newRole, newPhoto, newVirtualNumber });
-    setToken(newToken);
-    setUserId(newUserId);
-    setRole(newRole);
+    setToken(newToken || '');
+    setUserId(newUserId || '');
+    setRole(newRole || '');
     setPhoto(newPhoto || '');
     setVirtualNumber(newVirtualNumber || '');
+    localStorage.setItem('token', newToken || '');
+    localStorage.setItem('userId', newUserId || '');
+    localStorage.setItem('role', newRole || '');
+    localStorage.setItem('photo', newPhoto || '');
+    localStorage.setItem('virtualNumber', newVirtualNumber || '');
+    setIsAuthenticated(!!newToken && !!newUserId);
   };
 
-  if (!token || !userId) {
+  if (!isAuthenticated) {
     console.log('Redirecting to login due to missing token or userId');
     return <LoginScreen setAuth={setAuth} />;
   }
