@@ -6,48 +6,89 @@ const LoginScreen = ({ setAuth }) => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [role, setRole] = useState('0');
-  const [isRegistering, setIsRegistering] = useState(false);
+  const [name, setName] = useState('');
+  const [photo, setPhoto] = useState(null);
+  const [isLogin, setIsLogin] = useState(true);
   const [error, setError] = useState('');
 
-  const register = async () => {
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    const formData = new FormData();
+    formData.append('email', email);
+    formData.append('password', password);
+    if (!isLogin) {
+      formData.append('name', name);
+      formData.append('role', role);
+      if (photo) formData.append('photo', photo);
+    }
+
     try {
-      const { data } = await axios.post('/auth/register', { email, password, role });
-      setAuth(data.token, data.userId, data.role, data.photo);
+      const url = isLogin ? '/auth/login' : '/auth/register';
+      const { data } = await axios.post(url, isLogin ? { email, password } : formData, {
+        headers: !isLogin ? { 'Content-Type': 'multipart/form-data' } : {},
+      });
+      console.log('Auth response:', data);
+      setAuth(data.token, data.userId, data.role, data.photo, data.virtualNumber);
       setError('');
-    } catch (err) {
-      setError(err.response?.data?.error || 'Registration failed');
+    } catch (error) {
+      console.error('Auth error:', error);
+      setError(error.response?.data?.error || 'Authentication failed');
     }
   };
-
-  const login = async () => {
-    try {
-      const { data } = await axios.post('/auth/login', { email, password });
-      setAuth(data.token, data.userId, data.role, data.photo);
-      setError('');
-    } catch (err) {
-      setError(err.response?.data?.error || 'Login failed');
-    }
-  };
-
-  const handleSubmit = () => (isRegistering ? register() : login());
 
   return (
-    <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} transition={{ duration: 0.5 }} className="flex items-center justify-center min-h-screen bg-gray-100">
-      <div className="bg-white p-8 rounded-lg shadow-xl w-full max-w-md">
-        <h2 className="text-3xl font-bold text-primary mb-6 text-center">{isRegistering ? 'Register' : 'Login'}</h2>
-        {error && <p className="text-red-500 mb-4 text-center">{error}</p>}
-        <input placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} className="w-full p-3 mb-4 border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary" />
-        <input type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} className="w-full p-3 mb-4 border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary" />
-        {isRegistering && (
-          <select value={role} onChange={(e) => setRole(e.target.value)} className="w-full p-3 mb-4 border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary">
-            <option value="0">Job Seeker</option>
-            <option value="1">Employer</option>
-          </select>
-        )}
-        <button onClick={handleSubmit} className="w-full bg-primary text-white p-3 rounded-lg hover:bg-secondary transition duration-300">{isRegistering ? 'Register' : 'Login'}</button>
-        <button onClick={() => setIsRegistering(!isRegistering)} className="w-full mt-4 text-primary hover:text-secondary hover:underline transition duration-300">
-          {isRegistering ? 'Login instead' : 'Register instead'}
-        </button>
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="min-h-screen flex items-center justify-center bg-gray-100">
+      <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
+        <h2 className="text-2xl font-bold mb-4 text-primary">{isLogin ? 'Login' : 'Register'}</h2>
+        {error && <p className="text-red-500 mb-4">{error}</p>}
+        <form onSubmit={handleSubmit}>
+          {!isLogin && (
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="w-full p-2 mb-4 border rounded-lg"
+              placeholder="Name"
+            />
+          )}
+          <input
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            className="w-full p-2 mb-4 border rounded-lg"
+            placeholder="Email"
+          />
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            className="w-full p-2 mb-4 border rounded-lg"
+            placeholder="Password"
+          />
+          {!isLogin && (
+            <>
+              <select value={role} onChange={(e) => setRole(e.target.value)} className="w-full p-2 mb-4 border rounded-lg">
+                <option value="0">Job Seeker</option>
+                <option value="1">Employer</option>
+              </select>
+              <input
+                type="file"
+                accept="image/*"
+                onChange={(e) => setPhoto(e.target.files[0])}
+                className="w-full p-2 mb-4 border rounded-lg"
+              />
+            </>
+          )}
+          <button type="submit" className="w-full bg-primary text-white p-2 rounded-lg hover:bg-secondary">
+            {isLogin ? 'Login' : 'Register'}
+          </button>
+        </form>
+        <p className="mt-4 text-center">
+          {isLogin ? "Don't have an account?" : 'Already have an account?'}{' '}
+          <span onClick={() => setIsLogin(!isLogin)} className="text-primary cursor-pointer hover:underline">
+            {isLogin ? 'Register' : 'Login'}
+          </span>
+        </p>
       </div>
     </motion.div>
   );
