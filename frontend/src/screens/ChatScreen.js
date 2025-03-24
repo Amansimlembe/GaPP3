@@ -3,13 +3,17 @@ import io from 'socket.io-client';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import { FaPaperPlane, FaPaperclip, FaTrash, FaArrowLeft, FaReply, FaEllipsisH, FaSave } from 'react-icons/fa';
+import { useDispatch, useSelector } from 'react-redux';
+import { setMessages, addMessage, setSelectedChat } from '../store';
+import { saveMessages, getMessages } from '../db';
+import { List } from 'react-virtualized';
 
 const socket = io('https://gapp-6yc3.onrender.com');
 
 const ChatScreen = ({ token, userId }) => {
+  const dispatch = useDispatch();
+  const { chats, selectedChat } = useSelector((state) => state.messages);
   const [users, setUsers] = useState([]);
-  const [selectedUser, setSelectedUser] = useState(null);
-  const [messages, setMessages] = useState([]);
   const [message, setMessage] = useState('');
   const [file, setFile] = useState(null);
   const [caption, setCaption] = useState('');
@@ -26,6 +30,9 @@ const ChatScreen = ({ token, userId }) => {
   const [newContact, setNewContact] = useState('');
   const [error, setError] = useState('');
   const chatRef = useRef(null);
+  const menuRef = useRef(null);
+
+  const isSmallDevice = window.innerWidth < 768;
 
   useEffect(() => {
     if (!userId) return;
@@ -36,77 +43,96 @@ const ChatScreen = ({ token, userId }) => {
         const { data } = await axios.get('/auth/contacts', { headers: { Authorization: `Bearer ${token}` } });
         setUsers(data);
       } catch (error) {
-        console.error('Failed to fetch users:', error);
         setError('Failed to load contacts');
       }
     };
     fetchUsers();
 
+    const loadOfflineMessages = async () => {
+      const offlineMessages = await getMessages();
+      if (offlineMessages.length > 0 && !selectedChat) {
+        offlineMessages.forEach((msg) => {
+          dispatch(addMessage({ recipientId: msg.recipientId === userId ? msg.senderId : msg.recipientId, message: msg }));
+        });
+      }
+    };
+    loadOfflineMessages();
+
     const fetchMessages = async () => {
-      if (!selectedUser) return;
+      if (!selectedChat) return;
       try {
         const { data } = await axios.get('/social/messages', {
           headers: { Authorization: `Bearer ${token}` },
-          params: { userId, recipientId: selectedUser },
+          params: { userId, recipientId: selectedChat, limit: 20 },
         });
-        setMessages(data.map(msg => ({ ...msg, status: msg.status || 'sent' })));
+        dispatch(setMessages({ recipientId: selectedChat, messages: data.map((msg) => ({ ...msg, status: msg.status || 'sent' })) }));
         chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
-        setNotifications((prev) => ({ ...prev, [selectedUser]: 0 }));
+        setNotifications((prev) => ({ ...prev, [selectedChat]: 0 }));
       } catch (error) {
-        console.error('Failed to fetch messages:', error);
-        setMessages([]); // Start fresh if no previous messages
+        dispatch(setMessages({ recipientId: selectedChat, messages: [] }));
         setError('No previous messages');
       }
     };
     fetchMessages();
 
     socket.on('message', (msg) => {
-      if ((msg.senderId === userId && msg.recipientId === selectedUser) || (msg.senderId === selectedUser && msg.recipientId === userId)) {
-        setMessages((prev) => {
-          const exists = prev.some(m => m._id === msg._id);
-          const updated = exists ? prev.map(m => m._id === msg._id ? msg : m) : [...prev, msg];
-          chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
-          return updated;
-        });
+      saveMessages([msg]);
+      const senderKnown = users.some((u) => u.id === msg.senderId);
+      const updatedMsg = { ...msg, username: senderKnown ? msg.senderUsername : 'Unsaved Number' };
+      dispatch(addMessage({ recipientId: msg.recipientId === userId ? msg.senderId : msg.recipientId, message: updatedMsg }));
+      if (msg.recipientId === userId && !senderKnown) {
+        setUsers((prev) => [
+          ...prev,
+          { id: msg.senderId, virtualNumber: msg.senderVirtualNumber, username: 'Unsaved Number', photo: msg.senderPhoto || 'https://placehold.co/40x40' },
+        ]);
+      }
+      if ((msg.senderId === userId && msg.recipientId === selectedChat) || (msg.senderId === selectedChat && msg.recipientId === userId)) {
+        chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
       } else if (msg.recipientId === userId) {
         setNotifications((prev) => ({ ...prev, [msg.senderId]: (prev[msg.senderId] || 0) + 1 }));
-        if (!users.some(u => u.id === msg.senderId)) {
-          setUsers((prev) => [...prev, { id: msg.senderId, virtualNumber: msg.senderVirtualNumber, username: msg.senderUsername, photo: msg.senderPhoto }]);
-        }
       }
     });
 
     socket.on('typing', ({ userId: typer, recipientId }) => {
-      if (recipientId === userId && typer === selectedUser) setIsTyping((prev) => ({ ...prev, [typer]: true }));
+      if (recipientId === userId && typer === selectedChat) setIsTyping((prev) => ({ ...prev, [typer]: true }));
     });
 
     socket.on('stopTyping', ({ userId: typer, recipientId }) => {
-      if (recipientId === userId && typer === selectedUser) setIsTyping((prev) => ({ ...prev, [typer]: false }));
+      if (recipientId === userId && typer === selectedChat) setIsTyping((prev) => ({ ...prev, [typer]: false }));
     });
 
     socket.on('messageStatus', ({ messageId, status }) => {
-      setMessages((prev) => prev.map(msg => msg._id === messageId ? { ...msg, status } : msg));
+      dispatch(setMessages({
+        recipientId: selectedChat,
+        messages: (chats[selectedChat] || []).map((msg) => (msg._id === messageId ? { ...msg, status } : msg)),
+      }));
     });
+
+    const handleClickOutside = (event) => {
+      if (menuRef.current && !menuRef.current.contains(event.target)) setShowMenu(false);
+    };
+    document.addEventListener('mousedown', handleClickOutside);
 
     return () => {
       socket.off('message');
       socket.off('typing');
       socket.off('stopTyping');
       socket.off('messageStatus');
+      document.removeEventListener('mousedown', handleClickOutside);
     };
-  }, [token, userId, selectedUser]);
+  }, [token, userId, selectedChat, dispatch]);
 
   const sendMessage = async () => {
-    if (!selectedUser || (!message && !file && contentType === 'text')) {
+    if (!selectedChat || (!message && !file && contentType === 'text')) {
       setError('Please enter a message or select a file');
       return;
     }
-    socket.emit('stopTyping', { userId, recipientId: selectedUser });
+    socket.emit('stopTyping', { userId, recipientId: selectedChat });
     setTyping(false);
 
     const formData = new FormData();
     formData.append('senderId', userId);
-    formData.append('recipientId', selectedUser);
+    formData.append('recipientId', selectedChat);
     formData.append('contentType', contentType);
     formData.append('caption', caption);
     if (file) formData.append('content', file);
@@ -114,8 +140,8 @@ const ChatScreen = ({ token, userId }) => {
     if (replyTo) formData.append('replyTo', replyTo._id);
 
     const tempId = Date.now();
-    const tempMsg = { _id: tempId, senderId: userId, recipientId: selectedUser, contentType, content: file ? URL.createObjectURL(file) : message, caption, status: 'sent', replyTo };
-    setMessages((prev) => [...prev, tempMsg]);
+    const tempMsg = { _id: tempId, senderId: userId, recipientId: selectedChat, contentType, content: file ? URL.createObjectURL(file) : message, caption, status: 'sent', replyTo };
+    dispatch(addMessage({ recipientId: selectedChat, message: tempMsg }));
     chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
 
     try {
@@ -127,7 +153,10 @@ const ChatScreen = ({ token, userId }) => {
         },
       });
       socket.emit('message', { ...data, senderVirtualNumber: localStorage.getItem('virtualNumber'), senderUsername: localStorage.getItem('username'), senderPhoto: localStorage.getItem('photo') });
-      setMessages((prev) => prev.map(msg => msg._id === tempId ? { ...data, status: 'sent' } : msg));
+      dispatch(setMessages({
+        recipientId: selectedChat,
+        messages: (chats[selectedChat] || []).map((msg) => (msg._id === tempId ? { ...data, status: 'sent' } : msg)),
+      }));
       setMessage('');
       setFile(null);
       setCaption('');
@@ -136,10 +165,12 @@ const ChatScreen = ({ token, userId }) => {
       setUploadProgress(null);
       setReplyTo(null);
       setError('');
-      socket.emit('messageStatus', { messageId: data._id, status: 'delivered', recipientId: selectedUser });
+      socket.emit('messageStatus', { messageId: data._id, status: 'delivered', recipientId: selectedChat });
     } catch (error) {
-      console.error('Send message error:', error);
-      setMessages((prev) => prev.filter(msg => msg._id !== tempId));
+      dispatch(setMessages({
+        recipientId: selectedChat,
+        messages: (chats[selectedChat] || []).filter((msg) => msg._id !== tempId),
+      }));
       setUploadProgress(null);
       setError('Failed to send message');
     }
@@ -148,11 +179,11 @@ const ChatScreen = ({ token, userId }) => {
   const handleTyping = (e) => {
     setMessage(e.target.value);
     if (!typing) {
-      socket.emit('typing', { userId, recipientId: selectedUser });
+      socket.emit('typing', { userId, recipientId: selectedChat });
       setTyping(true);
     }
     setTimeout(() => {
-      socket.emit('stopTyping', { userId, recipientId: selectedUser });
+      socket.emit('stopTyping', { userId, recipientId: selectedChat });
       setTyping(false);
     }, 2000);
   };
@@ -160,10 +191,12 @@ const ChatScreen = ({ token, userId }) => {
   const deleteMessage = async (messageId) => {
     try {
       await axios.delete(`/social/message/${messageId}`, { headers: { Authorization: `Bearer ${token}` } });
-      setMessages(messages.filter(msg => msg._id !== messageId));
+      dispatch(setMessages({
+        recipientId: selectedChat,
+        messages: (chats[selectedChat] || []).filter((msg) => msg._id !== messageId),
+      }));
       setSelectedMessage(null);
     } catch (error) {
-      console.error('Delete message error:', error);
       setError('Failed to delete message');
     }
   };
@@ -172,7 +205,7 @@ const ChatScreen = ({ token, userId }) => {
     if (msg.senderId !== userId && msg.status === 'delivered') {
       socket.emit('messageStatus', { messageId: msg._id, status: 'read', recipientId: userId });
     }
-    setViewMedia(msg.content);
+    setViewMedia({ type: msg.contentType, url: msg.content });
   };
 
   const addContact = async () => {
@@ -187,15 +220,62 @@ const ChatScreen = ({ token, userId }) => {
         setError('Number not registered');
       }
     } catch (error) {
-      console.error('Add contact error:', error);
       setError(error.response?.data?.error || 'Number not available');
     }
   };
 
+  const rowRenderer = ({ index, key, style }) => {
+    const msg = (chats[selectedChat] || [])[index];
+    return (
+      <div key={key} style={style} className={`flex ${msg.senderId === userId ? 'justify-end' : 'justify-start'} mb-4`}>
+        <div
+          className={`max-w-xs p-3 rounded-lg shadow ${msg.senderId === userId ? 'bg-green-500 text-white' : 'bg-white text-black'}`}
+          onClick={() => setSelectedMessage(msg._id === selectedMessage ? null : msg._id)}
+          onDoubleClick={msg.contentType === 'video' ? () => viewMessage(msg) : null}
+        >
+          {msg.replyTo && (
+            <div className="bg-gray-200 p-2 rounded mb-1 text-sm italic">
+              <p>Replying to: {msg.replyTo.content.slice(0, 20)}...</p>
+            </div>
+          )}
+          {msg.contentType === 'text' && <p>{msg.content}</p>}
+          {msg.contentType === 'image' && (
+            <img src={msg.content} alt="Chat" className="max-w-full rounded cursor-pointer" onClick={(e) => { e.stopPropagation(); viewMessage(msg); }} />
+          )}
+          {msg.contentType === 'video' && (
+            <video src={msg.content} controls className="max-w-full rounded cursor-pointer" onClick={(e) => e.stopPropagation()} />
+          )}
+          {msg.contentType === 'audio' && <audio src={msg.content} controls className="w-full" />}
+          {msg.contentType === 'document' && (
+            <div className="flex items-center">
+              <a href={msg.content} target="_blank" rel="noopener noreferrer" className="text-blue-500 truncate max-w-[150px]">{msg.content.split('/').pop()}</a>
+              <p className="text-sm ml-2 italic">{msg.caption || 'Document'}</p>
+            </div>
+          )}
+          {msg.caption && msg.contentType !== 'document' && <p className="text-sm mt-1 italic">{msg.caption}</p>}
+          {msg.senderId === userId && (
+            <span className="text-xs flex justify-end mt-1">
+              {msg.status === 'sent' && '✓'}
+              {msg.status === 'delivered' && '✓✓'}
+              {msg.status === 'read' && <span className="text-blue-300">✓✓</span>}
+            </span>
+          )}
+        </div>
+        {msg._id === selectedMessage && (
+          <div className="flex items-center mt-1">
+            <FaReply onClick={() => setReplyTo(msg)} className="text-primary cursor-pointer hover:text-secondary mx-2" />
+            {msg.senderId === userId && (
+              <FaTrash onClick={() => deleteMessage(msg._id)} className="text-red-500 cursor-pointer hover:text-red-700" />
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5 }} className="flex h-screen bg-gray-100">
-      {/* Contact List */}
-      <div className="w-1/3 bg-white border-r border-gray-200 flex flex-col">
+      <div className={`w-1/3 bg-white border-r border-gray-200 flex flex-col ${isSmallDevice && selectedChat ? 'hidden' : 'block'}`}>
         <div className="p-4 flex justify-between items-center border-b border-gray-200">
           <h2 className="text-xl font-bold text-primary">Chats</h2>
           <FaEllipsisH onClick={() => setShowMenu(true)} className="text-2xl text-primary cursor-pointer hover:text-secondary" />
@@ -205,8 +285,8 @@ const ChatScreen = ({ token, userId }) => {
             <motion.div
               key={user.id}
               whileHover={{ backgroundColor: '#f0f0f0' }}
-              onClick={() => setSelectedUser(user.id)}
-              className={`flex items-center p-3 border-b border-gray-200 cursor-pointer ${selectedUser === user.id ? 'bg-gray-100' : ''}`}
+              onClick={() => dispatch(setSelectedChat(user.id))}
+              className={`flex items-center p-3 border-b border-gray-200 cursor-pointer ${selectedChat === user.id ? 'bg-gray-100' : ''}`}
             >
               <img src={user.photo || 'https://placehold.co/40x40'} alt="Profile" className="w-12 h-12 rounded-full mr-3" />
               <div className="flex-1">
@@ -223,6 +303,7 @@ const ChatScreen = ({ token, userId }) => {
         </div>
         {showMenu && (
           <motion.div
+            ref={menuRef}
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
             className="absolute top-16 right-4 bg-white p-4 rounded-lg shadow-lg"
@@ -241,62 +322,30 @@ const ChatScreen = ({ token, userId }) => {
         )}
       </div>
 
-      {/* Chat Area */}
-      <div className="flex-1 flex flex-col">
-        {selectedUser ? (
+      <div className={`flex-1 flex flex-col ${isSmallDevice && !selectedChat ? 'hidden' : 'block'}`}>
+        {selectedChat ? (
           <>
             <div className="bg-white p-3 flex items-center border-b border-gray-200">
-              <FaArrowLeft onClick={() => setSelectedUser(null)} className="text-xl text-primary cursor-pointer mr-3 hover:text-secondary md:hidden" />
-              <img src={users.find(u => u.id === selectedUser)?.photo || 'https://placehold.co/40x40'} alt="Profile" className="w-10 h-10 rounded-full mr-2" />
+              {isSmallDevice && (
+                <FaArrowLeft onClick={() => dispatch(setSelectedChat(null))} className="text-xl text-primary cursor-pointer mr-3 hover:text-secondary" />
+              )}
+              <img src={users.find((u) => u.id === selectedChat)?.photo || 'https://placehold.co/40x40'} alt="Profile" className="w-10 h-10 rounded-full mr-2" />
               <div>
-                <span className="font-semibold">{users.find(u => u.id === selectedUser)?.virtualNumber || 'Unknown'}</span>
-                {isTyping[selectedUser] && <span className="text-sm text-green-500 ml-2">Typing...</span>}
+                <span className="font-semibold">{users.find((u) => u.id === selectedChat)?.virtualNumber || 'Unknown'}</span>
+                {isTyping[selectedChat] && <span className="text-sm text-green-500 ml-2">Typing...</span>}
               </div>
             </div>
             <div ref={chatRef} className="flex-1 overflow-y-auto bg-gray-50 p-4">
-              {messages.length === 0 ? (
+              {(chats[selectedChat] || []).length === 0 ? (
                 <p className="text-center text-gray-500 mt-4">Start a new conversation</p>
               ) : (
-                messages.map((msg) => (
-                  <motion.div
-                    key={msg._id}
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    className={`flex ${msg.senderId === userId ? 'justify-end' : 'justify-start'} mb-4`}
-                  >
-                    <div
-                      className={`max-w-xs p-3 rounded-lg shadow ${msg.senderId === userId ? 'bg-green-500 text-white' : 'bg-white text-black'}`}
-                      onClick={() => setSelectedMessage(msg._id === selectedMessage ? null : msg._id)}
-                    >
-                      {msg.replyTo && (
-                        <div className="bg-gray-200 p-2 rounded mb-1 text-sm italic">
-                          <p>Replying to: {msg.replyTo.content.slice(0, 20)}...</p>
-                        </div>
-                      )}
-                      {msg.contentType === 'text' && <p>{msg.content}</p>}
-                      {msg.contentType === 'image' && <img src={msg.content} alt="Chat" className="max-w-full rounded cursor-pointer" onClick={(e) => { e.stopPropagation(); viewMessage(msg); }} />}
-                      {msg.contentType === 'video' && <video src={msg.content} controls className="max-w-full rounded cursor-pointer" onClick={(e) => { e.stopPropagation(); viewMessage(msg); }} />}
-                      {msg.contentType === 'audio' && <audio src={msg.content} controls className="w-full" />}
-                      {msg.contentType === 'raw' && <a href={msg.content} target="_blank" rel="noopener noreferrer" className="text-blue-500">Download</a>}
-                      {msg.caption && <p className="text-sm mt-1 italic">{msg.caption}</p>}
-                      {msg.senderId === userId && (
-                        <span className="text-xs flex justify-end mt-1">
-                          {msg.status === 'sent' && '✓'}
-                          {msg.status === 'delivered' && '✓✓'}
-                          {msg.status === 'read' && <span className="text-blue-300">✓✓</span>}
-                        </span>
-                      )}
-                    </div>
-                    {msg._id === selectedMessage && (
-                      <div className="flex items-center mt-1">
-                        <FaReply onClick={() => setReplyTo(msg)} className="text-primary cursor-pointer hover:text-secondary mx-2" />
-                        {msg.senderId === userId && (
-                          <FaTrash onClick={() => deleteMessage(msg._id)} className="text-red-500 cursor-pointer hover:text-red-700" />
-                        )}
-                      </div>
-                    )}
-                  </motion.div>
-                ))
+                <List
+                  width={chatRef.current?.offsetWidth || 500}
+                  height={chatRef.current?.offsetHeight || 400}
+                  rowCount={(chats[selectedChat] || []).length}
+                  rowHeight={100}
+                  rowRenderer={rowRenderer}
+                />
               )}
             </div>
             <div className="bg-white p-4 border-t border-gray-200">
@@ -341,7 +390,7 @@ const ChatScreen = ({ token, userId }) => {
                   animate={{ opacity: 1, scale: 1 }}
                   className="absolute bottom-20 left-4 bg-white p-2 rounded-lg shadow-lg flex space-x-2"
                 >
-                  {['image', 'video', 'audio', 'raw'].map((type) => (
+                  {['image', 'video', 'audio', 'document'].map((type) => (
                     <motion.button
                       key={type}
                       whileHover={{ scale: 1.1 }}
@@ -362,13 +411,18 @@ const ChatScreen = ({ token, userId }) => {
         )}
       </div>
 
-      {/* Media Viewer */}
       {viewMedia && (
-        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="fixed inset-0 bg-black flex items-center justify-center z-50" onClick={() => setViewMedia(null)}>
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          className="fixed inset-0 bg-black flex items-center justify-center z-50"
+          onClick={() => setViewMedia(null)}
+        >
           <FaArrowLeft onClick={(e) => { e.stopPropagation(); setViewMedia(null); }} className="absolute top-4 left-4 text-white text-2xl cursor-pointer hover:text-primary" />
-          {contentType === 'image' && <img src={viewMedia} alt="Full" className="max-w-full max-h-full object-contain" />}
-          {contentType === 'video' && <video controls src={viewMedia} className="max-w-full max-h-full object-contain" />}
-          {contentType === 'audio' && <audio controls src={viewMedia} className="w-full" />}
+          {viewMedia.type === 'image' && <img src={viewMedia.url} alt="Full" className="max-w-full max-h-full object-contain" />}
+          {viewMedia.type === 'video' && <video controls autoPlay src={viewMedia.url} className="max-w-full max-h-full object-contain" />}
+          {viewMedia.type === 'audio' && <audio controls src={viewMedia.url} className="w-full" />}
+          {viewMedia.type === 'document' && <iframe src={viewMedia.url} className="w-full h-full" title="Document" />}
         </motion.div>
       )}
 

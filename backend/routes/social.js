@@ -102,7 +102,7 @@ router.post('/message', authMiddleware, upload.single('content'), async (req, re
     }
     let contentUrl = req.body.content || '';
     if (req.file) {
-      const resourceType = ['image', 'video', 'audio', 'raw'].includes(contentType) ? contentType : 'raw';
+      const resourceType = ['image', 'video', 'audio', 'document'].includes(contentType) ? contentType : 'raw';
       const result = await new Promise((resolve, reject) => {
         cloudinary.uploader.upload_stream(
           { resource_type: resourceType, public_id: `${contentType}_${senderId}_${Date.now()}`, folder: `gapp_chat_${contentType}s` },
@@ -111,7 +111,7 @@ router.post('/message', authMiddleware, upload.single('content'), async (req, re
       });
       contentUrl = result.secure_url;
     }
-    const message = new Message({ senderId, recipientId, contentType, content: contentUrl, caption, status: 'sent', replyTo });
+    const message = new Message({ senderId, recipientId, contentType: contentType === 'document' ? 'document' : contentType, content: contentUrl, caption, status: 'sent', replyTo });
     await message.save();
     res.json(message);
   } catch (error) {
@@ -122,25 +122,21 @@ router.post('/message', authMiddleware, upload.single('content'), async (req, re
 
 router.get('/messages', authMiddleware, async (req, res) => {
   try {
-    const { userId, recipientId } = req.query;
-    console.log('Fetching messages for:', { userId, recipientId }); // Debug log
-
+    const { userId, recipientId, limit = 20, page = 1 } = req.query;
     if (!userId || !recipientId) {
-      console.error('Missing userId or recipientId');
       return res.status(400).json({ error: 'User ID and Recipient ID are required' });
     }
-
     const messages = await Message.find({
       $or: [
         { senderId: userId, recipientId },
         { senderId: recipientId, recipientId: userId }
       ]
-    }).sort({ createdAt: 1 });
-
-    console.log('Messages fetched:', messages.length);
+    })
+      .sort({ createdAt: 1 })
+      .skip((page - 1) * limit)
+      .limit(parseInt(limit));
     res.json(messages);
   } catch (error) {
-    console.error('Fetch messages error:', error.message, error.stack);
     res.status(500).json({ error: 'Failed to fetch messages', details: error.message });
   }
 });

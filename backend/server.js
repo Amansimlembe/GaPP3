@@ -43,6 +43,23 @@ const connectDB = async () => {
       useUnifiedTopology: true,
     });
     console.log('MongoDB Atlas connected');
+
+    // Create index for messages
+    await Message.collection.createIndex({ senderId: 1, recipientId: 1, createdAt: -1 });
+    console.log('Messages index created');
+
+    // Set up MongoDB Change Streams
+    const messageChangeStream = Message.watch();
+    messageChangeStream.on('change', (change) => {
+      if (change.operationType === 'insert') {
+        const newMessage = change.fullDocument;
+        io.to(newMessage.recipientId).emit('message', newMessage);
+        io.to(newMessage.senderId).emit('message', newMessage);
+      }
+    });
+    messageChangeStream.on('error', (error) => {
+      console.error('Change Stream error:', error);
+    });
   } catch (error) {
     console.error('MongoDB connection error:', error);
     process.exit(1);
