@@ -172,9 +172,10 @@ router.post('/message/status', authMiddleware, async (req, res) => {
   }
 });
 
-router.post('/like', auth, async (req, res) => {
+// Fix this route: Change 'auth' to 'authMiddleware'
+router.post('/like', authMiddleware, async (req, res) => {
   const { postId } = req.body;
-  const userId = req.user.id;
+  const userId = req.user.id; // req.user is set by authMiddleware
   try {
     const post = await Post.findById(postId);
     if (!post) return res.status(404).json({ error: 'Post not found' });
