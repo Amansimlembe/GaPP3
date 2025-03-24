@@ -31,7 +31,7 @@ const FeedScreen = ({ token, userId }) => {
         const randomizedPosts = data.filter(post => !post.isStory).sort(() => Math.random() - 0.5);
         setPosts(randomizedPosts.map(post => ({
           ...post,
-          username: post.username || 'Unknown', // Fallback if username is missing
+          username: post.username || 'Unknown',
         })));
         randomizedPosts.forEach(post => {
           if (post.contentType === 'image' || post.contentType === 'video') cache.set(post.content, post.content);
@@ -45,7 +45,9 @@ const FeedScreen = ({ token, userId }) => {
     fetchFeed();
 
     socket.on('newPost', (post) => setPosts((prev) => [post, ...prev.filter(p => p._id !== post._id)]));
-    socket.on('postUpdate', (updatedPost) => setPosts((prev) => prev.map(p => p._id === updatedPost._id ? updatedPost : p)));
+    socket.on('postUpdate', (updatedPost) => {
+      setPosts((prev) => prev.map(p => p._id === updatedPost._id ? updatedPost : p));
+    });
     socket.on('postDeleted', (postId) => setPosts((prev) => prev.filter(p => p._id !== postId)));
 
     const observer = new IntersectionObserver(
@@ -56,11 +58,13 @@ const FeedScreen = ({ token, userId }) => {
           if (entry.isIntersecting) {
             setPlayingPostId(postId);
             if (media.tagName === 'VIDEO') {
+              media.muted = false; // Enable sound
               media.play().catch((err) => console.error('Play error:', err));
             }
           } else if (playingPostId === postId) {
             if (media.tagName === 'VIDEO') {
               media.pause();
+              media.muted = true; // Mute when out of view
             }
             setPlayingPostId(null);
           }
@@ -69,8 +73,11 @@ const FeedScreen = ({ token, userId }) => {
       { threshold: 0.8 }
     );
 
-    const mediaElements = document.querySelectorAll('[data-post-id]');
-    mediaElements.forEach((el) => observer.observe(el));
+    const observeMedia = () => {
+      const mediaElements = document.querySelectorAll('[data-post-id]');
+      mediaElements.forEach((el) => observer.observe(el));
+    };
+    fetchFeed().then(observeMedia);
 
     return () => {
       observer.disconnect();
@@ -110,6 +117,7 @@ const FeedScreen = ({ token, userId }) => {
   };
 
   const likePost = async (postId) => {
+    if (!playingPostId || postId !== playingPostId) return; // Only like the current post
     try {
       const post = posts.find(p => p._id === postId);
       const action = post.likedBy?.includes(userId) ? '/social/unlike' : '/social/like';
@@ -121,7 +129,7 @@ const FeedScreen = ({ token, userId }) => {
   };
 
   const commentPost = async (postId) => {
-    if (!comment) return;
+    if (!playingPostId || postId !== playingPostId || !comment) return; // Only comment on current post
     try {
       const { data } = await axios.post('/social/comment', { postId, comment }, { headers: { Authorization: `Bearer ${token}` } });
       const updatedPost = { ...posts.find(p => p._id === postId), comments: [...(posts.find(p => p._id === postId).comments || []), data] };
@@ -154,12 +162,14 @@ const FeedScreen = ({ token, userId }) => {
   };
 
   const handleDoubleClick = (postId) => {
-    likePost(postId);
-    const heart = document.createElement('div');
-    heart.innerHTML = '❤️';
-    heart.className = 'absolute text-6xl animate-heart';
-    document.querySelector(`[data-post-id="${postId}"]`)?.parentElement.appendChild(heart);
-    setTimeout(() => heart.remove(), 1000);
+    if (postId === playingPostId) {
+      likePost(postId);
+      const heart = document.createElement('div');
+      heart.innerHTML = '❤️';
+      heart.className = 'absolute text-6xl animate-heart';
+      document.querySelector(`[data-post-id="${postId}"]`)?.parentElement.appendChild(heart);
+      setTimeout(() => heart.remove(), 1000);
+    }
   };
 
   return (
@@ -167,17 +177,17 @@ const FeedScreen = ({ token, userId }) => {
       <div className="fixed bottom-20 right-4 z-20 flex flex-col space-y-6 items-center">
         <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }} className="flex flex-col items-center">
           <FaHeart
-            onClick={() => likePost(posts.find(p => p._id === playingPostId)?._id)}
+            onClick={() => likePost(playingPostId)}
             className={`text-3xl cursor-pointer transition duration-200 ${posts.find(p => p._id === playingPostId)?.likedBy?.includes(userId) ? 'text-red-500' : 'text-white dark:text-gray-300'}`}
           />
           <span className="text-white dark:text-gray-300 text-sm">{posts.find(p => p._id === playingPostId)?.likes || 0}</span>
         </motion.div>
         <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }} className="flex flex-col items-center">
-          <FaComment onClick={() => setShowComments(posts.find(p => p._id === playingPostId)?._id)} className="text-3xl cursor-pointer text-white dark:text-gray-300 hover:text-primary" />
+          <FaComment onClick={() => setShowComments(playingPostId)} className="text-3xl cursor-pointer text-white dark:text-gray-300 hover:text-primary" />
           <span className="text-white dark:text-gray-300 text-sm">{posts.find(p => p._id === playingPostId)?.comments?.length || 0}</span>
         </motion.div>
         <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }} className="flex flex-col items-center">
-          <FaShare onClick={() => sharePost(posts.find(p => p._id === playingPostId)?._id)} className="text-3xl cursor-pointer text-white dark:text-gray-300 hover:text-primary" />
+          <FaShare onClick={() => sharePost(playingPostId)} className="text-3xl cursor-pointer text-white dark:text-gray-300 hover:text-primary" />
           <span className="text-white dark:text-gray-300 text-sm">Share</span>
         </motion.div>
         <motion.button whileHover={{ scale: 1.1, rotate: 90 }} whileTap={{ scale: 0.9 }} onClick={() => setShowPostModal(true)} className="bg-transparent text-white dark:text-gray-300 p-2 rounded-full">
@@ -265,7 +275,6 @@ const FeedScreen = ({ token, userId }) => {
                 data-post-id={post._id}
                 playsInline
                 loop
-                muted
                 autoPlay
                 src={cache.get(post.content) || post.content}
                 className="w-screen h-screen object-contain lazy-load"

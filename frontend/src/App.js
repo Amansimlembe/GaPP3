@@ -8,7 +8,6 @@ import EmployerScreen from './screens/EmployerScreen';
 import FeedScreen from './screens/FeedScreen';
 import ChatScreen from './screens/ChatScreen';
 import ProfileScreen from './screens/ProfileScreen';
-import CountrySelector from './components/CountrySelector';
 import io from 'socket.io-client';
 
 const socket = io('https://gapp-6yc3.onrender.com');
@@ -23,7 +22,7 @@ const App = () => {
   const [feedKey, setFeedKey] = useState(0);
 
   useEffect(() => {
-    console.log('Current token:', token); // Debug log
+    console.log('Current token:', token);
     localStorage.setItem('token', token);
     localStorage.setItem('userId', userId);
     localStorage.setItem('role', role);
@@ -61,7 +60,6 @@ const App = () => {
   return (
     <Router>
       <div className="min-h-screen flex flex-col">
-        {!virtualNumber && <CountrySelector token={token} userId={userId} onComplete={(vn) => setAuth(token, userId, role, photo, vn)} />}
         <div className="flex-1 container p-0 relative">
           <Switch>
             <Route path="/jobs" render={() => (parseInt(role) === 0 ? <JobSeekerScreen token={token} userId={userId} /> : <EmployerScreen token={token} userId={userId} />)} />

@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import axios from 'axios';
 import { motion } from 'framer-motion';
+import { getCountries, getCountryCallingCode } from 'libphonenumber-js';
+const countryList = require('country-list');
 
 const LoginScreen = ({ setAuth }) => {
   const [email, setEmail] = useState('');
@@ -10,6 +12,8 @@ const LoginScreen = ({ setAuth }) => {
   const [photo, setPhoto] = useState(null);
   const [isLogin, setIsLogin] = useState(true);
   const [error, setError] = useState('');
+  const [selectedCountry, setSelectedCountry] = useState('');
+  const [search, setSearch] = useState('');
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -20,6 +24,11 @@ const LoginScreen = ({ setAuth }) => {
       formData.append('name', name);
       formData.append('role', role);
       if (photo) formData.append('photo', photo);
+      if (!selectedCountry) {
+        setError('Please select a country');
+        return;
+      }
+      formData.append('country', selectedCountry);
     }
 
     try {
@@ -36,6 +45,16 @@ const LoginScreen = ({ setAuth }) => {
     }
   };
 
+  const countriesData = countryList.getData();
+  const validCountryCodes = getCountries();
+  const countries = countriesData
+    .filter(c => validCountryCodes.includes(c.code))
+    .map(c => ({ code: c.code, name: c.name }));
+  const filteredCountries = countries.filter(c => 
+    c.name.toLowerCase().includes(search.toLowerCase()) || 
+    c.code.toLowerCase().includes(search.toLowerCase())
+  );
+
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="min-h-screen flex items-center justify-center bg-gray-100">
       <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
@@ -43,13 +62,32 @@ const LoginScreen = ({ setAuth }) => {
         {error && <p className="text-red-500 mb-4">{error}</p>}
         <form onSubmit={handleSubmit}>
           {!isLogin && (
-            <input
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              className="w-full p-2 mb-4 border rounded-lg"
-              placeholder="Name"
-            />
+            <>
+              <input
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                className="w-full p-2 mb-4 border rounded-lg"
+                placeholder="Name"
+              />
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="w-full p-2 mb-4 border rounded-lg"
+                placeholder="Search for a country..."
+              />
+              <select
+                value={selectedCountry}
+                onChange={(e) => setSelectedCountry(e.target.value)}
+                className="w-full p-2 mb-4 border rounded-lg"
+                size="5"
+              >
+                {filteredCountries.map(c => (
+                  <option key={c.code} value={c.code}>{c.name}</option>
+                ))}
+              </select>
+            </>
           )}
           <input
             type="email"

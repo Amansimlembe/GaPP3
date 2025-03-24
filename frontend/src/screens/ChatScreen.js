@@ -43,6 +43,7 @@ const ChatScreen = ({ token, userId }) => {
     fetchUsers();
 
     const fetchMessages = async () => {
+      if (!selectedUser) return;
       try {
         const { data } = await axios.get('/social/messages', {
           headers: { Authorization: `Bearer ${token}` },
@@ -53,10 +54,11 @@ const ChatScreen = ({ token, userId }) => {
         setNotifications((prev) => ({ ...prev, [selectedUser]: 0 }));
       } catch (error) {
         console.error('Failed to fetch messages:', error);
-        setError('Failed to load messages');
+        setMessages([]); // Start fresh if no previous messages
+        setError('No previous messages');
       }
     };
-    if (selectedUser) fetchMessages();
+    fetchMessages();
 
     socket.on('message', (msg) => {
       if ((msg.senderId === userId && msg.recipientId === selectedUser) || (msg.senderId === selectedUser && msg.recipientId === userId)) {
@@ -242,49 +244,53 @@ const ChatScreen = ({ token, userId }) => {
             <span className="font-semibold">{users.find(u => u.id === selectedUser)?.virtualNumber || 'Unknown'}</span>
           </div>
           <div ref={chatRef} className="flex-1 overflow-y-auto bg-gray-50 p-2">
-            {messages.map((msg) => (
-              <motion.div
-                key={msg._id}
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className={`message p-2 ${msg.senderId === userId ? 'text-right' : 'text-left'}`}
-              >
-                {msg.replyTo && (
-                  <div className="bg-gray-200 p-2 rounded mb-1 text-sm italic">
-                    <p>Replying to: {msg.replyTo.content.slice(0, 20)}...</p>
-                  </div>
-                )}
-                <div
-                  className={`inline-block p-2 rounded-lg ${msg.senderId === userId ? 'bg-primary text-white' : 'bg-white text-black'} shadow`}
-                  onClick={() => setSelectedMessage(msg._id === selectedMessage ? null : msg._id)}
+            {messages.length === 0 ? (
+              <p className="text-center text-gray-500 mt-4">Start a new conversation</p>
+            ) : (
+              messages.map((msg) => (
+                <motion.div
+                  key={msg._id}
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className={`message p-2 ${msg.senderId === userId ? 'text-right' : 'text-left'}`}
                 >
-                  {msg.contentType === 'text' && <p>{msg.content}</p>}
-                  {msg.contentType === 'image' && <img src={msg.content} alt="Chat" className="max-w-full w-auto h-auto rounded cursor-pointer" onClick={(e) => { e.stopPropagation(); viewMessage(msg); }} />}
-                  {msg.contentType === 'video' && <video src={msg.content} controls className="max-w-full w-auto h-auto rounded cursor-pointer" onClick={(e) => { e.stopPropagation(); viewMessage(msg); }} />}
-                  {msg.contentType === 'audio' && <audio src={msg.content} controls className="w-full" />}
-                  {msg.contentType === 'raw' && <a href={msg.content} target="_blank" rel="noopener noreferrer" className="text-blue-500">Download</a>}
-                  {msg.caption && <p className="text-sm mt-1 italic max-w-full">{msg.caption}</p>}
-                  {msg.senderId === userId && (
-                    <span className="text-xs flex justify-end">
-                      {msg.status === 'sent' && '✓'}
-                      {msg.status === 'delivered' && '✓✓'}
-                      {msg.status === 'read' && <span className="text-green-500">✅✅</span>}
-                    </span>
+                  {msg.replyTo && (
+                    <div className="bg-gray-200 p-2 rounded mb-1 text-sm italic">
+                      <p>Replying to: {msg.replyTo.content.slice(0, 20)}...</p>
+                    </div>
                   )}
-                  {msg._id === uploadProgress?._id && uploadProgress !== null && (
-                    <div className="text-xs">Uploading: {uploadProgress}%</div>
-                  )}
-                </div>
-                {msg._id === selectedMessage && (
-                  <div className="flex justify-end mt-1">
-                    <FaReply onClick={() => setReplyTo(msg)} className="text-primary cursor-pointer hover:text-secondary mr-2" />
+                  <div
+                    className={`inline-block p-2 rounded-lg ${msg.senderId === userId ? 'bg-primary text-white' : 'bg-white text-black'} shadow`}
+                    onClick={() => setSelectedMessage(msg._id === selectedMessage ? null : msg._id)}
+                  >
+                    {msg.contentType === 'text' && <p>{msg.content}</p>}
+                    {msg.contentType === 'image' && <img src={msg.content} alt="Chat" className="max-w-full w-auto h-auto rounded cursor-pointer" onClick={(e) => { e.stopPropagation(); viewMessage(msg); }} />}
+                    {msg.contentType === 'video' && <video src={msg.content} controls className="max-w-full w-auto h-auto rounded cursor-pointer" onClick={(e) => { e.stopPropagation(); viewMessage(msg); }} />}
+                    {msg.contentType === 'audio' && <audio src={msg.content} controls className="w-full" />}
+                    {msg.contentType === 'raw' && <a href={msg.content} target="_blank" rel="noopener noreferrer" className="text-blue-500">Download</a>}
+                    {msg.caption && <p className="text-sm mt-1 italic max-w-full">{msg.caption}</p>}
                     {msg.senderId === userId && (
-                      <FaTrash onClick={() => deleteMessage(msg._id)} className="text-red-500 cursor-pointer hover:text-red-700" />
+                      <span className="text-xs flex justify-end">
+                        {msg.status === 'sent' && '✓'}
+                        {msg.status === 'delivered' && '✓✓'}
+                        {msg.status === 'read' && <span className="text-green-500">✅✅</span>}
+                      </span>
+                    )}
+                    {msg._id === uploadProgress?._id && uploadProgress !== null && (
+                      <div className="text-xs">Uploading: {uploadProgress}%</div>
                     )}
                   </div>
-                )}
-              </motion.div>
-            ))}
+                  {msg._id === selectedMessage && (
+                    <div className="flex justify-end mt-1">
+                      <FaReply onClick={() => setReplyTo(msg)} className="text-primary cursor-pointer hover:text-secondary mr-2" />
+                      {msg.senderId === userId && (
+                        <FaTrash onClick={() => deleteMessage(msg._id)} className="text-red-500 cursor-pointer hover:text-red-700" />
+                      )}
+                    </div>
+                  )}
+                </motion.div>
+              ))
+            )}
             {isTyping[selectedUser] && <p className="text-sm text-gray-500 p-2">User is typing...</p>}
           </div>
           <motion.div initial={{ y: 20 }} animate={{ y: 0 }} className="bg-white p-2 flex items-center">
@@ -353,4 +359,4 @@ const ChatScreen = ({ token, userId }) => {
   );
 };
 
-export default ChatScreen;
+export default ChatScreen;    
