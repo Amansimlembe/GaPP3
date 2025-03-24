@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Route, Switch, Link, Redirect } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { FaHome, FaBriefcase, FaComments, FaUser } from 'react-icons/fa';
+import axios from 'axios';
 import LoginScreen from './screens/LoginScreen';
 import JobSeekerScreen from './screens/JobSeekerScreen';
 import EmployerScreen from './screens/EmployerScreen';
@@ -12,6 +13,22 @@ import io from 'socket.io-client';
 
 const socket = io('https://gapp-6yc3.onrender.com');
 
+// Decode JWT to get expiration time
+const getTokenExpiration = (token) => {
+  try {
+    const base64Url = token.split('.')[1];
+    const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+    const jsonPayload = decodeURIComponent(atob(base64).split('').map((c) => {
+      return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
+    }).join(''));
+    const decoded = JSON.parse(jsonPayload);
+    return decoded.exp * 1000; // Convert to milliseconds
+  } catch (error) {
+    console.error('Error decoding token:', error);
+    return null;
+  }
+};
+
 const App = () => {
   const [token, setToken] = useState(localStorage.getItem('token') || '');
   const [userId, setUserId] = useState(localStorage.getItem('userId') || '');
@@ -21,6 +38,61 @@ const App = () => {
   const [chatNotifications, setChatNotifications] = useState(0);
   const [feedKey, setFeedKey] = useState(0);
   const [isAuthenticated, setIsAuthenticated] = useState(!!localStorage.getItem('token') && !!localStorage.getItem('userId'));
+
+  // Refresh token function
+  const refreshToken = async () => {
+    try {
+      const response = await axios.post('https://gapp-6yc3.onrender.com/auth/refresh', {}, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber } = response.data;
+      setAuth(newToken, newUserId, newRole, newPhoto, newVirtualNumber);
+      return newToken;
+    } catch (error) {
+      console.error('Token refresh failed:', error);
+      setAuth('', '', '', '', ''); // Log out on failure
+      return null;
+    }
+  };
+
+  // Axios interceptor for token refresh on 401
+  useEffect(() => {
+    const interceptor = axios.interceptors.response.use(
+      (response) => response,
+      async (error) => {
+        const originalRequest = error.config;
+        if (error.response?.status === 401 && !originalRequest._retry) {
+          originalRequest._retry = true;
+          const newToken = await refreshToken();
+          if (newToken) {
+            originalRequest.headers['Authorization'] = `Bearer ${newToken}`;
+            return axios(originalRequest);
+          }
+        }
+        return Promise.reject(error);
+      }
+    );
+    return () => axios.interceptors.response.eject(interceptor);
+  }, [token]);
+
+  // Proactive token refresh before expiration
+  useEffect(() => {
+    if (!token || !userId) return;
+
+    const checkTokenExpiration = async () => {
+      const expTime = getTokenExpiration(token);
+      const now = Date.now();
+      const oneDay = 24 * 60 * 60 * 1000; // 1 day in milliseconds
+
+      if (expTime && expTime - now < oneDay) { // Refresh if less than 1 day remains
+        await refreshToken();
+      }
+    };
+
+    checkTokenExpiration();
+    const interval = setInterval(checkTokenExpiration, 60 * 60 * 1000); // Check every hour
+    return () => clearInterval(interval);
+  }, [token, userId]);
 
   useEffect(() => {
     console.log('Current token:', token);
@@ -47,7 +119,6 @@ const App = () => {
     return () => socket.off('message');
   }, [token, userId, role, photo, virtualNumber]);
 
-  
   const setAuth = (newToken, newUserId, newRole, newPhoto, newVirtualNumber) => {
     console.log('Setting auth:', { newToken, newUserId, newRole, newPhoto, newVirtualNumber });
     setToken(newToken || '');

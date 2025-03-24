@@ -229,30 +229,30 @@ const ChatScreen = ({ token, userId }) => {
     return (
       <div key={key} style={style} className={`flex ${msg.senderId === userId ? 'justify-end' : 'justify-start'} mb-4`}>
         <div
-          className={`max-w-xs p-3 rounded-lg shadow ${msg.senderId === userId ? 'bg-green-500 text-white' : 'bg-white text-black'}`}
+          className={`max-w-md p-3 rounded-lg shadow-md ${msg.senderId === userId ? 'bg-green-500 text-white' : 'bg-gray-100 text-black'} transition-all`}
           onClick={() => setSelectedMessage(msg._id === selectedMessage ? null : msg._id)}
           onDoubleClick={msg.contentType === 'video' ? () => viewMessage(msg) : null}
         >
           {msg.replyTo && (
-            <div className="bg-gray-200 p-2 rounded mb-1 text-sm italic">
-              <p>Replying to: {msg.replyTo.content.slice(0, 20)}...</p>
+            <div className="bg-gray-200 p-2 rounded mb-2 text-sm italic text-gray-700">
+              <p>Replying to: {msg.replyTo?.content?.slice(0, 20) || 'Message'}...</p>
             </div>
           )}
-          {msg.contentType === 'text' && <p>{msg.content}</p>}
+          {msg.contentType === 'text' && <p className="text-base">{msg.content}</p>}
           {msg.contentType === 'image' && (
-            <img src={msg.content} alt="Chat" className="max-w-full rounded cursor-pointer" onClick={(e) => { e.stopPropagation(); viewMessage(msg); }} />
+            <img src={msg.content} alt="Chat" className="max-w-full rounded-lg cursor-pointer" onClick={(e) => { e.stopPropagation(); viewMessage(msg); }} />
           )}
           {msg.contentType === 'video' && (
-            <video src={msg.content} controls className="max-w-full rounded cursor-pointer" onClick={(e) => e.stopPropagation()} />
+            <video src={msg.content} controls className="max-w-full rounded-lg cursor-pointer" onClick={(e) => e.stopPropagation()} />
           )}
           {msg.contentType === 'audio' && <audio src={msg.content} controls className="w-full" />}
           {msg.contentType === 'document' && (
-            <div className="flex items-center">
-              <a href={msg.content} target="_blank" rel="noopener noreferrer" className="text-blue-500 truncate max-w-[150px]">{msg.content.split('/').pop()}</a>
-              <p className="text-sm ml-2 italic">{msg.caption || 'Document'}</p>
+            <div className="flex items-center bg-gray-200 p-2 rounded-lg">
+              <a href={msg.content} target="_blank" rel="noopener noreferrer" className="text-blue-600 font-semibold truncate max-w-[200px]">{msg.content.split('/').pop()}</a>
+              {msg.caption && <p className="text-sm ml-2 italic text-gray-600">{msg.caption}</p>}
             </div>
           )}
-          {msg.caption && msg.contentType !== 'document' && <p className="text-sm mt-1 italic">{msg.caption}</p>}
+          {msg.caption && msg.contentType !== 'document' && <p className="text-sm mt-1 italic text-gray-300">{msg.caption}</p>}
           {msg.senderId === userId && (
             <span className="text-xs flex justify-end mt-1">
               {msg.status === 'sent' && '✓'}
@@ -275,7 +275,7 @@ const ChatScreen = ({ token, userId }) => {
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5 }} className="flex h-screen bg-gray-100">
-      <div className={`w-1/3 bg-white border-r border-gray-200 flex flex-col ${isSmallDevice && selectedChat ? 'hidden' : 'block'}`}>
+      <div className={`w-full md:w-1/3 bg-white border-r border-gray-200 flex flex-col ${isSmallDevice && selectedChat ? 'hidden' : 'block'}`}>
         <div className="p-4 flex justify-between items-center border-b border-gray-200">
           <h2 className="text-xl font-bold text-primary">Chats</h2>
           <FaEllipsisH onClick={() => setShowMenu(true)} className="text-2xl text-primary cursor-pointer hover:text-secondary" />
@@ -306,7 +306,7 @@ const ChatScreen = ({ token, userId }) => {
             ref={menuRef}
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
-            className="absolute top-16 right-4 bg-white p-4 rounded-lg shadow-lg"
+            className="absolute top-16 right-4 bg-white p-4 rounded-lg shadow-lg z-10"
           >
             <input
               type="text"
@@ -348,14 +348,14 @@ const ChatScreen = ({ token, userId }) => {
                 />
               )}
             </div>
-            <div className="bg-white p-4 border-t border-gray-200">
+            <div className="bg-white p-4 border-t border-gray-200 fixed bottom-0 left-0 right-0 md:static md:flex-shrink-0 z-10">
               {replyTo && (
                 <div className="bg-gray-100 p-2 mb-2 rounded">
                   <p className="text-sm italic">Replying to: {replyTo.content.slice(0, 20)}...</p>
                   <button onClick={() => setReplyTo(null)} className="text-red-500 text-xs">Cancel</button>
                 </div>
               )}
-              <div className="flex items-center">
+              <div className="flex items-center max-w-4xl mx-auto">
                 <FaPaperclip className="text-xl text-primary cursor-pointer hover:text-secondary mr-2" onClick={() => setShowPicker(!showPicker)} />
                 {contentType === 'text' ? (
                   <input
@@ -388,7 +388,7 @@ const ChatScreen = ({ token, userId }) => {
                 <motion.div
                   initial={{ opacity: 0, scale: 0.8 }}
                   animate={{ opacity: 1, scale: 1 }}
-                  className="absolute bottom-20 left-4 bg-white p-2 rounded-lg shadow-lg flex space-x-2"
+                  className="absolute bottom-20 left-4 bg-white p-2 rounded-lg shadow-lg flex space-x-2 z-20"
                 >
                   {['image', 'video', 'audio', 'document'].map((type) => (
                     <motion.button

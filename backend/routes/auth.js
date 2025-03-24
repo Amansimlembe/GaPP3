@@ -9,7 +9,7 @@ const cloudinary = require('cloudinary').v2;
 const { getCountryCallingCode } = require('libphonenumber-js');
 const countryList = require('country-list');
 
-// Use CLOUDINARY_URL directly (no need for individual config if URL is set)
+// Cloudinary configuration
 if (process.env.CLOUDINARY_URL) {
   cloudinary.config({ cloudinary_url: process.env.CLOUDINARY_URL });
 } else {
@@ -34,11 +34,10 @@ router.post('/register', upload.single('photo'), async (req, res) => {
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
-    // Convert country name to ISO 3166-1 alpha-2 code if needed
-    const countryCode = countryList.getCode(country) || country; // e.g., "United States" → "US"
+    const countryCode = countryList.getCode(country) || country;
     if (!countryCode) return res.status(400).json({ error: 'Invalid country' });
 
-    const callingCode = getCountryCallingCode(countryCode); // e.g., "US" → "+1"
+    const callingCode = getCountryCallingCode(countryCode);
     const virtualNumber = `${callingCode}${Math.floor(100000000 + Math.random() * 900000000)}`;
 
     let photoUrl = null;
@@ -64,7 +63,7 @@ router.post('/register', upload.single('photo'), async (req, res) => {
 
     await user.save();
 
-    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET || 'secret', { expiresIn: '1h' });
+    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET || 'secret', { expiresIn: '30d' });
     res.json({ token, userId: user._id, role: user.role, photo: user.photo, virtualNumber: user.virtualNumber });
   } catch (error) {
     console.error('Register error:', error);
@@ -82,11 +81,24 @@ router.post('/login', async (req, res) => {
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) return res.status(400).json({ error: 'Invalid credentials' });
 
-    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET || 'secret', { expiresIn: '1h' });
+    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET || 'secret', { expiresIn: '30d' });
     res.json({ token, userId: user._id, role: user.role, photo: user.photo, virtualNumber: user.virtualNumber });
   } catch (error) {
     console.error('Login error:', error);
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+router.post('/refresh', auth, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const newToken = jwt.sign({ id: user._id }, process.env.JWT_SECRET || 'secret', { expiresIn: '30d' });
+    res.json({ token: newToken, userId: user._id, role: user.role, photo: user.photo, virtualNumber: user.virtualNumber });
+  } catch (error) {
+    console.error('Refresh token error:', error);
+    res.status(500).json({ error: 'Failed to refresh token', details: error.message });
   }
 });
 
@@ -127,7 +139,7 @@ router.post('/update_username', auth, async (req, res) => {
     res.status(500).json({ error: 'Failed to update username', details: error.message });
   }
 });
-// Add this route after /update_username
+
 router.post('/update_country', auth, async (req, res) => {
   try {
     const { userId, country } = req.body;
