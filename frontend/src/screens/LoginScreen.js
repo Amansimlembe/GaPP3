@@ -1,8 +1,7 @@
 import React, { useState } from 'react';
 import axios from 'axios';
 import { motion } from 'framer-motion';
-import { getCountries, getCountryCallingCode } from 'libphonenumber-js';
-const countryList = require('country-list');
+import { getCountries } from 'libphonenumber-js'; // Remove country-list
 
 const LoginScreen = ({ setAuth }) => {
   const [email, setEmail] = useState('');
@@ -36,7 +35,6 @@ const LoginScreen = ({ setAuth }) => {
       const { data } = await axios.post(url, isLogin ? { email, password } : formData, {
         headers: !isLogin ? { 'Content-Type': 'multipart/form-data' } : {},
       });
-      console.log('Auth response:', data);
       setAuth(data.token, data.userId, data.role, data.photo, data.virtualNumber);
       setError('');
     } catch (error) {
@@ -45,11 +43,10 @@ const LoginScreen = ({ setAuth }) => {
     }
   };
 
-  const countriesData = countryList.getData();
-  const validCountryCodes = getCountries();
-  const countries = countriesData
-    .filter(c => validCountryCodes.includes(c.code))
-    .map(c => ({ code: c.code, name: c.name }));
+  const countries = getCountries().map(code => ({
+    code,
+    name: new Intl.DisplayNames(['en'], { type: 'region' }).of(code), // Get country name from code
+  }));
   const filteredCountries = countries.filter(c => 
     c.name.toLowerCase().includes(search.toLowerCase()) || 
     c.code.toLowerCase().includes(search.toLowerCase())

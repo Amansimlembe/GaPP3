@@ -127,6 +127,31 @@ router.post('/update_username', auth, async (req, res) => {
     res.status(500).json({ error: 'Failed to update username', details: error.message });
   }
 });
+// Add this route after /update_username
+router.post('/update_country', auth, async (req, res) => {
+  try {
+    const { userId, country } = req.body;
+    if (!country) return res.status(400).json({ error: 'Country is required' });
+
+    const countryCode = countryList.getCode(country) || country;
+    if (!countryCode) return res.status(400).json({ error: 'Invalid country' });
+
+    const callingCode = getCountryCallingCode(countryCode);
+    const virtualNumber = `${callingCode}${Math.floor(100000000 + Math.random() * 900000000)}`;
+
+    const user = await User.findByIdAndUpdate(
+      userId,
+      { country: countryCode, virtualNumber },
+      { new: true }
+    );
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    res.json({ virtualNumber: user.virtualNumber });
+  } catch (error) {
+    console.error('Update country error:', error);
+    res.status(500).json({ error: 'Failed to update country', details: error.message });
+  }
+});
 
 router.get('/user/:id', auth, async (req, res) => {
   try {

@@ -1,8 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { motion } from 'framer-motion';
-import { getCountries, getCountryCallingCode } from 'libphonenumber-js';
-const countryList = require('country-list');
+import { getCountries } from 'libphonenumber-js'; // Remove country-list
 
 const CountrySelector = ({ token, userId, onComplete }) => {
   const [selectedCountry, setSelectedCountry] = useState('');
@@ -14,10 +13,8 @@ const CountrySelector = ({ token, userId, onComplete }) => {
   useEffect(() => {
     const checkCountry = async () => {
       try {
-        console.log('Checking user country with token:', token); // Debug log
         const { data } = await axios.get(`/auth/user/${userId}`, { headers: { Authorization: `Bearer ${token}` } });
         if (data.virtualNumber) {
-          console.log('Virtual number found:', data.virtualNumber);
           onComplete(data.virtualNumber);
           return;
         }
@@ -43,7 +40,6 @@ const CountrySelector = ({ token, userId, onComplete }) => {
 
     const handleClickOutside = (event) => {
       if (wrapperRef.current && !wrapperRef.current.contains(event.target)) {
-        console.log('Clicked outside, dismissing CountrySelector');
         onComplete(null);
       }
     };
@@ -61,9 +57,7 @@ const CountrySelector = ({ token, userId, onComplete }) => {
       return;
     }
     try {
-      console.log('Sending request to update_country:', { userId, country: selectedCountry });
       const { data } = await axios.post('/auth/update_country', { userId, country: selectedCountry }, { headers: { Authorization: `Bearer ${token}` } });
-      console.log('Country saved, virtual number:', data.virtualNumber);
       onComplete(data.virtualNumber);
     } catch (error) {
       console.error('Save country error:', error);
@@ -71,11 +65,10 @@ const CountrySelector = ({ token, userId, onComplete }) => {
     }
   };
 
-  const countriesData = countryList.getData();
-  const validCountryCodes = getCountries();
-  const countries = countriesData
-    .filter(c => validCountryCodes.includes(c.code))
-    .map(c => ({ code: c.code, name: c.name }));
+  const countries = getCountries().map(code => ({
+    code,
+    name: new Intl.DisplayNames(['en'], { type: 'region' }).of(code),
+  }));
   const filteredCountries = countries.filter(c => 
     c.name.toLowerCase().includes(search.toLowerCase()) || 
     c.code.toLowerCase().includes(search.toLowerCase())
