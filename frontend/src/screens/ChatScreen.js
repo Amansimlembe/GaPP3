@@ -6,78 +6,58 @@ import { FaPaperPlane, FaPaperclip, FaTrash, FaArrowLeft, FaReply, FaEllipsisH, 
 import { useDispatch, useSelector } from 'react-redux';
 import { setMessages, addMessage, setSelectedChat } from '../store';
 import { saveMessages, getMessages } from '../db';
-import * as signal from 'libsignal-protocol';
+import * as openpgp from 'openpgp';
 
 const socket = io('https://gapp-6yc3.onrender.com');
 
+// Helper to generate or retrieve key pair
+const getKeyPair = async () => {
+  const storedKeys = localStorage.getItem('pgpKeys');
+  if (storedKeys) return JSON.parse(storedKeys);
 
-  // Helper to generate or retrieve key pair
-  const getKeyPair = async () => {
-    const storedKeys = localStorage.getItem('signalKeys');
-    if (storedKeys) return JSON.parse(storedKeys);
-  
-    const keyPair = await signal.KeyHelper.generateIdentityKeyPair();
-    const registrationId = signal.KeyHelper.generateRegistrationId();
-    const preKey = await signal.KeyHelper.generatePreKey(1);
-    const signedPreKey = await signal.KeyHelper.generateSignedPreKey(keyPair, 1);
-  
-    const keys = {
-      identityKeyPair: keyPair,
-      registrationId,
-      preKeys: [preKey],
-      signedPreKey,
-    };
-    localStorage.setItem('signalKeys', JSON.stringify(keys));
-    return keys;
-  };
-  
-  // Encrypt message
-  const encryptMessage = async (message, recipientId) => {
-    const keys = await getKeyPair();
-    const address = new signal.SignalProtocolAddress(recipientId, 1);
-    const sessionBuilder = new signal.SessionBuilder({
-      storage: {
-        get: (key) => localStorage.getItem(key),
-        put: (key, value) => localStorage.setItem(key, value),
-        remove: (key) => localStorage.removeItem(key),
-      },
-    }, address);
-    await sessionBuilder.processPreKey({
-      registrationId: keys.registrationId,
-      identityKey: keys.identityKeyPair.pubKey,
-      signedPreKey: keys.signedPreKey,
-      preKey: keys.preKeys[0],
-    });
-    const sessionCipher = new signal.SessionCipher({
-      storage: {
-        get: (key) => localStorage.getItem(key),
-        put: (key, value) => localStorage.setItem(key, value),
-        remove: (key) => localStorage.removeItem(key),
-      },
-    }, address);
-    const messageBuffer = signal.util.toArrayBuffer(new TextEncoder().encode(message));
-    const encrypted = await sessionCipher.encrypt(messageBuffer);
-    return encrypted;
-  };
-  
-  // Decrypt message
-  const decryptMessage = async (encryptedMessage, senderId) => {
-    const keys = await getKeyPair();
-    const address = new signal.SignalProtocolAddress(senderId, 1);
-    const sessionCipher = new signal.SessionCipher({
-      storage: {
-        get: (key) => localStorage.getItem(key),
-        put: (key, value) => localStorage.setItem(key, value),
-        remove: (key) => localStorage.removeItem(key),
-      },
-    }, address);
-    const decryptedBuffer = await sessionCipher.decryptPreKeyWhisperMessage(encryptedMessage.body, 'binary');
-    const decrypted = new TextDecoder().decode(new Uint8Array(decryptedBuffer));
-    return decrypted;
-  };       
+  const { privateKey, publicKey } = await openpgp.generateKey({
+    type: 'rsa',
+    rsaBits: 2048,
+    userIDs: [{ name: 'User', email: `${localStorage.getItem('userId')}@gapp.com` }],
+    passphrase: 'gapp-secret', // In a real app, use a secure passphrase
+  });
 
+  const keys = { privateKey, publicKey };
+  localStorage.setItem('pgpKeys', JSON.stringify(keys));
+  return keys;
+};
 
-  
+// Encrypt message
+const encryptMessage = async (message, recipientId) => {
+  const userKeys = await getKeyPair();
+  // In a real app, fetch the recipient's public key from the server
+  // For this example, we'll assume the recipient has the same public key structure
+  const recipientPublicKey = userKeys.publicKey; // Replace with actual recipient public key retrieval
+
+  const publicKey = await openpgp.readKey({ armoredKey: recipientPublicKey });
+  const encrypted = await openpgp.encrypt({
+    message: await openpgp.createMessage({ text: message }),
+    encryptionKeys: publicKey,
+  });
+  return encrypted;
+};
+
+// Decrypt message
+const decryptMessage = async (encryptedMessage) => {
+  const userKeys = await getKeyPair();
+  const privateKey = await openpgp.decryptKey({
+    privateKey: await openpgp.readPrivateKey({ armoredKey: userKeys.privateKey }),
+    passphrase: 'gapp-secret',
+  });
+
+  const message = await openpgp.readMessage({ armoredMessage: encryptedMessage });
+  const decrypted = await openpgp.decrypt({
+    message,
+    decryptionKeys: privateKey,
+  });
+  return decrypted.data;
+};
+
 const ChatScreen = ({ token, userId }) => {
   const dispatch = useDispatch();
   const { chats, selectedChat } = useSelector((state) => state.messages);
@@ -140,7 +120,7 @@ const ChatScreen = ({ token, userId }) => {
           data.map(async (msg) => {
             if (msg.contentType === 'text' && msg.content) {
               try {
-                const decryptedContent = await decryptMessage(msg.content, msg.senderId);
+                const decryptedContent = await decryptMessage(msg.content);
                 return { ...msg, content: decryptedContent, status: msg.status || 'sent' };
               } catch (err) {
                 console.error('Decryption error:', err);
@@ -183,7 +163,7 @@ const ChatScreen = ({ token, userId }) => {
       let updatedMsg = { ...msg, username: senderKnown ? msg.senderUsername : 'Unsaved Number' };
       if (msg.contentType === 'text' && msg.content) {
         try {
-          const decryptedContent = await decryptMessage(msg.content, msg.senderId);
+          const decryptedContent = await decryptMessage(msg.content);
           updatedMsg = { ...updatedMsg, content: decryptedContent };
         } catch (err) {
           console.error('Decryption error:', err);
@@ -757,4 +737,4 @@ const ChatScreen = ({ token, userId }) => {
   );
 };
 
-export default ChatScreen;    
+export default ChatScreen;

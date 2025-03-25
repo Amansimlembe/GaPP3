@@ -9,7 +9,7 @@
     "framer-motion": "^10.18.0",
     "idb": "^8.0.2",
     "libphonenumber-js": "^1.12.6",
-    "libsignal-protocol": "github:signalapp/libsignal-protocol-javascript",
+    "openpgp": "^5.11.2",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-icons": "^5.5.0",
