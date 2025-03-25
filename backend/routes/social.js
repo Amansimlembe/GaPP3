@@ -75,7 +75,7 @@ router.post('/post', authMiddleware, upload.single('content'), async (req, res) 
     res.json(post);
   } catch (error) {
     console.error('Post error:', error);
-    res.status(500).json({ error: 'Failed to post', details: error.message });
+    res.status(500).json({ error: 'Failed to post', details: error.message, stack: error.stack });
   }
 });
 
@@ -89,7 +89,7 @@ router.delete('/post/:postId', authMiddleware, async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     console.error('Delete post error:', error);
-    res.status(500).json({ error: 'Failed to delete post', details: error.message });
+    res.status(500).json({ error: 'Failed to delete post', details: error.message, stack: error.stack });
   }
 });
 
@@ -99,23 +99,58 @@ router.post('/message', authMiddleware, upload.single('content'), async (req, re
     if (!senderId || !recipientId || !contentType) {
       return res.status(400).json({ error: 'Sender ID, recipient ID, and content type are required' });
     }
+
     let contentUrl = req.body.content || '';
     if (req.file) {
-      const resourceType = ['image', 'video', 'audio', 'document'].includes(contentType) ? contentType : 'raw';
+      // Map contentType to Cloudinary resource_type
+      let resourceType;
+      switch (contentType) {
+        case 'image':
+          resourceType = 'image';
+          break;
+        case 'video':
+          resourceType = 'video';
+          break;
+        case 'audio':
+          resourceType = 'video'; // Cloudinary treats audio as video
+          break;
+        case 'document':
+          resourceType = 'raw'; // Documents are uploaded as raw files
+          break;
+        default:
+          resourceType = 'raw';
+      }
+
       const result = await new Promise((resolve, reject) => {
         cloudinary.uploader.upload_stream(
           { resource_type: resourceType, public_id: `${contentType}_${senderId}_${Date.now()}`, folder: `gapp_chat_${contentType}s` },
-          (error, result) => error ? reject(error) : resolve(result)
+          (error, result) => {
+            if (error) {
+              console.error('Cloudinary upload error:', error);
+              reject(error);
+            } else {
+              resolve(result);
+            }
+          }
         ).end(req.file.buffer);
       });
       contentUrl = result.secure_url;
     }
-    const message = new Message({ senderId, recipientId, contentType: contentType === 'document' ? 'document' : contentType, content: contentUrl, caption, status: 'sent', replyTo });
+
+    const message = new Message({
+      senderId,
+      recipientId,
+      contentType: contentType === 'document' ? 'document' : contentType,
+      content: contentUrl,
+      caption,
+      status: 'sent',
+      replyTo,
+    });
     await message.save();
     res.json(message);
   } catch (error) {
     console.error('Message error:', error);
-    res.status(500).json({ error: 'Failed to send message', details: error.message });
+    res.status(500).json({ error: 'Failed to send message', details: error.message, stack: error.stack });
   }
 });
 
@@ -136,7 +171,8 @@ router.get('/messages', authMiddleware, async (req, res) => {
       .limit(parseInt(limit));
     res.json(messages);
   } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch messages', details: error.message });
+    console.error('Fetch messages error:', error);
+    res.status(500).json({ error: 'Failed to fetch messages', details: error.message, stack: error.stack });
   }
 });
 
@@ -154,7 +190,7 @@ router.delete('/message/:messageId', authMiddleware, async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     console.error('Delete message error:', error);
-    res.status(500).json({ error: 'Failed to delete message', details: error.message });
+    res.status(500).json({ error: 'Failed to delete message', details: error.message, stack: error.stack });
   }
 });
 
@@ -169,7 +205,7 @@ router.post('/message/status', authMiddleware, async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     console.error('Message status error:', error);
-    res.status(500).json({ error: 'Failed to update status', details: error.message });
+    res.status(500).json({ error: 'Failed to update status', details: error.message, stack: error.stack });
   }
 });
 
@@ -187,7 +223,7 @@ router.post('/like', authMiddleware, async (req, res) => {
     res.json(post);
   } catch (error) {
     console.error('Like error:', error);
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json({ error: 'Server error', details: error.message, stack: error.stack });
   }
 });
 
@@ -204,7 +240,7 @@ router.post('/unlike', authMiddleware, async (req, res) => {
     res.json(post);
   } catch (error) {
     console.error('Unlike error:', error);
-    res.status(500).json({ error: 'Failed to unlike post', details: error.message });
+    res.status(500).json({ error: 'Failed to unlike post', details: error.message, stack: error.stack });
   }
 });
 
@@ -221,7 +257,7 @@ router.post('/comment', authMiddleware, async (req, res) => {
     res.json(commentData);
   } catch (error) {
     console.error('Comment error:', error);
-    res.status(500).json({ error: 'Failed to comment', details: error.message });
+    res.status(500).json({ error: 'Failed to comment', details: error.message, stack: error.stack });
   }
 });
 
