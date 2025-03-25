@@ -43,11 +43,15 @@ const ChatScreen = ({ token, userId }) => {
   const [mediaPreview, setMediaPreview] = useState(null);
   const [holdTimer, setHoldTimer] = useState(null);
   const [swipeStartX, setSwipeStartX] = useState(null);
+  const [page, setPage] = useState(0); // Track the current page for pagination
+  const [hasMore, setHasMore] = useState(true); // Track if there are more messages to load
+  const [loading, setLoading] = useState(false); // Track loading state for fetching messages
   const chatRef = useRef(null);
   const menuRef = useRef(null);
   const messageMenuRef = useRef(null);
   const typingTimeoutRef = useRef(null);
 
+  const messagesPerPage = 50; // Number of messages to fetch per page
   const isSmallDevice = window.innerWidth < 768;
 
   useEffect(() => {
@@ -71,48 +75,72 @@ const ChatScreen = ({ token, userId }) => {
 
     const loadOfflineMessages = async () => {
       const offlineMessages = await getMessages();
-      if (offlineMessages.length > 0 && !selectedChat) {
+      if (offlineMessages.length > 0) {
         offlineMessages.forEach((msg) => {
-          dispatch(addMessage({ recipientId: msg.recipientId === userId ? msg.senderId : msg.recipientId, message: msg }));
+          const chatId = msg.recipientId === userId ? msg.senderId : msg.recipientId;
+          dispatch(addMessage({ recipientId: chatId, message: msg }));
         });
       }
     };
     loadOfflineMessages();
 
-    const fetchMessages = async () => {
-      if (!selectedChat) return;
+    const fetchMessages = async (pageNum = 0, isInitialLoad = true) => {
+      if (!selectedChat || loading) return;
+      setLoading(true);
       try {
         const { data } = await axios.get('/social/messages', {
           headers: { Authorization: `Bearer ${token}` },
-          params: { userId, recipientId: selectedChat, limit: 50 },
+          params: { userId, recipientId: selectedChat, limit: messagesPerPage, skip: pageNum * messagesPerPage },
         });
         console.log('Fetched messages:', data);
-        const messages = data.map((msg) => ({ ...msg, status: msg.status || 'sent' }));
-        dispatch(setMessages({ recipientId: selectedChat, messages }));
-        setNotifications((prev) => ({ ...prev, [selectedChat]: 0 }));
+        const messages = data.messages.map((msg) => ({ ...msg, status: msg.status || 'sent' }));
 
-        const lastReadIndex = messages.findIndex((msg) => msg.recipientId === userId && msg.status === 'read');
-        const unreadMessages = messages.slice(lastReadIndex + 1).filter((msg) => msg.recipientId === userId);
-        setUnreadCount(unreadMessages.length);
-        if (unreadMessages.length > 0) {
-          setFirstUnreadMessageId(unreadMessages[0]._id);
-        }
+        // Use hasMore from the backend response
+        setHasMore(data.hasMore);
 
-        if (unreadMessages.length === 0) {
-          chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
-        } else {
-          const firstUnreadElement = document.getElementById(`message-${unreadMessages[0]._id}`);
-          if (firstUnreadElement) {
-            firstUnreadElement.scrollIntoView({ behavior: 'smooth' });
+        if (isInitialLoad) {
+          dispatch(setMessages({ recipientId: selectedChat, messages }));
+          setNotifications((prev) => ({ ...prev, [selectedChat]: 0 }));
+
+          const lastReadIndex = messages.findIndex((msg) => msg.recipientId === userId && msg.status === 'read');
+          const unreadMessages = messages.slice(lastReadIndex + 1).filter((msg) => msg.recipientId === userId);
+          setUnreadCount(unreadMessages.length);
+          if (unreadMessages.length > 0) {
+            setFirstUnreadMessageId(unreadMessages[0]._id);
           }
+
+          if (unreadMessages.length === 0) {
+            chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
+          } else {
+            const firstUnreadElement = document.getElementById(`message-${unreadMessages[0]._id}`);
+            if (firstUnreadElement) {
+              firstUnreadElement.scrollIntoView({ behavior: 'smooth' });
+            }
+          }
+        } else {
+          // Prepend older messages for infinite scroll
+          dispatch(setMessages({
+            recipientId: selectedChat,
+            messages: [...messages, ...(chats[selectedChat] || [])],
+          }));
         }
       } catch (error) {
         console.error('Fetch messages error:', error);
-        dispatch(setMessages({ recipientId: selectedChat, messages: [] }));
-        setError('No previous messages');
+        if (isInitialLoad) {
+          dispatch(setMessages({ recipientId: selectedChat, messages: [] }));
+          setError('No previous messages');
+        }
+      } finally {
+        setLoading(false);
       }
     };
-    fetchMessages();
+
+    // Fetch initial messages when selectedChat changes
+    if (selectedChat) {
+      setPage(0);
+      setHasMore(true);
+      fetchMessages(0, true);
+    }
 
     socket.on('message', (msg) => {
       saveMessages([msg]);
@@ -178,6 +206,11 @@ const ChatScreen = ({ token, userId }) => {
         } else {
           setShowJumpToBottom(false);
         }
+
+        // Trigger fetching more messages when scrolling to the top
+        if (scrollTop < 100 && hasMore && !loading) {
+          setPage((prevPage) => prevPage + 1);
+        }
       }
     };
     chatRef.current?.addEventListener('scroll', handleScroll);
@@ -185,6 +218,11 @@ const ChatScreen = ({ token, userId }) => {
     if (isSmallDevice) {
       const bottomNav = document.querySelector('.bottom-nav');
       if (bottomNav) bottomNav.style.zIndex = '10';
+    }
+
+    // Fetch more messages when page changes (for infinite scroll)
+    if (page > 0) {
+      fetchMessages(page, false);
     }
 
     return () => {
@@ -196,7 +234,7 @@ const ChatScreen = ({ token, userId }) => {
       chatRef.current?.removeEventListener('scroll', handleScroll);
       clearInterval(keepAlive);
     };
-  }, [token, userId, selectedChat, dispatch]);
+  }, [token, userId, selectedChat, page, dispatch]);
 
   const sendMessage = async () => {
     if (!selectedChat || (!message && !file && contentType === 'text')) {
@@ -480,7 +518,12 @@ const ChatScreen = ({ token, userId }) => {
               </div>
             </div>
             <div ref={chatRef} className="flex-1 overflow-y-auto bg-gray-100 p-2 pt-16 pb-32">
-              {(chats[selectedChat] || []).length === 0 ? (
+              {loading && page === 0 && (
+                <div className="text-center py-2">
+                  <p className="text-gray-500">Loading messages...</p>
+                </div>
+              )}
+              {(chats[selectedChat] || []).length === 0 && !loading ? (
                 <p className="text-center text-gray-500 mt-4">Start a new conversation</p>
               ) : (
                 <>
@@ -676,6 +719,11 @@ const ChatScreen = ({ token, userId }) => {
                       </div>
                     </motion.div>
                   ))}
+                  {loading && page > 0 && (
+                    <div className="text-center py-2">
+                      <p className="text-gray-500">Loading more messages...</p>
+                    </div>
+                  )}
                 </>
               )}
             </div>

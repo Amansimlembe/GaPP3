@@ -153,13 +153,21 @@ router.post('/message', authMiddleware, upload.single('content'), async (req, re
     res.status(500).json({ error: 'Failed to send message', details: error.message, stack: error.stack });
   }
 });
-
 router.get('/messages', authMiddleware, async (req, res) => {
   try {
-    const { userId, recipientId, limit = 20, page = 1 } = req.query;
+    const { userId, recipientId, limit = 50, skip = 0 } = req.query;
     if (!userId || !recipientId) {
       return res.status(400).json({ error: 'User ID and Recipient ID are required' });
     }
+
+    // Count total messages for this conversation
+    const totalMessages = await Message.countDocuments({
+      $or: [
+        { senderId: userId, recipientId },
+        { senderId: recipientId, recipientId: userId }
+      ]
+    });
+
     const messages = await Message.find({
       $or: [
         { senderId: userId, recipientId },
@@ -167,9 +175,15 @@ router.get('/messages', authMiddleware, async (req, res) => {
       ]
     })
       .sort({ createdAt: 1 })
-      .skip((page - 1) * limit)
-      .limit(parseInt(limit));
-    res.json(messages);
+      .skip(parseInt(skip))
+      .limit(parseInt(limit))
+      .lean();
+
+    res.json({
+      messages,
+      totalMessages,
+      hasMore: parseInt(skip) + messages.length < totalMessages
+    });
   } catch (error) {
     console.error('Fetch messages error:', error);
     res.status(500).json({ error: 'Failed to fetch messages', details: error.message, stack: error.stack });
