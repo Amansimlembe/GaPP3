@@ -54,6 +54,40 @@ const ChatScreen = ({ token, userId }) => {
   const messagesPerPage = 50; // Number of messages to fetch per page
   const isSmallDevice = window.innerWidth < 768;
 
+  // Helper function to format the date for grouping (e.g., "Today", "Yesterday", or "March 24, 2025")
+  const formatDateHeader = (date) => {
+    const today = new Date();
+    const messageDate = new Date(date);
+
+    // Reset time for comparison (only compare dates)
+    const todayDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    const messageDateOnly = new Date(messageDate.getFullYear(), messageDate.getMonth(), messageDate.getDate());
+
+    const diffTime = todayDate - messageDateOnly;
+    const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+
+    if (diffDays === 0) {
+      return 'Today';
+    } else if (diffDays === 1) {
+      return 'Yesterday';
+    } else {
+      return messageDate.toLocaleDateString('en-US', {
+        month: 'long',
+        day: 'numeric',
+        year: 'numeric',
+      });
+    }
+  };
+
+  // Helper function to format the time in 12-hour format (e.g., "10:28 PM")
+  const formatTime = (date) => {
+    return new Date(date).toLocaleTimeString('en-US', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true,
+    });
+  };
+
   useEffect(() => {
     if (!userId || !token) return;
 
@@ -93,17 +127,38 @@ const ChatScreen = ({ token, userId }) => {
           params: { userId, recipientId: selectedChat, limit: messagesPerPage, skip: pageNum * messagesPerPage },
         });
         console.log('Fetched messages:', data);
-        const messages = data.messages.map((msg) => ({ ...msg, status: msg.status || 'sent' }));
+        // Backend returns messages in descending order (newest to oldest), reverse for display (oldest to newest)
+        let messages = data.messages.map((msg) => ({ ...msg, status: msg.status || 'sent' })).reverse();
+
+        // Merge with offline messages
+        const offlineMessages = await getMessages();
+        const offlineChatMessages = offlineMessages
+          .filter((msg) => {
+            const chatId = msg.recipientId === userId ? msg.senderId : msg.recipientId;
+            return chatId === selectedChat;
+          })
+          .map((msg) => ({ ...msg, status: msg.status || 'sent' }));
+
+        // Combine fetched and offline messages, removing duplicates
+        const allMessages = [...messages, ...offlineChatMessages].reduce((acc, msg) => {
+          if (!acc.some((m) => m._id === msg._id)) {
+            acc.push(msg);
+          }
+          return acc;
+        }, []);
+
+        // Sort messages by createdAt (oldest to newest) for display
+        allMessages.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
 
         // Use hasMore from the backend response
         setHasMore(data.hasMore);
 
         if (isInitialLoad) {
-          dispatch(setMessages({ recipientId: selectedChat, messages }));
+          dispatch(setMessages({ recipientId: selectedChat, messages: allMessages }));
           setNotifications((prev) => ({ ...prev, [selectedChat]: 0 }));
 
-          const lastReadIndex = messages.findIndex((msg) => msg.recipientId === userId && msg.status === 'read');
-          const unreadMessages = messages.slice(lastReadIndex + 1).filter((msg) => msg.recipientId === userId);
+          const lastReadIndex = allMessages.findIndex((msg) => msg.recipientId === userId && msg.status === 'read');
+          const unreadMessages = allMessages.slice(lastReadIndex + 1).filter((msg) => msg.recipientId === userId);
           setUnreadCount(unreadMessages.length);
           if (unreadMessages.length > 0) {
             setFirstUnreadMessageId(unreadMessages[0]._id);
@@ -527,198 +582,221 @@ const ChatScreen = ({ token, userId }) => {
                 <p className="text-center text-gray-500 mt-4">Start a new conversation</p>
               ) : (
                 <>
-                  {(chats[selectedChat] || []).map((msg, index) => (
-                    <motion.div
-                      key={msg._id}
-                      initial={{ opacity: 0, y: 20 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{ duration: 0.3 }}
-                    >
-                      {firstUnreadMessageId === msg._id && unreadCount > 0 && (
-                        <div className="text-center my-2">
-                          <span className="bg-blue-500 text-white px-2 py-1 rounded-full text-sm">
-                            {unreadCount} Unread Messages
-                          </span>
-                        </div>
-                      )}
-                      <div
-                        id={`message-${msg._id}`}
-                        className={`flex ${msg.senderId === userId ? 'justify-end' : 'justify-start'} px-2 py-1 relative`}
-                        onTouchStart={(e) => {
-                          handleHoldStart(msg._id);
-                          handleSwipeStart(e);
-                        }}
-                        onTouchMove={handleSwipeMove}
-                        onTouchEnd={(e) => {
-                          handleHoldEnd();
-                          handleSwipeEnd(e, msg);
-                        }}
-                        onMouseDown={() => handleHoldStart(msg._id)}
-                        onMouseUp={handleHoldEnd}
+                  {(chats[selectedChat] || []).map((msg, index) => {
+                    const currentDate = new Date(msg.createdAt);
+                    const prevMsg = index > 0 ? (chats[selectedChat] || [])[index - 1] : null;
+                    const prevDate = prevMsg ? new Date(prevMsg.createdAt) : null;
+
+                    // Determine if we need to show a date header
+                    let showDateHeader = false;
+                    if (!prevDate) {
+                      showDateHeader = true; // Always show for the first message
+                    } else {
+                      const currentDateOnly = new Date(currentDate.getFullYear(), currentDate.getMonth(), currentDate.getDate());
+                      const prevDateOnly = new Date(prevDate.getFullYear(), prevDate.getMonth(), prevDate.getDate());
+                      showDateHeader = currentDateOnly.getTime() !== prevDateOnly.getTime();
+                    }
+
+                    return (
+                      <motion.div
+                        key={msg._id}
+                        initial={{ opacity: 0, y: 20 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ duration: 0.3 }}
                       >
-                        <div
-                          className={`max-w-[70%] p-2 rounded-lg shadow-sm ${msg.senderId === userId ? 'bg-green-500 text-white rounded-br-none' : 'bg-white text-black rounded-bl-none'} transition-all ${selectedMessages.includes(msg._id) ? 'bg-opacity-50' : ''}`}
-                          onClick={() => {
-                            if (selectedMessages.length > 0) {
-                              setSelectedMessages((prev) =>
-                                prev.includes(msg._id) ? prev.filter((id) => id !== msg._id) : [...prev, msg._id]
-                              );
-                            }
-                          }}
-                          onDoubleClick={msg.contentType === 'video' ? () => viewMessage(msg) : null}
-                        >
-                          {msg.replyTo && (
-                            <div className="bg-gray-100 p-1 rounded mb-1 text-xs italic text-gray-700 border-l-4 border-green-500">
-                              {msg.replyTo.contentType === 'text' && (
-                                <p>{msg.replyTo.content.slice(0, 20) + (msg.replyTo.content.length > 20 ? '...' : '')}</p>
-                              )}
-                              {msg.replyTo.contentType === 'image' && (
-                                <div className="flex items-center">
-                                  <img src={msg.replyTo.content} alt="Reply Preview" className="w-8 h-8 object-cover rounded mr-2" />
-                                  <span>Image</span>
-                                </div>
-                              )}
-                              {msg.replyTo.contentType === 'video' && (
-                                <div className="flex items-center">
-                                  <video src={msg.replyTo.content} className="w-8 h-8 object-cover rounded mr-2" />
-                                  <span>Video</span>
-                                </div>
-                              )}
-                              {msg.replyTo.contentType === 'audio' && (
-                                <div className="flex items-center">
-                                  <FaPlay className="text-green-500 mr-2" />
-                                  <span>Audio</span>
-                                </div>
-                              )}
-                              {msg.replyTo.contentType === 'document' && (
-                                <div className="flex items-center">
-                                  <FaFileAlt className="text-blue-600 mr-2" />
-                                  <span>Document</span>
-                                </div>
-                              )}
-                            </div>
-                          )}
-                          {msg.contentType === 'text' && <p className="text-sm break-words">{msg.content}</p>}
-                          {msg.contentType === 'image' && (
-                            <div className="relative border-t border-l border-r border-gray-300 rounded-lg shadow-md p-1">
-                              <img
-                                src={msg.content}
-                                alt="Chat"
-                                className="max-w-[80%] max-h-64 object-contain rounded-lg"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  viewMessage(msg);
-                                }}
-                              />
-                              {msg.caption && (
-                                <p className="text-xs italic text-gray-300 max-w-[80%] p-2 border-b border-l border-r border-gray-300 rounded-b-lg break-words">{msg.caption}</p>
-                              )}
-                            </div>
-                          )}
-                          {msg.contentType === 'video' && (
-                            <div className="relative border-t border-l border-r border-gray-300 rounded-lg shadow-md p-1">
-                              <video
-                                src={msg.content}
-                                className="max-w-[80%] max-h-64 object-contain rounded-lg"
-                                onClick={(e) => e.stopPropagation()}
-                              />
-                              {msg.caption && (
-                                <p className="text-xs italic text-gray-300 max-w-[80%] p-2 border-b border-l border-r border-gray-300 rounded-b-lg break-words">{msg.caption}</p>
-                              )}
-                            </div>
-                          )}
-                          {msg.contentType === 'audio' && (
-                            <div className="relative flex items-center">
-                              <audio
-                                src={msg.content}
-                                controls
-                                className="max-w-[80%] h-10"
-                                onError={(e) => console.error('Audio playback error:', e)}
-                              />
-                              {msg.caption && <p className="text-xs mt-1 italic text-gray-300 ml-2">{msg.caption}</p>}
-                            </div>
-                          )}
-                          {msg.contentType === 'document' && (
-                            <div className="flex items-center bg-gray-100 p-2 rounded-lg">
-                              <FaFileAlt className="text-blue-600 mr-2" />
-                              <span className="text-blue-600 font-semibold truncate max-w-[200px] text-sm">
-                                {msg.content.split('/').pop().slice(0, 30) + (msg.content.split('/').pop().length > 30 ? '...' : '')}
-                              </span>
-                              <a
-                                href={msg.content}
-                                download
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="ml-2 text-blue-600 hover:text-blue-800"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                }}
-                              >
-                                <FaDownload />
-                              </a>
-                              {msg.caption && <p className="text-xs ml-2 italic text-gray-600">{msg.caption}</p>}
-                            </div>
-                          )}
-                          <div className="flex justify-between items-center mt-1">
-                            {msg.senderId === userId && (
-                              <span className="text-xs">
-                                {msg.status === 'sent' && '✓'}
-                                {msg.status === 'delivered' && '✓✓'}
-                                {msg.status === 'read' && <span className="text-blue-500">✓✓</span>}
-                              </span>
-                            )}
-                            <span className="text-xs text-gray-500">
-                              {new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        {showDateHeader && (
+                          <div className="text-center my-2">
+                            <span className="bg-gray-300 text-gray-700 px-2 py-1 rounded-full text-sm">
+                              {formatDateHeader(msg.createdAt)}
                             </span>
                           </div>
-                        </div>
-                        {showMessageMenu === msg._id && (
-                          <motion.div
-                            ref={messageMenuRef}
-                            initial={{ opacity: 0, scale: 0.8 }}
-                            animate={{ opacity: 1, scale: 1 }}
-                            className={`absolute ${msg.senderId === userId ? 'right-0' : 'left-0'} top-0 bg-white p-2 rounded-lg shadow-lg z-20 flex space-x-2`}
+                        )}
+                        {firstUnreadMessageId === msg._id && unreadCount > 0 && (
+                          <div className="text-center my-2">
+                            <span className="bg-blue-500 text-white px-2 py-1 rounded-full text-sm">
+                              {unreadCount} Unread Messages
+                            </span>
+                          </div>
+                        )}
+                        <div
+                          id={`message-${msg._id}`}
+                          className={`flex ${msg.senderId === userId ? 'justify-end' : 'justify-start'} px-2 py-1 relative`}
+                          onTouchStart={(e) => {
+                            handleHoldStart(msg._id);
+                            handleSwipeStart(e);
+                          }}
+                          onTouchMove={handleSwipeMove}
+                          onTouchEnd={(e) => {
+                            handleHoldEnd();
+                            handleSwipeEnd(e, msg);
+                          }}
+                          onMouseDown={() => handleHoldStart(msg._id)}
+                          onMouseUp={handleHoldEnd}
+                        >
+                          <div
+                            className={`max-w-[70%] p-2 rounded-lg shadow-sm ${msg.senderId === userId ? 'bg-green-500 text-white rounded-br-none' : 'bg-white text-black rounded-bl-none'} transition-all ${selectedMessages.includes(msg._id) ? 'bg-opacity-50' : ''}`}
+                            onClick={() => {
+                              if (selectedMessages.length > 0) {
+                                setSelectedMessages((prev) =>
+                                  prev.includes(msg._id) ? prev.filter((id) => id !== msg._id) : [...prev, msg._id]
+                                );
+                              }
+                            }}
+                            onDoubleClick={msg.contentType === 'video' ? () => viewMessage(msg) : null}
                           >
-                            <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
-                              <FaReply
-                                onClick={() => setReplyTo(msg)}
-                                className="text-primary cursor-pointer hover:text-secondary"
-                              />
-                            </motion.div>
-                            <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
-                              <FaForward
-                                onClick={() => forwardMessage(msg)}
-                                className="text-primary cursor-pointer hover:text-secondary"
-                              />
-                            </motion.div>
-                            <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
-                              <FaCopy
-                                onClick={() => copyMessage(msg)}
-                                className="text-primary cursor-pointer hover:text-secondary"
-                              />
-                            </motion.div>
-                            <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
-                              <FaShare
-                                onClick={() => shareMessage(msg)}
-                                className="text-primary cursor-pointer hover:text-secondary"
-                              />
-                            </motion.div>
-                            {msg.senderId === userId && (
-                              <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
-                                <FaTrash
-                                  onClick={() => {
-                                    setSelectedMessages([msg._id]);
-                                    setShowDeleteConfirm(true);
+                            {msg.replyTo && (
+                              <div className="bg-gray-100 p-1 rounded mb-1 text-xs italic text-gray-700 border-l-4 border-green-500">
+                                {msg.replyTo.contentType === 'text' && (
+                                  <p>{msg.replyTo.content.slice(0, 20) + (msg.replyTo.content.length > 20 ? '...' : '')}</p>
+                                )}
+                                {msg.replyTo.contentType === 'image' && (
+                                  <div className="flex items-center">
+                                    <img src={msg.replyTo.content} alt="Reply Preview" className="w-8 h-8 object-cover rounded mr-2" />
+                                    <span>Image</span>
+                                  </div>
+                                )}
+                                {msg.replyTo.contentType === 'video' && (
+                                  <div className="flex items-center">
+                                    <video src={msg.replyTo.content} className="w-8 h-8 object-cover rounded mr-2" />
+                                    <span>Video</span>
+                                  </div>
+                                )}
+                                {msg.replyTo.contentType === 'audio' && (
+                                  <div className="flex items-center">
+                                    <FaPlay className="text-green-500 mr-2" />
+                                    <span>Audio</span>
+                                  </div>
+                                )}
+                                {msg.replyTo.contentType === 'document' && (
+                                  <div className="flex items-center">
+                                    <FaFileAlt className="text-blue-600 mr-2" />
+                                    <span>Document</span>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                            {msg.contentType === 'text' && <p className="text-sm break-words">{msg.content}</p>}
+                            {msg.contentType === 'image' && (
+                              <div className="relative border-t border-l border-r border-gray-300 rounded-lg shadow-md p-1">
+                                <img
+                                  src={msg.content}
+                                  alt="Chat"
+                                  className="max-w-[80%] max-h-64 object-contain rounded-lg"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    viewMessage(msg);
                                   }}
-                                  className="text-red-500 cursor-pointer hover:text-red-700"
+                                />
+                                {msg.caption && (
+                                  <p className="text-xs italic text-gray-300 max-w-[80%] p-2 border-b border-l border-r border-gray-300 rounded-b-lg break-words">{msg.caption}</p>
+                                )}
+                              </div>
+                            )}
+                            {msg.contentType === 'video' && (
+                              <div className="relative border-t border-l border-r border-gray-300 rounded-lg shadow-md p-1">
+                                <video
+                                  src={msg.content}
+                                  className="max-w-[80%] max-h-64 object-contain rounded-lg"
+                                  onClick={(e) => e.stopPropagation()}
+                                />
+                                {msg.caption && (
+                                  <p className="text-xs italic text-gray-300 max-w-[80%] p-2 border-b border-l border-r border-gray-300 rounded-b-lg break-words">{msg.caption}</p>
+                                )}
+                              </div>
+                            )}
+                            {msg.contentType === 'audio' && (
+                              <div className="relative flex items-center">
+                                <audio
+                                  src={msg.content}
+                                  controls
+                                  className="max-w-[80%] h-10"
+                                  onError={(e) => console.error('Audio playback error:', e)}
+                                />
+                                {msg.caption && <p className="text-xs mt-1 italic text-gray-300 ml-2">{msg.caption}</p>}
+                              </div>
+                            )}
+                            {msg.contentType === 'document' && (
+                              <div className="flex items-center bg-gray-100 p-2 rounded-lg">
+                                <FaFileAlt className="text-blue-600 mr-2" />
+                                <span className="text-blue-600 font-semibold truncate max-w-[200px] text-sm">
+                                  {msg.content.split('/').pop().slice(0, 30) + (msg.content.split('/').pop().length > 30 ? '...' : '')}
+                                </span>
+                                <a
+                                  href={msg.content}
+                                  download
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="ml-2 text-blue-600 hover:text-blue-800"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                  }}
+                                >
+                                  <FaDownload />
+                                </a>
+                                {msg.caption && <p className="text-xs ml-2 italic text-gray-600">{msg.caption}</p>}
+                              </div>
+                            )}
+                            <div className="flex justify-between items-center mt-1">
+                              {msg.senderId === userId && (
+                                <span className="text-xs">
+                                  {msg.status === 'sent' && '✓'}
+                                  {msg.status === 'delivered' && '✓✓'}
+                                  {msg.status === 'read' && <span className="text-blue-500">✓✓</span>}
+                                </span>
+                              )}
+                              <span className="text-xs text-gray-500">
+                                {formatTime(msg.createdAt)}
+                              </span>
+                            </div>
+                          </div>
+                          {showMessageMenu === msg._id && (
+                            <motion.div
+                              ref={messageMenuRef}
+                              initial={{ opacity: 0, scale: 0.8 }}
+                              animate={{ opacity: 1, scale: 1 }}
+                              className={`absolute ${msg.senderId === userId ? 'right-0' : 'left-0'} top-0 bg-white p-2 rounded-lg shadow-lg z-20 flex space-x-2`}
+                            >
+                              <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
+                                <FaReply
+                                  onClick={() => setReplyTo(msg)}
+                                  className="text-primary cursor-pointer hover:text-secondary"
                                 />
                               </motion.div>
-                            )}
-                          </motion.div>
-                        )}
-                      </div>
-                    </motion.div>
-                  ))}
+                              <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
+                                <FaForward
+                                  onClick={() => forwardMessage(msg)}
+                                  className="text-primary cursor-pointer hover:text-secondary"
+                                />
+                              </motion.div>
+                              <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
+                                <FaCopy
+                                  onClick={() => copyMessage(msg)}
+                                  className="text-primary cursor-pointer hover:text-secondary"
+                                />
+                              </motion.div>
+                              <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
+                                <FaShare
+                                  onClick={() => shareMessage(msg)}
+                                  className="text-primary cursor-pointer hover:text-secondary"
+                                />
+                              </motion.div>
+                              {msg.senderId === userId && (
+                                <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
+                                  <FaTrash
+                                    onClick={() => {
+                                      setSelectedMessages([msg._id]);
+                                      setShowDeleteConfirm(true);
+                                    }}
+                                    className="text-red-500 cursor-pointer hover:text-red-700"
+                                  />
+                                </motion.div>
+                              )}
+                            </motion.div>
+                          )}
+                        </div>
+                      </motion.div>
+                    );
+                  })}
                   {loading && page > 0 && (
                     <div className="text-center py-2">
                       <p className="text-gray-500">Loading more messages...</p>
