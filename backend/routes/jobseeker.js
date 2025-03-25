@@ -7,6 +7,13 @@ const multer = require('multer');
 const { jobMatcher } = require('../utils/jobMatcher');
 const authMiddleware = require('../middleware/auth');
 
+
+
+
+
+
+
+
 const upload = multer({ storage: multer.memoryStorage() });
 
 router.post('/update_cv', authMiddleware, upload.single('cv_file'), async (req, res) => {

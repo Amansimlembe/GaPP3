@@ -84,24 +84,38 @@ io.on('connection', (socket) => {
   });
 
   socket.on('message', async (data) => {
-    const isRecipientOnline = await redisClient.get(`online:${data.recipientId}`);
-    const status = isRecipientOnline ? 'delivered' : 'sent';
-    const message = await Message.findById(data._id);
-    if (message) {
-      message.status = status;
-      await message.save();
-      io.to(data.recipientId).emit('message', { ...data, status });
-      io.to(data.senderId).emit('message', { ...data, status });
+    try {
+      const isRecipientOnline = await redisClient.get(`online:${data.recipientId}`);
+      const status = isRecipientOnline ? 'delivered' : 'sent';
+      const message = await Message.findById(data._id);
+      if (message) {
+        message.status = status;
+        await message.save();
+        // Emit to both sender and recipient
+        io.to(data.recipientId).emit('message', { ...data, status });
+        io.to(data.senderId).emit('message', { ...data, status });
+      } else {
+        console.error('Message not found:', data._id);
+      }
+    } catch (error) {
+      console.error('Error handling message event:', error);
     }
   });
 
   socket.on('messageStatus', async ({ messageId, status, recipientId }) => {
-    const message = await Message.findById(messageId);
-    if (message) {
-      message.status = status;
-      await message.save();
-      io.to(recipientId).emit('messageStatus', { messageId, status });
-      io.to(message.senderId).emit('messageStatus', { messageId, status });
+    try {
+      const message = await Message.findById(messageId);
+      if (message) {
+        message.status = status;
+        await message.save();
+        // Emit to both sender and recipient
+        io.to(recipientId).emit('messageStatus', { messageId, status });
+        io.to(message.senderId).emit('messageStatus', { messageId, status });
+      } else {
+        console.error('Message not found for status update:', messageId);
+      }
+    } catch (error) {
+      console.error('Error handling messageStatus event:', error);
     }
   });
 
@@ -123,6 +137,11 @@ io.on('connection', (socket) => {
 
   socket.on('postDeleted', (postId) => {
     io.emit('postDeleted', postId);
+  });
+
+  socket.on('ping', ({ userId }) => {
+    // Keep-alive ping to prevent Render from idling
+    console.log(`Received ping from user: ${userId}`);
   });
 
   socket.on('error', (error) => {

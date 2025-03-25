@@ -10,13 +10,22 @@ const messageSlice = createSlice({
     addMessage: (state, action) => {
       const { recipientId, message } = action.payload;
       state.chats[recipientId] = state.chats[recipientId] || [];
-      state.chats[recipientId].push(message);
+      // Avoid duplicates by checking if the message already exists
+      if (!state.chats[recipientId].find((msg) => msg._id === message._id)) {
+        state.chats[recipientId].push(message);
+      }
+    },
+    updateMessageStatus: (state, action) => {
+      const { recipientId, messageId, status } = action.payload;
+      state.chats[recipientId] = (state.chats[recipientId] || []).map((msg) =>
+        msg._id === messageId ? { ...msg, status } : msg
+      );
     },
     setSelectedChat: (state, action) => {
       state.selectedChat = action.payload;
-    }
-  }
+    },
+  },
 });
 
-export const { setMessages, addMessage, setSelectedChat } = messageSlice.actions;
-export const store = configureStore({ reducer: { messages: messageSlice.reducer } });     
+export const { setMessages, addMessage, updateMessageStatus, setSelectedChat } = messageSlice.actions;
+export const store = configureStore({ reducer: { messages: messageSlice.reducer } });

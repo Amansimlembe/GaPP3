@@ -180,7 +180,13 @@ router.delete('/message/:messageId', authMiddleware, async (req, res) => {
   try {
     const message = await Message.findById(req.params.messageId);
     if (!message) return res.status(404).json({ error: 'Message not found' });
-    if (message.senderId.toString() !== req.user.userId) return res.status(403).json({ error: 'Not authorized' });
+
+    console.log('Message senderId:', message.senderId.toString());
+    console.log('Request userId:', req.user.userId);
+
+    if (message.senderId.toString() !== req.user.userId) {
+      return res.status(403).json({ error: 'Not authorized to delete this message' });
+    }
 
     const result = await Message.deleteOne({ _id: req.params.messageId });
     if (result.deletedCount === 0) {
@@ -193,6 +199,7 @@ router.delete('/message/:messageId', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Failed to delete message', details: error.message, stack: error.stack });
   }
 });
+
 
 router.post('/message/status', authMiddleware, async (req, res) => {
   try {

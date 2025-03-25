@@ -4,10 +4,16 @@ import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import { FaPaperPlane, FaPaperclip, FaTrash, FaArrowLeft, FaReply, FaEllipsisH, FaSave, FaShare, FaCopy, FaForward, FaFileAlt, FaPlay, FaArrowDown, FaDownload } from 'react-icons/fa';
 import { useDispatch, useSelector } from 'react-redux';
-import { setMessages, addMessage, setSelectedChat } from '../store';
+import { setMessages, addMessage, updateMessageStatus, setSelectedChat } from '../store';
 import { saveMessages, getMessages } from '../db';
 
-const socket = io('https://gapp-6yc3.onrender.com');
+const socket = io('https://gapp-6yc3.onrender.com', {
+  reconnection: true,
+  reconnectionAttempts: Infinity,
+  reconnectionDelay: 1000,
+  reconnectionDelayMax: 5000,
+  randomizationFactor: 0.5,
+});
 
 const ChatScreen = ({ token, userId }) => {
   const dispatch = useDispatch();
@@ -48,6 +54,10 @@ const ChatScreen = ({ token, userId }) => {
     if (!userId || !token) return;
 
     socket.emit('join', userId);
+
+    const keepAlive = setInterval(() => {
+      socket.emit('ping', { userId });
+    }, 300000); // Ping every 5 minutes
 
     const fetchUsers = async () => {
       try {
@@ -108,13 +118,21 @@ const ChatScreen = ({ token, userId }) => {
       saveMessages([msg]);
       const senderKnown = users.some((u) => u.id === msg.senderId);
       let updatedMsg = { ...msg, username: senderKnown ? msg.senderUsername : 'Unsaved Number' };
-      dispatch(addMessage({ recipientId: msg.recipientId === userId ? msg.senderId : msg.recipientId, message: updatedMsg }));
+
+      const chatId = msg.senderId === userId ? msg.recipientId : msg.senderId;
+
+      const existingMessage = (chats[chatId] || []).find((m) => m._id === msg._id);
+      if (!existingMessage) {
+        dispatch(addMessage({ recipientId: chatId, message: updatedMsg }));
+      }
+
       if (msg.recipientId === userId && !senderKnown) {
         setUsers((prev) => [
           ...prev,
           { id: msg.senderId, virtualNumber: msg.senderVirtualNumber, username: 'Unsaved Number', photo: msg.senderPhoto || 'https://placehold.co/40x40' },
         ]);
       }
+
       if ((msg.senderId === userId && msg.recipientId === selectedChat) || (msg.senderId === selectedChat && msg.recipientId === userId)) {
         if (msg.recipientId === userId) {
           setUnreadCount((prev) => prev + 1);
@@ -143,10 +161,7 @@ const ChatScreen = ({ token, userId }) => {
     });
 
     socket.on('messageStatus', ({ messageId, status }) => {
-      dispatch(setMessages({
-        recipientId: selectedChat,
-        messages: (chats[selectedChat] || []).map((msg) => (msg._id === messageId ? { ...msg, status } : msg)),
-      }));
+      dispatch(updateMessageStatus({ recipientId: selectedChat, messageId, status }));
     });
 
     const handleClickOutside = (event) => {
@@ -179,6 +194,7 @@ const ChatScreen = ({ token, userId }) => {
       socket.off('messageStatus');
       document.removeEventListener('mousedown', handleClickOutside);
       chatRef.current?.removeEventListener('scroll', handleScroll);
+      clearInterval(keepAlive);
     };
   }, [token, userId, selectedChat, dispatch]);
 
@@ -257,7 +273,9 @@ const ChatScreen = ({ token, userId }) => {
     try {
       await Promise.all(
         selectedMessages.map((messageId) =>
-          axios.delete(`/social/message/${messageId}`, { headers: { Authorization: `Bearer ${token}` } })
+          axios.delete(`/social/message/${messageId}`, {
+            headers: { Authorization: `Bearer ${token}` }
+          })
         )
       );
       dispatch(setMessages({
@@ -267,6 +285,7 @@ const ChatScreen = ({ token, userId }) => {
       setSelectedMessages([]);
       setShowDeleteConfirm(false);
     } catch (error) {
+      console.error('Delete message error:', error);
       setError('Failed to delete messages');
     }
   };
@@ -379,8 +398,9 @@ const ChatScreen = ({ token, userId }) => {
     const swipeDistance = touch.clientX - swipeStartX;
   };
 
-  const handleSwipeEnd = (msg) => {
+  const handleSwipeEnd = (e, msg) => {
     if (swipeStartX === null) return;
+    const touch = e.changedTouches[0];
     const swipeDistance = touch.clientX - swipeStartX;
     if (swipeDistance < -50) {
       setReplyTo(msg);
@@ -459,7 +479,7 @@ const ChatScreen = ({ token, userId }) => {
                 {isTyping[selectedChat] && <span className="text-sm text-green-500 ml-2">Typing...</span>}
               </div>
             </div>
-            <div ref={chatRef} className="flex-1 overflow-y-auto bg-gray-100 p-2 pt-16 pb-24">
+            <div ref={chatRef} className="flex-1 overflow-y-auto bg-gray-100 p-2 pt-16 pb-28">
               {(chats[selectedChat] || []).length === 0 ? (
                 <p className="text-center text-gray-500 mt-4">Start a new conversation</p>
               ) : (
@@ -486,9 +506,9 @@ const ChatScreen = ({ token, userId }) => {
                           handleSwipeStart(e);
                         }}
                         onTouchMove={handleSwipeMove}
-                        onTouchEnd={() => {
+                        onTouchEnd={(e) => {
                           handleHoldEnd();
-                          handleSwipeEnd(msg);
+                          handleSwipeEnd(e, msg);
                         }}
                         onMouseDown={() => handleHoldStart(msg._id)}
                         onMouseUp={handleHoldEnd}
@@ -566,22 +586,32 @@ const ChatScreen = ({ token, userId }) => {
                           )}
                           {msg.contentType === 'audio' && (
                             <div className="relative flex items-center">
-                              <FaPlay className="text-green-500 mr-2" />
-                              <div className={`bg-gray-200 h-2 rounded-full ${isSmallDevice ? 'w-[250px]' : 'w-[400px]'}`}>
-                                <div className="bg-green-500 h-2 rounded-full w-1/3"></div>
-                              </div>
-                              <audio src={msg.content} controls className="hidden" />
+                              <audio
+                                src={msg.content}
+                                controls
+                                className="max-w-[80%] h-10"
+                                onError={(e) => console.error('Audio playback error:', e)}
+                              />
                               {msg.caption && <p className="text-xs mt-1 italic text-gray-300 ml-2">{msg.caption}</p>}
                             </div>
                           )}
                           {msg.contentType === 'document' && (
-                            <div className="flex items-center bg-gray-100 p-[2px] rounded-lg">
+                            <div className="flex items-center bg-gray-100 p-2 rounded-lg">
                               <FaFileAlt className="text-blue-600 mr-2" />
                               <span className="text-blue-600 font-semibold truncate max-w-[200px] text-sm">
                                 {msg.content.split('/').pop().slice(0, 30) + (msg.content.split('/').pop().length > 30 ? '...' : '')}
                               </span>
-                              <a href={msg.content} download className="ml-2">
-                                <FaDownload className="text-blue-600" />
+                              <a
+                                href={msg.content}
+                                download
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="ml-2 text-blue-600 hover:text-blue-800"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                }}
+                              >
+                                <FaDownload />
                               </a>
                               {msg.caption && <p className="text-xs ml-2 italic text-gray-600">{msg.caption}</p>}
                             </div>
@@ -649,7 +679,7 @@ const ChatScreen = ({ token, userId }) => {
                 </>
               )}
             </div>
-            <div className="bg-white p-2 border-t border-gray-200 shadow-lg fixed bottom-0 md:left-[33.33%] md:w-2/3 left-0 right-0 z-10 mb-12">
+            <div className="bg-white p-2 border-t border-gray-200 shadow-lg fixed bottom-0 md:left-[33.33%] md:w-2/3 left-0 right-0 z-10 mb-0">
               {mediaPreview && (
                 <div className="bg-gray-100 p-2 mb-2 rounded w-full max-w-[80%] mx-auto">
                   {mediaPreview.type === 'image' && (
@@ -683,6 +713,17 @@ const ChatScreen = ({ token, userId }) => {
                     style={{ maxWidth: mediaPreview.type === 'image' || mediaPreview.type === 'video' ? '80%' : '100%' }}
                   />
                   <button onClick={() => setMediaPreview(null)} className="text-red-500 text-xs mt-1">Cancel</button>
+                </div>
+              )}
+              {uploadProgress !== null && (
+                <div className="bg-gray-100 p-2 mb-2 rounded w-full max-w-[80%] mx-auto">
+                  <div className="w-full bg-gray-200 rounded-full h-2.5">
+                    <div
+                      className="bg-green-500 h-2.5 rounded-full"
+                      style={{ width: `${uploadProgress}%` }}
+                    ></div>
+                  </div>
+                  <p className="text-xs text-center mt-1">Uploading: {uploadProgress}%</p>
                 </div>
               )}
               {selectedMessages.length > 0 && (
