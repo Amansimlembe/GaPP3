@@ -38,3 +38,48 @@ body {
   .overflow-x-auto { -webkit-overflow-scrolling: touch; }
   .chat-media { max-width: 100%; overflow-x: hidden; }
 }
+
+
+
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.lazy-load {
+  opacity: 0;
+  transition: opacity 0.3s ease-in;
+}
+
+.lazy-load[src] {
+  opacity: 1;
+}
+
+.animate-heart {
+  animation: heartFade 1s ease-out forwards;
+}
+
+@keyframes heartFade {
+  0% { opacity: 1; transform: translateY(0); }
+  100% { opacity: 0; transform: translateY(-100px); }
+}
+
+.dark {
+  background-color: #1a1a1a;
+  color: #e0e0e0;
+}
+
+@media (max-width: 640px) {
+  .container { padding: 0 !important; margin: 0 !important; width: 100% !important; max-width: 100% !important; }
+  .snap-start { margin: 0 !important; padding: 0 !important; }
+  .overflow-x-auto { -webkit-overflow-scrolling: touch; }
+  .chat-media { max-width: 100%; overflow-x: hidden; }
+  .chat-container { padding-bottom: 60px; } /* Ensure space for typing box */
+}             
