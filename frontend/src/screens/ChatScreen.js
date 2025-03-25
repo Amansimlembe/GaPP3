@@ -6,7 +6,7 @@ import { FaPaperPlane, FaPaperclip, FaTrash, FaArrowLeft, FaReply, FaEllipsisH, 
 import { useDispatch, useSelector } from 'react-redux';
 import { setMessages, addMessage, setSelectedChat } from '../store';
 import { saveMessages, getMessages } from '../db';
-import * as signal from 'libsignal-protocol-javascript';
+import * as signal from 'libsignal-protocol';
 
 const socket = io('https://gapp-6yc3.onrender.com');
 
