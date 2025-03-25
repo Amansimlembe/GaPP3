@@ -40,6 +40,7 @@ const ChatScreen = ({ token, userId }) => {
   const chatRef = useRef(null);
   const menuRef = useRef(null);
   const messageMenuRef = useRef(null);
+  const typingTimeoutRef = useRef(null);
 
   const isSmallDevice = window.innerWidth < 768;
 
@@ -75,6 +76,7 @@ const ChatScreen = ({ token, userId }) => {
           headers: { Authorization: `Bearer ${token}` },
           params: { userId, recipientId: selectedChat, limit: 50 },
         });
+        console.log('Fetched messages:', data);
         const messages = data.map((msg) => ({ ...msg, status: msg.status || 'sent' }));
         dispatch(setMessages({ recipientId: selectedChat, messages }));
         setNotifications((prev) => ({ ...prev, [selectedChat]: 0 }));
@@ -95,6 +97,7 @@ const ChatScreen = ({ token, userId }) => {
           }
         }
       } catch (error) {
+        console.error('Fetch messages error:', error);
         dispatch(setMessages({ recipientId: selectedChat, messages: [] }));
         setError('No previous messages');
       }
@@ -122,6 +125,7 @@ const ChatScreen = ({ token, userId }) => {
               firstUnreadElement.scrollIntoView({ behavior: 'smooth' });
             }
           }
+          socket.emit('messageStatus', { messageId: msg._id, status: 'delivered', recipientId: userId });
           socket.emit('messageStatus', { messageId: msg._id, status: 'read', recipientId: userId });
         }
         chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
@@ -163,7 +167,6 @@ const ChatScreen = ({ token, userId }) => {
     };
     chatRef.current?.addEventListener('scroll', handleScroll);
 
-    // Ensure bottom navigation bar is visible
     if (isSmallDevice) {
       const bottomNav = document.querySelector('.bottom-nav');
       if (bottomNav) bottomNav.style.zIndex = '20';
@@ -210,6 +213,7 @@ const ChatScreen = ({ token, userId }) => {
           if (file) setUploadProgress(Math.round((progressEvent.loaded * 100) / progressEvent.total));
         },
       });
+      console.log('Message sent to backend:', data);
       socket.emit('message', { ...data, senderVirtualNumber: localStorage.getItem('virtualNumber'), senderUsername: localStorage.getItem('username'), senderPhoto: localStorage.getItem('photo') });
       dispatch(setMessages({
         recipientId: selectedChat,
@@ -241,7 +245,8 @@ const ChatScreen = ({ token, userId }) => {
       socket.emit('typing', { userId, recipientId: selectedChat });
       setTyping(true);
     }
-    setTimeout(() => {
+    clearTimeout(typingTimeoutRef.current);
+    typingTimeoutRef.current = setTimeout(() => {
       socket.emit('stopTyping', { userId, recipientId: selectedChat });
       setTyping(false);
     }, 2000);
@@ -352,7 +357,7 @@ const ChatScreen = ({ token, userId }) => {
   const handleHoldStart = (msgId) => {
     const timer = setTimeout(() => {
       setShowMessageMenu(msgId);
-    }, 1500); // 1.5 seconds
+    }, 1500);
     setHoldTimer(timer);
   };
 
@@ -372,13 +377,12 @@ const ChatScreen = ({ token, userId }) => {
     if (swipeStartX === null) return;
     const touch = e.touches[0];
     const swipeDistance = touch.clientX - swipeStartX;
-    // Optional: Add visual feedback during swipe (e.g., translate the message bubble)
   };
 
   const handleSwipeEnd = (msg) => {
     if (swipeStartX === null) return;
-    const swipeDistance = swipeStartX - (swipeStartX || 0);
-    if (swipeDistance < -50) { // Right swipe (negative distance)
+    const swipeDistance = touch.clientX - swipeStartX;
+    if (swipeDistance < -50) {
       setReplyTo(msg);
     }
     setSwipeStartX(null);
@@ -455,7 +459,7 @@ const ChatScreen = ({ token, userId }) => {
                 {isTyping[selectedChat] && <span className="text-sm text-green-500 ml-2">Typing...</span>}
               </div>
             </div>
-            <div ref={chatRef} className="flex-1 overflow-y-auto bg-gray-100 p-2 pt-16 pb-20">
+            <div ref={chatRef} className="flex-1 overflow-y-auto bg-gray-100 p-2 pt-16 pb-24">
               {(chats[selectedChat] || []).length === 0 ? (
                 <p className="text-center text-gray-500 mt-4">Start a new conversation</p>
               ) : (
@@ -533,11 +537,11 @@ const ChatScreen = ({ token, userId }) => {
                           )}
                           {msg.contentType === 'text' && <p className="text-sm break-words">{msg.content}</p>}
                           {msg.contentType === 'image' && (
-                            <div className="relative border-t border-l border-r border-gray-300 rounded-t-lg">
+                            <div className="relative border-t border-l border-r border-gray-300 rounded-lg shadow-md p-1">
                               <img
                                 src={msg.content}
                                 alt="Chat"
-                                className="max-w-[80%] h-40 object-contain rounded-t-lg"
+                                className="max-w-[80%] max-h-64 object-contain rounded-lg"
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   viewMessage(msg);
@@ -549,10 +553,10 @@ const ChatScreen = ({ token, userId }) => {
                             </div>
                           )}
                           {msg.contentType === 'video' && (
-                            <div className="relative border-t border-l border-r border-gray-300 rounded-t-lg">
+                            <div className="relative border-t border-l border-r border-gray-300 rounded-lg shadow-md p-1">
                               <video
                                 src={msg.content}
-                                className="max-w-[80%] h-40 object-contain rounded-t-lg"
+                                className="max-w-[80%] max-h-64 object-contain rounded-lg"
                                 onClick={(e) => e.stopPropagation()}
                               />
                               {msg.caption && (
@@ -649,10 +653,10 @@ const ChatScreen = ({ token, userId }) => {
               {mediaPreview && (
                 <div className="bg-gray-100 p-2 mb-2 rounded w-full max-w-[80%] mx-auto">
                   {mediaPreview.type === 'image' && (
-                    <img src={mediaPreview.url} alt="Preview" className="max-w-full h-40 object-contain rounded-lg p-[2px]" />
+                    <img src={mediaPreview.url} alt="Preview" className="max-w-full max-h-64 object-contain rounded-lg p-[2px]" />
                   )}
                   {mediaPreview.type === 'video' && (
-                    <video src={mediaPreview.url} className="max-w-full h-40 object-contain rounded-lg p-[2px]" controls />
+                    <video src={mediaPreview.url} className="max-w-full max-h-64 object-contain rounded-lg p-[2px]" controls />
                   )}
                   {mediaPreview.type === 'audio' && (
                     <div className="flex items-center">
