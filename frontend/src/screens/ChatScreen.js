@@ -11,51 +11,83 @@ import * as openpgp from 'openpgp';
 const socket = io('https://gapp-6yc3.onrender.com');
 
 // Helper to generate or retrieve key pair
-const getKeyPair = async () => {
+const getKeyPair = async (userId, token) => {
   const storedKeys = localStorage.getItem('pgpKeys');
   if (storedKeys) return JSON.parse(storedKeys);
 
   const { privateKey, publicKey } = await openpgp.generateKey({
     type: 'rsa',
     rsaBits: 2048,
-    userIDs: [{ name: 'User', email: `${localStorage.getItem('userId')}@gapp.com` }],
-    passphrase: 'gapp-secret', // In a real app, use a secure passphrase
+    userIDs: [{ name: 'User', email: `${userId}@gapp.com` }],
+    passphrase: 'gapp-secret',
   });
 
   const keys = { privateKey, publicKey };
   localStorage.setItem('pgpKeys', JSON.stringify(keys));
+
+  try {
+    await axios.post(
+      '/auth/save-public-key',
+      { userId, publicKey },
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+  } catch (error) {
+    console.error('Failed to save public key:', error);
+  }
+
   return keys;
 };
 
-// Encrypt message
-const encryptMessage = async (message, recipientId) => {
-  const userKeys = await getKeyPair();
-  // In a real app, fetch the recipient's public key from the server
-  // For this example, we'll assume the recipient has the same public key structure
-  const recipientPublicKey = userKeys.publicKey; // Replace with actual recipient public key retrieval
+// Fetch recipient's public key from the server
+const fetchRecipientPublicKey = async (recipientId, token) => {
+  try {
+    const { data } = await axios.get(`/auth/public-key/${recipientId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    return data.publicKey;
+  } catch (error) {
+    console.error('Failed to fetch recipient public key:', error);
+    throw new Error('Unable to fetch recipient public key');
+  }
+};
 
-  const publicKey = await openpgp.readKey({ armoredKey: recipientPublicKey });
-  const encrypted = await openpgp.encrypt({
-    message: await openpgp.createMessage({ text: message }),
-    encryptionKeys: publicKey,
-  });
-  return encrypted;
+// Encrypt message
+const encryptMessage = async (message, recipientId, token) => {
+  try {
+    const recipientPublicKey = await fetchRecipientPublicKey(recipientId, token);
+    const publicKey = await openpgp.readKey({ armoredKey: recipientPublicKey });
+    const encrypted = await openpgp.encrypt({
+      message: await openpgp.createMessage({ text: message }),
+      encryptionKeys: publicKey,
+    });
+    return encrypted;
+  } catch (error) {
+    console.error('Encryption error:', error);
+    throw error;
+  }
 };
 
 // Decrypt message
 const decryptMessage = async (encryptedMessage) => {
-  const userKeys = await getKeyPair();
-  const privateKey = await openpgp.decryptKey({
-    privateKey: await openpgp.readPrivateKey({ armoredKey: userKeys.privateKey }),
-    passphrase: 'gapp-secret',
-  });
+  try {
+    const userKeys = JSON.parse(localStorage.getItem('pgpKeys'));
+    if (!userKeys) throw new Error('No private key found');
 
-  const message = await openpgp.readMessage({ armoredMessage: encryptedMessage });
-  const decrypted = await openpgp.decrypt({
-    message,
-    decryptionKeys: privateKey,
-  });
-  return decrypted.data;
+    const privateKey = await openpgp.decryptKey({
+      privateKey: await openpgp.readPrivateKey({ armoredKey: userKeys.privateKey }),
+      passphrase: 'gapp-secret',
+    });
+
+    const message = await openpgp.readMessage({ armoredMessage: encryptedMessage });
+    const decrypted = await openpgp.decrypt({
+      message,
+      decryptionKeys: privateKey,
+    });
+    return decrypted.data;
+  } catch (error) {
+    console.error('Decryption error:', error);
+    throw error;
+  }
 };
 
 const ChatScreen = ({ token, userId }) => {
@@ -80,13 +112,27 @@ const ChatScreen = ({ token, userId }) => {
   const [unreadCount, setUnreadCount] = useState(0);
   const [firstUnreadMessageId, setFirstUnreadMessageId] = useState(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [hoveredMessage, setHoveredMessage] = useState(null); // Track hovered message for three-dot menu
+  const [showMessageMenu, setShowMessageMenu] = useState(null); // Track which message's menu is open
   const chatRef = useRef(null);
   const menuRef = useRef(null);
+  const messageMenuRef = useRef(null);
 
   const isSmallDevice = window.innerWidth < 768;
 
   useEffect(() => {
-    if (!userId) return;
+    if (!userId || !token) return;
+
+    // Initialize key pair on component mount
+    const initializeKeys = async () => {
+      try {
+        await getKeyPair(userId, token);
+      } catch (error) {
+        setError('Failed to initialize encryption keys');
+      }
+    };
+    initializeKeys();
+
     socket.emit('join', userId);
 
     const fetchUsers = async () => {
@@ -123,7 +169,6 @@ const ChatScreen = ({ token, userId }) => {
                 const decryptedContent = await decryptMessage(msg.content);
                 return { ...msg, content: decryptedContent, status: msg.status || 'sent' };
               } catch (err) {
-                console.error('Decryption error:', err);
                 return { ...msg, content: '[Encrypted]', status: msg.status || 'sent' };
               }
             }
@@ -133,7 +178,6 @@ const ChatScreen = ({ token, userId }) => {
         dispatch(setMessages({ recipientId: selectedChat, messages: decryptedMessages }));
         setNotifications((prev) => ({ ...prev, [selectedChat]: 0 }));
 
-        // Calculate unread messages
         const lastReadIndex = decryptedMessages.findIndex((msg) => msg.recipientId === userId && msg.status === 'read');
         const unreadMessages = decryptedMessages.slice(lastReadIndex + 1).filter((msg) => msg.recipientId === userId);
         setUnreadCount(unreadMessages.length);
@@ -141,7 +185,6 @@ const ChatScreen = ({ token, userId }) => {
           setFirstUnreadMessageId(unreadMessages[0]._id);
         }
 
-        // Scroll to last message if no new messages, otherwise to first unread
         if (unreadMessages.length === 0) {
           chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
         } else {
@@ -166,7 +209,6 @@ const ChatScreen = ({ token, userId }) => {
           const decryptedContent = await decryptMessage(msg.content);
           updatedMsg = { ...updatedMsg, content: decryptedContent };
         } catch (err) {
-          console.error('Decryption error:', err);
           updatedMsg = { ...updatedMsg, content: '[Encrypted]' };
         }
       }
@@ -212,8 +254,15 @@ const ChatScreen = ({ token, userId }) => {
 
     const handleClickOutside = (event) => {
       if (menuRef.current && !menuRef.current.contains(event.target)) setShowMenu(false);
+      if (messageMenuRef.current && !messageMenuRef.current.contains(event.target)) setShowMessageMenu(null);
     };
     document.addEventListener('mousedown', handleClickOutside);
+
+    // Hide bottom navbar when chatbox is open
+    if (selectedChat && isSmallDevice) {
+      const bottomNav = document.querySelector('.bottom-nav');
+      if (bottomNav) bottomNav.style.display = 'none';
+    }
 
     return () => {
       socket.off('message');
@@ -229,12 +278,18 @@ const ChatScreen = ({ token, userId }) => {
       setError('Please enter a message or select a file');
       return;
     }
+
     socket.emit('stopTyping', { userId, recipientId: selectedChat });
     setTyping(false);
 
     let encryptedContent = message;
     if (contentType === 'text' && message) {
-      encryptedContent = await encryptMessage(message, selectedChat);
+      try {
+        encryptedContent = await encryptMessage(message, selectedChat, token);
+      } catch (error) {
+        setError('Failed to encrypt message');
+        return;
+      }
     }
 
     const formData = new FormData();
@@ -273,6 +328,7 @@ const ChatScreen = ({ token, userId }) => {
       setReplyTo(null);
       setError('');
     } catch (error) {
+      console.error('Send message error:', error);
       dispatch(setMessages({
         recipientId: selectedChat,
         messages: (chats[selectedChat] || []).filter((msg) => msg._id !== tempId),
@@ -390,6 +446,8 @@ const ChatScreen = ({ token, userId }) => {
     }
   };
 
+  const lastMessage = chats[selectedChat]?.slice(-1)[0];
+
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5 }} className="flex h-screen bg-gray-100">
       <div className={`w-full md:w-1/3 bg-white border-r border-gray-200 flex flex-col ${isSmallDevice && selectedChat ? 'hidden' : 'block'}`}>
@@ -450,7 +508,8 @@ const ChatScreen = ({ token, userId }) => {
                   <FaArrowLeft
                     onClick={() => {
                       dispatch(setSelectedChat(null));
-                      document.querySelector('.bottom-nav').style.display = 'flex';
+                      const bottomNav = document.querySelector('.bottom-nav');
+                      if (bottomNav) bottomNav.style.display = 'flex';
                     }}
                     className="text-xl text-primary cursor-pointer mr-3 hover:text-secondary"
                   />
@@ -478,10 +537,13 @@ const ChatScreen = ({ token, userId }) => {
                       )}
                       <div
                         id={`message-${msg._id}`}
-                        className={`flex ${msg.senderId === userId ? 'justify-end' : 'justify-start'} px-2 py-1`}
+                        className={`flex ${msg.senderId === userId ? 'justify-end' : 'justify-start'} px-2 py-1 relative`}
+                        onMouseEnter={() => setHoveredMessage(msg._id)}
+                        onMouseLeave={() => setHoveredMessage(null)}
+                        onTouchStart={() => setShowMessageMenu(msg._id)}
                       >
                         <div
-                          className={`max-w-[70%] p-2 rounded-lg shadow-sm ${msg.senderId === userId ? 'bg-green-500 text-white rounded-br-none' : 'bg-white text-black rounded-bl-none'} transition-all ${selectedMessages.includes(msg._id) ? 'bg-opacity-50' : ''}`}
+                          className={`max-w-[70%] p-3 rounded-lg shadow-sm ${msg.senderId === userId ? 'bg-green-500 text-white rounded-br-none' : 'bg-white text-black rounded-bl-none'} transition-all ${selectedMessages.includes(msg._id) ? 'bg-opacity-50' : ''}`}
                           onClick={() => {
                             if (selectedMessages.length > 0) {
                               setSelectedMessages((prev) =>
@@ -502,7 +564,7 @@ const ChatScreen = ({ token, userId }) => {
                               <img
                                 src={msg.content}
                                 alt="Chat"
-                                className="max-w-full h-40 object-contain rounded-lg cursor-pointer shadow-md"
+                                className="max-w-[80%] h-40 object-contain rounded-lg cursor-pointer shadow-md"
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   viewMessage(msg);
@@ -515,7 +577,7 @@ const ChatScreen = ({ token, userId }) => {
                             <div className="relative">
                               <video
                                 src={msg.content}
-                                className="max-w-full h-40 object-contain rounded-lg cursor-pointer shadow-md"
+                                className="max-w-[80%] h-40 object-contain rounded-lg cursor-pointer shadow-md"
                                 onClick={(e) => e.stopPropagation()}
                               />
                               {msg.caption && <p className="text-xs mt-1 italic text-gray-300">{msg.caption}</p>}
@@ -544,54 +606,66 @@ const ChatScreen = ({ token, userId }) => {
                             <span className="text-xs flex justify-end mt-1">
                               {msg.status === 'sent' && '✓'}
                               {msg.status === 'delivered' && '✓✓'}
-                              {msg.status === 'read' && <span className="text-blue-300">✓✓</span>}
+                              {msg.status === 'read' && <span className="text-blue-500">✓✓</span>}
                             </span>
                           )}
                         </div>
-                        <div className="flex items-center ml-2">
-                          <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
-                            <FaReply
-                              onClick={() => setReplyTo(msg)}
-                              className="text-primary cursor-pointer hover:text-secondary"
-                            />
-                          </motion.div>
-                          <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
-                            <FaForward
-                              onClick={() => forwardMessage(msg)}
-                              className="text-primary cursor-pointer hover:text-secondary ml-2"
-                            />
-                          </motion.div>
-                          <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
-                            <FaCopy
-                              onClick={() => copyMessage(msg)}
-                              className="text-primary cursor-pointer hover:text-secondary ml-2"
-                            />
-                          </motion.div>
-                          <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
-                            <FaShare
-                              onClick={() => shareMessage(msg)}
-                              className="text-primary cursor-pointer hover:text-secondary ml-2"
-                            />
-                          </motion.div>
-                          {msg.senderId === userId && (
+                        {(hoveredMessage === msg._id || showMessageMenu === msg._id) && (
+                          <motion.div
+                            ref={messageMenuRef}
+                            initial={{ opacity: 0, scale: 0.8 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            className={`absolute ${msg.senderId === userId ? 'right-0' : 'left-0'} top-0 bg-white p-2 rounded-lg shadow-lg z-20 flex space-x-2`}
+                          >
                             <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
-                              <FaTrash
-                                onClick={() => {
-                                  setSelectedMessages([msg._id]);
-                                  setShowDeleteConfirm(true);
-                                }}
-                                className="text-red-500 cursor-pointer hover:text-red-700 ml-2"
+                              <FaReply
+                                onClick={() => setReplyTo(msg)}
+                                className="text-primary cursor-pointer hover:text-secondary"
                               />
                             </motion.div>
-                          )}
-                        </div>
+                            <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
+                              <FaForward
+                                onClick={() => forwardMessage(msg)}
+                                className="text-primary cursor-pointer hover:text-secondary"
+                              />
+                            </motion.div>
+                            <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
+                              <FaCopy
+                                onClick={() => copyMessage(msg)}
+                                className="text-primary cursor-pointer hover:text-secondary"
+                              />
+                            </motion.div>
+                            <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
+                              <FaShare
+                                onClick={() => shareMessage(msg)}
+                                className="text-primary cursor-pointer hover:text-secondary"
+                              />
+                            </motion.div>
+                            {msg.senderId === userId && (
+                              <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
+                                <FaTrash
+                                  onClick={() => {
+                                    setSelectedMessages([msg._id]);
+                                    setShowDeleteConfirm(true);
+                                  }}
+                                  className="text-red-500 cursor-pointer hover:text-red-700"
+                                />
+                              </motion.div>
+                            )}
+                          </motion.div>
+                        )}
                       </div>
                     </React.Fragment>
                   ))}
                 </>
               )}
             </div>
-            <div className="bg-white p-2 border-t border-gray-200 shadow-lg z-30 flex items-center">
+            <div className="bg-white p-2 border-t border-gray-200 shadow-lg z-30 flex flex-col">
+              {lastMessage && (
+                <div className="text-sm text-gray-500 mb-2 px-2 truncate">
+                  {lastMessage.contentType === 'text' ? lastMessage.content : `Sent a ${lastMessage.contentType}`}
+                </div>
+              )}
               {selectedMessages.length > 0 && (
                 <div className="flex items-center w-full mb-2">
                   <button
