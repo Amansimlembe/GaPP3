@@ -84,7 +84,7 @@ router.delete('/post/:postId', authMiddleware, async (req, res) => {
     const post = await Post.findById(req.params.postId);
     if (!post) return res.status(404).json({ error: 'Post not found' });
     if (post.userId !== req.user.userId) return res.status(403).json({ error: 'Not authorized' });
-    await Post.deleteOne({ _id: req.params.postId }); // Ensure deletion from DB
+    await Post.deleteOne({ _id: req.params.postId });
     io.emit('postDeleted', req.params.postId);
     res.json({ success: true });
   } catch (error) {
@@ -92,7 +92,6 @@ router.delete('/post/:postId', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Failed to delete post', details: error.message });
   }
 });
-
 
 router.post('/message', authMiddleware, upload.single('content'), async (req, res) => {
   try {
@@ -144,8 +143,14 @@ router.get('/messages', authMiddleware, async (req, res) => {
 router.delete('/message/:messageId', authMiddleware, async (req, res) => {
   try {
     const message = await Message.findById(req.params.messageId);
-    if (!message || message.senderId !== req.user.userId) return res.status(403).json({ error: 'Not authorized' });
-    await message.remove();
+    if (!message) return res.status(404).json({ error: 'Message not found' });
+    if (message.senderId.toString() !== req.user.userId) return res.status(403).json({ error: 'Not authorized' });
+
+    const result = await Message.deleteOne({ _id: req.params.messageId });
+    if (result.deletedCount === 0) {
+      return res.status(500).json({ error: 'Failed to delete message from database' });
+    }
+
     res.json({ success: true });
   } catch (error) {
     console.error('Delete message error:', error);
@@ -168,10 +173,9 @@ router.post('/message/status', authMiddleware, async (req, res) => {
   }
 });
 
-// Fix this route: Change 'auth' to 'authMiddleware'
 router.post('/like', authMiddleware, async (req, res) => {
   const { postId } = req.body;
-  const userId = req.user.id; // req.user is set by authMiddleware
+  const userId = req.user.id;
   try {
     const post = await Post.findById(postId);
     if (!post) return res.status(404).json({ error: 'Post not found' });

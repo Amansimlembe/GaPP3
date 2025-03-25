@@ -35,6 +35,8 @@ const ChatScreen = ({ token, userId }) => {
   const [showMessageMenu, setShowMessageMenu] = useState(null);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   const [mediaPreview, setMediaPreview] = useState(null);
+  const [holdTimer, setHoldTimer] = useState(null);
+  const [swipeStartX, setSwipeStartX] = useState(null);
   const chatRef = useRef(null);
   const menuRef = useRef(null);
   const messageMenuRef = useRef(null);
@@ -161,10 +163,10 @@ const ChatScreen = ({ token, userId }) => {
     };
     chatRef.current?.addEventListener('scroll', handleScroll);
 
-    // Hide bottom navigation bar when chat is open on mobile
-    if (selectedChat && isSmallDevice) {
+    // Ensure bottom navigation bar is visible
+    if (isSmallDevice) {
       const bottomNav = document.querySelector('.bottom-nav');
-      if (bottomNav) bottomNav.style.display = 'none';
+      if (bottomNav) bottomNav.style.zIndex = '20';
     }
 
     return () => {
@@ -174,11 +176,6 @@ const ChatScreen = ({ token, userId }) => {
       socket.off('messageStatus');
       document.removeEventListener('mousedown', handleClickOutside);
       chatRef.current?.removeEventListener('scroll', handleScroll);
-      // Show bottom navigation bar when leaving chat screen
-      if (isSmallDevice) {
-        const bottomNav = document.querySelector('.bottom-nav');
-        if (bottomNav) bottomNav.style.display = 'flex';
-      }
     };
   }, [token, userId, selectedChat, dispatch]);
 
@@ -288,8 +285,6 @@ const ChatScreen = ({ token, userId }) => {
     const formData = new FormData();
     formData.append('senderId', userId);
     formData.append('recipientId', contact.id);
-    form
-
     formData.append('contentType', msg.contentType);
     formData.append('caption', msg.caption || '');
     formData.append('content', msg.content);
@@ -354,7 +349,40 @@ const ChatScreen = ({ token, userId }) => {
     setShowJumpToBottom(false);
   };
 
-  const lastMessage = chats[selectedChat]?.slice(-1)[0];
+  const handleHoldStart = (msgId) => {
+    const timer = setTimeout(() => {
+      setShowMessageMenu(msgId);
+    }, 1500); // 1.5 seconds
+    setHoldTimer(timer);
+  };
+
+  const handleHoldEnd = () => {
+    if (holdTimer) {
+      clearTimeout(holdTimer);
+      setHoldTimer(null);
+    }
+  };
+
+  const handleSwipeStart = (e) => {
+    const touch = e.touches[0];
+    setSwipeStartX(touch.clientX);
+  };
+
+  const handleSwipeMove = (e) => {
+    if (swipeStartX === null) return;
+    const touch = e.touches[0];
+    const swipeDistance = touch.clientX - swipeStartX;
+    // Optional: Add visual feedback during swipe (e.g., translate the message bubble)
+  };
+
+  const handleSwipeEnd = (msg) => {
+    if (swipeStartX === null) return;
+    const swipeDistance = swipeStartX - (swipeStartX || 0);
+    if (swipeDistance < -50) { // Right swipe (negative distance)
+      setReplyTo(msg);
+    }
+    setSwipeStartX(null);
+  };
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5 }} className="flex h-screen bg-gray-100">
@@ -410,14 +438,12 @@ const ChatScreen = ({ token, userId }) => {
       <div className={`flex-1 flex flex-col ${isSmallDevice && !selectedChat ? 'hidden' : 'block'}`}>
         {selectedChat ? (
           <>
-            <div className="bg-white p-3 flex items-center border-b border-gray-200 fixed top-0 left-0 right-0 z-10">
+            <div className="bg-white p-3 flex items-center border-b border-gray-200 fixed top-0 md:left-[33.33%] md:w-2/3 left-0 right-0 z-10">
               {isSmallDevice && (
                 <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
                   <FaArrowLeft
                     onClick={() => {
                       dispatch(setSelectedChat(null));
-                      const bottomNav = document.querySelector('.bottom-nav');
-                      if (bottomNav) bottomNav.style.display = 'flex';
                     }}
                     className="text-xl text-primary cursor-pointer mr-3 hover:text-secondary"
                   />
@@ -451,9 +477,17 @@ const ChatScreen = ({ token, userId }) => {
                       <div
                         id={`message-${msg._id}`}
                         className={`flex ${msg.senderId === userId ? 'justify-end' : 'justify-start'} px-2 py-1 relative`}
-                        onMouseEnter={() => setHoveredMessage(msg._id)}
-                        onMouseLeave={() => setHoveredMessage(null)}
-                        onTouchStart={() => setShowMessageMenu(msg._id)}
+                        onTouchStart={(e) => {
+                          handleHoldStart(msg._id);
+                          handleSwipeStart(e);
+                        }}
+                        onTouchMove={handleSwipeMove}
+                        onTouchEnd={() => {
+                          handleHoldEnd();
+                          handleSwipeEnd(msg);
+                        }}
+                        onMouseDown={() => handleHoldStart(msg._id)}
+                        onMouseUp={handleHoldEnd}
                       >
                         <div
                           className={`max-w-[70%] p-2 rounded-lg shadow-sm ${msg.senderId === userId ? 'bg-green-500 text-white rounded-br-none' : 'bg-white text-black rounded-bl-none'} transition-all ${selectedMessages.includes(msg._id) ? 'bg-opacity-50' : ''}`}
@@ -467,33 +501,63 @@ const ChatScreen = ({ token, userId }) => {
                           onDoubleClick={msg.contentType === 'video' ? () => viewMessage(msg) : null}
                         >
                           {msg.replyTo && (
-                            <div className="bg-gray-100 p-1 rounded mb-1 text-xs italic text-gray-700">
-                              <p>Replying to: {msg.replyTo?.content?.slice(0, 20) || 'Message'}...</p>
+                            <div className="bg-gray-100 p-1 rounded mb-1 text-xs italic text-gray-700 border-l-4 border-green-500">
+                              {msg.replyTo.contentType === 'text' && (
+                                <p>{msg.replyTo.content.slice(0, 20) + (msg.replyTo.content.length > 20 ? '...' : '')}</p>
+                              )}
+                              {msg.replyTo.contentType === 'image' && (
+                                <div className="flex items-center">
+                                  <img src={msg.replyTo.content} alt="Reply Preview" className="w-8 h-8 object-cover rounded mr-2" />
+                                  <span>Image</span>
+                                </div>
+                              )}
+                              {msg.replyTo.contentType === 'video' && (
+                                <div className="flex items-center">
+                                  <video src={msg.replyTo.content} className="w-8 h-8 object-cover rounded mr-2" />
+                                  <span>Video</span>
+                                </div>
+                              )}
+                              {msg.replyTo.contentType === 'audio' && (
+                                <div className="flex items-center">
+                                  <FaPlay className="text-green-500 mr-2" />
+                                  <span>Audio</span>
+                                </div>
+                              )}
+                              {msg.replyTo.contentType === 'document' && (
+                                <div className="flex items-center">
+                                  <FaFileAlt className="text-blue-600 mr-2" />
+                                  <span>Document</span>
+                                </div>
+                              )}
                             </div>
                           )}
                           {msg.contentType === 'text' && <p className="text-sm break-words">{msg.content}</p>}
                           {msg.contentType === 'image' && (
-                            <div className="relative">
+                            <div className="relative border-t border-l border-r border-gray-300 rounded-t-lg">
                               <img
                                 src={msg.content}
                                 alt="Chat"
-                                className="max-w-[80%] h-40 object-contain rounded-lg cursor-pointer shadow-md p-[2px]"
+                                className="max-w-[80%] h-40 object-contain rounded-t-lg"
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   viewMessage(msg);
                                 }}
                               />
-                              {msg.caption && <p className="text-xs mt-1 italic text-gray-300 max-w-[80%]">{msg.caption}</p>}
+                              {msg.caption && (
+                                <p className="text-xs italic text-gray-300 max-w-[80%] p-2 border-b border-l border-r border-gray-300 rounded-b-lg break-words">{msg.caption}</p>
+                              )}
                             </div>
                           )}
                           {msg.contentType === 'video' && (
-                            <div className="relative">
+                            <div className="relative border-t border-l border-r border-gray-300 rounded-t-lg">
                               <video
                                 src={msg.content}
-                                className="max-w-[80%] h-40 object-contain rounded-lg cursor-pointer shadow-md p-[2px]"
+                                className="max-w-[80%] h-40 object-contain rounded-t-lg"
                                 onClick={(e) => e.stopPropagation()}
                               />
-                              {msg.caption && <p className="text-xs mt-1 italic text-gray-300 max-w-[80%]">{msg.caption}</p>}
+                              {msg.caption && (
+                                <p className="text-xs italic text-gray-300 max-w-[80%] p-2 border-b border-l border-r border-gray-300 rounded-b-lg break-words">{msg.caption}</p>
+                              )}
                             </div>
                           )}
                           {msg.contentType === 'audio' && (
@@ -531,7 +595,7 @@ const ChatScreen = ({ token, userId }) => {
                             </span>
                           </div>
                         </div>
-                        {(hoveredMessage === msg._id || showMessageMenu === msg._id) && (
+                        {showMessageMenu === msg._id && (
                           <motion.div
                             ref={messageMenuRef}
                             initial={{ opacity: 0, scale: 0.8 }}
@@ -581,7 +645,7 @@ const ChatScreen = ({ token, userId }) => {
                 </>
               )}
             </div>
-            <div className="bg-white p-2 border-t border-gray-200 shadow-lg fixed bottom-0 left-0 right-0 z-10">
+            <div className="bg-white p-2 border-t border-gray-200 shadow-lg fixed bottom-0 md:left-[33.33%] md:w-2/3 left-0 right-0 z-10 mb-12">
               {mediaPreview && (
                 <div className="bg-gray-100 p-2 mb-2 rounded w-full max-w-[80%] mx-auto">
                   {mediaPreview.type === 'image' && (
