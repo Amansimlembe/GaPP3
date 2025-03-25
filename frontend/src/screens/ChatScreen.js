@@ -6,108 +6,8 @@ import { FaPaperPlane, FaPaperclip, FaTrash, FaArrowLeft, FaReply, FaEllipsisH, 
 import { useDispatch, useSelector } from 'react-redux';
 import { setMessages, addMessage, setSelectedChat } from '../store';
 import { saveMessages, getMessages } from '../db';
-import * as openpgp from 'openpgp';
 
 const socket = io('https://gapp-6yc3.onrender.com');
-
-// Helper to generate or retrieve key pair
-const getKeyPair = async (userId, token) => {
-  const storedKeys = localStorage.getItem('pgpKeys');
-  if (storedKeys) {
-    try {
-      const keys = JSON.parse(storedKeys);
-      // Validate keys
-      await openpgp.readKey({ armoredKey: keys.publicKey });
-      await openpgp.readPrivateKey({ armoredKey: keys.privateKey });
-      return keys;
-    } catch (error) {
-      console.error('Invalid stored keys, regenerating:', error);
-      localStorage.removeItem('pgpKeys');
-    }
-  }
-
-  try {
-    const { privateKey, publicKey } = await openpgp.generateKey({
-      type: 'rsa',
-      rsaBits: 2048,
-      userIDs: [{ name: 'User', email: `${userId}@gapp.com` }],
-      passphrase: 'gapp-secret',
-    });
-
-    const keys = { privateKey, publicKey };
-    localStorage.setItem('pgpKeys', JSON.stringify(keys));
-
-    await axios.post(
-      '/auth/save-public-key',
-      { userId, publicKey },
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-
-    return keys;
-  } catch (error) {
-    console.error('Key generation failed:', error);
-    throw new Error('Failed to generate encryption keys');
-  }
-};
-
-// Fetch recipient's public key from the server
-const fetchRecipientPublicKey = async (recipientId, token) => {
-  try {
-    const { data } = await axios.get(`/auth/public-key/${recipientId}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!data.publicKey) throw new Error('Public key not found for recipient');
-    return data.publicKey;
-  } catch (error) {
-    console.error('Failed to fetch recipient public key:', error);
-    throw new Error('Unable to fetch recipient public key');
-  }
-};
-
-// Encrypt message
-const encryptMessage = async (message, recipientId, token) => {
-  try {
-    const recipientPublicKey = await fetchRecipientPublicKey(recipientId, token);
-    if (typeof recipientPublicKey !== 'string') {
-      throw new Error('Invalid public key format');
-    }
-    const publicKey = await openpgp.readKey({ armoredKey: recipientPublicKey });
-    const encrypted = await openpgp.encrypt({
-      message: await openpgp.createMessage({ text: message }),
-      encryptionKeys: publicKey,
-    });
-    return encrypted;
-  } catch (error) {
-    console.error('Encryption error:', error);
-    throw error;
-  }
-};
-
-// Decrypt message
-const decryptMessage = async (encryptedMessage) => {
-  try {
-    if (typeof encryptedMessage !== 'string') {
-      throw new Error('Encrypted message must be a string');
-    }
-    const userKeys = JSON.parse(localStorage.getItem('pgpKeys'));
-    if (!userKeys) throw new Error('No private key found');
-
-    const privateKey = await openpgp.decryptKey({
-      privateKey: await openpgp.readPrivateKey({ armoredKey: userKeys.privateKey }),
-      passphrase: 'gapp-secret',
-    });
-
-    const message = await openpgp.readMessage({ armoredMessage: encryptedMessage });
-    const decrypted = await openpgp.decrypt({
-      message,
-      decryptionKeys: privateKey,
-    });
-    return decrypted.data;
-  } catch (error) {
-    console.error('Decryption error:', error);
-    return '[Failed to decrypt]';
-  }
-};
 
 const ChatScreen = ({ token, userId }) => {
   const dispatch = useDispatch();
@@ -144,15 +44,6 @@ const ChatScreen = ({ token, userId }) => {
   useEffect(() => {
     if (!userId || !token) return;
 
-    const initializeKeys = async () => {
-      try {
-        await getKeyPair(userId, token);
-      } catch (error) {
-        setError('Failed to initialize encryption keys');
-      }
-    };
-    initializeKeys();
-
     socket.emit('join', userId);
 
     const fetchUsers = async () => {
@@ -182,20 +73,12 @@ const ChatScreen = ({ token, userId }) => {
           headers: { Authorization: `Bearer ${token}` },
           params: { userId, recipientId: selectedChat, limit: 50 },
         });
-        const decryptedMessages = await Promise.all(
-          data.map(async (msg) => {
-            if (msg.contentType === 'text' && msg.content) {
-              const decryptedContent = await decryptMessage(msg.content);
-              return { ...msg, content: decryptedContent, status: msg.status || 'sent' };
-            }
-            return { ...msg, status: msg.status || 'sent' };
-          })
-        );
-        dispatch(setMessages({ recipientId: selectedChat, messages: decryptedMessages }));
+        const messages = data.map((msg) => ({ ...msg, status: msg.status || 'sent' }));
+        dispatch(setMessages({ recipientId: selectedChat, messages }));
         setNotifications((prev) => ({ ...prev, [selectedChat]: 0 }));
 
-        const lastReadIndex = decryptedMessages.findIndex((msg) => msg.recipientId === userId && msg.status === 'read');
-        const unreadMessages = decryptedMessages.slice(lastReadIndex + 1).filter((msg) => msg.recipientId === userId);
+        const lastReadIndex = messages.findIndex((msg) => msg.recipientId === userId && msg.status === 'read');
+        const unreadMessages = messages.slice(lastReadIndex + 1).filter((msg) => msg.recipientId === userId);
         setUnreadCount(unreadMessages.length);
         if (unreadMessages.length > 0) {
           setFirstUnreadMessageId(unreadMessages[0]._id);
@@ -216,14 +99,10 @@ const ChatScreen = ({ token, userId }) => {
     };
     fetchMessages();
 
-    socket.on('message', async (msg) => {
+    socket.on('message', (msg) => {
       saveMessages([msg]);
       const senderKnown = users.some((u) => u.id === msg.senderId);
       let updatedMsg = { ...msg, username: senderKnown ? msg.senderUsername : 'Unsaved Number' };
-      if (msg.contentType === 'text' && msg.content) {
-        const decryptedContent = await decryptMessage(msg.content);
-        updatedMsg = { ...updatedMsg, content: decryptedContent };
-      }
       dispatch(addMessage({ recipientId: msg.recipientId === userId ? msg.senderId : msg.recipientId, message: updatedMsg }));
       if (msg.recipientId === userId && !senderKnown) {
         setUsers((prev) => [
@@ -282,6 +161,7 @@ const ChatScreen = ({ token, userId }) => {
     };
     chatRef.current?.addEventListener('scroll', handleScroll);
 
+    // Hide bottom navigation bar when chat is open on mobile
     if (selectedChat && isSmallDevice) {
       const bottomNav = document.querySelector('.bottom-nav');
       if (bottomNav) bottomNav.style.display = 'none';
@@ -294,6 +174,11 @@ const ChatScreen = ({ token, userId }) => {
       socket.off('messageStatus');
       document.removeEventListener('mousedown', handleClickOutside);
       chatRef.current?.removeEventListener('scroll', handleScroll);
+      // Show bottom navigation bar when leaving chat screen
+      if (isSmallDevice) {
+        const bottomNav = document.querySelector('.bottom-nav');
+        if (bottomNav) bottomNav.style.display = 'flex';
+      }
     };
   }, [token, userId, selectedChat, dispatch]);
 
@@ -306,23 +191,13 @@ const ChatScreen = ({ token, userId }) => {
     socket.emit('stopTyping', { userId, recipientId: selectedChat });
     setTyping(false);
 
-    let encryptedContent = message;
-    if (contentType === 'text' && message) {
-      try {
-        encryptedContent = await encryptMessage(message, selectedChat, token);
-      } catch (error) {
-        setError('Failed to encrypt message');
-        return;
-      }
-    }
-
     const formData = new FormData();
     formData.append('senderId', userId);
     formData.append('recipientId', selectedChat);
     formData.append('contentType', contentType);
     formData.append('caption', caption);
     if (file) formData.append('content', file);
-    else formData.append('content', encryptedContent);
+    else formData.append('content', message);
     if (replyTo) formData.append('replyTo', replyTo._id);
 
     const tempId = Date.now();
@@ -413,6 +288,8 @@ const ChatScreen = ({ token, userId }) => {
     const formData = new FormData();
     formData.append('senderId', userId);
     formData.append('recipientId', contact.id);
+    form
+
     formData.append('contentType', msg.contentType);
     formData.append('caption', msg.caption || '');
     formData.append('content', msg.content);
@@ -552,7 +429,7 @@ const ChatScreen = ({ token, userId }) => {
                 {isTyping[selectedChat] && <span className="text-sm text-green-500 ml-2">Typing...</span>}
               </div>
             </div>
-            <div ref={chatRef} className="flex-1 overflow-y-auto bg-gray-100 p-2 pt-16 pb-24">
+            <div ref={chatRef} className="flex-1 overflow-y-auto bg-gray-100 p-2 pt-16 pb-20">
               {(chats[selectedChat] || []).length === 0 ? (
                 <p className="text-center text-gray-500 mt-4">Start a new conversation</p>
               ) : (
@@ -762,7 +639,7 @@ const ChatScreen = ({ token, userId }) => {
                   <button onClick={() => setReplyTo(null)} className="text-red-500 text-xs">Cancel</button>
                 </div>
               )}
-              <div className={`flex items-center ${isSmallDevice ? 'w-[90%]' : 'w-full max-w-3xl'} mx-auto`}>
+              <div className={`flex items-center ${isSmallDevice ? 'w-[90%]' : 'w-full max-w-3xl'} mx-auto pb-4`}>
                 <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
                   <FaPaperclip
                     className="text-xl text-gray-500 cursor-pointer hover:text-gray-700 mr-2"
