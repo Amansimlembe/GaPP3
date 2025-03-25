@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import io from 'socket.io-client';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
-import { FaPaperPlane, FaPaperclip, FaTrash, FaArrowLeft, FaReply, FaEllipsisH, FaSave, FaShare, FaCopy, FaForward, FaFileAlt, FaPlay, FaArrowDown } from 'react-icons/fa';
+import { FaPaperPlane, FaPaperclip, FaTrash, FaArrowLeft, FaReply, FaEllipsisH, FaSave, FaShare, FaCopy, FaForward, FaFileAlt, FaPlay, FaArrowDown, FaDownload } from 'react-icons/fa';
 import { useDispatch, useSelector } from 'react-redux';
 import { setMessages, addMessage, setSelectedChat } from '../store';
 import { saveMessages, getMessages } from '../db';
@@ -56,6 +56,7 @@ const fetchRecipientPublicKey = async (recipientId, token) => {
     const { data } = await axios.get(`/auth/public-key/${recipientId}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
+    if (!data.publicKey) throw new Error('Public key not found for recipient');
     return data.publicKey;
   } catch (error) {
     console.error('Failed to fetch recipient public key:', error);
@@ -67,6 +68,9 @@ const fetchRecipientPublicKey = async (recipientId, token) => {
 const encryptMessage = async (message, recipientId, token) => {
   try {
     const recipientPublicKey = await fetchRecipientPublicKey(recipientId, token);
+    if (typeof recipientPublicKey !== 'string') {
+      throw new Error('Invalid public key format');
+    }
     const publicKey = await openpgp.readKey({ armoredKey: recipientPublicKey });
     const encrypted = await openpgp.encrypt({
       message: await openpgp.createMessage({ text: message }),
@@ -82,6 +86,9 @@ const encryptMessage = async (message, recipientId, token) => {
 // Decrypt message
 const decryptMessage = async (encryptedMessage) => {
   try {
+    if (typeof encryptedMessage !== 'string') {
+      throw new Error('Encrypted message must be a string');
+    }
     const userKeys = JSON.parse(localStorage.getItem('pgpKeys'));
     if (!userKeys) throw new Error('No private key found');
 
@@ -460,7 +467,7 @@ const ChatScreen = ({ token, userId }) => {
     if (selectedFile) {
       setFile(selectedFile);
       setContentType(type);
-      setMediaPreview({ type, url: URL.createObjectURL(selectedFile) });
+      setMediaPreview({ type, url: URL.createObjectURL(selectedFile), name: selectedFile.name });
       setShowPicker(false);
     }
   };
@@ -593,7 +600,7 @@ const ChatScreen = ({ token, userId }) => {
                               <img
                                 src={msg.content}
                                 alt="Chat"
-                                className="max-w-[80%] h-40 object-contain rounded-lg cursor-pointer shadow-md p-1"
+                                className="max-w-[80%] h-40 object-contain rounded-lg cursor-pointer shadow-md p-[2px]"
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   viewMessage(msg);
@@ -606,7 +613,7 @@ const ChatScreen = ({ token, userId }) => {
                             <div className="relative">
                               <video
                                 src={msg.content}
-                                className="max-w-[80%] h-40 object-contain rounded-lg cursor-pointer shadow-md p-1"
+                                className="max-w-[80%] h-40 object-contain rounded-lg cursor-pointer shadow-md p-[2px]"
                                 onClick={(e) => e.stopPropagation()}
                               />
                               {msg.caption && <p className="text-xs mt-1 italic text-gray-300 max-w-[80%]">{msg.caption}</p>}
@@ -623,15 +630,13 @@ const ChatScreen = ({ token, userId }) => {
                             </div>
                           )}
                           {msg.contentType === 'document' && (
-                            <div className="flex items-center bg-gray-100 p-1 rounded-lg">
+                            <div className="flex items-center bg-gray-100 p-[2px] rounded-lg">
                               <FaFileAlt className="text-blue-600 mr-2" />
-                              <a
-                                href={msg.content}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="text-blue-600 font-semibold truncate max-w-[200px] text-sm"
-                              >
-                                {msg.content.split('/').pop()}
+                              <span className="text-blue-600 font-semibold truncate max-w-[200px] text-sm">
+                                {msg.content.split('/').pop().slice(0, 30) + (msg.content.split('/').pop().length > 30 ? '...' : '')}
+                              </span>
+                              <a href={msg.content} download className="ml-2">
+                                <FaDownload className="text-blue-600" />
                               </a>
                               {msg.caption && <p className="text-xs ml-2 italic text-gray-600">{msg.caption}</p>}
                             </div>
@@ -703,10 +708,26 @@ const ChatScreen = ({ token, userId }) => {
               {mediaPreview && (
                 <div className="bg-gray-100 p-2 mb-2 rounded w-full max-w-[80%] mx-auto">
                   {mediaPreview.type === 'image' && (
-                    <img src={mediaPreview.url} alt="Preview" className="max-w-full h-40 object-contain rounded-lg" />
+                    <img src={mediaPreview.url} alt="Preview" className="max-w-full h-40 object-contain rounded-lg p-[2px]" />
                   )}
                   {mediaPreview.type === 'video' && (
-                    <video src={mediaPreview.url} className="max-w-full h-40 object-contain rounded-lg" controls />
+                    <video src={mediaPreview.url} className="max-w-full h-40 object-contain rounded-lg p-[2px]" controls />
+                  )}
+                  {mediaPreview.type === 'audio' && (
+                    <div className="flex items-center">
+                      <FaPlay className="text-green-500 mr-2" />
+                      <div className={`bg-gray-200 h-2 rounded-full ${isSmallDevice ? 'w-[250px]' : 'w-[400px]'}`}>
+                        <div className="bg-green-500 h-2 rounded-full w-1/3"></div>
+                      </div>
+                    </div>
+                  )}
+                  {mediaPreview.type === 'document' && (
+                    <div className="flex items-center">
+                      <FaFileAlt className="text-blue-600 mr-2" />
+                      <span className="text-blue-600 font-semibold truncate max-w-[200px] text-sm">
+                        {mediaPreview.name.slice(0, 30) + (mediaPreview.name.length > 30 ? '...' : '')}
+                      </span>
+                    </div>
                   )}
                   <input
                     type="text"
@@ -874,4 +895,4 @@ const ChatScreen = ({ token, userId }) => {
   );
 };
 
-export default ChatScreen;   
+export default ChatScreen;
