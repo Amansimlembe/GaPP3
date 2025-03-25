@@ -153,6 +153,8 @@ router.post('/message', authMiddleware, upload.single('content'), async (req, re
     res.status(500).json({ error: 'Failed to send message', details: error.message, stack: error.stack });
   }
 });
+
+
 router.get('/messages', authMiddleware, async (req, res) => {
   try {
     const { userId, recipientId, limit = 50, skip = 0 } = req.query;
@@ -174,7 +176,7 @@ router.get('/messages', authMiddleware, async (req, res) => {
         { senderId: recipientId, recipientId: userId }
       ]
     })
-      .sort({ createdAt: 1 })
+      .sort({ createdAt: -1 }) // Sort newest to oldest
       .skip(parseInt(skip))
       .limit(parseInt(limit))
       .lean();
