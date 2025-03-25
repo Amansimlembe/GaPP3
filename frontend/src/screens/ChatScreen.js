@@ -6,7 +6,6 @@ import { FaPaperPlane, FaPaperclip, FaTrash, FaArrowLeft, FaReply, FaEllipsisH, 
 import { useDispatch, useSelector } from 'react-redux';
 import { setMessages, addMessage, setSelectedChat } from '../store';
 import { saveMessages, getMessages } from '../db';
-import { List } from 'react-virtualized';
 
 const socket = io('https://gapp-6yc3.onrender.com');
 
@@ -224,65 +223,6 @@ const ChatScreen = ({ token, userId }) => {
     }
   };
 
-  const rowRenderer = ({ index, key, style }) => {
-    const msg = (chats[selectedChat] || [])[index];
-    return (
-      <div key={key} style={{ ...style, padding: '2px 0' }} className={`flex ${msg.senderId === userId ? 'justify-end' : 'justify-start'} px-2`}>
-        <div
-          className={`max-w-[70%] p-2 rounded-lg shadow-sm ${msg.senderId === userId ? 'bg-green-500 text-white rounded-br-none' : 'bg-white text-black rounded-bl-none'} transition-all`}
-          onClick={() => setSelectedMessage(msg._id === selectedMessage ? null : msg._id)}
-          onDoubleClick={msg.contentType === 'video' ? () => viewMessage(msg) : null}
-        >
-          {msg.replyTo && (
-            <div className="bg-gray-100 p-1 rounded mb-1 text-xs italic text-gray-700">
-              <p>Replying to: {msg.replyTo?.content?.slice(0, 20) || 'Message'}...</p>
-            </div>
-          )}
-          {msg.contentType === 'text' && <p className="text-sm break-words">{msg.content}</p>}
-          {msg.contentType === 'image' && (
-            <div className="relative">
-              <img src={msg.content} alt="Chat" className="max-w-full h-auto rounded-lg cursor-pointer shadow-md" onClick={(e) => { e.stopPropagation(); viewMessage(msg); }} />
-              {msg.caption && <p className="text-xs mt-1 italic text-gray-300">{msg.caption}</p>}
-            </div>
-          )}
-          {msg.contentType === 'video' && (
-            <div className="relative">
-              <video src={msg.content} controls className="max-w-full h-auto rounded-lg cursor-pointer shadow-md" onClick={(e) => e.stopPropagation()} />
-              {msg.caption && <p className="text-xs mt-1 italic text-gray-300">{msg.caption}</p>}
-            </div>
-          )}
-          {msg.contentType === 'audio' && (
-            <div className="relative">
-              <audio src={msg.content} controls className="w-full" />
-              {msg.caption && <p className="text-xs mt-1 italic text-gray-300">{msg.caption}</p>}
-            </div>
-          )}
-          {msg.contentType === 'document' && (
-            <div className="flex items-center bg-gray-100 p-2 rounded-lg">
-              <a href={msg.content} target="_blank" rel="noopener noreferrer" className="text-blue-600 font-semibold truncate max-w-[200px] text-sm">{msg.content.split('/').pop()}</a>
-              {msg.caption && <p className="text-xs ml-2 italic text-gray-600">{msg.caption}</p>}
-            </div>
-          )}
-          {msg.senderId === userId && (
-            <span className="text-xs flex justify-end mt-1">
-              {msg.status === 'sent' && '✓'}
-              {msg.status === 'delivered' && '✓✓'}
-              {msg.status === 'read' && <span className="text-blue-300">✓✓</span>}
-            </span>
-          )}
-        </div>
-        {msg._id === selectedMessage && (
-          <div className="flex items-center ml-2">
-            <FaReply onClick={() => setReplyTo(msg)} className="text-primary cursor-pointer hover:text-secondary" />
-            {msg.senderId === userId && (
-              <FaTrash onClick={() => deleteMessage(msg._id)} className="text-red-500 cursor-pointer hover:text-red-700 ml-2" />
-            )}
-          </div>
-        )}
-      </div>
-    );
-  };
-
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5 }} className="flex h-screen bg-gray-100">
       <div className={`w-full md:w-1/3 bg-white border-r border-gray-200 flex flex-col ${isSmallDevice && selectedChat ? 'hidden' : 'block'}`}>
@@ -349,13 +289,61 @@ const ChatScreen = ({ token, userId }) => {
               {(chats[selectedChat] || []).length === 0 ? (
                 <p className="text-center text-gray-500 mt-4">Start a new conversation</p>
               ) : (
-                <List
-                  width={chatRef.current?.offsetWidth || 500}
-                  height={chatRef.current?.offsetHeight || 400}
-                  rowCount={(chats[selectedChat] || []).length}
-                  rowHeight={60} // Tighter spacing like WhatsApp
-                  rowRenderer={rowRenderer}
-                />
+                (chats[selectedChat] || []).map((msg) => (
+                  <div key={msg._id} className={`flex ${msg.senderId === userId ? 'justify-end' : 'justify-start'} px-2 py-1`}>
+                    <div
+                      className={`max-w-[70%] p-2 rounded-lg shadow-sm ${msg.senderId === userId ? 'bg-green-500 text-white rounded-br-none' : 'bg-white text-black rounded-bl-none'} transition-all`}
+                      onClick={() => setSelectedMessage(msg._id === selectedMessage ? null : msg._id)}
+                      onDoubleClick={msg.contentType === 'video' ? () => viewMessage(msg) : null}
+                    >
+                      {msg.replyTo && (
+                        <div className="bg-gray-100 p-1 rounded mb-1 text-xs italic text-gray-700">
+                          <p>Replying to: {msg.replyTo?.content?.slice(0, 20) || 'Message'}...</p>
+                        </div>
+                      )}
+                      {msg.contentType === 'text' && <p className="text-sm break-words">{msg.content}</p>}
+                      {msg.contentType === 'image' && (
+                        <div className="relative">
+                          <img src={msg.content} alt="Chat" className="max-w-full h-auto rounded-lg cursor-pointer shadow-md" onClick={(e) => { e.stopPropagation(); viewMessage(msg); }} />
+                          {msg.caption && <p className="text-xs mt-1 italic text-gray-300">{msg.caption}</p>}
+                        </div>
+                      )}
+                      {msg.contentType === 'video' && (
+                        <div className="relative">
+                          <video src={msg.content} controls className="max-w-full h-auto rounded-lg cursor-pointer shadow-md" onClick={(e) => e.stopPropagation()} />
+                          {msg.caption && <p className="text-xs mt-1 italic text-gray-300">{msg.caption}</p>}
+                        </div>
+                      )}
+                      {msg.contentType === 'audio' && (
+                        <div className="relative">
+                          <audio src={msg.content} controls className="w-full" />
+                          {msg.caption && <p className="text-xs mt-1 italic text-gray-300">{msg.caption}</p>}
+                        </div>
+                      )}
+                      {msg.contentType === 'document' && (
+                        <div className="flex items-center bg-gray-100 p-2 rounded-lg">
+                          <a href={msg.content} target="_blank" rel="noopener noreferrer" className="text-blue-600 font-semibold truncate max-w-[200px] text-sm">{msg.content.split('/').pop()}</a>
+                          {msg.caption && <p className="text-xs ml-2 italic text-gray-600">{msg.caption}</p>}
+                        </div>
+                      )}
+                      {msg.senderId === userId && (
+                        <span className="text-xs flex justify-end mt-1">
+                          {msg.status === 'sent' && '✓'}
+                          {msg.status === 'delivered' && '✓✓'}
+                          {msg.status === 'read' && <span className="text-blue-300">✓✓</span>}
+                        </span>
+                      )}
+                    </div>
+                    {msg._id === selectedMessage && (
+                      <div className="flex items-center ml-2">
+                        <FaReply onClick={() => setReplyTo(msg)} className="text-primary cursor-pointer hover:text-secondary" />
+                        {msg.senderId === userId && (
+                          <FaTrash onClick={() => deleteMessage(msg._id)} className="text-red-500 cursor-pointer hover:text-red-700 ml-2" />
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))
               )}
             </div>
             <div className="bg-white p-2 border-t border-gray-200 shadow-lg z-30 flex items-center">

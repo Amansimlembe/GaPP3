@@ -15,7 +15,6 @@
     "react-redux": "^9.2.0",
     "react-router-dom": "^5.3.4",
     "react-scripts": "5.0.1",
-    "react-virtualized": "^9.22.6",
     "socket.io-client": "^4.8.1"
   },
   "scripts": {
