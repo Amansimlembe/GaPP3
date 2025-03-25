@@ -102,6 +102,33 @@ router.post('/refresh', auth, async (req, res) => {
   }
 });
 
+
+// routes/auth.js
+router.post('/save-public-key', auth, async (req, res) => {
+  const { userId, publicKey } = req.body;
+  try {
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    user.publicKey = publicKey;
+    await user.save();
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Save public key error:', error);
+    res.status(500).json({ error: 'Failed to save public key' });
+  }
+});
+
+router.get('/public-key/:id', auth, async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    res.json({ publicKey: user.publicKey });
+  } catch (error) {
+    console.error('Fetch public key error:', error);
+    res.status(500).json({ error: 'Failed to fetch public key' });
+  }
+});
+
 router.post('/update_photo', auth, upload.single('photo'), async (req, res) => {
   try {
     const { userId } = req.body;

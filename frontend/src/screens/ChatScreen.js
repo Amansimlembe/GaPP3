@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import io from 'socket.io-client';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
-import { FaPaperPlane, FaPaperclip, FaTrash, FaArrowLeft, FaReply, FaEllipsisH, FaSave, FaShare, FaCopy, FaForward } from 'react-icons/fa';
+import { FaPaperPlane, FaPaperclip, FaTrash, FaArrowLeft, FaReply, FaEllipsisH, FaSave, FaShare, FaCopy, FaForward, FaFileAlt, FaPlay, FaArrowDown } from 'react-icons/fa';
 import { useDispatch, useSelector } from 'react-redux';
 import { setMessages, addMessage, setSelectedChat } from '../store';
 import { saveMessages, getMessages } from '../db';
@@ -13,29 +13,41 @@ const socket = io('https://gapp-6yc3.onrender.com');
 // Helper to generate or retrieve key pair
 const getKeyPair = async (userId, token) => {
   const storedKeys = localStorage.getItem('pgpKeys');
-  if (storedKeys) return JSON.parse(storedKeys);
-
-  const { privateKey, publicKey } = await openpgp.generateKey({
-    type: 'rsa',
-    rsaBits: 2048,
-    userIDs: [{ name: 'User', email: `${userId}@gapp.com` }],
-    passphrase: 'gapp-secret',
-  });
-
-  const keys = { privateKey, publicKey };
-  localStorage.setItem('pgpKeys', JSON.stringify(keys));
+  if (storedKeys) {
+    try {
+      const keys = JSON.parse(storedKeys);
+      // Validate keys
+      await openpgp.readKey({ armoredKey: keys.publicKey });
+      await openpgp.readPrivateKey({ armoredKey: keys.privateKey });
+      return keys;
+    } catch (error) {
+      console.error('Invalid stored keys, regenerating:', error);
+      localStorage.removeItem('pgpKeys');
+    }
+  }
 
   try {
+    const { privateKey, publicKey } = await openpgp.generateKey({
+      type: 'rsa',
+      rsaBits: 2048,
+      userIDs: [{ name: 'User', email: `${userId}@gapp.com` }],
+      passphrase: 'gapp-secret',
+    });
+
+    const keys = { privateKey, publicKey };
+    localStorage.setItem('pgpKeys', JSON.stringify(keys));
+
     await axios.post(
       '/auth/save-public-key',
       { userId, publicKey },
       { headers: { Authorization: `Bearer ${token}` } }
     );
-  } catch (error) {
-    console.error('Failed to save public key:', error);
-  }
 
-  return keys;
+    return keys;
+  } catch (error) {
+    console.error('Key generation failed:', error);
+    throw new Error('Failed to generate encryption keys');
+  }
 };
 
 // Fetch recipient's public key from the server
@@ -86,7 +98,7 @@ const decryptMessage = async (encryptedMessage) => {
     return decrypted.data;
   } catch (error) {
     console.error('Decryption error:', error);
-    throw error;
+    return '[Failed to decrypt]';
   }
 };
 
@@ -112,8 +124,10 @@ const ChatScreen = ({ token, userId }) => {
   const [unreadCount, setUnreadCount] = useState(0);
   const [firstUnreadMessageId, setFirstUnreadMessageId] = useState(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
-  const [hoveredMessage, setHoveredMessage] = useState(null); // Track hovered message for three-dot menu
-  const [showMessageMenu, setShowMessageMenu] = useState(null); // Track which message's menu is open
+  const [hoveredMessage, setHoveredMessage] = useState(null);
+  const [showMessageMenu, setShowMessageMenu] = useState(null);
+  const [showJumpToBottom, setShowJumpToBottom] = useState(false);
+  const [mediaPreview, setMediaPreview] = useState(null);
   const chatRef = useRef(null);
   const menuRef = useRef(null);
   const messageMenuRef = useRef(null);
@@ -123,7 +137,6 @@ const ChatScreen = ({ token, userId }) => {
   useEffect(() => {
     if (!userId || !token) return;
 
-    // Initialize key pair on component mount
     const initializeKeys = async () => {
       try {
         await getKeyPair(userId, token);
@@ -165,12 +178,8 @@ const ChatScreen = ({ token, userId }) => {
         const decryptedMessages = await Promise.all(
           data.map(async (msg) => {
             if (msg.contentType === 'text' && msg.content) {
-              try {
-                const decryptedContent = await decryptMessage(msg.content);
-                return { ...msg, content: decryptedContent, status: msg.status || 'sent' };
-              } catch (err) {
-                return { ...msg, content: '[Encrypted]', status: msg.status || 'sent' };
-              }
+              const decryptedContent = await decryptMessage(msg.content);
+              return { ...msg, content: decryptedContent, status: msg.status || 'sent' };
             }
             return { ...msg, status: msg.status || 'sent' };
           })
@@ -205,12 +214,8 @@ const ChatScreen = ({ token, userId }) => {
       const senderKnown = users.some((u) => u.id === msg.senderId);
       let updatedMsg = { ...msg, username: senderKnown ? msg.senderUsername : 'Unsaved Number' };
       if (msg.contentType === 'text' && msg.content) {
-        try {
-          const decryptedContent = await decryptMessage(msg.content);
-          updatedMsg = { ...updatedMsg, content: decryptedContent };
-        } catch (err) {
-          updatedMsg = { ...updatedMsg, content: '[Encrypted]' };
-        }
+        const decryptedContent = await decryptMessage(msg.content);
+        updatedMsg = { ...updatedMsg, content: decryptedContent };
       }
       dispatch(addMessage({ recipientId: msg.recipientId === userId ? msg.senderId : msg.recipientId, message: updatedMsg }));
       if (msg.recipientId === userId && !senderKnown) {
@@ -258,7 +263,18 @@ const ChatScreen = ({ token, userId }) => {
     };
     document.addEventListener('mousedown', handleClickOutside);
 
-    // Hide bottom navbar when chatbox is open
+    const handleScroll = () => {
+      if (chatRef.current) {
+        const { scrollTop, scrollHeight, clientHeight } = chatRef.current;
+        if (scrollHeight - scrollTop - clientHeight > 100) {
+          setShowJumpToBottom(true);
+        } else {
+          setShowJumpToBottom(false);
+        }
+      }
+    };
+    chatRef.current?.addEventListener('scroll', handleScroll);
+
     if (selectedChat && isSmallDevice) {
       const bottomNav = document.querySelector('.bottom-nav');
       if (bottomNav) bottomNav.style.display = 'none';
@@ -270,6 +286,7 @@ const ChatScreen = ({ token, userId }) => {
       socket.off('stopTyping');
       socket.off('messageStatus');
       document.removeEventListener('mousedown', handleClickOutside);
+      chatRef.current?.removeEventListener('scroll', handleScroll);
     };
   }, [token, userId, selectedChat, dispatch]);
 
@@ -302,7 +319,7 @@ const ChatScreen = ({ token, userId }) => {
     if (replyTo) formData.append('replyTo', replyTo._id);
 
     const tempId = Date.now();
-    const tempMsg = { _id: tempId, senderId: userId, recipientId: selectedChat, contentType, content: file ? URL.createObjectURL(file) : message, caption, status: 'sent', replyTo };
+    const tempMsg = { _id: tempId, senderId: userId, recipientId: selectedChat, contentType, content: file ? URL.createObjectURL(file) : message, caption, status: 'sent', replyTo, createdAt: new Date() };
     dispatch(addMessage({ recipientId: selectedChat, message: tempMsg }));
     chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
 
@@ -326,6 +343,7 @@ const ChatScreen = ({ token, userId }) => {
       setShowPicker(false);
       setUploadProgress(null);
       setReplyTo(null);
+      setMediaPreview(null);
       setError('');
     } catch (error) {
       console.error('Send message error:', error);
@@ -442,8 +460,14 @@ const ChatScreen = ({ token, userId }) => {
     if (selectedFile) {
       setFile(selectedFile);
       setContentType(type);
+      setMediaPreview({ type, url: URL.createObjectURL(selectedFile) });
       setShowPicker(false);
     }
+  };
+
+  const jumpToBottom = () => {
+    chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
+    setShowJumpToBottom(false);
   };
 
   const lastMessage = chats[selectedChat]?.slice(-1)[0];
@@ -502,7 +526,7 @@ const ChatScreen = ({ token, userId }) => {
       <div className={`flex-1 flex flex-col ${isSmallDevice && !selectedChat ? 'hidden' : 'block'}`}>
         {selectedChat ? (
           <>
-            <div className="bg-white p-3 flex items-center border-b border-gray-200">
+            <div className="bg-white p-3 flex items-center border-b border-gray-200 fixed top-0 left-0 right-0 z-10">
               {isSmallDevice && (
                 <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
                   <FaArrowLeft
@@ -521,13 +545,18 @@ const ChatScreen = ({ token, userId }) => {
                 {isTyping[selectedChat] && <span className="text-sm text-green-500 ml-2">Typing...</span>}
               </div>
             </div>
-            <div ref={chatRef} className="flex-1 overflow-y-auto bg-gray-100 p-2 pb-16">
+            <div ref={chatRef} className="flex-1 overflow-y-auto bg-gray-100 p-2 pt-16 pb-24">
               {(chats[selectedChat] || []).length === 0 ? (
                 <p className="text-center text-gray-500 mt-4">Start a new conversation</p>
               ) : (
                 <>
                   {(chats[selectedChat] || []).map((msg, index) => (
-                    <React.Fragment key={msg._id}>
+                    <motion.div
+                      key={msg._id}
+                      initial={{ opacity: 0, y: 20 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.3 }}
+                    >
                       {firstUnreadMessageId === msg._id && unreadCount > 0 && (
                         <div className="text-center my-2">
                           <span className="bg-blue-500 text-white px-2 py-1 rounded-full text-sm">
@@ -543,7 +572,7 @@ const ChatScreen = ({ token, userId }) => {
                         onTouchStart={() => setShowMessageMenu(msg._id)}
                       >
                         <div
-                          className={`max-w-[70%] p-3 rounded-lg shadow-sm ${msg.senderId === userId ? 'bg-green-500 text-white rounded-br-none' : 'bg-white text-black rounded-bl-none'} transition-all ${selectedMessages.includes(msg._id) ? 'bg-opacity-50' : ''}`}
+                          className={`max-w-[70%] p-2 rounded-lg shadow-sm ${msg.senderId === userId ? 'bg-green-500 text-white rounded-br-none' : 'bg-white text-black rounded-bl-none'} transition-all ${selectedMessages.includes(msg._id) ? 'bg-opacity-50' : ''}`}
                           onClick={() => {
                             if (selectedMessages.length > 0) {
                               setSelectedMessages((prev) =>
@@ -564,33 +593,38 @@ const ChatScreen = ({ token, userId }) => {
                               <img
                                 src={msg.content}
                                 alt="Chat"
-                                className="max-w-[80%] h-40 object-contain rounded-lg cursor-pointer shadow-md"
+                                className="max-w-[80%] h-40 object-contain rounded-lg cursor-pointer shadow-md p-1"
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   viewMessage(msg);
                                 }}
                               />
-                              {msg.caption && <p className="text-xs mt-1 italic text-gray-300">{msg.caption}</p>}
+                              {msg.caption && <p className="text-xs mt-1 italic text-gray-300 max-w-[80%]">{msg.caption}</p>}
                             </div>
                           )}
                           {msg.contentType === 'video' && (
                             <div className="relative">
                               <video
                                 src={msg.content}
-                                className="max-w-[80%] h-40 object-contain rounded-lg cursor-pointer shadow-md"
+                                className="max-w-[80%] h-40 object-contain rounded-lg cursor-pointer shadow-md p-1"
                                 onClick={(e) => e.stopPropagation()}
                               />
-                              {msg.caption && <p className="text-xs mt-1 italic text-gray-300">{msg.caption}</p>}
+                              {msg.caption && <p className="text-xs mt-1 italic text-gray-300 max-w-[80%]">{msg.caption}</p>}
                             </div>
                           )}
                           {msg.contentType === 'audio' && (
-                            <div className="relative">
-                              <audio src={msg.content} controls className="w-full" />
-                              {msg.caption && <p className="text-xs mt-1 italic text-gray-300">{msg.caption}</p>}
+                            <div className="relative flex items-center">
+                              <FaPlay className="text-green-500 mr-2" />
+                              <div className={`bg-gray-200 h-2 rounded-full ${isSmallDevice ? 'w-[250px]' : 'w-[400px]'}`}>
+                                <div className="bg-green-500 h-2 rounded-full w-1/3"></div>
+                              </div>
+                              <audio src={msg.content} controls className="hidden" />
+                              {msg.caption && <p className="text-xs mt-1 italic text-gray-300 ml-2">{msg.caption}</p>}
                             </div>
                           )}
                           {msg.contentType === 'document' && (
-                            <div className="flex items-center bg-gray-100 p-2 rounded-lg">
+                            <div className="flex items-center bg-gray-100 p-1 rounded-lg">
+                              <FaFileAlt className="text-blue-600 mr-2" />
                               <a
                                 href={msg.content}
                                 target="_blank"
@@ -602,13 +636,18 @@ const ChatScreen = ({ token, userId }) => {
                               {msg.caption && <p className="text-xs ml-2 italic text-gray-600">{msg.caption}</p>}
                             </div>
                           )}
-                          {msg.senderId === userId && (
-                            <span className="text-xs flex justify-end mt-1">
-                              {msg.status === 'sent' && '✓'}
-                              {msg.status === 'delivered' && '✓✓'}
-                              {msg.status === 'read' && <span className="text-blue-500">✓✓</span>}
+                          <div className="flex justify-between items-center mt-1">
+                            {msg.senderId === userId && (
+                              <span className="text-xs">
+                                {msg.status === 'sent' && '✓'}
+                                {msg.status === 'delivered' && '✓✓'}
+                                {msg.status === 'read' && <span className="text-blue-500">✓✓</span>}
+                              </span>
+                            )}
+                            <span className="text-xs text-gray-500">
+                              {new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                             </span>
-                          )}
+                          </div>
                         </div>
                         {(hoveredMessage === msg._id || showMessageMenu === msg._id) && (
                           <motion.div
@@ -655,15 +694,29 @@ const ChatScreen = ({ token, userId }) => {
                           </motion.div>
                         )}
                       </div>
-                    </React.Fragment>
+                    </motion.div>
                   ))}
                 </>
               )}
             </div>
-            <div className="bg-white p-2 border-t border-gray-200 shadow-lg z-30 flex flex-col">
-              {lastMessage && (
-                <div className="text-sm text-gray-500 mb-2 px-2 truncate">
-                  {lastMessage.contentType === 'text' ? lastMessage.content : `Sent a ${lastMessage.contentType}`}
+            <div className="bg-white p-2 border-t border-gray-200 shadow-lg fixed bottom-0 left-0 right-0 z-10">
+              {mediaPreview && (
+                <div className="bg-gray-100 p-2 mb-2 rounded w-full max-w-[80%] mx-auto">
+                  {mediaPreview.type === 'image' && (
+                    <img src={mediaPreview.url} alt="Preview" className="max-w-full h-40 object-contain rounded-lg" />
+                  )}
+                  {mediaPreview.type === 'video' && (
+                    <video src={mediaPreview.url} className="max-w-full h-40 object-contain rounded-lg" controls />
+                  )}
+                  <input
+                    type="text"
+                    value={caption}
+                    onChange={(e) => setCaption(e.target.value)}
+                    placeholder="Add a caption..."
+                    className="w-full p-1 mt-2 border rounded-lg text-sm"
+                    style={{ maxWidth: mediaPreview.type === 'image' || mediaPreview.type === 'video' ? '80%' : '100%' }}
+                  />
+                  <button onClick={() => setMediaPreview(null)} className="text-red-500 text-xs mt-1">Cancel</button>
                 </div>
               )}
               {selectedMessages.length > 0 && (
@@ -741,6 +794,16 @@ const ChatScreen = ({ token, userId }) => {
                 </motion.div>
               )}
             </div>
+            {showJumpToBottom && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="fixed bottom-20 right-4 bg-green-500 text-white p-2 rounded-full cursor-pointer z-20"
+                onClick={jumpToBottom}
+              >
+                <FaArrowDown />
+              </motion.div>
+            )}
           </>
         ) : (
           <div className="flex-1 flex items-center justify-center">
@@ -811,4 +874,4 @@ const ChatScreen = ({ token, userId }) => {
   );
 };
 
-export default ChatScreen;
+export default ChatScreen;   
