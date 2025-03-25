@@ -184,7 +184,7 @@ const ChatScreen = ({ token, userId }) => {
 
     if (isSmallDevice) {
       const bottomNav = document.querySelector('.bottom-nav');
-      if (bottomNav) bottomNav.style.zIndex = '20';
+      if (bottomNav) bottomNav.style.zIndex = '10';
     }
 
     return () => {
@@ -479,7 +479,7 @@ const ChatScreen = ({ token, userId }) => {
                 {isTyping[selectedChat] && <span className="text-sm text-green-500 ml-2">Typing...</span>}
               </div>
             </div>
-            <div ref={chatRef} className="flex-1 overflow-y-auto bg-gray-100 p-2 pt-16 pb-28">
+            <div ref={chatRef} className="flex-1 overflow-y-auto bg-gray-100 p-2 pt-16 pb-32">
               {(chats[selectedChat] || []).length === 0 ? (
                 <p className="text-center text-gray-500 mt-4">Start a new conversation</p>
               ) : (
@@ -679,7 +679,7 @@ const ChatScreen = ({ token, userId }) => {
                 </>
               )}
             </div>
-            <div className="bg-white p-2 border-t border-gray-200 shadow-lg fixed bottom-0 md:left-[33.33%] md:w-2/3 left-0 right-0 z-10 mb-0">
+            <div className="bg-white p-2 border-t border-gray-200 shadow-lg fixed bottom-0 md:left-[33.33%] md:w-2/3 left-0 right-0 z-30 mb-16">
               {mediaPreview && (
                 <div className="bg-gray-100 p-2 mb-2 rounded w-full max-w-[80%] mx-auto">
                   {mediaPreview.type === 'image' && (
