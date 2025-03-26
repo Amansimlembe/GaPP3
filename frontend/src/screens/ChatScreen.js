@@ -43,23 +43,31 @@ const ChatScreen = ({ token, userId }) => {
   const [mediaPreview, setMediaPreview] = useState(null);
   const [holdTimer, setHoldTimer] = useState(null);
   const [swipeStartX, setSwipeStartX] = useState(null);
-  const [page, setPage] = useState(0); // Track the current page for pagination
-  const [hasMore, setHasMore] = useState(true); // Track if there are more messages to load
-  const [loading, setLoading] = useState(false); // Track loading state for fetching messages
+  const [page, setPage] = useState(0);
+  const [hasMore, setHasMore] = useState(true);
+  const [loading, setLoading] = useState(false);
   const chatRef = useRef(null);
   const menuRef = useRef(null);
   const messageMenuRef = useRef(null);
   const typingTimeoutRef = useRef(null);
 
-  const messagesPerPage = 50; // Number of messages to fetch per page
+  const messagesPerPage = 50;
   const isSmallDevice = window.innerWidth < 768;
+
+  // Helper function to format the date for the chat list (e.g., "Mar 25")
+  const formatChatListDate = (date) => {
+    const messageDate = new Date(date);
+    return messageDate.toLocaleDateString('en-US', {
+      month: 'short',
+      day: '2-digit',
+    });
+  };
 
   // Helper function to format the date for grouping (e.g., "Today", "Yesterday", or "March 24, 2025")
   const formatDateHeader = (date) => {
     const today = new Date();
     const messageDate = new Date(date);
 
-    // Reset time for comparison (only compare dates)
     const todayDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
     const messageDateOnly = new Date(messageDate.getFullYear(), messageDate.getMonth(), messageDate.getDate());
 
@@ -95,12 +103,33 @@ const ChatScreen = ({ token, userId }) => {
 
     const keepAlive = setInterval(() => {
       socket.emit('ping', { userId });
-    }, 300000); // Ping every 5 minutes
+    }, 300000);
 
     const fetchUsers = async () => {
       try {
         const { data } = await axios.get('/auth/contacts', { headers: { Authorization: `Bearer ${token}` } });
-        setUsers(data);
+        const usersWithLatestMessage = await Promise.all(
+          data.map(async (user) => {
+            try {
+              const { data: messagesData } = await axios.get('/social/messages', {
+                headers: { Authorization: `Bearer ${token}` },
+                params: { userId, recipientId: user.id, limit: 1, skip: 0 },
+              });
+              const latestMessage = messagesData.messages.length > 0 ? messagesData.messages[0] : null;
+              return { ...user, latestMessage };
+            } catch (error) {
+              console.error(`Error fetching latest message for user ${user.id}:`, error);
+              return { ...user, latestMessage: null };
+            }
+          })
+        );
+        // Sort users by the latest message's createdAt (newest first)
+        usersWithLatestMessage.sort((a, b) => {
+          const dateA = a.latestMessage ? new Date(a.latestMessage.createdAt) : new Date(0);
+          const dateB = b.latestMessage ? new Date(b.latestMessage.createdAt) : new Date(0);
+          return dateB - dateA;
+        });
+        setUsers(usersWithLatestMessage);
       } catch (error) {
         setError('Failed to load contacts');
       }
@@ -126,11 +155,8 @@ const ChatScreen = ({ token, userId }) => {
           headers: { Authorization: `Bearer ${token}` },
           params: { userId, recipientId: selectedChat, limit: messagesPerPage, skip: pageNum * messagesPerPage },
         });
-        console.log('Fetched messages:', data);
-        // Backend returns messages in descending order (newest to oldest), reverse for display (oldest to newest)
         let messages = data.messages.map((msg) => ({ ...msg, status: msg.status || 'sent' })).reverse();
 
-        // Merge with offline messages
         const offlineMessages = await getMessages();
         const offlineChatMessages = offlineMessages
           .filter((msg) => {
@@ -139,7 +165,6 @@ const ChatScreen = ({ token, userId }) => {
           })
           .map((msg) => ({ ...msg, status: msg.status || 'sent' }));
 
-        // Combine fetched and offline messages, removing duplicates
         const allMessages = [...messages, ...offlineChatMessages].reduce((acc, msg) => {
           if (!acc.some((m) => m._id === msg._id)) {
             acc.push(msg);
@@ -147,33 +172,33 @@ const ChatScreen = ({ token, userId }) => {
           return acc;
         }, []);
 
-        // Sort messages by createdAt (oldest to newest) for display
         allMessages.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-
-        // Use hasMore from the backend response
         setHasMore(data.hasMore);
 
         if (isInitialLoad) {
           dispatch(setMessages({ recipientId: selectedChat, messages: allMessages }));
+          // Reset notifications for this chat
           setNotifications((prev) => ({ ...prev, [selectedChat]: 0 }));
+          setUnreadCount(0);
+          setFirstUnreadMessageId(null);
 
           const lastReadIndex = allMessages.findIndex((msg) => msg.recipientId === userId && msg.status === 'read');
           const unreadMessages = allMessages.slice(lastReadIndex + 1).filter((msg) => msg.recipientId === userId);
           setUnreadCount(unreadMessages.length);
           if (unreadMessages.length > 0) {
             setFirstUnreadMessageId(unreadMessages[0]._id);
-          }
-
-          if (unreadMessages.length === 0) {
-            chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
+            setTimeout(() => {
+              const firstUnreadElement = document.getElementById(`message-${unreadMessages[0]._id}`);
+              if (firstUnreadElement) {
+                firstUnreadElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              }
+            }, 100);
           } else {
-            const firstUnreadElement = document.getElementById(`message-${unreadMessages[0]._id}`);
-            if (firstUnreadElement) {
-              firstUnreadElement.scrollIntoView({ behavior: 'smooth' });
-            }
+            setTimeout(() => {
+              chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
+            }, 100);
           }
         } else {
-          // Prepend older messages for infinite scroll
           dispatch(setMessages({
             recipientId: selectedChat,
             messages: [...messages, ...(chats[selectedChat] || [])],
@@ -190,7 +215,6 @@ const ChatScreen = ({ token, userId }) => {
       }
     };
 
-    // Fetch initial messages when selectedChat changes
     if (selectedChat) {
       setPage(0);
       setHasMore(true);
@@ -223,15 +247,29 @@ const ChatScreen = ({ token, userId }) => {
             setFirstUnreadMessageId(msg._id);
             const firstUnreadElement = document.getElementById(`message-${msg._id}`);
             if (firstUnreadElement) {
-              firstUnreadElement.scrollIntoView({ behavior: 'smooth' });
+              firstUnreadElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
             }
           }
           socket.emit('messageStatus', { messageId: msg._id, status: 'delivered', recipientId: userId });
           socket.emit('messageStatus', { messageId: msg._id, status: 'read', recipientId: userId });
         }
-        chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
+        setTimeout(() => {
+          chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
+        }, 100);
       } else if (msg.recipientId === userId) {
         setNotifications((prev) => ({ ...prev, [msg.senderId]: (prev[msg.senderId] || 0) + 1 }));
+        // Update the latest message for the contact and re-sort the list
+        setUsers((prev) => {
+          const updatedUsers = prev.map((user) =>
+            user.id === msg.senderId ? { ...user, latestMessage: msg } : user
+          );
+          updatedUsers.sort((a, b) => {
+            const dateA = a.latestMessage ? new Date(a.latestMessage.createdAt) : new Date(0);
+            const dateB = b.latestMessage ? new Date(b.latestMessage.createdAt) : new Date(0);
+            return dateB - dateA;
+          });
+          return updatedUsers;
+        });
       }
     });
 
@@ -262,7 +300,6 @@ const ChatScreen = ({ token, userId }) => {
           setShowJumpToBottom(false);
         }
 
-        // Trigger fetching more messages when scrolling to the top
         if (scrollTop < 100 && hasMore && !loading) {
           setPage((prevPage) => prevPage + 1);
         }
@@ -275,7 +312,6 @@ const ChatScreen = ({ token, userId }) => {
       if (bottomNav) bottomNav.style.zIndex = '10';
     }
 
-    // Fetch more messages when page changes (for infinite scroll)
     if (page > 0) {
       fetchMessages(page, false);
     }
@@ -300,6 +336,37 @@ const ChatScreen = ({ token, userId }) => {
     socket.emit('stopTyping', { userId, recipientId: selectedChat });
     setTyping(false);
 
+    const tempId = Date.now();
+    const tempMsg = {
+      _id: tempId,
+      senderId: userId,
+      recipientId: selectedChat,
+      contentType,
+      content: file ? URL.createObjectURL(file) : message,
+      caption,
+      status: 'sent',
+      replyTo,
+      createdAt: new Date(),
+    };
+
+    // Immediately add the message to the UI
+    dispatch(addMessage({ recipientId: selectedChat, message: tempMsg }));
+    setTimeout(() => {
+      chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
+    }, 0);
+
+    // Clear the input fields immediately
+    setMessage('');
+    setFile(null);
+    setCaption('');
+    setContentType('text');
+    setShowPicker(false);
+    setUploadProgress(null);
+    setReplyTo(null);
+    setMediaPreview(null);
+    setError('');
+
+    // Send the message to the backend in the background
     const formData = new FormData();
     formData.append('senderId', userId);
     formData.append('recipientId', selectedChat);
@@ -309,11 +376,6 @@ const ChatScreen = ({ token, userId }) => {
     else formData.append('content', message);
     if (replyTo) formData.append('replyTo', replyTo._id);
 
-    const tempId = Date.now();
-    const tempMsg = { _id: tempId, senderId: userId, recipientId: selectedChat, contentType, content: file ? URL.createObjectURL(file) : message, caption, status: 'sent', replyTo, createdAt: new Date() };
-    dispatch(addMessage({ recipientId: selectedChat, message: tempMsg }));
-    chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
-
     try {
       if (file) setUploadProgress(0);
       const { data } = await axios.post('/social/message', formData, {
@@ -322,21 +384,12 @@ const ChatScreen = ({ token, userId }) => {
           if (file) setUploadProgress(Math.round((progressEvent.loaded * 100) / progressEvent.total));
         },
       });
-      console.log('Message sent to backend:', data);
       socket.emit('message', { ...data, senderVirtualNumber: localStorage.getItem('virtualNumber'), senderUsername: localStorage.getItem('username'), senderPhoto: localStorage.getItem('photo') });
       dispatch(setMessages({
         recipientId: selectedChat,
         messages: (chats[selectedChat] || []).map((msg) => (msg._id === tempId ? { ...data, status: 'sent' } : msg)),
       }));
-      setMessage('');
-      setFile(null);
-      setCaption('');
-      setContentType('text');
-      setShowPicker(false);
       setUploadProgress(null);
-      setReplyTo(null);
-      setMediaPreview(null);
-      setError('');
     } catch (error) {
       console.error('Send message error:', error);
       dispatch(setMessages({
@@ -520,14 +573,29 @@ const ChatScreen = ({ token, userId }) => {
             >
               <img src={user.photo || 'https://placehold.co/40x40'} alt="Profile" className="w-12 h-12 rounded-full mr-3" />
               <div className="flex-1">
-                <span className="font-semibold">{user.virtualNumber}</span>
-                <span className="text-sm ml-2 text-gray-600">{user.username || 'Unknown'}</span>
+                <div className="flex justify-between">
+                  <span className="font-semibold">{user.virtualNumber}</span>
+                  {user.latestMessage && (
+                    <span className="text-xs text-gray-500">
+                      {formatChatListDate(user.latestMessage.createdAt)}
+                    </span>
+                  )}
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-sm text-gray-600 truncate">
+                    {user.latestMessage
+                      ? user.latestMessage.contentType === 'text'
+                        ? user.latestMessage.content.slice(0, 30) + (user.latestMessage.content.length > 30 ? '...' : '')
+                        : user.latestMessage.contentType.charAt(0).toUpperCase() + user.latestMessage.contentType.slice(1)
+                      : 'No messages yet'}
+                  </span>
+                  {notifications[user.id] > 0 && (
+                    <span className="ml-auto bg-green-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
+                      {notifications[user.id]}
+                    </span>
+                  )}
+                </div>
               </div>
-              {notifications[user.id] > 0 && (
-                <span className="ml-auto bg-green-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
-                  {notifications[user.id]}
-                </span>
-              )}
             </motion.div>
           ))}
         </div>
@@ -573,12 +641,7 @@ const ChatScreen = ({ token, userId }) => {
               </div>
             </div>
             <div ref={chatRef} className="flex-1 overflow-y-auto bg-gray-100 p-2 pt-16 pb-32">
-              {loading && page === 0 && (
-                <div className="text-center py-2">
-                  <p className="text-gray-500">Loading messages...</p>
-                </div>
-              )}
-              {(chats[selectedChat] || []).length === 0 && !loading ? (
+              {(chats[selectedChat] || []).length === 0 ? (
                 <p className="text-center text-gray-500 mt-4">Start a new conversation</p>
               ) : (
                 <>
@@ -587,10 +650,9 @@ const ChatScreen = ({ token, userId }) => {
                     const prevMsg = index > 0 ? (chats[selectedChat] || [])[index - 1] : null;
                     const prevDate = prevMsg ? new Date(prevMsg.createdAt) : null;
 
-                    // Determine if we need to show a date header
                     let showDateHeader = false;
                     if (!prevDate) {
-                      showDateHeader = true; // Always show for the first message
+                      showDateHeader = true;
                     } else {
                       const currentDateOnly = new Date(currentDate.getFullYear(), currentDate.getMonth(), currentDate.getDate());
                       const prevDateOnly = new Date(prevDate.getFullYear(), prevDate.getMonth(), prevDate.getDate());
