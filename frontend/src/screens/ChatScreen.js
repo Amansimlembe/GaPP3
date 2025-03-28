@@ -169,7 +169,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
             cachedUsers.map(async (user) => {
               if (!user.id) {
                 console.warn('User missing ID:', user);
-                return { ...user, latestMessage: null, unreadCount: 0 }; // Skip fetch for invalid users
+                return { ...user, latestMessage: null, unreadCount: 0 };
               }
               try {
                 const { data } = await axios.get('https://gapp-6yc3.onrender.com/social/messages', {
@@ -181,7 +181,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                 return { ...user, latestMessage, unreadCount };
               } catch (error) {
                 console.error(`Error fetching latest message for user ${user.id}:`, error.response?.status || error.message);
-                return { ...user, latestMessage: null, unreadCount: 0 }; // Default to no message
+                return { ...user, latestMessage: null, unreadCount: 0 };
               }
             })
           );
@@ -239,7 +239,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
           const chatId = msg.recipientId === userId ? msg.senderId : msg.recipientId;
           if (msg.contentType === 'text' && msg.iv) {
             pendingDecryption[msg._id] = { encryptedContent: msg.content, iv: msg.iv };
-            dispatch(addMessage({ recipientId: chatId, message: { ...msg, content: 'Message encrypted, awaiting key' } }));
+            dispatch(addMessage({ recipientId: chatId, message: { ...msg, content: 'Decrypting...' } }));
           } else {
             dispatch(addMessage({ recipientId: chatId, message: msg }));
           }
@@ -278,82 +278,72 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       }
     };
 
+    const fetchMessages = async (pageNum = 0, isInitialLoad = true) => {
+      if (!selectedChat || loading) return;
+      setLoading(true);
+      try {
+        const cachedMessages = await getMessages(selectedChat);
+        let messages = [];
+
+        if (cachedMessages.length > 0 && pageNum === 0) {
+          messages = cachedMessages.slice(-messagesPerPage);
+          setHasMore(cachedMessages.length >= messagesPerPage);
+        } else {
+          const { data } = await axios.get('https://gapp-6yc3.onrender.com/social/messages', {
+            headers: { Authorization: `Bearer ${token}` },
+            params: { userId, recipientId: selectedChat, limit: messagesPerPage, skip: pageNum * messagesPerPage },
+          });
+          const sharedKey = await getSharedKey(selectedChat);
+          messages = await Promise.all(
+            data.messages.map(async (msg) => ({
+              ...msg,
+              content: msg.contentType === 'text' && sharedKey ? await decryptMessage(msg.content, msg.iv, sharedKey) : msg.content,
+              status: msg.status || 'sent',
+            }))
+          );
+          setHasMore(data.hasMore);
+          await saveMessages(messages); // Save to IndexedDB
+        }
+
+        if (isInitialLoad) {
+          dispatch(setMessages({ recipientId: selectedChat, messages }));
+          const unreadMessages = messages.filter((msg) => msg.recipientId === userId && msg.status !== 'read');
+          if (unreadMessages.length > 0) {
+            unreadMessages.forEach((msg) => {
+              socket.emit('messageStatus', { messageId: msg._id, status: 'read', recipientId: userId });
+            });
+          }
+          setNotifications((prev) => {
+            const updatedNotifications = { ...prev, [selectedChat]: 0 };
+            localStorage.setItem('chatNotifications', JSON.stringify(updatedNotifications));
+            return updatedNotifications;
+          });
+          setUnreadCount(0);
+          setFirstUnreadMessageId(null);
+          chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'auto' });
+        } else {
+          dispatch(
+            setMessages({
+              recipientId: selectedChat,
+              messages: [...messages, ...(chats[selectedChat] || [])],
+            })
+          );
+        }
+      } catch (error) {
+        console.error('Fetch messages error:', error);
+        if (isInitialLoad) {
+          dispatch(setMessages({ recipientId: selectedChat, messages: [] }));
+          setError('No previous messages');
+        }
+      } finally {
+        setLoading(false);
+      }
+    };
+
     if (selectedChat) {
       setPage(0);
       setHasMore(true);
       loadOfflineMessages();
-      const fetchMessages = async (pageNum = 0, isInitialLoad = true) => {
-        if (!selectedChat || loading) return;
-        setLoading(true);
-        try {
-          const cachedMessages = JSON.parse(localStorage.getItem(`chat_${selectedChat}`)) || [];
-          let messages = [];
-
-          if (cachedMessages.length > 0 && pageNum === 0) {
-            messages = cachedMessages.slice(-messagesPerPage);
-            setHasMore(cachedMessages.length >= messagesPerPage);
-          } else {
-            const { data } = await axios.get('https://gapp-6yc3.onrender.com/social/messages', {
-              headers: { Authorization: `Bearer ${token}` },
-              params: { userId, recipientId: selectedChat, limit: messagesPerPage, skip: pageNum * messagesPerPage },
-            });
-            const sharedKey = await getSharedKey(selectedChat);
-            messages = await Promise.all(
-              data.messages.map(async (msg) => ({
-                ...msg,
-                content: msg.contentType === 'text' && sharedKey ? await decryptMessage(msg.content, msg.iv, sharedKey) : msg.content,
-                status: msg.status || 'sent',
-              }))
-            );
-            setHasMore(data.hasMore);
-            const updatedCachedMessages = [...cachedMessages, ...data.messages].reduce((acc, msg) => {
-              if (!acc.some((m) => m._id === msg._id)) acc.push(msg);
-              return acc;
-            }, []);
-            localStorage.setItem(`chat_${selectedChat}`, JSON.stringify(updatedCachedMessages));
-            await saveMessages(data.messages);
-          }
-
-          messages.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-
-          if (isInitialLoad) {
-            dispatch(setMessages({ recipientId: selectedChat, messages }));
-            const unreadMessages = messages.filter((msg) => msg.recipientId === userId && msg.status !== 'read');
-            if (unreadMessages.length > 0) {
-              unreadMessages.forEach((msg) => {
-                socket.emit('messageStatus', { messageId: msg._id, status: 'read', recipientId: userId });
-              });
-            }
-            setNotifications((prev) => {
-              const updatedNotifications = { ...prev, [selectedChat]: 0 };
-              localStorage.setItem('chatNotifications', JSON.stringify(updatedNotifications));
-              return updatedNotifications;
-            });
-            setUnreadCount(0);
-            setFirstUnreadMessageId(null);
-
-            setTimeout(() => {
-              const lastMessageElement = document.getElementById(`message-${messages[messages.length - 1]?._id}`);
-              if (lastMessageElement) lastMessageElement.scrollIntoView({ behavior: 'auto', block: 'end' });
-            }, 100);
-          } else {
-            dispatch(
-              setMessages({
-                recipientId: selectedChat,
-                messages: [...messages, ...(chats[selectedChat] || [])],
-              })
-            );
-          }
-        } catch (error) {
-          console.error('Fetch messages error:', error);
-          if (isInitialLoad) {
-            dispatch(setMessages({ recipientId: selectedChat, messages: [] }));
-            setError('No previous messages');
-          }
-        } finally {
-          setLoading(false);
-        }
-      };
       fetchMessages(0, true);
 
       const fetchUserStatus = async () => {
@@ -376,12 +366,8 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       const senderKnown = users.some((u) => u.id === msg.senderId);
       const updatedMsg = { ...msg, content: decryptedContent, username: senderKnown ? msg.senderUsername : 'Unsaved Number' };
 
-      const existingMessage = (chats[chatId] || []).find((m) => m._id === msg._id);
-      if (!existingMessage) {
-        dispatch(addMessage({ recipientId: chatId, message: updatedMsg }));
-        const cachedMessages = JSON.parse(localStorage.getItem(`chat_${chatId}`)) || [];
-        localStorage.setItem(`chat_${chatId}`, JSON.stringify([...cachedMessages, msg]));
-      }
+      dispatch(addMessage({ recipientId: chatId, message: updatedMsg }));
+      await saveMessages([msg]);
 
       if (msg.recipientId === userId && !senderKnown) {
         setUsers((prev) => {
@@ -399,16 +385,14 @@ const ChatScreen = ({ token, userId, setAuth }) => {
           socket.emit('messageStatus', { messageId: msg._id, status: 'delivered', recipientId: userId });
           if (isAtBottomRef.current) {
             socket.emit('messageStatus', { messageId: msg._id, status: 'read', recipientId: userId });
+            chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
           } else {
             setUnreadCount((prev) => prev + 1);
             if (!firstUnreadMessageId) setFirstUnreadMessageId(msg._id);
             setShowJumpToBottom(true);
           }
-        }
-        if (isAtBottomRef.current) {
-          setTimeout(() => {
-            chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
-          }, 100);
+        } else if (isAtBottomRef.current) {
+          chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
         } else {
           setShowJumpToBottom(true);
         }
@@ -421,8 +405,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
         setUsers((prev) => {
           const updatedUsers = prev.map((user) =>
             user.id === msg.senderId ? { ...user, latestMessage: msg, unreadCount: (user.unreadCount || 0) + 1 } : user
-          );
-          updatedUsers.sort((a, b) => {
+          ).sort((a, b) => {
             const dateA = a.latestMessage ? new Date(a.latestMessage.createdAt) : new Date(0);
             const dateB = b.latestMessage ? new Date(b.latestMessage.createdAt) : new Date(0);
             return dateB - dateA;
@@ -450,9 +433,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
 
     socket.on('onlineStatus', ({ userId: contactId, status, lastSeen }) => {
       setUsers((prev) => prev.map((user) => (user.id === contactId ? { ...user, status, lastSeen } : user)));
-      if (contactId === selectedChat) {
-        setUserStatus({ status, lastSeen });
-      }
+      if (contactId === selectedChat) setUserStatus({ status, lastSeen });
     });
 
     const handleClickOutside = (event) => {
@@ -464,10 +445,10 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     const handleScroll = () => {
       if (chatRef.current) {
         const { scrollTop, scrollHeight, clientHeight } = chatRef.current;
-        isAtBottomRef.current = scrollHeight - scrollTop - clientHeight < 100;
+        isAtBottomRef.current = scrollHeight - scrollTop - clientHeight < 50;
         setShowJumpToBottom(!isAtBottomRef.current);
 
-        if (scrollTop < 100 && hasMore && !loading) {
+        if (scrollTop < 50 && hasMore && !loading) {
           setPage((prevPage) => prevPage + 1);
         }
 
@@ -483,15 +464,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     };
     chatRef.current?.addEventListener('scroll', handleScroll);
 
-    if (isSmallDevice) {
-      const bottomNav = document.querySelector('.bottom-nav');
-      if (bottomNav) bottomNav.style.zIndex = '10';
-    }
-
-    if (page > 0) {
-      const fetchMoreMessages = async () => fetchMessages(page, false);
-      fetchMoreMessages();
-    }
+    if (page > 0) fetchMessages(page, false);
 
     const handleOnline = async () => {
       if (pendingMessages.length > 0) {
@@ -550,9 +523,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
           ),
         })
       );
-      const cachedMessages = JSON.parse(localStorage.getItem(`chat_${selectedChat}`)) || [];
-      const updatedCachedMessages = cachedMessages.map((msg) => (msg._id === msgData.tempId ? { ...data, status: 'sent' } : msg));
-      localStorage.setItem(`chat_${selectedChat}`, JSON.stringify(updatedCachedMessages));
+      await saveMessages([data]);
       setUploadProgress(null);
     } catch (error) {
       console.error('Send message error:', error);
@@ -568,103 +539,89 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   };
 
   const sendMessage = async () => {
-    try {
-      if (!selectedChat) {
-        setError('No chat selected');
-        return;
-      }
-      if (!message && !file && contentType === 'text') {
-        setError('Please enter a message or select a file');
-        return;
-      }
-
-      socket.emit('stopTyping', { userId, recipientId: selectedChat });
-      setTyping(false);
-
-      const tempId = Date.now().toString();
-      const tempMsg = {
-        _id: tempId,
-        senderId: userId,
-        recipientId: selectedChat,
-        contentType,
-        content: file ? URL.createObjectURL(file) : message,
-        caption,
-        status: 'sending',
-        replyTo,
-        createdAt: new Date(),
-        tempId,
-      };
-
-      dispatch(addMessage({ recipientId: selectedChat, message: tempMsg }));
-
-      let encryptedContent = message;
-      let iv = '';
-
-      if (contentType === 'text') {
-        const sharedKey = await getSharedKey(selectedChat);
-        if (sharedKey) {
-          const encryptionResult = await encryptMessage(message, sharedKey);
-          encryptedContent = encryptionResult.encrypted;
-          iv = encryptionResult.iv;
-        } else {
-          console.warn('No encryption key - sending unencrypted');
-          setError('Message sent without encryption');
-        }
-      }
-
-      const cachedMessages = JSON.parse(localStorage.getItem(`chat_${selectedChat}`)) || [];
-      const messageForServer = { ...tempMsg, content: encryptedContent, iv, status: 'sent' };
-      localStorage.setItem(`chat_${selectedChat}`, JSON.stringify([...cachedMessages, messageForServer]));
-
-      if (isAtBottomRef.current) {
-        setTimeout(() => {
-          chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
-        }, 0);
-      } else {
-        setShowJumpToBottom(true);
-      }
-
-      setMessage('');
-      setFile(null);
-      setCaption('');
-      setContentType('text');
-      setShowPicker(false);
-      setUploadProgress(null);
-      setReplyTo(null);
-      setMediaPreview(null);
-
-      if (navigator.onLine) {
-        await sendMessageToServer(messageForServer);
-        dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: tempId, status: 'sent' }));
-      } else {
-        setPendingMessages((prev) => [...prev, messageForServer]);
-        await saveMessages([messageForServer]);
-        dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: tempId, status: 'pending' }));
-        if (contentType === 'text' && iv) {
-          setDecryptionPending((prev) => ({
-            ...prev,
-            [tempId]: { encryptedContent, iv },
-          }));
-        }
-      }
-
-      // Update users with the latest message
-      setUsers((prev) => {
-        const updatedUsers = prev.map((user) =>
-          user.id === selectedChat ? { ...user, latestMessage: { ...messageForServer, content: message } } : user
-        );
-        updatedUsers.sort((a, b) => {
-          const dateA = a.latestMessage ? new Date(a.latestMessage.createdAt) : new Date(0);
-          const dateB = b.latestMessage ? new Date(b.latestMessage.createdAt) : new Date(0);
-          return dateB - dateA;
-        });
-        localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
-        return updatedUsers;
-      });
-    } catch (error) {
-      console.error('Error in sendMessage:', error);
-      setError('An unexpected error occurred');
+    if (!selectedChat) {
+      setError('No chat selected');
+      return;
     }
+    if (!message && !file) {
+      setError('Please enter a message or select a file');
+      return;
+    }
+
+    socket.emit('stopTyping', { userId, recipientId: selectedChat });
+    setTyping(false);
+
+    const tempId = Date.now().toString();
+    const tempMsg = {
+      _id: tempId,
+      senderId: userId,
+      recipientId: selectedChat,
+      contentType,
+      content: file ? URL.createObjectURL(file) : message,
+      caption,
+      status: 'sending',
+      replyTo,
+      createdAt: new Date(),
+      tempId,
+    };
+
+    dispatch(addMessage({ recipientId: selectedChat, message: tempMsg }));
+
+    let encryptedContent = message;
+    let iv = '';
+
+    if (contentType === 'text') {
+      const sharedKey = await getSharedKey(selectedChat);
+      if (sharedKey) {
+        const encryptionResult = await encryptMessage(message, sharedKey);
+        encryptedContent = encryptionResult.encrypted;
+        iv = encryptionResult.iv;
+      }
+    }
+
+    const messageForServer = { ...tempMsg, content: encryptedContent, iv, status: 'sent' };
+    await saveMessages([messageForServer]);
+
+    if (isAtBottomRef.current) {
+      chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
+    } else {
+      setShowJumpToBottom(true);
+    }
+
+    setMessage('');
+    setFile(null);
+    setCaption('');
+    setContentType('text');
+    setShowPicker(false);
+    setUploadProgress(null);
+    setReplyTo(null);
+    setMediaPreview(null);
+
+    if (navigator.onLine) {
+      await sendMessageToServer(messageForServer);
+      dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: tempId, status: 'sent' }));
+    } else {
+      setPendingMessages((prev) => [...prev, messageForServer]);
+      dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: tempId, status: 'pending' }));
+      if (contentType === 'text' && iv) {
+        setDecryptionPending((prev) => ({
+          ...prev,
+          [tempId]: { encryptedContent, iv },
+        }));
+      }
+    }
+
+    setUsers((prev) => {
+      const updatedUsers = prev.map((user) =>
+        user.id === selectedChat ? { ...user, latestMessage: { ...messageForServer, content: message } } : user
+      ).sort((a, b) => {
+        const dateA = a.latestMessage ? new Date(a.latestMessage.createdAt) : new Date(0);
+        const dateB = b.latestMessage ? new Date(b.latestMessage.createdAt) : new Date(0);
+        return dateB - dateA;
+      });
+      localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
+      return updatedUsers;
+    });
   };
 
   const handleTyping = (e) => {
@@ -696,9 +653,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
           messages: (chats[selectedChat] || []).filter((msg) => !selectedMessages.includes(msg._id)),
         })
       );
-      const cachedMessages = JSON.parse(localStorage.getItem(`chat_${selectedChat}`)) || [];
-      const updatedCachedMessages = cachedMessages.filter((msg) => !selectedMessages.includes(msg._id));
-      localStorage.setItem(`chat_${selectedChat}`, JSON.stringify(updatedCachedMessages));
+      await saveMessages((chats[selectedChat] || []).filter((msg) => !selectedMessages.includes(msg._id)));
       setSelectedMessages([]);
       setShowDeleteConfirm(false);
     } catch (error) {
@@ -749,21 +704,21 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   };
 
   const copyMessage = (msg) => {
-    if (msg.contentType === 'text' && msg.content !== 'Message encrypted, awaiting key') {
+    if (msg.contentType === 'text' && msg.content !== 'Decrypting...') {
       navigator.clipboard.writeText(msg.content);
       alert('Message copied to clipboard');
     }
   };
 
   const shareMessage = (msg) => {
-    if (navigator.share && msg.content !== 'Message encrypted, awaiting key') {
+    if (navigator.share && msg.content !== 'Decrypting...') {
       navigator.share({
         title: 'Shared Message',
         text: msg.contentType === 'text' ? msg.content : undefined,
         url: msg.contentType !== 'text' ? msg.content : undefined,
       });
     } else {
-      alert('Sharing not supported on this device or message is encrypted');
+      alert('Sharing not supported on this device');
     }
   };
 
@@ -787,14 +742,13 @@ const ChatScreen = ({ token, userId, setAuth }) => {
         username: newContactName || data.username || 'Unsaved Number',
         photo: data.photo || 'https://placehold.co/40x40',
         unreadCount: 0,
-        latestMessage: null, // No messages yet for new contact
+        latestMessage: null,
         status: 'offline',
         lastSeen: null,
       };
 
       setUsers((prev) => {
-        const updatedUsers = [...prev, newContact];
-        updatedUsers.sort((a, b) => {
+        const updatedUsers = [...prev, newContact].sort((a, b) => {
           const dateA = a.latestMessage ? new Date(a.latestMessage.createdAt) : new Date(0);
           const dateB = b.latestMessage ? new Date(b.latestMessage.createdAt) : new Date(0);
           return dateB - dateA;
@@ -808,17 +762,11 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       setMenuTab('');
       setError('');
       setLoading(false);
-      dispatch(setSelectedChat(data.userId)); // Open chat box for new contact
+      dispatch(setSelectedChat(data.userId)); // Open chatbox immediately
     } catch (error) {
       console.error('Add contact error:', error);
       setLoading(false);
-      const errorMessage = error.response?.data?.error || 'Failed to add contact';
-      setError(errorMessage);
-      if (error.response?.status === 404) {
-        setError('Contact service unavailable. Please try again later.');
-      } else if (error.response?.status === 400) {
-        setError('Invalid virtual number or contact already exists.');
-      }
+      setError(error.response?.data?.error || 'Failed to add contact');
     }
   };
 
@@ -853,7 +801,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   const handleHoldStart = (msgId) => {
     const timer = setTimeout(() => {
       setShowMessageMenu(msgId);
-    }, 1500);
+    }, 500); // Reduced for faster response
     setHoldTimer(timer);
   };
 
@@ -867,12 +815,6 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   const handleSwipeStart = (e) => {
     const touch = e.touches[0];
     setSwipeStartX(touch.clientX);
-  };
-
-  const handleSwipeMove = (e) => {
-    if (swipeStartX === null) return;
-    const touch = e.touches[0];
-    const swipeDistance = touch.clientX - swipeStartX;
   };
 
   const handleSwipeEnd = (e, msg) => {
@@ -897,7 +839,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   };
 
   return (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5 }} className="flex h-screen bg-gray-100">
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.3 }} className="flex h-screen bg-gray-100">
       <div className={`w-full md:w-1/3 bg-white border-r border-gray-200 flex flex-col ${isSmallDevice && selectedChat ? 'hidden' : 'block'}`}>
         <div className="p-4 flex justify-between items-center border-b border-gray-200">
           <h2 className="text-xl font-bold text-primary">Chats</h2>
@@ -908,9 +850,9 @@ const ChatScreen = ({ token, userId, setAuth }) => {
         <div className="flex-1 overflow-y-auto">
           {users.map((user) => (
             <motion.div
-              key={user.id || user.virtualNumber} // Use virtualNumber as fallback key if id is missing
+              key={user.id || user.virtualNumber}
               whileHover={{ backgroundColor: '#f0f0f0' }}
-              onClick={() => user.id && dispatch(setSelectedChat(user.id))} // Only set chat if id exists
+              onClick={() => user.id && dispatch(setSelectedChat(user.id))}
               className={`flex items-center p-3 border-b border-gray-200 cursor-pointer ${selectedChat === user.id ? 'bg-gray-100' : ''}`}
             >
               <div className="relative">
@@ -962,35 +904,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                   <FaUserPlus className="text-primary mr-3" />
                   <span className="text-primary">New Number</span>
                 </motion.div>
-                <motion.div
-                  whileHover={{ scale: 1.05 }}
-                  onClick={() => setMenuTab('newGroup')}
-                  className={`flex items-center p-3 rounded-lg cursor-pointer ${menuTab === 'newGroup' ? 'bg-gray-200' : ''}`}
-                >
-                  <FaUsers className="text-primary mr-3" />
-                  <span className="text-primary">New Group</span>
-                </motion.div>
-                <motion.div
-                  whileHover={{ scale: 1.05 }}
-                  onClick={() => setMenuTab('theme')}
-                  className={`flex items-center p-3 rounded-lg cursor-pointer ${menuTab === 'theme' ? 'bg-gray-200' : ''}`}
-                >
-                  <FaPaintBrush className="text-primary mr-3" />
-                  <span className="text-primary">Theme</span>
-                </motion.div>
-                <motion.div
-                  whileHover={{ scale: 1.05 }}
-                  onClick={() => setMenuTab('settings')}
-                  className={`flex items-center p-3 rounded-lg cursor-pointer ${menuTab === 'settings' ? 'bg-gray-200' : ''}`}
-                >
-                  <FaCog className="text-primary mr-3" />
-                  <span className="text-primary">Account & Settings</span>
-                </motion.div>
-                <motion.div
-                  whileHover={{ scale: 1.05 }}
-                  onClick={handleLogout}
-                  className="flex items-center p-3 rounded-lg cursor-pointer text-red-500 hover:bg-gray-200"
-                >
+                <motion.div whileHover={{ scale: 1.05 }} className="flex items-center p-3 rounded-lg cursor-pointer text-red-500 hover:bg-gray-200" onClick={handleLogout}>
                   <FaSignOutAlt className="text-red-500 mr-3" />
                   <span className="text-red-500">Logout</span>
                 </motion.div>
@@ -1027,36 +941,6 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                       {loading ? 'Saving...' : 'Save Contact'}
                     </button>
                     {error && <p className="text-red-500 text-sm mt-2">{error}</p>}
-                  </motion.div>
-                )}
-                {menuTab === 'newGroup' && (
-                  <motion.div
-                    initial={{ opacity: 0, height: 0 }}
-                    animate={{ opacity: 1, height: 'auto' }}
-                    exit={{ opacity: 0, height: 0 }}
-                    className="mt-4"
-                  >
-                    <p className="text-gray-500">New Group feature coming soon!</p>
-                  </motion.div>
-                )}
-                {menuTab === 'theme' && (
-                  <motion.div
-                    initial={{ opacity: 0, height: 0 }}
-                    animate={{ opacity: 1, height: 'auto' }}
-                    exit={{ opacity: 0, height: 0 }}
-                    className="mt-4"
-                  >
-                    <p className="text-gray-500">Theme customization coming soon!</p>
-                  </motion.div>
-                )}
-                {menuTab === 'settings' && (
-                  <motion.div
-                    initial={{ opacity: 0, height: 0 }}
-                    animate={{ opacity: 1, height: 'auto' }}
-                    exit={{ opacity: 0, height: 0 }}
-                    className="mt-4"
-                  >
-                    <p className="text-gray-500">Account & Settings coming soon!</p>
                   </motion.div>
                 )}
               </AnimatePresence>
@@ -1108,11 +992,10 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                     const prevDate = prevMsg ? new Date(prevMsg.createdAt) : null;
                     let showDateHeader =
                       !prevDate ||
-                      new Date(currentDate.getFullYear(), currentDate.getMonth(), currentDate.getDate()).getTime() !==
-                        new Date(prevDate.getFullYear(), prevDate.getMonth(), prevDate.getDate()).getTime();
+                      currentDate.toDateString() !== prevDate.toDateString();
 
                     return (
-                      <motion.div key={msg._id} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }}>
+                      <motion.div key={msg._id} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2 }}>
                         {showDateHeader && (
                           <div className="text-center my-2">
                             <span className="bg-gray-300 text-gray-700 px-2 py-1 rounded-full text-sm">{formatDateHeader(msg.createdAt)}</span>
@@ -1126,11 +1009,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                         <div
                           id={`message-${msg._id}`}
                           className={`flex ${msg.senderId === userId ? 'justify-end' : 'justify-start'} px-2 py-1 relative`}
-                          onTouchStart={(e) => {
-                            handleHoldStart(msg._id);
-                            handleSwipeStart(e);
-                          }}
-                          onTouchMove={handleSwipeMove}
+                          onTouchStart={(e) => handleHoldStart(msg._id)}
                           onTouchEnd={(e) => {
                             handleHoldEnd();
                             handleSwipeEnd(e, msg);
