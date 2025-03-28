@@ -1,4 +1,4 @@
-const mongoose = require('mongoose'); // Import mongoose
+const mongoose = require('mongoose');
 
 const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true },
@@ -9,10 +9,11 @@ const userSchema = new mongoose.Schema({
   virtualNumber: { type: String, unique: true },
   contacts: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   role: { type: Number, default: 0 },
-  publicKey: { type: String }, // Added for E2EE
-  status: { type: String, default: 'offline' }, // Added for online status
-  lastSeen: { type: Date }, // Added for online status
+  publicKey: { type: String }, // ECDH public key
+  privateKey: { type: String }, // ECDH private key (stored securely)
+  sharedKeys: [{ contactId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, key: String }], // Shared keys for each contact
+  status: { type: String, default: 'offline' },
+  lastSeen: { type: Date },
 });
 
-// Export the model
 module.exports = mongoose.model('User', userSchema);

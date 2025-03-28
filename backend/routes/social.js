@@ -224,10 +224,10 @@ module.exports = (io) => {
     }
   });
 
-  // Send a message
+  // Send a message (Updated for encryption)
   router.post('/message', authMiddleware, upload.single('content'), async (req, res) => {
     try {
-      const { senderId, recipientId, contentType, caption, replyTo } = req.body;
+      const { senderId, recipientId, contentType, caption, iv, replyTo } = req.body;
       if (!senderId || !recipientId || !contentType) {
         return res.status(400).json({ error: 'Sender ID, recipient ID, and content type are required' });
       }
@@ -269,6 +269,8 @@ module.exports = (io) => {
           ).end(req.file.buffer);
         });
         contentUrl = result.secure_url;
+      } else if (contentType === 'text' && !iv) {
+        return res.status(400).json({ error: 'Initialization vector (iv) is required for text messages' });
       }
 
       const message = new Message({
@@ -276,6 +278,7 @@ module.exports = (io) => {
         recipientId,
         contentType,
         content: contentUrl,
+        iv: contentType === 'text' ? iv : undefined, // Store IV for encrypted text messages
         caption,
         status: 'sent',
         replyTo: replyTo || undefined,
@@ -297,7 +300,7 @@ module.exports = (io) => {
     }
   });
 
-  // Fetch messages
+  // Fetch messages (Updated to include iv)
   router.get('/messages', authMiddleware, async (req, res) => {
     try {
       const { userId, recipientId, limit = 50, skip = 0 } = req.query;
@@ -328,7 +331,7 @@ module.exports = (io) => {
           { senderId: recipientId, recipientId: userId },
         ],
       })
-        .select('senderId recipientId contentType content caption status replyTo createdAt')
+        .select('senderId recipientId contentType content iv caption status replyTo createdAt') // Include iv
         .sort({ createdAt: -1 })
         .skip(parseInt(skip))
         .limit(parseInt(limit))

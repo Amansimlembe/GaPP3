@@ -58,53 +58,78 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   const messagesPerPage = 50;
   const isSmallDevice = window.innerWidth < 768;
 
-  // E2EE Functions
-  const generateKeyPair = async () => {
-    const keyPair = await window.crypto.subtle.generateKey(
-      { name: 'RSA-OAEP', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
+  // Diffie-Hellman Key Exchange and AES Encryption Functions
+  const generateDHKeyPair = async () => {
+    const dh = await window.crypto.subtle.generateKey(
+      { name: 'ECDH', namedCurve: 'P-256' },
+      true,
+      ['deriveKey']
+    );
+    const publicKey = await window.crypto.subtle.exportKey('raw', dh.publicKey);
+    const privateKey = await window.crypto.subtle.exportKey('raw', dh.privateKey);
+    const publicKeyBase64 = Buffer.from(publicKey).toString('base64');
+    const privateKeyBase64 = Buffer.from(privateKey).toString('base64');
+
+    // Store private key locally (insecure for production; use a secure store)
+    localStorage.setItem(`privateKey_${userId}`, privateKeyBase64);
+
+    return { publicKey: publicKeyBase64 };
+  };
+
+  const deriveSharedKey = async (recipientPublicKey) => {
+    const privateKeyBase64 = localStorage.getItem(`privateKey_${userId}`);
+    if (!privateKeyBase64) throw new Error('Private key not found');
+
+    const privateKeyObj = await window.crypto.subtle.importKey(
+      'raw',
+      Buffer.from(privateKeyBase64, 'base64'),
+      { name: 'ECDH', namedCurve: 'P-256' },
+      false,
+      ['deriveKey']
+    );
+    const publicKeyObj = await window.crypto.subtle.importKey(
+      'raw',
+      Buffer.from(recipientPublicKey, 'base64'),
+      { name: 'ECDH', namedCurve: 'P-256' },
+      false,
+      []
+    );
+    const sharedKey = await window.crypto.subtle.deriveKey(
+      { name: 'ECDH', public: publicKeyObj },
+      privateKeyObj,
+      { name: 'AES-GCM', length: 256 },
       true,
       ['encrypt', 'decrypt']
     );
-    const publicKey = await window.crypto.subtle.exportKey('spki', keyPair.publicKey);
-    const privateKey = await window.crypto.subtle.exportKey('pkcs8', keyPair.privateKey);
-    localStorage.setItem('privateKey', Buffer.from(privateKey).toString('base64'));
-    await axios.post('/auth/update_public_key', { userId, publicKey: Buffer.from(publicKey).toString('base64') }, { headers: { Authorization: `Bearer ${token}` } });
-    return keyPair;
+    return sharedKey;
   };
 
-  const encryptMessage = async (content, recipientId) => {
-    const recipient = await axios.get(`/auth/user/${recipientId}`, { headers: { Authorization: `Bearer ${token}` } });
-    const publicKey = await window.crypto.subtle.importKey(
-      'spki',
-      Buffer.from(recipient.data.publicKey, 'base64'),
-      { name: 'RSA-OAEP', hash: 'SHA-256' },
-      false,
-      ['encrypt']
-    );
+  const encryptMessage = async (content, sharedKey) => {
+    const iv = window.crypto.getRandomValues(new Uint8Array(12));
     const encoder = new TextEncoder();
     const encrypted = await window.crypto.subtle.encrypt(
-      { name: 'RSA-OAEP' },
-      publicKey,
+      { name: 'AES-GCM', iv },
+      sharedKey,
       encoder.encode(content)
     );
-    return Buffer.from(encrypted).toString('base64');
+    return { encrypted: Buffer.from(encrypted).toString('base64'), iv: Buffer.from(iv).toString('base64') };
   };
 
-  const decryptMessage = async (encryptedContent) => {
-    const privateKey = await window.crypto.subtle.importKey(
-      'pkcs8',
-      Buffer.from(localStorage.getItem('privateKey'), 'base64'),
-      { name: 'RSA-OAEP', hash: 'SHA-256' },
-      false,
-      ['decrypt']
-    );
+  const decryptMessage = async (encryptedContent, iv, sharedKey) => {
     const decoder = new TextDecoder();
     const decrypted = await window.crypto.subtle.decrypt(
-      { name: 'RSA-OAEP' },
-      privateKey,
+      { name: 'AES-GCM', iv: Buffer.from(iv, 'base64') },
+      sharedKey,
       Buffer.from(encryptedContent, 'base64')
     );
     return decoder.decode(decrypted);
+  };
+
+  const getSharedKey = async (recipientId) => {
+    const response = await axios.get(`/auth/shared_key/${recipientId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    return await deriveSharedKey(response.data.recipientPublicKey);
   };
 
   const formatChatListDate = (date) => {
@@ -145,11 +170,10 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     if (!userId || !token) return;
 
     socket.emit('join', userId);
-    generateKeyPair(); // Generate E2EE keys on login
 
     const keepAlive = setInterval(() => {
       socket.emit('ping', { userId });
-    }, 300000);
+    }, 30000); // Reduced to 30 seconds for more frequent status updates
 
     const fetchUsers = async () => {
       try {
@@ -164,9 +188,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                   params: { userId, recipientId: user.id, limit: 1, skip: 0 },
                 });
                 const latestMessage = data.messages.length > 0 ? data.messages[0] : null;
-                const unreadCount = data.messages.filter(
-                  (msg) => msg.recipientId === userId && msg.status !== 'read'
-                ).length;
+                const unreadCount = latestMessage && latestMessage.recipientId === userId && latestMessage.status !== 'read' ? 1 : 0;
                 return { ...user, latestMessage, unreadCount };
               } catch (error) {
                 console.error(`Error fetching latest message for user ${user.id}:`, error);
@@ -193,9 +215,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                   params: { userId, recipientId: user.id, limit: 1, skip: 0 },
                 });
                 const latestMessage = messagesData.messages.length > 0 ? messagesData.messages[0] : null;
-                const unreadCount = messagesData.messages.filter(
-                  (msg) => msg.recipientId === userId && msg.status !== 'read'
-                ).length;
+                const unreadCount = latestMessage && latestMessage.recipientId === userId && latestMessage.status !== 'read' ? 1 : 0;
                 return { ...user, latestMessage, unreadCount };
               } catch (error) {
                 console.error(`Error fetching latest message for user ${user.id}:`, error);
@@ -220,11 +240,12 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     const loadOfflineMessages = async () => {
       const offlineMessages = await getMessages();
       if (offlineMessages.length > 0) {
-        offlineMessages.forEach(async (msg) => {
-          const decryptedContent = msg.contentType === 'text' ? await decryptMessage(msg.content) : msg.content;
+        for (const msg of offlineMessages) {
+          const sharedKey = await getSharedKey(msg.recipientId === userId ? msg.senderId : msg.recipientId);
+          const decryptedContent = msg.contentType === 'text' ? await decryptMessage(msg.content, msg.iv, sharedKey) : msg.content;
           const chatId = msg.recipientId === userId ? msg.senderId : msg.recipientId;
           dispatch(addMessage({ recipientId: chatId, message: { ...msg, content: decryptedContent } }));
-        });
+        }
       }
     };
     loadOfflineMessages();
@@ -244,14 +265,14 @@ const ChatScreen = ({ token, userId, setAuth }) => {
             headers: { Authorization: `Bearer ${token}` },
             params: { userId, recipientId: selectedChat, limit: messagesPerPage, skip: pageNum * messagesPerPage },
           });
+          const sharedKey = await getSharedKey(selectedChat);
           messages = await Promise.all(
             data.messages.map(async (msg) => ({
               ...msg,
-              content: msg.contentType === 'text' ? await decryptMessage(msg.content) : msg.content,
+              content: msg.contentType === 'text' ? await decryptMessage(msg.content, msg.iv, sharedKey) : msg.content,
               status: msg.status || 'sent',
             }))
           );
-          messages.reverse();
           setHasMore(data.hasMore);
           const updatedCachedMessages = [...cachedMessages, ...data.messages].reduce((acc, msg) => {
             if (!acc.some((m) => m._id === msg._id)) acc.push(msg);
@@ -319,24 +340,24 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     }
 
     socket.on('message', async (msg) => {
-      const decryptedContent = msg.contentType === 'text' ? await decryptMessage(msg.content) : msg.content;
+      const chatId = msg.senderId === userId ? msg.recipientId : msg.senderId;
+      const sharedKey = await getSharedKey(chatId);
+      const decryptedContent = msg.contentType === 'text' ? await decryptMessage(msg.content, msg.iv, sharedKey) : msg.content;
       const senderKnown = users.some((u) => u.id === msg.senderId);
       const updatedMsg = { ...msg, content: decryptedContent, username: senderKnown ? msg.senderUsername : 'Unsaved Number' };
 
-      const chatId = msg.senderId === userId ? msg.recipientId : msg.senderId;
       const existingMessage = (chats[chatId] || []).find((m) => m._id === msg._id);
-
       if (!existingMessage) {
         dispatch(addMessage({ recipientId: chatId, message: updatedMsg }));
-        const cachedMessages = JSON.parse(localStorage.getItem(`chat_${chatId}`)) || [];
-        localStorage.setItem(`chat_${chatId}`, JSON.stringify([...cachedMessages, msg])); // Store original encrypted message
+        const cachedMessages = JSON.parse(localStorage.getItem(`chat_${chatId}`)) || []);
+        localStorage.setItem(`chat_${chatId}`, JSON.stringify([...cachedMessages, msg]));
       }
 
       if (msg.recipientId === userId && !senderKnown) {
         setUsers((prev) => {
           const updatedUsers = [
             ...prev,
-            { id: msg.senderId, virtualNumber: msg.senderVirtualNumber, username: 'Unsaved Number', photo: msg.senderPhoto || 'https://placehold.co/40x40' },
+            { id: msg.senderId, virtualNumber: msg.senderVirtualNumber, username: 'Unsaved Number', photo: msg.senderPhoto || 'https://placehold.co/40x40', unreadCount: 0 },
           ];
           localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
           return updatedUsers;
@@ -346,13 +367,12 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       if ((msg.senderId === userId && msg.recipientId === selectedChat) || (msg.senderId === selectedChat && msg.recipientId === userId)) {
         if (msg.recipientId === userId) {
           socket.emit('messageStatus', { messageId: msg._id, status: 'delivered', recipientId: userId });
-          socket.emit('messageStatus', { messageId: msg._id, status: 'read', recipientId: userId });
-          if (!isAtBottomRef.current) {
+          if (isAtBottomRef.current) {
+            socket.emit('messageStatus', { messageId: msg._id, status: 'read', recipientId: userId });
+          } else {
             setUnreadCount((prev) => prev + 1);
-            if (!firstUnreadMessageId) {
-              setFirstUnreadMessageId(msg._id);
-              setShowJumpToBottom(true);
-            }
+            if (!firstUnreadMessageId) setFirstUnreadMessageId(msg._id);
+            setShowJumpToBottom(true);
           }
         }
         if (isAtBottomRef.current) {
@@ -428,6 +448,16 @@ const ChatScreen = ({ token, userId, setAuth }) => {
         if (scrollTop < 100 && hasMore && !loading) {
           setPage((prevPage) => prevPage + 1);
         }
+
+        // Mark messages as read when scrolled into view
+        if (isAtBottomRef.current && selectedChat) {
+          const unreadMessages = (chats[selectedChat] || []).filter((msg) => msg.recipientId === userId && msg.status !== 'read');
+          unreadMessages.forEach((msg) => {
+            socket.emit('messageStatus', { messageId: msg._id, status: 'read', recipientId: userId });
+          });
+          setUnreadCount(0);
+          setFirstUnreadMessageId(null);
+        }
       }
     };
     chatRef.current?.addEventListener('scroll', handleScroll);
@@ -467,7 +497,8 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     formData.append('senderId', msgData.senderId);
     formData.append('recipientId', msgData.recipientId);
     formData.append('contentType', msgData.contentType);
-    formData.append('caption', msgData.caption);
+    formData.append('caption', msgData.caption || '');
+    if (msgData.contentType === 'text') formData.append('iv', msgData.iv);
     if (msgData.file) formData.append('content', msgData.file);
     else formData.append('content', msgData.content);
     if (msgData.replyTo) formData.append('replyTo', msgData.replyTo);
@@ -511,14 +542,16 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     socket.emit('stopTyping', { userId, recipientId: selectedChat });
     setTyping(false);
 
-    const encryptedContent = contentType === 'text' ? await encryptMessage(message, selectedChat) : message;
+    const sharedKey = await getSharedKey(selectedChat);
+    const { encrypted, iv } = contentType === 'text' ? await encryptMessage(message, sharedKey) : { encrypted: message, iv: '' };
     const tempId = Date.now().toString();
     const tempMsg = {
       _id: tempId,
       senderId: userId,
       recipientId: selectedChat,
       contentType,
-      content: file ? URL.createObjectURL(file) : message, // Display unencrypted locally
+      content: file ? URL.createObjectURL(file) : message,
+      iv,
       caption,
       status: 'sent',
       replyTo,
@@ -527,8 +560,8 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     };
 
     dispatch(addMessage({ recipientId: selectedChat, message: tempMsg }));
-    const cachedMessages = JSON.parse(localStorage.getItem(`chat_${selectedChat}`)) || [];
-    localStorage.setItem(`chat_${selectedChat}`, JSON.stringify([...cachedMessages, { ...tempMsg, content: encryptedContent }]));
+    const cachedMessages = JSON.parse(localStorage.getItem(`chat_${selectedChat}`)) || []);
+    localStorage.setItem(`chat_${selectedChat}`, JSON.stringify([...cachedMessages, { ...tempMsg, content: encrypted }]));
 
     if (isAtBottomRef.current) {
       setTimeout(() => {
@@ -549,10 +582,10 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     setError('');
 
     if (navigator.onLine) {
-      await sendMessageToServer({ ...tempMsg, content: encryptedContent, file });
+      await sendMessageToServer({ ...tempMsg, content: encrypted, file, iv });
     } else {
-      setPendingMessages((prev) => [...prev, { ...tempMsg, content: encryptedContent, file }]);
-      await saveMessages([{ ...tempMsg, content: encryptedContent }]);
+      setPendingMessages((prev) => [...prev, { ...tempMsg, content: encrypted, file, iv }]);
+      await saveMessages([{ ...tempMsg, content: encrypted, iv }]);
     }
   };
 
@@ -595,7 +628,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   };
 
   const viewMessage = (msg) => {
-    if (msg.senderId !== userId && msg.status === 'delivered') {
+    if (msg.senderId !== userId && msg.status !== 'read') {
       socket.emit('messageStatus', { messageId: msg._id, status: 'read', recipientId: userId });
     }
     setViewMedia({ type: msg.contentType, url: msg.content });
@@ -610,13 +643,15 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       return;
     }
 
-    const encryptedContent = msg.contentType === 'text' ? await encryptMessage(msg.content, contact.id) : msg.content;
+    const sharedKey = await getSharedKey(contact.id);
+    const { encrypted, iv } = msg.contentType === 'text' ? await encryptMessage(msg.content, sharedKey) : { encrypted: msg.content, iv: msg.iv || '' };
     const formData = new FormData();
     formData.append('senderId', userId);
     formData.append('recipientId', contact.id);
     formData.append('contentType', msg.contentType);
     formData.append('caption', msg.caption || '');
-    formData.append('content', encryptedContent);
+    formData.append('content', encrypted);
+    if (msg.contentType === 'text') formData.append('iv', iv);
 
     try {
       const { data } = await axios.post('/social/message', formData, {
@@ -639,7 +674,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     if (navigator.share) {
       navigator.share({
         title: 'Shared Message',
-        text: msg.contentType === 'text' ? msg.content : msg.content,
+        text: msg.contentType === 'text' ? msg.content : undefined,
         url: msg.contentType !== 'text' ? msg.content : undefined,
       });
     } else {
@@ -651,6 +686,8 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     try {
       const { data } = await axios.post('/auth/add_contact', { userId, virtualNumber: newContactNumber }, { headers: { Authorization: `Bearer ${token}` } });
       if (data.userId) {
+        const { publicKey } = await generateDHKeyPair();
+        await axios.post('/auth/update_public_key', { userId, publicKey }, { headers: { Authorization: `Bearer ${token}` } });
         setUsers((prev) => {
           const updatedUsers = [...prev, { id: data.userId, virtualNumber: newContactNumber, username: newContactName || data.username || 'Unsaved Number', photo: data.photo || 'https://placehold.co/40x40', unreadCount: 0 }];
           localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
@@ -684,6 +721,11 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     isAtBottomRef.current = true;
     setUnreadCount(0);
     setFirstUnreadMessageId(null);
+
+    const unreadMessages = (chats[selectedChat] || []).filter((msg) => msg.recipientId === userId && msg.status !== 'read');
+    unreadMessages.forEach((msg) => {
+      socket.emit('messageStatus', { messageId: msg._id, status: 'read', recipientId: userId });
+    });
   };
 
   const scrollToMessage = (messageId) => {
@@ -1090,25 +1132,25 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                             >
                               <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
                                 <FaReply
-                                  onClick={() => { setReplyTo(msg); scrollToMessage(msg._id); }}
+                                  onClick={() => { setReplyTo(msg); scrollToMessage(msg._id); setShowMessageMenu(null); }}
                                   className="text-primary cursor-pointer hover:text-secondary"
                                 />
                               </motion.div>
                               <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
                                 <FaForward
-                                  onClick={() => forwardMessage(msg)}
+                                  onClick={() => { forwardMessage(msg); setShowMessageMenu(null); }}
                                   className="text-primary cursor-pointer hover:text-secondary"
                                 />
                               </motion.div>
                               <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
                                 <FaCopy
-                                  onClick={() => copyMessage(msg)}
+                                  onClick={() => { copyMessage(msg); setShowMessageMenu(null); }}
                                   className="text-primary cursor-pointer hover:text-secondary"
                                 />
                               </motion.div>
                               <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
                                 <FaShare
-                                  onClick={() => shareMessage(msg)}
+                                  onClick={() => { shareMessage(msg); setShowMessageMenu(null); }}
                                   className="text-primary cursor-pointer hover:text-secondary"
                                 />
                               </motion.div>
@@ -1118,6 +1160,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                                     onClick={() => {
                                       setSelectedMessages([msg._id]);
                                       setShowDeleteConfirm(true);
+                                      setShowMessageMenu(null);
                                     }}
                                     className="text-red-500 cursor-pointer hover:text-red-700"
                                   />
@@ -1285,6 +1328,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                 <audio src={viewMedia.url} controls className="w-full max-w-md" />
               </div>
             )}
+   
             {viewMedia.type === 'document' && (
               <div className="bg-gray-800 p-4 rounded-lg flex items-center">
                 <FaFileAlt className="text-white text-2xl mr-3" />

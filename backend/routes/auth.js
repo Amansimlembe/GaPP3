@@ -296,19 +296,43 @@ router.post('/update_theme', auth, async (req, res) => {
   }
 });
 
-// Update public key for E2EE
+// Update public key for E2EE (Diffie-Hellman)
 router.post('/update_public_key', auth, async (req, res) => {
   try {
     const { userId, publicKey } = req.body;
     if (!publicKey) return res.status(400).json({ error: 'Public key is required' });
 
-    const user = await User.findByIdAndUpdate(userId, { publicKey }, { new: true });
+    const user = await User.findById(userId);
     if (!user) return res.status(404).json({ error: 'User not found' });
+
+    user.publicKey = publicKey;
+    await user.save();
 
     res.json({ success: true });
   } catch (error) {
     console.error('Update public key error:', error);
     res.status(500).json({ error: 'Failed to update public key', details: error.message });
+  }
+});
+
+// Get recipient's public key for shared key derivation
+router.get('/shared_key/:recipientId', auth, async (req, res) => {
+  try {
+    const { id: userId } = req.user;
+    const { recipientId } = req.params;
+
+    const recipient = await User.findById(recipientId).select('publicKey');
+    if (!recipient) return res.status(404).json({ error: 'Recipient not found' });
+
+    if (!recipient.publicKey) {
+      return res.status(400).json({ error: 'Recipient has not set a public key yet' });
+    }
+
+    // Return only the recipient's public key; private key is managed client-side
+    res.json({ recipientPublicKey: recipient.publicKey });
+  } catch (error) {
+    console.error('Get shared key error:', error);
+    res.status(500).json({ error: 'Failed to fetch recipient public key', details: error.message });
   }
 });
 
