@@ -9,6 +9,7 @@ import EmployerScreen from './screens/EmployerScreen';
 import FeedScreen from './screens/FeedScreen';
 import ChatScreen from './screens/ChatScreen';
 import ProfileScreen from './screens/ProfileScreen';
+import CountrySelector from './components/CountrySelector'; // Updated import path
 import io from 'socket.io-client';
 
 const socket = io('https://gapp-6yc3.onrender.com', {
@@ -18,6 +19,7 @@ const socket = io('https://gapp-6yc3.onrender.com', {
   reconnectionDelayMax: 5000,
   randomizationFactor: 0.5,
 });
+
 
 const getTokenExpiration = (token) => {
   try {
@@ -40,9 +42,10 @@ const getTokenExpiration = (token) => {
 const App = () => {
   const [token, setToken] = useState(localStorage.getItem('token') || '');
   const [userId, setUserId] = useState(localStorage.getItem('userId') || '');
-  const [role, setRole] = useState(localStorage.getItem('role') || '');
+  const [role, setRole] = useState(Number(localStorage.getItem('role')) || 0); // Ensure number
   const [photo, setPhoto] = useState(localStorage.getItem('photo') || '');
   const [virtualNumber, setVirtualNumber] = useState(localStorage.getItem('virtualNumber') || '');
+  const [username, setUsername] = useState(localStorage.getItem('username') || '');
   const [chatNotifications, setChatNotifications] = useState(0);
   const [feedKey, setFeedKey] = useState(0);
   const [isAuthenticated, setIsAuthenticated] = useState(
@@ -53,16 +56,16 @@ const App = () => {
   const refreshToken = async () => {
     try {
       const response = await axios.post(
-        'https://gapp-6yc3.onrender.com/auth/refresh',
+        '/auth/refresh', // Updated to relative path
         {},
         { headers: { Authorization: `Bearer ${token}` } }
       );
-      const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber } = response.data;
-      setAuth(newToken, newUserId, newRole, newPhoto, newVirtualNumber);
+      const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername } = response.data;
+      setAuth(newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername);
       return newToken;
     } catch (error) {
       console.error('Token refresh failed:', error);
-      setAuth('', '', '', '', '');
+      setAuth('', '', '', '', '', '');
       return null;
     }
   };
@@ -100,7 +103,7 @@ const App = () => {
     };
 
     checkTokenExpiration();
-    const interval = setInterval(checkTokenExpiration, 60 * 60 * 1000);
+    const interval = setInterval(checkTokenExpiration, 60 * 60 * 1000); // Check hourly
     return () => clearInterval(interval);
   }, [token, userId]);
 
@@ -114,13 +117,13 @@ const App = () => {
   }, [theme]);
 
   useEffect(() => {
-    console.log('Current token:', token);
-    console.log('Current userId:', userId);
+    console.log('Current auth state:', { token, userId, role, photo, virtualNumber, username });
     localStorage.setItem('token', token);
     localStorage.setItem('userId', userId);
     localStorage.setItem('role', role);
     localStorage.setItem('photo', photo);
     localStorage.setItem('virtualNumber', virtualNumber);
+    localStorage.setItem('username', username);
 
     if (userId && token) {
       socket.emit('join', userId);
@@ -136,23 +139,24 @@ const App = () => {
     }
 
     return () => socket.off('message');
-  }, [token, userId, role, photo, virtualNumber]);
+  }, [token, userId, role, photo, virtualNumber, username]);
 
-  const setAuth = (newToken, newUserId, newRole, newPhoto, newVirtualNumber) => {
-    console.log('Setting auth:', { newToken, newUserId, newRole, newPhoto, newVirtualNumber });
+  const setAuth = (newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername) => {
+    console.log('Setting auth:', { newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername });
     setToken(newToken || '');
     setUserId(newUserId || '');
-    setRole(newRole || '');
+    setRole(Number(newRole) || 0); // Ensure number
     setPhoto(newPhoto || '');
     setVirtualNumber(newVirtualNumber || '');
+    setUsername(newUsername || '');
     localStorage.setItem('token', newToken || '');
     localStorage.setItem('userId', newUserId || '');
-    localStorage.setItem('role', newRole || '');
+    localStorage.setItem('role', String(newRole || 0)); // Store as string but convert on read
     localStorage.setItem('photo', newPhoto || '');
     localStorage.setItem('virtualNumber', newVirtualNumber || '');
+    localStorage.setItem('username', newUsername || '');
     setIsAuthenticated(!!newToken && !!newUserId);
   };
-
   const toggleTheme = () => {
     setTheme((prevTheme) => (prevTheme === 'light' ? 'dark' : 'light'));
   };
@@ -169,6 +173,14 @@ const App = () => {
   return (
     <Router>
       <div className={`min-h-screen flex flex-col ${theme}`}>
+        {!virtualNumber && (
+          <CountrySelector
+            token={token}
+            userId={userId}
+            virtualNumber={virtualNumber}
+            onComplete={(newVirtualNumber) => setAuth(token, userId, role, photo, newVirtualNumber, username)}
+          />
+        )}
         <div className="flex-1 container p-0 relative">
           <Switch>
             <Route
@@ -186,7 +198,19 @@ const App = () => {
               path="/chat"
               render={() => <ChatScreen token={token} userId={userId} onNavigate={handleChatNavigation} setAuth={setAuth} />}
             />
-            <Route path="/profile" render={() => <ProfileScreen token={token} userId={userId} setAuth={setAuth} />} />
+            <Route
+              path="/profile"
+              render={() => (
+                <ProfileScreen
+                  token={token}
+                  userId={userId}
+                  setAuth={setAuth}
+                  username={username}
+                  virtualNumber={virtualNumber}
+                  photo={photo}
+                />
+              )}
+            />
             <Route path="/" exact>
               <Redirect to="/feed" />
             </Route>

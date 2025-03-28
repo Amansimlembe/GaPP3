@@ -6,14 +6,14 @@ import io from 'socket.io-client';
 
 const socket = io('https://gapp-6yc3.onrender.com');
 
-const ProfileScreen = ({ token, userId, setAuth }) => {
+const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virtualNumber: initialVirtualNumber, photo: initialPhoto }) => {
   const [cvFile, setCvFile] = useState(null);
   const [photoFile, setPhotoFile] = useState(null);
-  const [username, setUsername] = useState(localStorage.getItem('username') || '');
-  const [virtualNumber, setVirtualNumber] = useState(localStorage.getItem('virtualNumber') || '');
+  const [username, setUsername] = useState(initialUsername || localStorage.getItem('username') || '');
+  const [virtualNumber, setVirtualNumber] = useState(initialVirtualNumber || localStorage.getItem('virtualNumber') || '');
   const [editUsername, setEditUsername] = useState(false);
   const [error, setError] = useState('');
-  const [photoUrl, setPhotoUrl] = useState(localStorage.getItem('photo') || 'https://placehold.co/100x100');
+  const [photoUrl, setPhotoUrl] = useState(initialPhoto || localStorage.getItem('photo') || 'https://placehold.co/100x100');
   const [myPosts, setMyPosts] = useState([]);
   const [showPosts, setShowPosts] = useState(false);
   const [selectedPost, setSelectedPost] = useState(null);
@@ -21,21 +21,6 @@ const ProfileScreen = ({ token, userId, setAuth }) => {
   const [darkMode, setDarkMode] = useState(localStorage.getItem('darkMode') === 'true');
 
   useEffect(() => {
-    const fetchUser = async () => {
-      try {
-        const { data } = await axios.get(`/auth/user/${userId}`, { headers: { Authorization: `Bearer ${token}` } });
-        setUsername(data.username || 'Not Set');
-        setVirtualNumber(data.virtualNumber || 'Not Set');
-        setPhotoUrl(data.photo || 'https://placehold.co/100x100');
-        localStorage.setItem('username', data.username || '');
-        localStorage.setItem('virtualNumber', data.virtualNumber || '');
-        localStorage.setItem('photo', data.photo || '');
-      } catch (error) {
-        console.error('Fetch user error:', error);
-        setError('Failed to load user data. Please try again.');
-      }
-    };
-
     const fetchMyPosts = async () => {
       try {
         const { data } = await axios.get(`/social/my-posts/${userId}`, { headers: { Authorization: `Bearer ${token}` } });
@@ -47,7 +32,6 @@ const ProfileScreen = ({ token, userId, setAuth }) => {
     };
 
     if (token && userId) {
-      fetchUser();
       fetchMyPosts();
     } else {
       setError('Authentication required. Please log in again.');
@@ -142,7 +126,7 @@ const ProfileScreen = ({ token, userId, setAuth }) => {
   };
 
   const logout = () => {
-    setAuth('', '', '', '', '');
+    setAuth('', '', '', '', '', ''); // Updated to match 6 arguments
     localStorage.clear();
   };
 
@@ -326,4 +310,4 @@ const ProfileScreen = ({ token, userId, setAuth }) => {
   );
 };
 
-export default ProfileScreen;  
+export default ProfileScreen;

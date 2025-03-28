@@ -1,20 +1,18 @@
-
-const mongoose = require('mongoose');
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
-const User = require('../models/User');
-const auth = require('../middleware/auth');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
-const { getCountryCallingCode } = require('libphonenumber-js');
-const countryList = require('country-list');
+const { getCountryCallingCode, parsePhoneNumberFromString } = require('libphonenumber-js');
+const User = require('../models/User');
 
-// Cloudinary configuration
-if (process.env.CLOUDINARY_URL) {
-  cloudinary.config({ cloudinary_url: process.env.CLOUDINARY_URL });
-} else {
+// Configure Multer for file uploads
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } }); // 5MB limit
+
+// Configure Cloudinary (assumed set via environment variables in server.js)
+if (!cloudinary.config().cloud_name) {
   cloudinary.config({
     cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
     api_key: process.env.CLOUDINARY_API_KEY,
@@ -22,194 +20,171 @@ if (process.env.CLOUDINARY_URL) {
   });
 }
 
-const storage = multer.memoryStorage();
-const upload = multer({ storage });
+// JWT Authentication Middleware
+const authMiddleware = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  console.log('Auth Header:', authHeader);
+
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    console.error('No token provided or malformed header:', authHeader);
+    return res.status(401).json({ error: 'No token provided' });
+  }
+
+  const token = authHeader.split(' ')[1];
+  console.log('Extracted Token:', token);
+
+  if (!token) {
+    console.error('Token missing after Bearer');
+    return res.status(401).json({ error: 'Token missing' });
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret', {
+      algorithms: ['HS256'],
+    });
+    console.log('Decoded Token:', decoded);
+    req.user = decoded;
+    next();
+  } catch (error) {
+    console.error('Auth middleware error:', error);
+    return res.status(401).json({ error: 'Invalid token', details: error.message });
+  }
+};
+
+// Generate virtual number based on country and userId
+const generateVirtualNumber = (countryCode, userId) => {
+  const hash = crypto.createHash('sha256').update(userId).digest('hex');
+  const numericPart = parseInt(hash.substring(0, 8), 16).toString().padStart(9, '0').slice(0, 9); // 9 digits
+  const countryCallingCode = getCountryCallingCode(countryCode);
+  const rawNumber = `+${countryCallingCode}${numericPart}`;
+  const phoneNumber = parsePhoneNumberFromString(rawNumber, countryCode);
+  return phoneNumber ? phoneNumber.formatInternational() : rawNumber;
+};
 
 // Register a new user
 router.post('/register', upload.single('photo'), async (req, res) => {
-  const { email, password, name, role, country } = req.body;
-  const photo = req.file;
-
   try {
-    // Validate input
-    if (!email || !password || !name || !country) {
-      return res.status(400).json({ error: 'All fields are required' });
+    const { email, password, username, country } = req.body;
+    if (!email || !password || !username || !country) {
+      return res.status(400).json({ error: 'Email, password, username, and country are required' });
     }
 
-    let user = await User.findOne({ email });
-    if (user) return res.status(400).json({ error: 'User already exists' });
-
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(password, salt);
-
-    const countryCode = countryList.getCode(country) || country;
-    if (!countryCode) return res.status(400).json({ error: 'Invalid country' });
-
-    const callingCode = getCountryCallingCode(countryCode);
-    let virtualNumber;
-    let isUnique = false;
-    let attempts = 0;
-    const maxAttempts = 10;
-
-    // Ensure virtual number is unique
-    while (!isUnique && attempts < maxAttempts) {
-      virtualNumber = `${callingCode}${Math.floor(100000000 + Math.random() * 900000000)}`;
-      const existingUser = await User.findOne({ virtualNumber });
-      if (!existingUser) {
-        isUnique = true;
-      }
-      attempts++;
+    const existingUser = await User.findOne({ $or: [{ email }, { username }] });
+    if (existingUser) {
+      return res.status(400).json({ error: 'Email or username already exists' });
     }
 
-    if (!isUnique) {
-      return res.status(500).json({ error: 'Unable to generate a unique virtual number' });
-    }
+    const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', {
+      namedCurve: 'secp256k1',
+    });
+    const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' });
+    const privateKeyPem = privateKey.export({ type: 'pkcs8', format: 'pem' });
 
-    let photoUrl = null;
-    if (photo) {
-      const result = await new Promise((resolve, reject) => {
-        cloudinary.uploader.upload_stream(
-          { resource_type: 'image', folder: 'gapp_photos' },
-          (error, result) => (error ? reject(error) : resolve(result))
-        ).end(photo.buffer);
-      });
-      photoUrl = result.secure_url;
-    }
-
-    user = new User({
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const virtualNumber = generateVirtualNumber(country, crypto.randomBytes(16).toString('hex')); // Unique temp ID
+    const user = new User({
       email,
       password: hashedPassword,
-      username: name,
-      role: parseInt(role) || 0,
+      username,
       country,
       virtualNumber,
-      photo: photoUrl,
-      contacts: [],
-      status: 'offline', // Default status
-      lastSeen: null,    // Default lastSeen
+      publicKey: publicKeyPem,
+      privateKey: privateKeyPem,
+      role: req.body.role || 0,
+      status: 'offline',
+      lastSeen: null,
+      photo: 'https://placehold.co/40x40', // Default photo
     });
+
+    if (req.file) {
+      const result = await new Promise((resolve, reject) => {
+        cloudinary.uploader.upload_stream(
+          { resource_type: 'image', folder: 'gapp_profile_photos' },
+          (error, result) => (error ? reject(error) : resolve(result))
+        ).end(req.file.buffer);
+      });
+      user.photo = result.secure_url;
+    }
 
     await user.save();
 
-    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET || 'secret', { expiresIn: '30d' });
-    res.json({ token, userId: user._id, role: user.role, photo: user.photo, virtualNumber: user.virtualNumber });
+    const token = jwt.sign(
+      { id: user._id, email: user.email, virtualNumber: user.virtualNumber },
+      process.env.JWT_SECRET || 'secret',
+      { expiresIn: '1h' }
+    );
+
+    res.status(201).json({
+      token,
+      userId: user._id,
+      virtualNumber: user.virtualNumber,
+      username: user.username,
+      photo: user.photo,
+      role: user.role,
+    });
   } catch (error) {
     console.error('Register error:', error);
-    res.status(500).json({ error: 'Server error', details: error.message });
+    res.status(500).json({ error: 'Failed to register', details: error.message });
   }
 });
 
-// User login
+// Login
 router.post('/login', async (req, res) => {
-  const { email, password } = req.body;
-
   try {
+    const { email, password } = req.body;
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password are required' });
     }
 
     const user = await User.findOne({ email });
-    if (!user) return res.status(400).json({ error: 'Invalid credentials' });
+    if (!user || !(await bcrypt.compare(password, user.password))) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
 
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) return res.status(400).json({ error: 'Invalid credentials' });
+    const token = jwt.sign(
+      { id: user._id, email: user.email, virtualNumber: user.virtualNumber },
+      process.env.JWT_SECRET || 'secret',
+      { expiresIn: '1h' }
+    );
 
-    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET || 'secret', { expiresIn: '30d' });
-    res.json({ token, userId: user._id, role: user.role, photo: user.photo, virtualNumber: user.virtualNumber });
+    user.status = 'online';
+    user.lastSeen = new Date();
+    await user.save();
+
+    res.json({
+      token,
+      userId: user._id,
+      virtualNumber: user.virtualNumber,
+      username: user.username,
+      photo: user.photo || 'https://placehold.co/40x40',
+      role: user.role,
+    });
   } catch (error) {
     console.error('Login error:', error);
-    res.status(500).json({ error: 'Server error', details: error.message });
+    res.status(500).json({ error: 'Failed to login', details: error.message });
   }
 });
 
-// Refresh token
-router.post('/refresh', auth, async (req, res) => {
-  try {
-    const user = await User.findById(req.user.id);
-    if (!user) return res.status(404).json({ error: 'User not found' });
-
-    const newToken = jwt.sign({ id: user._id }, process.env.JWT_SECRET || 'secret', { expiresIn: '30d' });
-    res.json({ token: newToken, userId: user._id, role: user.role, photo: user.photo, virtualNumber: user.virtualNumber });
-  } catch (error) {
-    console.error('Refresh token error:', error);
-    res.status(500).json({ error: 'Failed to refresh token', details: error.message });
-  }
-});
-
-// Update user photo
-router.post('/update_photo', auth, upload.single('photo'), async (req, res) => {
-  try {
-    const { userId } = req.body;
-    if (!req.file) return res.status(400).json({ error: 'No photo uploaded' });
-
-    const result = await new Promise((resolve, reject) => {
-      cloudinary.uploader.upload_stream(
-        { resource_type: 'image', folder: 'gapp_photos' },
-        (error, result) => (error ? reject(error) : resolve(result))
-      ).end(req.file.buffer);
-    });
-
-    const user = await User.findByIdAndUpdate(userId, { photo: result.secure_url }, { new: true });
-    if (!user) return res.status(404).json({ error: 'User not found' });
-    res.json({ photo: user.photo });
-  } catch (error) {
-    console.error('Photo update error:', error);
-    res.status(500).json({ error: 'Failed to update photo', details: error.message });
-  }
-});
-
-// Update username
-router.post('/update_username', auth, async (req, res) => {
-  try {
-    const { userId, username } = req.body;
-    if (!username) return res.status(400).json({ error: 'Username is required' });
-    const existingUser = await User.findOne({ username });
-    if (existingUser && existingUser._id.toString() !== userId) {
-      return res.status(400).json({ error: 'Username already taken' });
-    }
-    const user = await User.findByIdAndUpdate(userId, { username }, { new: true });
-    if (!user) return res.status(404).json({ error: 'User not found' });
-    res.json({ username: user.username });
-  } catch (error) {
-    console.error('Username update error:', error);
-    res.status(500).json({ error: 'Failed to update username', details: error.message });
-  }
-});
-
-// Update country and virtual number
-router.post('/update_country', auth, async (req, res) => {
+// Update country
+router.post('/update_country', authMiddleware, async (req, res) => {
   try {
     const { userId, country } = req.body;
-    if (!country) return res.status(400).json({ error: 'Country is required' });
-
-    const countryCode = countryList.getCode(country) || country;
-    if (!countryCode) return res.status(400).json({ error: 'Invalid country' });
-
-    const callingCode = getCountryCallingCode(countryCode);
-    let virtualNumber;
-    let isUnique = false;
-    let attempts = 0;
-    const maxAttempts = 10;
-
-    while (!isUnique && attempts < maxAttempts) {
-      virtualNumber = `${callingCode}${Math.floor(100000000 + Math.random() * 900000000)}`;
-      const existingUser = await User.findOne({ virtualNumber });
-      if (!existingUser) {
-        isUnique = true;
-      }
-      attempts++;
+    if (userId !== req.user.id) {
+      return res.status(403).json({ error: 'Not authorized' });
     }
-
-    if (!isUnique) {
-      return res.status(500).json({ error: 'Unable to generate a unique virtual number' });
-    }
-
-    const user = await User.findByIdAndUpdate(
-      userId,
-      { country: countryCode, virtualNumber },
-      { new: true }
-    );
+    const user = await User.findById(userId);
     if (!user) return res.status(404).json({ error: 'User not found' });
+
+    if (!country) {
+      return res.status(400).json({ error: 'Country is required' });
+    }
+
+    // Only regenerate virtualNumber if it hasn’t been set or country changes
+    if (!user.virtualNumber || user.country !== country) {
+      user.country = country;
+      user.virtualNumber = generateVirtualNumber(country, user._id.toString());
+      await user.save();
+    }
 
     res.json({ virtualNumber: user.virtualNumber });
   } catch (error) {
@@ -218,59 +193,77 @@ router.post('/update_country', auth, async (req, res) => {
   }
 });
 
-// Get user details
-router.get('/user/:id', auth, async (req, res) => {
+// Update profile photo
+router.post('/update_photo', authMiddleware, upload.single('photo'), async (req, res) => {
   try {
-    const user = await User.findById(req.params.id)
-      .select('-password')
-      .populate('contacts', 'virtualNumber username photo');
+    const { userId } = req.body;
+    if (userId !== req.user.id) {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+    const user = await User.findById(userId);
     if (!user) return res.status(404).json({ error: 'User not found' });
-    res.json(user);
+
+    if (!req.file) {
+      return res.status(400).json({ error: 'No photo provided' });
+    }
+
+    const result = await new Promise((resolve, reject) => {
+      cloudinary.uploader.upload_stream(
+        { resource_type: 'image', folder: 'gapp_profile_photos' },
+        (error, result) => (error ? reject(error) : resolve(result))
+      ).end(req.file.buffer);
+    });
+
+    user.photo = result.secure_url;
+    await user.save();
+    res.json({ photo: user.photo });
   } catch (error) {
-    console.error('Get user error:', error);
-    res.status(500).json({ error: 'Server error', details: error.message });
+    console.error('Update photo error:', error);
+    res.status(500).json({ error: 'Failed to update photo', details: error.message });
   }
 });
 
-// Add a contact
-router.post('/add_contact', auth, async (req, res) => {
-  const { userId, virtualNumber } = req.body;
-
+// Update username
+router.post('/update_username', authMiddleware, async (req, res) => {
   try {
-    const targetUser = await User.findOne({ virtualNumber });
-    if (!targetUser) return res.status(404).json({ error: 'User not found' });
-
+    const { userId, username } = req.body;
+    if (userId !== req.user.id) {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
     const user = await User.findById(userId);
-    if (!user) return res.status(404).json({ error: 'Current user not found' });
-
-    // Check if contact already exists
-    if (user.contacts.some((contactId) => contactId.toString() === targetUser._id.toString())) {
-      return res.status(400).json({ error: 'This virtual number is already in your contacts' });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (!username.trim()) {
+      return res.status(400).json({ error: 'Username cannot be empty' });
     }
 
-    user.contacts.push(targetUser._id);
-    await user.save();
+    const existingUser = await User.findOne({ username });
+    if (existingUser && existingUser._id.toString() !== userId) {
+      return res.status(400).json({ error: 'Username already taken' });
+    }
 
-    res.status(201).json({ userId: targetUser._id, username: targetUser.username, photo: targetUser.photo });
+    user.username = username;
+    await user.save();
+    res.json({ username: user.username });
   } catch (error) {
-    console.error('Error adding contact:', error);
-    res.status(500).json({ error: 'Failed to add contact', details: error.message });
+    console.error('Update username error:', error);
+    res.status(500).json({ error: 'Failed to update username', details: error.message });
   }
 });
 
 // Get user's contacts
-router.get('/contacts', auth, async (req, res) => {
+router.get('/contacts', authMiddleware, async (req, res) => {
   try {
-    const user = await User.findById(req.user.id)
-      .populate('contacts', 'virtualNumber username photo')
-      .select('contacts');
+    const user = await User.findById(req.user.id).populate('contacts', 'username virtualNumber photo status lastSeen');
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    const contacts = user.contacts.map((c) => ({
-      id: c._id,
-      virtualNumber: c.virtualNumber,
-      username: c.username,
-      photo: c.photo || 'https://placehold.co/40x40',
+    // Ensure all contacts have required fields
+    const contacts = user.contacts.map((contact) => ({
+      id: contact._id,
+      username: contact.username,
+      virtualNumber: contact.virtualNumber,
+      photo: contact.photo || 'https://placehold.co/40x40',
+      status: contact.status || 'offline',
+      lastSeen: contact.lastSeen,
     }));
 
     res.json(contacts);
@@ -280,94 +273,115 @@ router.get('/contacts', auth, async (req, res) => {
   }
 });
 
-// Update theme preference
-router.post('/update_theme', auth, async (req, res) => {
+// Add a contact
+router.post('/add_contact', authMiddleware, async (req, res) => {
   try {
-    const { userId, theme } = req.body;
-    if (!theme || !['light', 'dark'].includes(theme)) {
-      return res.status(400).json({ error: 'Invalid theme value' });
+    const { userId, virtualNumber } = req.body;
+    if (userId !== req.user.id) {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+    if (!virtualNumber) {
+      return res.status(400).json({ error: 'Virtual number is required' });
     }
 
-    const user = await User.findByIdAndUpdate(userId, { theme }, { new: true });
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    const contact = await User.findOne({ virtualNumber });
+    if (!contact) return res.status(404).json({ error: 'Contact not found' });
+    if (contact._id.toString() === userId) return res.status(400).json({ error: 'Cannot add yourself as a contact' });
 
-    res.json({ theme: user.theme });
+    const user = await User.findById(userId);
+    if (!user.contacts.includes(contact._id)) {
+      user.contacts.push(contact._id);
+      await user.save();
+
+      // Generate shared key using ECDH
+      const userPrivateKey = crypto.createPrivateKey(user.privateKey);
+      const contactPublicKey = crypto.createPublicKey(contact.publicKey);
+      const sharedKey = crypto.diffieHellman({
+        privateKey: userPrivateKey,
+        publicKey: contactPublicKey,
+      });
+      const sharedKeyBase64 = sharedKey.toString('base64');
+
+      user.sharedKeys.push({ contactId: contact._id, key: sharedKeyBase64 });
+      await user.save();
+
+      // Add reciprocal contact and shared key
+      const contactPrivateKey = crypto.createPrivateKey(contact.privateKey);
+      const userPublicKey = crypto.createPublicKey(user.publicKey);
+      const contactSharedKey = crypto.diffieHellman({
+        privateKey: contactPrivateKey,
+        publicKey: userPublicKey,
+      });
+      contact.sharedKeys.push({ contactId: user._id, key: contactSharedKey.toString('base64') });
+      await contact.save();
+    }
+
+    res.json({
+      userId: contact._id,
+      virtualNumber: contact.virtualNumber,
+      username: contact.username,
+      photo: contact.photo || 'https://placehold.co/40x40',
+    });
   } catch (error) {
-    console.error('Update theme error:', error);
-    res.status(500).json({ error: 'Failed to update theme', details: error.message });
+    console.error('Add contact error:', error);
+    res.status(500).json({ error: 'Failed to add contact', details: error.message });
   }
 });
 
-// Update public key for E2EE (Diffie-Hellman)
-router.post('/update_public_key', auth, async (req, res) => {
+// Get shared key for a contact
+router.get('/shared_key/:recipientId', authMiddleware, async (req, res) => {
   try {
-    const { userId, publicKey } = req.body;
-    if (!publicKey) return res.status(400).json({ error: 'Public key is required' });
+    const userId = req.user.id;
+    const recipientId = req.params.recipientId;
 
     const user = await User.findById(userId);
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    user.publicKey = publicKey;
-    await user.save();
-
-    res.json({ success: true });
-  } catch (error) {
-    console.error('Update public key error:', error);
-    res.status(500).json({ error: 'Failed to update public key', details: error.message });
-  }
-});
-// Updated shared_key endpoint in auth.js
-router.get('/shared_key/:recipientId', auth, async (req, res) => {
-  try {
-    const { id: userId } = req.user;
-    const { recipientId } = req.params;
-
-    // Validate recipientId format
-    if (!mongoose.Types.ObjectId.isValid(recipientId)) {
-      return res.status(400).json({ 
-        error: 'Invalid recipient ID format',
-        code: 'INVALID_RECIPIENT_ID'
-      });
-    }
-
-    // Check if recipient exists and has public key
-    const recipient = await User.findById(recipientId)
-      .select('publicKey virtualNumber username')
-      .lean();
-
+    const recipient = await User.findById(recipientId);
     if (!recipient) {
-      return res.status(404).json({ 
-        error: 'Recipient not found',
-        code: 'RECIPIENT_NOT_FOUND'
-      });
+      return res.status(404).json({ error: 'Recipient not found', code: 'RECIPIENT_NOT_FOUND' });
     }
 
-    if (!recipient.publicKey) {
-      return res.status(400).json({ 
-        error: 'Recipient has not set up end-to-end encryption',
-        code: 'NO_PUBLIC_KEY',
-        recipientInfo: {
-          id: recipient._id,
-          virtualNumber: recipient.virtualNumber,
-          username: recipient.username
-        }
-      });
+    if (!user.contacts.includes(recipientId)) {
+      return res.status(403).json({ error: 'Recipient is not a contact' });
     }
 
-    res.json({ 
-      recipientPublicKey: recipient.publicKey,
-      recipientInfo: {
-        id: recipient._id,
-        virtualNumber: recipient.virtualNumber,
-        username: recipient.username
-      }
-    });
+    const sharedKeyEntry = user.sharedKeys.find((entry) => entry.contactId.toString() === recipientId);
+    if (!sharedKeyEntry) {
+      return res.status(404).json({ error: 'No shared key found', code: 'NO_SHARED_KEY' });
+    }
+
+    res.json({ sharedKey: sharedKeyEntry.key });
   } catch (error) {
-    console.error('Get shared key error:', error);
-    res.status(500).json({ 
-      error: 'Failed to fetch recipient public key',
-      code: 'SERVER_ERROR'
-    });
+    console.error('Fetch shared key error:', error);
+    res.status(500).json({ error: 'Failed to fetch shared key', details: error.message });
   }
 });
+
+// Refresh token
+router.post('/refresh', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const newToken = jwt.sign(
+      { id: user._id, email: user.email, virtualNumber: user.virtualNumber },
+      process.env.JWT_SECRET || 'secret',
+      { expiresIn: '1h' }
+    );
+
+    res.json({
+      token: newToken,
+      userId: user._id,
+      role: user.role,
+      photo: user.photo || 'https://placehold.co/40x40',
+      virtualNumber: user.virtualNumber,
+      username: user.username,
+    });
+  } catch (error) {
+    console.error('Refresh token error:', error);
+    res.status(500).json({ error: 'Failed to refresh token', details: error.message });
+  }
+});
+
 module.exports = router;

@@ -1,13 +1,13 @@
 import React, { useState } from 'react';
 import axios from 'axios';
 import { motion } from 'framer-motion';
-import { getCountries } from 'libphonenumber-js'; // Remove country-list
+import { getCountries } from 'libphonenumber-js';
 
 const LoginScreen = ({ setAuth }) => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [role, setRole] = useState('0');
-  const [name, setName] = useState('');
+  const [username, setUsername] = useState(''); // Changed from name to username
   const [photo, setPhoto] = useState(null);
   const [isLogin, setIsLogin] = useState(true);
   const [error, setError] = useState('');
@@ -20,7 +20,7 @@ const LoginScreen = ({ setAuth }) => {
     formData.append('email', email);
     formData.append('password', password);
     if (!isLogin) {
-      formData.append('name', name);
+      formData.append('username', username); // Changed from name to username
       formData.append('role', role);
       if (photo) formData.append('photo', photo);
       if (!selectedCountry) {
@@ -35,7 +35,8 @@ const LoginScreen = ({ setAuth }) => {
       const { data } = await axios.post(url, isLogin ? { email, password } : formData, {
         headers: !isLogin ? { 'Content-Type': 'multipart/form-data' } : {},
       });
-      setAuth(data.token, data.userId, data.role, data.photo, data.virtualNumber);
+      // Update setAuth to include username
+      setAuth(data.token, data.userId, data.role, data.photo, data.virtualNumber, data.username);
       setError('');
     } catch (error) {
       console.error('Auth error:', error);
@@ -45,7 +46,7 @@ const LoginScreen = ({ setAuth }) => {
 
   const countries = getCountries().map(code => ({
     code,
-    name: new Intl.DisplayNames(['en'], { type: 'region' }).of(code), // Get country name from code
+    name: new Intl.DisplayNames(['en'], { type: 'region' }).of(code),
   }));
   const filteredCountries = countries.filter(c => 
     c.name.toLowerCase().includes(search.toLowerCase()) || 
@@ -62,10 +63,10 @@ const LoginScreen = ({ setAuth }) => {
             <>
               <input
                 type="text"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
                 className="w-full p-2 mb-4 border rounded-lg"
-                placeholder="Name"
+                placeholder="Username"
               />
               <input
                 type="text"

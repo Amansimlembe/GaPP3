@@ -98,7 +98,7 @@ io.on('connection', (socket) => {
     try {
       await redisClient.set(`online:${userId}`, 'true', { EX: 3600 }); // Expire after 1 hour
       onlineUsers.set(userId, { lastSeen: new Date(), socketId: socket.id, status: 'online' });
-      io.emit('onlineStatus', { userId, status: 'online' });
+      io.emit('onlineStatus', { userId, status: 'online', lastSeen: onlineUsers.get(userId).lastSeen });
     } catch (error) {
       console.error(`Error setting online status for ${userId} in Redis:`, error);
     }
@@ -118,7 +118,6 @@ io.on('connection', (socket) => {
       if (message) {
         message.status = status;
         await message.save();
-        // Emit to both sender and recipient
         io.to(data.recipientId).emit('message', { ...data, status });
         io.to(data.senderId).emit('message', { ...data, status });
       } else {
@@ -140,7 +139,6 @@ io.on('connection', (socket) => {
       if (message) {
         message.status = status;
         await message.save();
-        // Emit to both sender and recipient
         io.to(recipientId).emit('messageStatus', { messageId, status });
         io.to(message.senderId).emit('messageStatus', { messageId, status });
       } else {
@@ -193,7 +191,6 @@ io.on('connection', (socket) => {
 
   socket.on('ping', ({ userId }) => {
     console.log(`[${new Date().toISOString()}] Received ping from user: ${userId}`);
-    // Update last seen in onlineUsers
     if (onlineUsers.has(userId)) {
       onlineUsers.set(userId, { ...onlineUsers.get(userId), lastSeen: new Date() });
     }

@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { motion } from 'framer-motion';
-import { getCountries } from 'libphonenumber-js'; // Remove country-list
+import { getCountries } from 'libphonenumber-js';
 
-const CountrySelector = ({ token, userId, onComplete }) => {
+const CountrySelector = ({ token, userId, virtualNumber, onComplete }) => {
   const [selectedCountry, setSelectedCountry] = useState('');
   const [search, setSearch] = useState('');
   const [error, setError] = useState('');
@@ -11,32 +11,27 @@ const CountrySelector = ({ token, userId, onComplete }) => {
   const wrapperRef = useRef(null);
 
   useEffect(() => {
-    const checkCountry = async () => {
-      try {
-        const { data } = await axios.get(`/auth/user/${userId}`, { headers: { Authorization: `Bearer ${token}` } });
-        if (data.virtualNumber) {
-          onComplete(data.virtualNumber);
-          return;
-        }
-        navigator.geolocation.getCurrentPosition(
-          async (position) => {
-            const { latitude, longitude } = position.coords;
-            const response = await axios.get(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=en`);
-            const currentCountryCode = response.data.countryCode;
-            if (currentCountryCode === selectedCountry) {
-              setLocationConfirmed(true);
-            } else {
-              setError('Selected country does not match your current location.');
-            }
-          },
-          () => setError('Unable to detect location. Please select your current country.')
-        );
-      } catch (error) {
-        console.error('Check country error:', error);
-        setError('Failed to load user data');
-      }
+    if (virtualNumber) {
+      onComplete(virtualNumber); // Skip if virtualNumber is already set
+      return;
+    }
+
+    const checkLocation = () => {
+      navigator.geolocation.getCurrentPosition(
+        async (position) => {
+          const { latitude, longitude } = position.coords;
+          const response = await axios.get(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=en`);
+          const currentCountryCode = response.data.countryCode;
+          if (currentCountryCode === selectedCountry) {
+            setLocationConfirmed(true);
+          } else {
+            setError('Selected country does not match your current location.');
+          }
+        },
+        () => setError('Unable to detect location. Please select your current country.')
+      );
     };
-    if (selectedCountry) checkCountry();
+    if (selectedCountry) checkLocation();
 
     const handleClickOutside = (event) => {
       if (wrapperRef.current && !wrapperRef.current.contains(event.target)) {
@@ -45,7 +40,7 @@ const CountrySelector = ({ token, userId, onComplete }) => {
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [token, userId, selectedCountry, onComplete]);
+  }, [token, userId, selectedCountry, onComplete, virtualNumber]);
 
   const saveCountry = async () => {
     if (!selectedCountry) {
@@ -57,7 +52,11 @@ const CountrySelector = ({ token, userId, onComplete }) => {
       return;
     }
     try {
-      const { data } = await axios.post('/auth/update_country', { userId, country: selectedCountry }, { headers: { Authorization: `Bearer ${token}` } });
+      const { data } = await axios.post(
+        '/auth/update_country',
+        { userId, country: selectedCountry }, // Send only country, backend generates virtualNumber
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
       onComplete(data.virtualNumber);
     } catch (error) {
       console.error('Save country error:', error);

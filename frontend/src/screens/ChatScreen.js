@@ -1,10 +1,29 @@
-
 // @ts-nocheck
 import React, { useState, useEffect, useRef } from 'react';
 import io from 'socket.io-client';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
-import { FaPaperPlane, FaPaperclip, FaTrash, FaArrowLeft, FaReply, FaEllipsisH, FaSave, FaShare, FaCopy, FaForward, FaFileAlt, FaPlay, FaArrowDown, FaDownload, FaUserPlus, FaUsers, FaPaintBrush, FaCog, FaSignOutAlt } from 'react-icons/fa';
+import {
+  FaPaperPlane,
+  FaPaperclip,
+  FaTrash,
+  FaArrowLeft,
+  FaReply,
+  FaEllipsisH,
+  FaSave,
+  FaShare,
+  FaCopy,
+  FaForward,
+  FaFileAlt,
+  FaPlay,
+  FaArrowDown,
+  FaDownload,
+  FaUserPlus,
+  FaUsers,
+  FaPaintBrush,
+  FaCog,
+  FaSignOutAlt,
+} from 'react-icons/fa';
 import { useDispatch, useSelector } from 'react-redux';
 import { setMessages, addMessage, updateMessageStatus, setSelectedChat, resetState } from '../store';
 import { saveMessages, getMessages } from '../db';
@@ -51,6 +70,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   const [loading, setLoading] = useState(false);
   const [userStatus, setUserStatus] = useState({ status: 'offline', lastSeen: null });
   const [pendingMessages, setPendingMessages] = useState([]);
+  const [decryptionPending, setDecryptionPending] = useState({});
   const chatRef = useRef(null);
   const menuRef = useRef(null);
   const messageMenuRef = useRef(null);
@@ -60,113 +80,50 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   const messagesPerPage = 50;
   const isSmallDevice = window.innerWidth < 768;
 
-  // Diffie-Hellman Key Exchange and AES Encryption Functions
-  const generateDHKeyPair = async () => {
-    const dh = await window.crypto.subtle.generateKey(
-      { name: 'ECDH', namedCurve: 'P-256' },
-      true,
-      ['deriveKey']
-    );
-    const publicKey = await window.crypto.subtle.exportKey('raw', dh.publicKey);
-    const privateKey = await window.crypto.subtle.exportKey('raw', dh.privateKey);
-    const publicKeyBase64 = Buffer.from(publicKey).toString('base64');
-    const privateKeyBase64 = Buffer.from(privateKey).toString('base64');
-
-    // Store private key locally (insecure for production; use a secure store)
-    localStorage.setItem(`privateKey_${userId}`, privateKeyBase64);
-
-    return { publicKey: publicKeyBase64 };
-  };
-
-  const deriveSharedKey = async (recipientPublicKey) => {
-    const privateKeyBase64 = localStorage.getItem(`privateKey_${userId}`);
-    if (!privateKeyBase64) throw new Error('Private key not found');
-
-    const privateKeyObj = await window.crypto.subtle.importKey(
-      'raw',
-      Buffer.from(privateKeyBase64, 'base64'),
-      { name: 'ECDH', namedCurve: 'P-256' },
-      false,
-      ['deriveKey']
-    );
-    const publicKeyObj = await window.crypto.subtle.importKey(
-      'raw',
-      Buffer.from(recipientPublicKey, 'base64'),
-      { name: 'ECDH', namedCurve: 'P-256' },
-      false,
-      []
-    );
-    const sharedKey = await window.crypto.subtle.deriveKey(
-      { name: 'ECDH', public: publicKeyObj },
-      privateKeyObj,
-      { name: 'AES-GCM', length: 256 },
-      true,
-      ['encrypt', 'decrypt']
-    );
-    return sharedKey;
-  };
-
+  // Encryption Functions
   const encryptMessage = async (content, sharedKey) => {
     const iv = window.crypto.getRandomValues(new Uint8Array(12));
     const encoder = new TextEncoder();
-    const encrypted = await window.crypto.subtle.encrypt(
-      { name: 'AES-GCM', iv },
-      sharedKey,
-      encoder.encode(content)
-    );
-    return { encrypted: Buffer.from(encrypted).toString('base64'), iv: Buffer.from(iv).toString('base64') };
+    const key = await window.crypto.subtle.importKey('raw', Uint8Array.from(atob(sharedKey), (c) => c.charCodeAt(0)), { name: 'AES-GCM' }, false, ['encrypt']);
+    const encrypted = await window.crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, encoder.encode(content));
+    return { encrypted: btoa(String.fromCharCode(...new Uint8Array(encrypted))), iv: btoa(String.fromCharCode(...iv)) };
   };
 
   const decryptMessage = async (encryptedContent, iv, sharedKey) => {
     const decoder = new TextDecoder();
+    const key = await window.crypto.subtle.importKey('raw', Uint8Array.from(atob(sharedKey), (c) => c.charCodeAt(0)), { name: 'AES-GCM' }, false, ['decrypt']);
     const decrypted = await window.crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv: Buffer.from(iv, 'base64') },
-      sharedKey,
-      Buffer.from(encryptedContent, 'base64')
+      { name: 'AES-GCM', iv: Uint8Array.from(atob(iv), (c) => c.charCodeAt(0)) },
+      key,
+      Uint8Array.from(atob(encryptedContent), (c) => c.charCodeAt(0))
     );
     return decoder.decode(decrypted);
   };
 
-
-const getSharedKey = async (recipientId) => {
-  try {
-    const response = await axios.get(`/auth/shared_key/${recipientId}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-
-    if (response.data.error) {
-      // Handle specific error cases
-      switch (response.data.code) {
-        case 'INVALID_RECIPIENT_ID':
-          throw new Error('Invalid contact ID');
-        case 'RECIPIENT_NOT_FOUND':
-          throw new Error('Contact not found');
-        case 'NO_PUBLIC_KEY':
-          // Optionally notify user that messages won't be encrypted
-          console.warn('Contact has no public key - sending unencrypted');
-          return null; // Return null to indicate no encryption
-        default:
-          throw new Error(response.data.error);
+  const getSharedKey = async (recipientId) => {
+    try {
+      const response = await axios.get(`https://gapp-6yc3.onrender.com/auth/shared_key/${recipientId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (response.data.error) {
+        if (response.data.code === 'NO_SHARED_KEY') {
+          console.warn('No shared key - sending unencrypted');
+          return null;
+        }
+        throw new Error(response.data.error);
       }
+      return response.data.sharedKey;
+    } catch (error) {
+      console.error('Error getting shared key:', error.message);
+      return null;
     }
+  };
 
-    if (!response.data.recipientPublicKey) {
-      throw new Error('No public key available');
-    }
-
-    return await deriveSharedKey(response.data.recipientPublicKey);
-  } catch (error) {
-    console.error('Error getting shared key:', error);
-    // Fallback to unencrypted communication
-    return null;
-  }
-};
   const formatChatListDate = (date) => {
     const messageDate = new Date(date);
     const now = new Date();
     const diffTime = now - messageDate;
     const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
-
     if (diffDays === 0) return messageDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
     else if (diffDays === 1) return 'Yesterday';
     else return messageDate.toLocaleDateString('en-US', { month: 'short', day: '2-digit' });
@@ -179,7 +136,6 @@ const getSharedKey = async (recipientId) => {
     const messageDateOnly = new Date(messageDate.getFullYear(), messageDate.getMonth(), messageDate.getDate());
     const diffTime = todayDate - messageDateOnly;
     const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
-
     if (diffDays === 0) return 'Today';
     else if (diffDays === 1) return 'Yesterday';
     else return messageDate.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
@@ -202,17 +158,21 @@ const getSharedKey = async (recipientId) => {
 
     const keepAlive = setInterval(() => {
       socket.emit('ping', { userId });
-    }, 30000); // Reduced to 30 seconds for more frequent status updates
+    }, 30000);
 
     const fetchUsers = async () => {
       try {
-        const cachedUsers = JSON.parse(localStorage.getItem('cachedUsers'));
-        if (cachedUsers && cachedUsers.length > 0) {
+        const cachedUsers = JSON.parse(localStorage.getItem('cachedUsers')) || [];
+        if (cachedUsers.length > 0) {
           setUsers(cachedUsers);
           const usersWithLatestMessage = await Promise.all(
             cachedUsers.map(async (user) => {
+              if (!user.id) {
+                console.warn('User missing ID:', user);
+                return { ...user, latestMessage: null, unreadCount: 0 }; // Skip fetch for invalid users
+              }
               try {
-                const { data } = await axios.get('/social/messages', {
+                const { data } = await axios.get('https://gapp-6yc3.onrender.com/social/messages', {
                   headers: { Authorization: `Bearer ${token}` },
                   params: { userId, recipientId: user.id, limit: 1, skip: 0 },
                 });
@@ -220,8 +180,8 @@ const getSharedKey = async (recipientId) => {
                 const unreadCount = latestMessage && latestMessage.recipientId === userId && latestMessage.status !== 'read' ? 1 : 0;
                 return { ...user, latestMessage, unreadCount };
               } catch (error) {
-                console.error(`Error fetching latest message for user ${user.id}:`, error);
-                return { ...user, latestMessage: null, unreadCount: 0 };
+                console.error(`Error fetching latest message for user ${user.id}:`, error.response?.status || error.message);
+                return { ...user, latestMessage: null, unreadCount: 0 }; // Default to no message
               }
             })
           );
@@ -233,13 +193,17 @@ const getSharedKey = async (recipientId) => {
           setUsers(usersWithLatestMessage);
           localStorage.setItem('cachedUsers', JSON.stringify(usersWithLatestMessage));
         } else {
-          const { data } = await axios.get('/auth/contacts', {
+          const { data } = await axios.get('https://gapp-6yc3.onrender.com/auth/contacts', {
             headers: { Authorization: `Bearer ${token}` },
           });
           const usersWithLatestMessage = await Promise.all(
             data.map(async (user) => {
+              if (!user.id) {
+                console.warn('Contact missing ID:', user);
+                return { ...user, latestMessage: null, unreadCount: 0 };
+              }
               try {
-                const { data: messagesData } = await axios.get('/social/messages', {
+                const { data: messagesData } = await axios.get('https://gapp-6yc3.onrender.com/social/messages', {
                   headers: { Authorization: `Bearer ${token}` },
                   params: { userId, recipientId: user.id, limit: 1, skip: 0 },
                 });
@@ -247,7 +211,7 @@ const getSharedKey = async (recipientId) => {
                 const unreadCount = latestMessage && latestMessage.recipientId === userId && latestMessage.status !== 'read' ? 1 : 0;
                 return { ...user, latestMessage, unreadCount };
               } catch (error) {
-                console.error(`Error fetching latest message for user ${user.id}:`, error);
+                console.error(`Error fetching latest message for user ${user.id}:`, error.response?.status || error.message);
                 return { ...user, latestMessage: null, unreadCount: 0 };
               }
             })
@@ -261,103 +225,140 @@ const getSharedKey = async (recipientId) => {
           localStorage.setItem('cachedUsers', JSON.stringify(usersWithLatestMessage));
         }
       } catch (error) {
+        console.error('Fetch users error:', error);
         setError('Failed to load contacts');
       }
     };
     fetchUsers();
 
     const loadOfflineMessages = async () => {
-      const offlineMessages = await getMessages();
+      const offlineMessages = await getMessages(selectedChat);
       if (offlineMessages.length > 0) {
+        const pendingDecryption = {};
         for (const msg of offlineMessages) {
-          const sharedKey = await getSharedKey(msg.recipientId === userId ? msg.senderId : msg.recipientId);
-          const decryptedContent = msg.contentType === 'text' ? await decryptMessage(msg.content, msg.iv, sharedKey) : msg.content;
           const chatId = msg.recipientId === userId ? msg.senderId : msg.recipientId;
-          dispatch(addMessage({ recipientId: chatId, message: { ...msg, content: decryptedContent } }));
+          if (msg.contentType === 'text' && msg.iv) {
+            pendingDecryption[msg._id] = { encryptedContent: msg.content, iv: msg.iv };
+            dispatch(addMessage({ recipientId: chatId, message: { ...msg, content: 'Message encrypted, awaiting key' } }));
+          } else {
+            dispatch(addMessage({ recipientId: chatId, message: msg }));
+          }
         }
+        setDecryptionPending(pendingDecryption);
       }
     };
-    loadOfflineMessages();
 
-    const fetchMessages = async (pageNum = 0, isInitialLoad = true) => {
-      if (!selectedChat || loading) return;
-      setLoading(true);
-      try {
-        const cachedMessages = JSON.parse(localStorage.getItem(`chat_${selectedChat}`)) || [];
-        let messages = [];
+    const decryptPendingMessages = async () => {
+      if (Object.keys(decryptionPending).length === 0 || !navigator.onLine) return;
 
-        if (cachedMessages.length > 0 && pageNum === 0) {
-          messages = cachedMessages.slice(-messagesPerPage);
-          setHasMore(cachedMessages.length >= messagesPerPage);
-        } else {
-          const { data } = await axios.get('/social/messages', {
-            headers: { Authorization: `Bearer ${token}` },
-            params: { userId, recipientId: selectedChat, limit: messagesPerPage, skip: pageNum * messagesPerPage },
-          });
-          const sharedKey = await getSharedKey(selectedChat);
-          messages = await Promise.all(
-            data.messages.map(async (msg) => ({
-              ...msg,
-              content: msg.contentType === 'text' ? await decryptMessage(msg.content, msg.iv, sharedKey) : msg.content,
-              status: msg.status || 'sent',
-            }))
-          );
-          setHasMore(data.hasMore);
-          const updatedCachedMessages = [...cachedMessages, ...data.messages].reduce((acc, msg) => {
-            if (!acc.some((m) => m._id === msg._id)) acc.push(msg);
-            return acc;
-          }, []);
-          localStorage.setItem(`chat_${selectedChat}`, JSON.stringify(updatedCachedMessages));
-          await saveMessages(data.messages);
-        }
-
-        messages.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-
-        if (isInitialLoad) {
-          dispatch(setMessages({ recipientId: selectedChat, messages }));
-          const unreadMessages = messages.filter((msg) => msg.recipientId === userId && msg.status !== 'read');
-          if (unreadMessages.length > 0) {
-            unreadMessages.forEach((msg) => {
-              socket.emit('messageStatus', { messageId: msg._id, status: 'read', recipientId: userId });
-            });
+      const updatedMessages = [];
+      for (const [messageId, { encryptedContent, iv }] of Object.entries(decryptionPending)) {
+        const chatId = (chats[selectedChat] || []).find((m) => m._id === messageId)?.senderId === userId ? selectedChat : userId;
+        const sharedKey = await getSharedKey(chatId);
+        if (sharedKey) {
+          try {
+            const decryptedContent = await decryptMessage(encryptedContent, iv, sharedKey);
+            updatedMessages.push({ _id: messageId, content: decryptedContent });
+          } catch (error) {
+            console.error(`Failed to decrypt message ${messageId}:`, error);
           }
-          setNotifications((prev) => {
-            const updatedNotifications = { ...prev, [selectedChat]: 0 };
-            localStorage.setItem('chatNotifications', JSON.stringify(updatedNotifications));
-            return updatedNotifications;
-          });
-          setUnreadCount(0);
-          setFirstUnreadMessageId(null);
+        }
+      }
 
-          setTimeout(() => {
-            const lastMessageElement = document.getElementById(`message-${messages[messages.length - 1]?._id}`);
-            if (lastMessageElement) lastMessageElement.scrollIntoView({ behavior: 'auto', block: 'end' });
-          }, 100);
-        } else {
-          dispatch(setMessages({
+      if (updatedMessages.length > 0) {
+        dispatch(
+          setMessages({
             recipientId: selectedChat,
-            messages: [...messages, ...(chats[selectedChat] || [])],
-          }));
-        }
-      } catch (error) {
-        console.error('Fetch messages error:', error);
-        if (isInitialLoad) {
-          dispatch(setMessages({ recipientId: selectedChat, messages: [] }));
-          setError('No previous messages');
-        }
-      } finally {
-        setLoading(false);
+            messages: (chats[selectedChat] || []).map((msg) =>
+              updatedMessages.find((um) => um._id === msg._id) ? { ...msg, content: updatedMessages.find((um) => um._id === msg._id).content } : msg
+            ),
+          })
+        );
+        setDecryptionPending({});
       }
     };
 
     if (selectedChat) {
       setPage(0);
       setHasMore(true);
+      loadOfflineMessages();
+      const fetchMessages = async (pageNum = 0, isInitialLoad = true) => {
+        if (!selectedChat || loading) return;
+        setLoading(true);
+        try {
+          const cachedMessages = JSON.parse(localStorage.getItem(`chat_${selectedChat}`)) || [];
+          let messages = [];
+
+          if (cachedMessages.length > 0 && pageNum === 0) {
+            messages = cachedMessages.slice(-messagesPerPage);
+            setHasMore(cachedMessages.length >= messagesPerPage);
+          } else {
+            const { data } = await axios.get('https://gapp-6yc3.onrender.com/social/messages', {
+              headers: { Authorization: `Bearer ${token}` },
+              params: { userId, recipientId: selectedChat, limit: messagesPerPage, skip: pageNum * messagesPerPage },
+            });
+            const sharedKey = await getSharedKey(selectedChat);
+            messages = await Promise.all(
+              data.messages.map(async (msg) => ({
+                ...msg,
+                content: msg.contentType === 'text' && sharedKey ? await decryptMessage(msg.content, msg.iv, sharedKey) : msg.content,
+                status: msg.status || 'sent',
+              }))
+            );
+            setHasMore(data.hasMore);
+            const updatedCachedMessages = [...cachedMessages, ...data.messages].reduce((acc, msg) => {
+              if (!acc.some((m) => m._id === msg._id)) acc.push(msg);
+              return acc;
+            }, []);
+            localStorage.setItem(`chat_${selectedChat}`, JSON.stringify(updatedCachedMessages));
+            await saveMessages(data.messages);
+          }
+
+          messages.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+
+          if (isInitialLoad) {
+            dispatch(setMessages({ recipientId: selectedChat, messages }));
+            const unreadMessages = messages.filter((msg) => msg.recipientId === userId && msg.status !== 'read');
+            if (unreadMessages.length > 0) {
+              unreadMessages.forEach((msg) => {
+                socket.emit('messageStatus', { messageId: msg._id, status: 'read', recipientId: userId });
+              });
+            }
+            setNotifications((prev) => {
+              const updatedNotifications = { ...prev, [selectedChat]: 0 };
+              localStorage.setItem('chatNotifications', JSON.stringify(updatedNotifications));
+              return updatedNotifications;
+            });
+            setUnreadCount(0);
+            setFirstUnreadMessageId(null);
+
+            setTimeout(() => {
+              const lastMessageElement = document.getElementById(`message-${messages[messages.length - 1]?._id}`);
+              if (lastMessageElement) lastMessageElement.scrollIntoView({ behavior: 'auto', block: 'end' });
+            }, 100);
+          } else {
+            dispatch(
+              setMessages({
+                recipientId: selectedChat,
+                messages: [...messages, ...(chats[selectedChat] || [])],
+              })
+            );
+          }
+        } catch (error) {
+          console.error('Fetch messages error:', error);
+          if (isInitialLoad) {
+            dispatch(setMessages({ recipientId: selectedChat, messages: [] }));
+            setError('No previous messages');
+          }
+        } finally {
+          setLoading(false);
+        }
+      };
       fetchMessages(0, true);
 
       const fetchUserStatus = async () => {
         try {
-          const { data } = await axios.get(`/social/user-status/${selectedChat}`, {
+          const { data } = await axios.get(`https://gapp-6yc3.onrender.com/social/user-status/${selectedChat}`, {
             headers: { Authorization: `Bearer ${token}` },
           });
           setUserStatus(data);
@@ -371,17 +372,17 @@ const getSharedKey = async (recipientId) => {
     socket.on('message', async (msg) => {
       const chatId = msg.senderId === userId ? msg.recipientId : msg.senderId;
       const sharedKey = await getSharedKey(chatId);
-      const decryptedContent = msg.contentType === 'text' ? await decryptMessage(msg.content, msg.iv, sharedKey) : msg.content;
+      const decryptedContent = msg.contentType === 'text' && sharedKey ? await decryptMessage(msg.content, msg.iv, sharedKey) : msg.content;
       const senderKnown = users.some((u) => u.id === msg.senderId);
       const updatedMsg = { ...msg, content: decryptedContent, username: senderKnown ? msg.senderUsername : 'Unsaved Number' };
-    
+
       const existingMessage = (chats[chatId] || []).find((m) => m._id === msg._id);
       if (!existingMessage) {
         dispatch(addMessage({ recipientId: chatId, message: updatedMsg }));
-        const cachedMessages = JSON.parse(localStorage.getItem(`chat_${chatId}`)) || []; // Fixed: Added semicolon
+        const cachedMessages = JSON.parse(localStorage.getItem(`chat_${chatId}`)) || [];
         localStorage.setItem(`chat_${chatId}`, JSON.stringify([...cachedMessages, msg]));
       }
-    
+
       if (msg.recipientId === userId && !senderKnown) {
         setUsers((prev) => {
           const updatedUsers = [
@@ -392,7 +393,7 @@ const getSharedKey = async (recipientId) => {
           return updatedUsers;
         });
       }
-   
+
       if ((msg.senderId === userId && msg.recipientId === selectedChat) || (msg.senderId === selectedChat && msg.recipientId === userId)) {
         if (msg.recipientId === userId) {
           socket.emit('messageStatus', { messageId: msg._id, status: 'delivered', recipientId: userId });
@@ -443,20 +444,12 @@ const getSharedKey = async (recipientId) => {
     socket.on('messageStatus', ({ messageId, status }) => {
       dispatch(updateMessageStatus({ recipientId: selectedChat, messageId, status }));
       if (status === 'read') {
-        setUsers((prev) =>
-          prev.map((user) =>
-            user.id === selectedChat ? { ...user, unreadCount: 0 } : user
-          )
-        );
+        setUsers((prev) => prev.map((user) => (user.id === selectedChat ? { ...user, unreadCount: 0 } : user)));
       }
     });
 
     socket.on('onlineStatus', ({ userId: contactId, status, lastSeen }) => {
-      setUsers((prev) =>
-        prev.map((user) =>
-          user.id === contactId ? { ...user, status, lastSeen } : user
-        )
-      );
+      setUsers((prev) => prev.map((user) => (user.id === contactId ? { ...user, status, lastSeen } : user)));
       if (contactId === selectedChat) {
         setUserStatus({ status, lastSeen });
       }
@@ -478,7 +471,6 @@ const getSharedKey = async (recipientId) => {
           setPage((prevPage) => prevPage + 1);
         }
 
-        // Mark messages as read when scrolled into view
         if (isAtBottomRef.current && selectedChat) {
           const unreadMessages = (chats[selectedChat] || []).filter((msg) => msg.recipientId === userId && msg.status !== 'read');
           unreadMessages.forEach((msg) => {
@@ -496,7 +488,10 @@ const getSharedKey = async (recipientId) => {
       if (bottomNav) bottomNav.style.zIndex = '10';
     }
 
-    if (page > 0) fetchMessages(page, false);
+    if (page > 0) {
+      const fetchMoreMessages = async () => fetchMessages(page, false);
+      fetchMoreMessages();
+    }
 
     const handleOnline = async () => {
       if (pendingMessages.length > 0) {
@@ -505,6 +500,7 @@ const getSharedKey = async (recipientId) => {
         }
         setPendingMessages([]);
       }
+      await decryptPendingMessages();
     };
     window.addEventListener('online', handleOnline);
 
@@ -534,29 +530,38 @@ const getSharedKey = async (recipientId) => {
 
     try {
       if (msgData.file) setUploadProgress(0);
-      const { data } = await axios.post('/social/message', formData, {
+      const { data } = await axios.post('https://gapp-6yc3.onrender.com/social/message', formData, {
         headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
         onUploadProgress: (progressEvent) => {
           if (msgData.file) setUploadProgress(Math.round((progressEvent.loaded * 100) / progressEvent.total));
         },
       });
-      socket.emit('message', { ...data, senderVirtualNumber: localStorage.getItem('virtualNumber'), senderUsername: localStorage.getItem('username'), senderPhoto: localStorage.getItem('photo') });
-      dispatch(setMessages({
-        recipientId: selectedChat,
-        messages: (chats[selectedChat] || []).map((msg) => (msg._id === msgData.tempId ? { ...data, content: msg.content, status: 'sent' } : msg)),
-      }));
-      const cachedMessages = JSON.parse(localStorage.getItem(`chat_${selectedChat}`)) || [];
-      const updatedCachedMessages = cachedMessages.map((msg) =>
-        msg._id === msgData.tempId ? { ...data, status: 'sent' } : msg
+      socket.emit('message', {
+        ...data,
+        senderVirtualNumber: localStorage.getItem('virtualNumber'),
+        senderUsername: localStorage.getItem('username'),
+        senderPhoto: localStorage.getItem('photo'),
+      });
+      dispatch(
+        setMessages({
+          recipientId: selectedChat,
+          messages: (chats[selectedChat] || []).map((msg) =>
+            msg._id === msgData.tempId ? { ...data, content: msg.content, status: 'sent' } : msg
+          ),
+        })
       );
+      const cachedMessages = JSON.parse(localStorage.getItem(`chat_${selectedChat}`)) || [];
+      const updatedCachedMessages = cachedMessages.map((msg) => (msg._id === msgData.tempId ? { ...data, status: 'sent' } : msg));
       localStorage.setItem(`chat_${selectedChat}`, JSON.stringify(updatedCachedMessages));
       setUploadProgress(null);
     } catch (error) {
       console.error('Send message error:', error);
-      dispatch(setMessages({
-        recipientId: selectedChat,
-        messages: (chats[selectedChat] || []).filter((msg) => msg._id !== msgData.tempId),
-      }));
+      dispatch(
+        setMessages({
+          recipientId: selectedChat,
+          messages: (chats[selectedChat] || []).filter((msg) => msg._id !== msgData.tempId),
+        })
+      );
       setUploadProgress(null);
       setError('Failed to send message');
     }
@@ -564,7 +569,6 @@ const getSharedKey = async (recipientId) => {
 
   const sendMessage = async () => {
     try {
-      // Validate input
       if (!selectedChat) {
         setError('No chat selected');
         return;
@@ -573,12 +577,10 @@ const getSharedKey = async (recipientId) => {
         setError('Please enter a message or select a file');
         return;
       }
-  
-      // Stop typing indicator
+
       socket.emit('stopTyping', { userId, recipientId: selectedChat });
       setTyping(false);
-  
-      // Prepare temporary message (unencrypted for local display)
+
       const tempId = Date.now().toString();
       const tempMsg = {
         _id: tempId,
@@ -587,45 +589,33 @@ const getSharedKey = async (recipientId) => {
         contentType,
         content: file ? URL.createObjectURL(file) : message,
         caption,
-        status: 'sending', // New status to indicate message is being sent
+        status: 'sending',
         replyTo,
         createdAt: new Date(),
         tempId,
       };
-  
-      // Add message to local state immediately for responsiveness
+
       dispatch(addMessage({ recipientId: selectedChat, message: tempMsg }));
-      
+
       let encryptedContent = message;
       let iv = '';
-      
-      // Only attempt encryption for text messages if we have a shared key
+
       if (contentType === 'text') {
-        try {
-          const sharedKey = await getSharedKey(selectedChat);
-          if (sharedKey) {
-            const encryptionResult = await encryptMessage(message, sharedKey);
-            encryptedContent = encryptionResult.encrypted;
-            iv = encryptionResult.iv;
-          } else {
-            console.warn('No encryption key - sending unencrypted');
-            // You might want to notify the user here
-          }
-        } catch (encryptionError) {
-          console.error('Encryption failed:', encryptionError);
-          // Continue with unencrypted message but notify user
+        const sharedKey = await getSharedKey(selectedChat);
+        if (sharedKey) {
+          const encryptionResult = await encryptMessage(message, sharedKey);
+          encryptedContent = encryptionResult.encrypted;
+          iv = encryptionResult.iv;
+        } else {
+          console.warn('No encryption key - sending unencrypted');
           setError('Message sent without encryption');
         }
       }
-  
-      // Update local cache with encrypted content
+
       const cachedMessages = JSON.parse(localStorage.getItem(`chat_${selectedChat}`)) || [];
-      localStorage.setItem(
-        `chat_${selectedChat}`,
-        JSON.stringify([...cachedMessages, { ...tempMsg, content: encryptedContent, iv }])
-      );
-  
-      // Scroll to bottom if needed
+      const messageForServer = { ...tempMsg, content: encryptedContent, iv, status: 'sent' };
+      localStorage.setItem(`chat_${selectedChat}`, JSON.stringify([...cachedMessages, messageForServer]));
+
       if (isAtBottomRef.current) {
         setTimeout(() => {
           chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
@@ -633,8 +623,7 @@ const getSharedKey = async (recipientId) => {
       } else {
         setShowJumpToBottom(true);
       }
-  
-      // Clear input fields
+
       setMessage('');
       setFile(null);
       setCaption('');
@@ -643,46 +632,35 @@ const getSharedKey = async (recipientId) => {
       setUploadProgress(null);
       setReplyTo(null);
       setMediaPreview(null);
-  
-      // Prepare message for server
-      const messageForServer = {
-        ...tempMsg,
-        content: encryptedContent,
-        iv,
-        status: 'sent' // Update status for server
-      };
-  
-      // Handle online/offline sending
+
       if (navigator.onLine) {
-        try {
-          await sendMessageToServer(messageForServer);
-          // Update local message status to 'sent' after successful server send
-          dispatch(updateMessageStatus({
-            recipientId: selectedChat,
-            messageId: tempId,
-            status: 'sent'
-          }));
-        } catch (sendError) {
-          console.error('Failed to send message:', sendError);
-          // Update local message status to 'failed'
-          dispatch(updateMessageStatus({
-            recipientId: selectedChat,
-            messageId: tempId,
-            status: 'failed'
-          }));
-          setError('Failed to send message');
-        }
+        await sendMessageToServer(messageForServer);
+        dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: tempId, status: 'sent' }));
       } else {
-        // Offline handling
         setPendingMessages((prev) => [...prev, messageForServer]);
         await saveMessages([messageForServer]);
-        // Update local message status to indicate it's pending
-        dispatch(updateMessageStatus({
-          recipientId: selectedChat,
-          messageId: tempId,
-          status: 'pending'
-        }));
+        dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: tempId, status: 'pending' }));
+        if (contentType === 'text' && iv) {
+          setDecryptionPending((prev) => ({
+            ...prev,
+            [tempId]: { encryptedContent, iv },
+          }));
+        }
       }
+
+      // Update users with the latest message
+      setUsers((prev) => {
+        const updatedUsers = prev.map((user) =>
+          user.id === selectedChat ? { ...user, latestMessage: { ...messageForServer, content: message } } : user
+        );
+        updatedUsers.sort((a, b) => {
+          const dateA = a.latestMessage ? new Date(a.latestMessage.createdAt) : new Date(0);
+          const dateB = b.latestMessage ? new Date(b.latestMessage.createdAt) : new Date(0);
+          return dateB - dateA;
+        });
+        localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
+        return updatedUsers;
+      });
     } catch (error) {
       console.error('Error in sendMessage:', error);
       setError('An unexpected error occurred');
@@ -707,15 +685,17 @@ const getSharedKey = async (recipientId) => {
     try {
       await Promise.all(
         selectedMessages.map((messageId) =>
-          axios.delete(`/social/message/${messageId}`, {
+          axios.delete(`https://gapp-6yc3.onrender.com/social/message/${messageId}`, {
             headers: { Authorization: `Bearer ${token}` },
           })
         )
       );
-      dispatch(setMessages({
-        recipientId: selectedChat,
-        messages: (chats[selectedChat] || []).filter((msg) => !selectedMessages.includes(msg._id)),
-      }));
+      dispatch(
+        setMessages({
+          recipientId: selectedChat,
+          messages: (chats[selectedChat] || []).filter((msg) => !selectedMessages.includes(msg._id)),
+        })
+      );
       const cachedMessages = JSON.parse(localStorage.getItem(`chat_${selectedChat}`)) || [];
       const updatedCachedMessages = cachedMessages.filter((msg) => !selectedMessages.includes(msg._id));
       localStorage.setItem(`chat_${selectedChat}`, JSON.stringify(updatedCachedMessages));
@@ -744,41 +724,46 @@ const getSharedKey = async (recipientId) => {
     }
 
     const sharedKey = await getSharedKey(contact.id);
-    const { encrypted, iv } = msg.contentType === 'text' ? await encryptMessage(msg.content, sharedKey) : { encrypted: msg.content, iv: msg.iv || '' };
+    const { encrypted, iv } = msg.contentType === 'text' && sharedKey ? await encryptMessage(msg.content, sharedKey) : { encrypted: msg.content, iv: msg.iv || '' };
     const formData = new FormData();
     formData.append('senderId', userId);
     formData.append('recipientId', contact.id);
     formData.append('contentType', msg.contentType);
     formData.append('caption', msg.caption || '');
     formData.append('content', encrypted);
-    if (msg.contentType === 'text') formData.append('iv', iv);
+    if (msg.contentType === 'text' && sharedKey) formData.append('iv', iv);
 
     try {
-      const { data } = await axios.post('/social/message', formData, {
+      const { data } = await axios.post('https://gapp-6yc3.onrender.com/social/message', formData, {
         headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
       });
-      socket.emit('message', { ...data, senderVirtualNumber: localStorage.getItem('virtualNumber'), senderUsername: localStorage.getItem('username'), senderPhoto: localStorage.getItem('photo') });
+      socket.emit('message', {
+        ...data,
+        senderVirtualNumber: localStorage.getItem('virtualNumber'),
+        senderUsername: localStorage.getItem('username'),
+        senderPhoto: localStorage.getItem('photo'),
+      });
     } catch (error) {
       setError('Failed to forward message');
     }
   };
 
   const copyMessage = (msg) => {
-    if (msg.contentType === 'text') {
+    if (msg.contentType === 'text' && msg.content !== 'Message encrypted, awaiting key') {
       navigator.clipboard.writeText(msg.content);
       alert('Message copied to clipboard');
     }
   };
 
   const shareMessage = (msg) => {
-    if (navigator.share) {
+    if (navigator.share && msg.content !== 'Message encrypted, awaiting key') {
       navigator.share({
         title: 'Shared Message',
         text: msg.contentType === 'text' ? msg.content : undefined,
         url: msg.contentType !== 'text' ? msg.content : undefined,
       });
     } else {
-      alert('Sharing not supported on this device');
+      alert('Sharing not supported on this device or message is encrypted');
     }
   };
 
@@ -787,56 +772,53 @@ const getSharedKey = async (recipientId) => {
       setError('Virtual number is required');
       return;
     }
-  
+
+    setLoading(true);
     try {
       const { data } = await axios.post(
-        '/auth/add_contact',
-        { 
-          userId, 
-          virtualNumber: newContactNumber,
-          name: newContactName || undefined 
-        },
-        { 
-          headers: { Authorization: `Bearer ${token}` } 
-        }
+        'https://gapp-6yc3.onrender.com/auth/add_contact',
+        { userId, virtualNumber: newContactNumber },
+        { headers: { Authorization: `Bearer ${token}` } }
       );
-  
-      if (data.userId) {
-        try {
-          const { publicKey } = await generateDHKeyPair();
-          await axios.post(
-            '/auth/update_public_key', 
-            { userId, publicKey }, 
-            { headers: { Authorization: `Bearer ${token}` } 
-          });
-          
-          setUsers((prev) => {
-            const updatedUsers = [
-              ...prev,
-              { 
-                id: data.userId, 
-                virtualNumber: newContactNumber, 
-                username: newContactName || data.username || 'Unsaved Number', 
-                photo: data.photo || 'https://placehold.co/40x40', 
-                unreadCount: 0 
-              }
-            ];
-            localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
-            return updatedUsers;
-          });
-          
-          setNewContactNumber('');
-          setNewContactName('');
-          setMenuTab('');
-          setError('');
-        } catch (keyError) {
-          console.error('Error updating public key:', keyError);
-          setError('Contact added but encryption setup failed');
-        }
-      }
+
+      const newContact = {
+        id: data.userId,
+        virtualNumber: data.virtualNumber,
+        username: newContactName || data.username || 'Unsaved Number',
+        photo: data.photo || 'https://placehold.co/40x40',
+        unreadCount: 0,
+        latestMessage: null, // No messages yet for new contact
+        status: 'offline',
+        lastSeen: null,
+      };
+
+      setUsers((prev) => {
+        const updatedUsers = [...prev, newContact];
+        updatedUsers.sort((a, b) => {
+          const dateA = a.latestMessage ? new Date(a.latestMessage.createdAt) : new Date(0);
+          const dateB = b.latestMessage ? new Date(b.latestMessage.createdAt) : new Date(0);
+          return dateB - dateA;
+        });
+        localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
+        return updatedUsers;
+      });
+
+      setNewContactNumber('');
+      setNewContactName('');
+      setMenuTab('');
+      setError('');
+      setLoading(false);
+      dispatch(setSelectedChat(data.userId)); // Open chat box for new contact
     } catch (error) {
       console.error('Add contact error:', error);
-      setError(error.response?.data?.error || 'Failed to add contact');
+      setLoading(false);
+      const errorMessage = error.response?.data?.error || 'Failed to add contact';
+      setError(errorMessage);
+      if (error.response?.status === 404) {
+        setError('Contact service unavailable. Please try again later.');
+      } else if (error.response?.status === 400) {
+        setError('Invalid virtual number or contact already exists.');
+      }
     }
   };
 
@@ -926,9 +908,9 @@ const getSharedKey = async (recipientId) => {
         <div className="flex-1 overflow-y-auto">
           {users.map((user) => (
             <motion.div
-              key={user.id}
+              key={user.id || user.virtualNumber} // Use virtualNumber as fallback key if id is missing
               whileHover={{ backgroundColor: '#f0f0f0' }}
-              onClick={() => dispatch(setSelectedChat(user.id))}
+              onClick={() => user.id && dispatch(setSelectedChat(user.id))} // Only set chat if id exists
               className={`flex items-center p-3 border-b border-gray-200 cursor-pointer ${selectedChat === user.id ? 'bg-gray-100' : ''}`}
             >
               <div className="relative">
@@ -946,16 +928,7 @@ const getSharedKey = async (recipientId) => {
                 </div>
                 <div className="flex justify-between">
                   <span className="text-sm text-gray-600 truncate">
-                    {user.latestMessage ? (
-                      <>
-                        {user.latestMessage.senderId === userId && 'You: '}
-                        {user.latestMessage.contentType === 'text'
-                          ? user.latestMessage.content.slice(0, 30) + (user.latestMessage.content.length > 30 ? '...' : '')
-                          : '(Attachment)'}
-                      </>
-                    ) : (
-                      'No messages yet'
-                    )}
+                    {user.latestMessage ? user.latestMessage.content : 'No messages yet'}
                   </span>
                   {(user.unreadCount || notifications[user.id]) > 0 && (
                     <span className="ml-auto bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
@@ -1036,6 +1009,7 @@ const getSharedKey = async (recipientId) => {
                       onChange={(e) => setNewContactNumber(e.target.value)}
                       className="w-full p-2 mb-2 border rounded-lg"
                       placeholder="Enter virtual number"
+                      disabled={loading}
                     />
                     <input
                       type="text"
@@ -1043,10 +1017,16 @@ const getSharedKey = async (recipientId) => {
                       onChange={(e) => setNewContactName(e.target.value)}
                       className="w-full p-2 mb-2 border rounded-lg"
                       placeholder="Enter contact name (optional)"
+                      disabled={loading}
                     />
-                    <button onClick={addContact} className="w-full bg-primary text-white p-2 rounded-lg hover:bg-secondary">
-                      Save Contact
+                    <button
+                      onClick={addContact}
+                      className="w-full bg-primary text-white p-2 rounded-lg hover:bg-secondary disabled:bg-gray-400"
+                      disabled={loading}
+                    >
+                      {loading ? 'Saving...' : 'Save Contact'}
                     </button>
+                    {error && <p className="text-red-500 text-sm mt-2">{error}</p>}
                   </motion.div>
                 )}
                 {menuTab === 'newGroup' && (
@@ -1097,9 +1077,15 @@ const getSharedKey = async (recipientId) => {
                   />
                 </motion.div>
               )}
-              <img src={users.find((u) => u.id === selectedChat)?.photo || 'https://placehold.co/40x40'} alt="Profile" className="w-10 h-10 rounded-full mr-2" />
+              <img
+                src={users.find((u) => u.id === selectedChat)?.photo || 'https://placehold.co/40x40'}
+                alt="Profile"
+                className="w-10 h-10 rounded-full mr-2"
+              />
               <div>
-                <span className="font-semibold">{users.find((u) => u.id === selectedChat)?.username || users.find((u) => u.id === selectedChat)?.virtualNumber || 'Unknown'}</span>
+                <span className="font-semibold">
+                  {users.find((u) => u.id === selectedChat)?.username || users.find((u) => u.id === selectedChat)?.virtualNumber || 'Unknown'}
+                </span>
                 <div className="text-sm text-gray-500">
                   {isTyping[selectedChat] ? (
                     <span className="text-green-500">Typing...</span>
@@ -1113,23 +1099,20 @@ const getSharedKey = async (recipientId) => {
             </div>
             <div ref={chatRef} className="flex-1 overflow-y-auto bg-gray-100 p-2 pt-16 pb-32">
               {(chats[selectedChat] || []).length === 0 ? (
-                <p className="text-center text-gray-500 mt-4">Start a new conversation</p>
+                <p className="text-center text-gray-500 mt-4">No messages yet</p>
               ) : (
                 <>
                   {(chats[selectedChat] || []).map((msg, index) => {
                     const currentDate = new Date(msg.createdAt);
                     const prevMsg = index > 0 ? (chats[selectedChat] || [])[index - 1] : null;
                     const prevDate = prevMsg ? new Date(prevMsg.createdAt) : null;
-
-                    let showDateHeader = !prevDate || new Date(currentDate.getFullYear(), currentDate.getMonth(), currentDate.getDate()).getTime() !== new Date(prevDate.getFullYear(), prevDate.getMonth(), prevDate.getDate()).getTime();
+                    let showDateHeader =
+                      !prevDate ||
+                      new Date(currentDate.getFullYear(), currentDate.getMonth(), currentDate.getDate()).getTime() !==
+                        new Date(prevDate.getFullYear(), prevDate.getMonth(), prevDate.getDate()).getTime();
 
                     return (
-                      <motion.div
-                        key={msg._id}
-                        initial={{ opacity: 0, y: 20 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ duration: 0.3 }}
-                      >
+                      <motion.div key={msg._id} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }}>
                         {showDateHeader && (
                           <div className="text-center my-2">
                             <span className="bg-gray-300 text-gray-700 px-2 py-1 rounded-full text-sm">{formatDateHeader(msg.createdAt)}</span>
@@ -1143,14 +1126,22 @@ const getSharedKey = async (recipientId) => {
                         <div
                           id={`message-${msg._id}`}
                           className={`flex ${msg.senderId === userId ? 'justify-end' : 'justify-start'} px-2 py-1 relative`}
-                          onTouchStart={(e) => { handleHoldStart(msg._id); handleSwipeStart(e); }}
+                          onTouchStart={(e) => {
+                            handleHoldStart(msg._id);
+                            handleSwipeStart(e);
+                          }}
                           onTouchMove={handleSwipeMove}
-                          onTouchEnd={(e) => { handleHoldEnd(); handleSwipeEnd(e, msg); }}
+                          onTouchEnd={(e) => {
+                            handleHoldEnd();
+                            handleSwipeEnd(e, msg);
+                          }}
                           onMouseDown={() => handleHoldStart(msg._id)}
                           onMouseUp={handleHoldEnd}
                         >
                           <div
-                            className={`max-w-[70%] p-2 rounded-lg shadow-sm ${msg.senderId === userId ? 'bg-green-500 text-white rounded-br-none' : 'bg-white text-black rounded-bl-none'} transition-all ${selectedMessages.includes(msg._id) ? 'bg-opacity-50' : ''}`}
+                            className={`max-w-[70%] p-2 rounded-lg shadow-sm ${
+                              msg.senderId === userId ? 'bg-green-500 text-white rounded-br-none' : 'bg-white text-black rounded-bl-none'
+                            } transition-all ${selectedMessages.includes(msg._id) ? 'bg-opacity-50' : ''}`}
                             onClick={() => {
                               if (selectedMessages.length > 0) {
                                 setSelectedMessages((prev) =>
@@ -1198,10 +1189,15 @@ const getSharedKey = async (recipientId) => {
                                   src={msg.content}
                                   alt="Chat"
                                   className="max-w-[80%] max-h-64 object-contain rounded-lg"
-                                  onClick={(e) => { e.stopPropagation(); viewMessage(msg); }}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    viewMessage(msg);
+                                  }}
                                 />
                                 {msg.caption && (
-                                  <p className="text-xs italic text-gray-300 max-w-[80%] p-2 border-b border-l border-r border-gray-300 rounded-b-lg break-words">{msg.caption}</p>
+                                  <p className="text-xs italic text-gray-300 max-w-[80%] p-2 border-b border-l border-r border-gray-300 rounded-b-lg break-words">
+                                    {msg.caption}
+                                  </p>
                                 )}
                               </div>
                             )}
@@ -1213,7 +1209,9 @@ const getSharedKey = async (recipientId) => {
                                   onClick={(e) => e.stopPropagation()}
                                 />
                                 {msg.caption && (
-                                  <p className="text-xs italic text-gray-300 max-w-[80%] p-2 border-b border-l border-r border-gray-300 rounded-b-lg break-words">{msg.caption}</p>
+                                  <p className="text-xs italic text-gray-300 max-w-[80%] p-2 border-b border-l border-r border-gray-300 rounded-b-lg break-words">
+                                    {msg.caption}
+                                  </p>
                                 )}
                               </div>
                             )}
@@ -1267,25 +1265,38 @@ const getSharedKey = async (recipientId) => {
                             >
                               <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
                                 <FaReply
-                                  onClick={() => { setReplyTo(msg); scrollToMessage(msg._id); setShowMessageMenu(null); }}
+                                  onClick={() => {
+                                    setReplyTo(msg);
+                                    scrollToMessage(msg._id);
+                                    setShowMessageMenu(null);
+                                  }}
                                   className="text-primary cursor-pointer hover:text-secondary"
                                 />
                               </motion.div>
                               <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
                                 <FaForward
-                                  onClick={() => { forwardMessage(msg); setShowMessageMenu(null); }}
+                                  onClick={() => {
+                                    forwardMessage(msg);
+                                    setShowMessageMenu(null);
+                                  }}
                                   className="text-primary cursor-pointer hover:text-secondary"
                                 />
                               </motion.div>
                               <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
                                 <FaCopy
-                                  onClick={() => { copyMessage(msg); setShowMessageMenu(null); }}
+                                  onClick={() => {
+                                    copyMessage(msg);
+                                    setShowMessageMenu(null);
+                                  }}
                                   className="text-primary cursor-pointer hover:text-secondary"
                                 />
                               </motion.div>
                               <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
                                 <FaShare
-                                  onClick={() => { shareMessage(msg); setShowMessageMenu(null); }}
+                                  onClick={() => {
+                                    shareMessage(msg);
+                                    setShowMessageMenu(null);
+                                  }}
                                   className="text-primary cursor-pointer hover:text-secondary"
                                 />
                               </motion.div>
@@ -1348,87 +1359,119 @@ const getSharedKey = async (recipientId) => {
                     className="w-full p-1 mt-2 border rounded-lg text-sm"
                     style={{ maxWidth: mediaPreview.type === 'image' || mediaPreview.type === 'video' ? '80%' : '100%' }}
                   />
-                  <button onClick={() => setMediaPreview(null)} className="text-red-500 text-xs mt-1">Cancel</button>
-                </div>
-              )}
-              {uploadProgress !== null && (
-                <div className="bg-gray-100 p-2 mb-2 rounded w-full max-w-[80%] mx-auto">
-                  <div className="w-full bg-gray-200 rounded-full h-2.5">
-                    <div className="bg-green-500 h-2.5 rounded-full" style={{ width: `${uploadProgress}%` }}></div>
-                  </div>
-                  <p className="text-xs text-center mt-1">Uploading: {uploadProgress}%</p>
-                </div>
-              )}
-              {selectedMessages.length > 0 && (
-                <div className="flex items-center w-full mb-2">
-                  <button onClick={() => setShowDeleteConfirm(true)} className="bg-red-500 text-white px-3 py-1 rounded mr-2">
-                    Delete ({selectedMessages.length})
-                  </button>
-                  <button onClick={() => setSelectedMessages([])} className="bg-gray-500 text-white px-3 py-1 rounded">
-                    Cancel
+                  <button onClick={() => setMediaPreview(null)} className="absolute top-2 right-2 bg-red-500 text-white p-1 rounded-full">
+                    <FaTrash />
                   </button>
                 </div>
               )}
               {replyTo && (
-                <div className="bg-gray-100 p-2 mb-2 rounded w-full">
-                  <p className="text-sm italic">Replying to: {replyTo.content.slice(0, 20)}...</p>
-                  <button onClick={() => setReplyTo(null)} className="text-red-500 text-xs">Cancel</button>
+                <div className="bg-gray-100 p-2 mb-2 rounded w-full max-w-[80%] mx-auto flex justify-between items-center">
+                  <div>
+                    <p className="text-xs italic text-gray-700">Replying to:</p>
+                    <p className="text-sm">
+                      {replyTo.contentType === 'text' ? replyTo.content.slice(0, 20) + (replyTo.content.length > 20 ? '...' : '') : replyTo.contentType}
+                    </p>
+                  </div>
+                  <button onClick={() => setReplyTo(null)} className="text-red-500">
+                    <FaTrash />
+                  </button>
                 </div>
               )}
-              <div className={`flex items-center ${isSmallDevice ? 'w-[90%]' : 'w-full max-w-3xl'} mx-auto pb-4`}>
-                <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
-                  <FaPaperclip
-                    className="text-xl text-gray-500 cursor-pointer hover:text-gray-700 mr-2"
-                    onClick={() => setShowPicker(!showPicker)}
-                  />
+              <div className="flex items-center">
+                <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }} className="relative">
+                  <FaPaperclip onClick={() => setShowPicker(!showPicker)} className="text-xl text-primary cursor-pointer hover:text-secondary mr-2" />
+                  {showPicker && (
+                    <motion.div
+                      initial={{ opacity: 0, scale: 0.8 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.8 }}
+                      className="absolute bottom-12 left-0 bg-white p-2 rounded-lg shadow-lg z-20 flex space-x-2"
+                    >
+                      <label className="cursor-pointer">
+                        <FaFileAlt className="text-blue-600" />
+                        <input type="file" accept=".pdf,.doc,.docx" onChange={(e) => handleFileChange(e, 'document')} className="hidden" />
+                      </label>
+                      <label className="cursor-pointer">
+                        <FaPlay className="text-green-500" />
+                        <input type="file" accept="audio/*" onChange={(e) => handleFileChange(e, 'audio')} className="hidden" />
+                      </label>
+                      <label className="cursor-pointer">
+                        <img src="https://placehold.co/20x20" alt="Image" />
+                        <input type="file" accept="image/*" onChange={(e) => handleFileChange(e, 'image')} className="hidden" />
+                      </label>
+                      <label className="cursor-pointer">
+                        <video width="20" height="20" />
+                        <input type="file" accept="video/*" onChange={(e) => handleFileChange(e, 'video')} className="hidden" />
+                      </label>
+                    </motion.div>
+                  )}
                 </motion.div>
                 <input
+                  type="text"
                   value={message}
                   onChange={handleTyping}
                   onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
-                  className="flex-1 p-2 border rounded-full focus:ring-2 focus:ring-green-500 bg-gray-100 text-sm"
                   placeholder="Type a message..."
+                  className="flex-1 p-2 border rounded-lg mr-2"
+                  disabled={contentType !== 'text' && file}
                 />
                 <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
-                  <FaPaperPlane
-                    className="text-xl text-green-500 cursor-pointer hover:text-green-700 ml-2"
-                    onClick={sendMessage}
-                  />
+                  <FaPaperPlane onClick={sendMessage} className="text-xl text-primary cursor-pointer hover:text-secondary" />
                 </motion.div>
               </div>
-              {showPicker && (
-                <motion.div
-                  initial={{ opacity: 0, scale: 0.8 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  className="absolute bottom-16 left-4 bg-white p-2 rounded-lg shadow-lg flex space-x-2 z-20"
-                >
-                  {['image', 'video', 'audio', 'document'].map((type) => (
-                    <motion.label
-                      key={type}
-                      whileHover={{ scale: 1.1 }}
-                      className="p-2 bg-green-500 text-white rounded hover:bg-green-600 text-sm cursor-pointer"
-                    >
-                      {type.charAt(0).toUpperCase() + type.slice(1)}
-                      <input
-                        type="file"
-                        accept={type === 'image' ? 'image/*' : type === 'video' ? 'video/*' : type === 'audio' ? 'audio/*' : '*/*'}
-                        onChange={(e) => handleFileChange(e, type)}
-                        className="hidden"
-                      />
-                    </motion.label>
-                  ))}
-                </motion.div>
+              {uploadProgress !== null && (
+                <div className="w-full bg-gray-200 rounded-full h-2 mt-2">
+                  <div className="bg-primary h-2 rounded-full" style={{ width: `${uploadProgress}%` }}></div>
+                </div>
               )}
+              {error && <p className="text-red-500 text-sm mt-2">{error}</p>}
             </div>
             {showJumpToBottom && (
               <motion.div
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
-                className="fixed bottom-20 right-4 bg-green-500 text-white p-2 rounded-full cursor-pointer z-20"
+                className="fixed bottom-20 md:left-[66%] left-1/2 transform -translate-x-1/2 bg-primary text-white p-2 rounded-full cursor-pointer z-40"
                 onClick={jumpToBottom}
               >
                 <FaArrowDown />
-                <span className="ml-2 text-sm">New Messages</span>
+              </motion.div>
+            )}
+            {showDeleteConfirm && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
+              >
+                <div className="bg-white p-6 rounded-lg shadow-lg">
+                  <p className="mb-4">Are you sure you want to delete {selectedMessages.length} message(s)?</p>
+                  <div className="flex justify-end space-x-2">
+                    <button onClick={() => setShowDeleteConfirm(false)} className="bg-gray-300 text-black p-2 rounded-lg">
+                      Cancel
+                    </button>
+                    <button onClick={deleteMessages} className="bg-red-500 text-white p-2 rounded-lg">
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+            {viewMedia && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50"
+                onClick={() => setViewMedia(null)}
+              >
+                {viewMedia.type === 'image' && <img src={viewMedia.url} alt="Media" className="max-w-full max-h-full" />}
+                {viewMedia.type === 'video' && <video src={viewMedia.url} controls className="max-w-full max-h-full" />}
+                {viewMedia.type === 'audio' && <audio src={viewMedia.url} controls className="w-full max-w-md" />}
+                {viewMedia.type === 'document' && (
+                  <div className="bg-white p-4 rounded-lg">
+                    <a href={viewMedia.url} download target="_blank" rel="noopener noreferrer" className="text-blue-600">
+                      Download Document
+                    </a>
+                  </div>
+                )}
               </motion.div>
             )}
           </>
@@ -1438,90 +1481,6 @@ const getSharedKey = async (recipientId) => {
           </div>
         )}
       </div>
-      {viewMedia && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="fixed inset-0 bg-black flex items-center justify-center z-50"
-          onClick={() => setViewMedia(null)}
-        >
-          <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
-            <FaArrowLeft
-              onClick={(e) => { e.stopPropagation(); setViewMedia(null); }}
-              className="absolute top-4 left-4 text-white text-2xl cursor-pointer hover:text-gray-300"
-            />
-          </motion.div>
-          <div className="relative max-w-[90%] max-h-[90%] flex items-center justify-center">
-            {viewMedia.type === 'image' && (
-              <img src={viewMedia.url} alt="Media" className="max-w-full max-h-full object-contain rounded-lg" />
-            )}
-            {viewMedia.type === 'video' && (
-              <video src={viewMedia.url} controls autoPlay className="max-w-full max-h-full object-contain rounded-lg" />
-            )}
-            {viewMedia.type === 'audio' && (
-              <div className="bg-gray-800 p-4 rounded-lg">
-                <audio src={viewMedia.url} controls className="w-full max-w-md" />
-              </div>
-            )}
-            {viewMedia.type === 'document' && (
-              <div className="bg-gray-800 p-4 rounded-lg flex items-center">
-                <FaFileAlt className="text-white text-2xl mr-3" />
-                <span className="text-white text-lg truncate max-w-[200px]">{viewMedia.url.split('/').pop()}</span>
-                <a
-                  href={viewMedia.url}
-                  download
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="ml-3 text-white hover:text-gray-300"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <FaDownload className="text-2xl" />
-                </a>
-              </div>
-            )}
-          </div>
-          {(viewMedia.type === 'image' || viewMedia.type === 'video') && (
-            <a
-              href={viewMedia.url}
-              download
-              target="_blank"
-              rel="noopener noreferrer"
-              className="absolute bottom-4 right-4 text-white hover:text-gray-300"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <FaDownload className="text-2xl" />
-            </a>
-          )}
-        </motion.div>
-      )}
-
-      {showDeleteConfirm && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
-        >
-          <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-sm">
-            <h3 className="text-lg font-semibold text-primary mb-4">Delete {selectedMessages.length} message{selectedMessages.length > 1 ? 's' : ''}?</h3>
-            <p className="text-gray-600 mb-4">This action cannot be undone.</p>
-            <div className="flex justify-end space-x-2">
-              <button onClick={() => setShowDeleteConfirm(false)} className="bg-gray-500 text-white px-4 py-2 rounded-lg hover:bg-gray-600">Cancel</button>
-              <button onClick={deleteMessages} className="bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600">Delete</button>
-            </div>
-          </div>
-        </motion.div>
-      )}
-
-      {error && (
-        <motion.div
-          initial={{ opacity: 0, y: -20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="fixed top-4 left-1/2 transform -translate-x-1/2 bg-red-500 text-white px-4 py-2 rounded-lg shadow-lg z-50"
-        >
-          {error}
-          <button onClick={() => setError('')} className="ml-2 text-white hover:text-gray-200">✕</button>
-        </motion.div>
-      )}
     </motion.div>
   );
 };

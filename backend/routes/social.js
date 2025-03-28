@@ -8,7 +8,7 @@ const multer = require('multer');
 const authMiddleware = require('../middleware/auth');
 const cache = require('memory-cache');
 
-// Cloudinary configuration (assumed set via environment variables in auth.js)
+// Cloudinary configuration
 if (!cloudinary.config().cloud_name) {
   cloudinary.config({
     cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -175,7 +175,7 @@ module.exports = (io) => {
   // Create a new post
   router.post('/post', authMiddleware, upload.single('content'), async (req, res) => {
     try {
-      const { id: userId } = req.user; // Changed from userId to id to match auth middleware
+      const { id: userId } = req.user;
       const { contentType, caption } = req.body;
       if (!contentType) return res.status(400).json({ error: 'Content type is required' });
 
@@ -215,7 +215,7 @@ module.exports = (io) => {
       const post = await Post.findById(req.params.postId);
       if (!post) return res.status(404).json({ error: 'Post not found' });
       if (post.userId.toString() !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
-      await Post.deleteOne({ _id: req.params.postId });
+      await Post.deleteJUan({ _id: req.params.postId });
       io.emit('postDeleted', req.params.postId);
       res.json({ success: true });
     } catch (error) {
@@ -224,7 +224,7 @@ module.exports = (io) => {
     }
   });
 
-  // Send a message (Updated for encryption)
+  // Send a message
   router.post('/message', authMiddleware, upload.single('content'), async (req, res) => {
     try {
       const { senderId, recipientId, contentType, caption, iv, replyTo } = req.body;
@@ -278,7 +278,7 @@ module.exports = (io) => {
         recipientId,
         contentType,
         content: contentUrl,
-        iv: contentType === 'text' ? iv : undefined, // Store IV for encrypted text messages
+        iv: contentType === 'text' ? iv : undefined,
         caption,
         status: 'sent',
         replyTo: replyTo || undefined,
@@ -300,7 +300,7 @@ module.exports = (io) => {
     }
   });
 
-  // Fetch messages (Updated to include iv)
+  // Fetch messages
   router.get('/messages', authMiddleware, async (req, res) => {
     try {
       const { userId, recipientId, limit = 50, skip = 0 } = req.query;
@@ -331,17 +331,23 @@ module.exports = (io) => {
           { senderId: recipientId, recipientId: userId },
         ],
       })
-        .select('senderId recipientId contentType content iv caption status replyTo createdAt') // Include iv
+        .select('senderId recipientId contentType content iv caption status replyTo createdAt')
         .sort({ createdAt: -1 })
         .skip(parseInt(skip))
         .limit(parseInt(limit))
         .lean();
 
       const response = {
-        messages: messages.reverse(),
+        messages: messages.reverse(), // Reverse to chronological order
         totalMessages,
         hasMore: parseInt(skip) + messages.length < totalMessages,
       };
+
+      // Handle case where no messages exist (new contact)
+      if (messages.length === 0) {
+        response.messages = [];
+        response.hasMore = false;
+      }
 
       cache.put(cacheKey, response, 5 * 60 * 1000); // Cache for 5 minutes
       res.json(response);

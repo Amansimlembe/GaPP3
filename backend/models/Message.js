@@ -5,6 +5,7 @@ const messageSchema = new mongoose.Schema({
   recipientId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   contentType: { type: String, required: true },
   content: { type: String, required: true },
+  iv: { type: String }, // Added for AES-GCM encryption
   caption: { type: String },
   status: { type: String, default: 'sent' },
   replyTo: { type: mongoose.Schema.Types.ObjectId, ref: 'Message' },
