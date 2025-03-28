@@ -1,3 +1,5 @@
+
+const mongoose = require('mongoose');
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
@@ -314,34 +316,58 @@ router.post('/update_public_key', auth, async (req, res) => {
     res.status(500).json({ error: 'Failed to update public key', details: error.message });
   }
 });
-
-// Get recipient's public key for shared key derivation
+// Updated shared_key endpoint in auth.js
 router.get('/shared_key/:recipientId', auth, async (req, res) => {
   try {
     const { id: userId } = req.user;
     const { recipientId } = req.params;
 
+    // Validate recipientId format
     if (!mongoose.Types.ObjectId.isValid(recipientId)) {
-      return res.status(400).json({ error: 'Invalid recipient ID' });
+      return res.status(400).json({ 
+        error: 'Invalid recipient ID format',
+        code: 'INVALID_RECIPIENT_ID'
+      });
     }
 
-    const recipient = await User.findById(recipientId).select('publicKey');
-    if (!recipient) return res.status(404).json({ error: 'Recipient not found' });
+    // Check if recipient exists and has public key
+    const recipient = await User.findById(recipientId)
+      .select('publicKey virtualNumber username')
+      .lean();
+
+    if (!recipient) {
+      return res.status(404).json({ 
+        error: 'Recipient not found',
+        code: 'RECIPIENT_NOT_FOUND'
+      });
+    }
 
     if (!recipient.publicKey) {
       return res.status(400).json({ 
         error: 'Recipient has not set up end-to-end encryption',
-        canCommunicate: false
+        code: 'NO_PUBLIC_KEY',
+        recipientInfo: {
+          id: recipient._id,
+          virtualNumber: recipient.virtualNumber,
+          username: recipient.username
+        }
       });
     }
 
     res.json({ 
       recipientPublicKey: recipient.publicKey,
-      canCommunicate: true
+      recipientInfo: {
+        id: recipient._id,
+        virtualNumber: recipient.virtualNumber,
+        username: recipient.username
+      }
     });
   } catch (error) {
     console.error('Get shared key error:', error);
-    res.status(500).json({ error: 'Failed to fetch recipient public key' });
+    res.status(500).json({ 
+      error: 'Failed to fetch recipient public key',
+      code: 'SERVER_ERROR'
+    });
   }
 });
 module.exports = router;

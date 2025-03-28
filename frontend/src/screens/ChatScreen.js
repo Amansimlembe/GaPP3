@@ -127,24 +127,40 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     return decoder.decode(decrypted);
   };
 
-  const getSharedKey = async (recipientId) => {
-    try {
-      const response = await axios.get(`/auth/shared_key/${recipientId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      
-      if (!response.data?.recipientPublicKey) {
-        throw new Error('Recipient has not set up encryption');
-      }
-      
-      return await deriveSharedKey(response.data.recipientPublicKey);
-    } catch (error) {
-      console.error('Error getting shared key:', error);
-      // Fallback to unencrypted communication or show error
-      throw error;
-    }
-  };
 
+const getSharedKey = async (recipientId) => {
+  try {
+    const response = await axios.get(`/auth/shared_key/${recipientId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    if (response.data.error) {
+      // Handle specific error cases
+      switch (response.data.code) {
+        case 'INVALID_RECIPIENT_ID':
+          throw new Error('Invalid contact ID');
+        case 'RECIPIENT_NOT_FOUND':
+          throw new Error('Contact not found');
+        case 'NO_PUBLIC_KEY':
+          // Optionally notify user that messages won't be encrypted
+          console.warn('Contact has no public key - sending unencrypted');
+          return null; // Return null to indicate no encryption
+        default:
+          throw new Error(response.data.error);
+      }
+    }
+
+    if (!response.data.recipientPublicKey) {
+      throw new Error('No public key available');
+    }
+
+    return await deriveSharedKey(response.data.recipientPublicKey);
+  } catch (error) {
+    console.error('Error getting shared key:', error);
+    // Fallback to unencrypted communication
+    return null;
+  }
+};
   const formatChatListDate = (date) => {
     const messageDate = new Date(date);
     const now = new Date();
@@ -580,22 +596,24 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       // Add message to local state immediately for responsiveness
       dispatch(addMessage({ recipientId: selectedChat, message: tempMsg }));
       
-      // Handle encryption (only for text messages)
       let encryptedContent = message;
       let iv = '';
       
+      // Only attempt encryption for text messages if we have a shared key
       if (contentType === 'text') {
         try {
           const sharedKey = await getSharedKey(selectedChat);
-          const encryptionResult = await encryptMessage(message, sharedKey);
-          encryptedContent = encryptionResult.encrypted;
-          iv = encryptionResult.iv;
+          if (sharedKey) {
+            const encryptionResult = await encryptMessage(message, sharedKey);
+            encryptedContent = encryptionResult.encrypted;
+            iv = encryptionResult.iv;
+          } else {
+            console.warn('No encryption key - sending unencrypted');
+            // You might want to notify the user here
+          }
         } catch (encryptionError) {
           console.error('Encryption failed:', encryptionError);
-          // Fallback to unencrypted if encryption fails
-          encryptedContent = message;
-          iv = '';
-          // Optionally notify user encryption failed
+          // Continue with unencrypted message but notify user
           setError('Message sent without encryption');
         }
       }
