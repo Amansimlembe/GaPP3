@@ -321,19 +321,27 @@ router.get('/shared_key/:recipientId', auth, async (req, res) => {
     const { id: userId } = req.user;
     const { recipientId } = req.params;
 
+    if (!mongoose.Types.ObjectId.isValid(recipientId)) {
+      return res.status(400).json({ error: 'Invalid recipient ID' });
+    }
+
     const recipient = await User.findById(recipientId).select('publicKey');
     if (!recipient) return res.status(404).json({ error: 'Recipient not found' });
 
     if (!recipient.publicKey) {
-      return res.status(400).json({ error: 'Recipient has not set a public key yet' });
+      return res.status(400).json({ 
+        error: 'Recipient has not set up end-to-end encryption',
+        canCommunicate: false
+      });
     }
 
-    // Return only the recipient's public key; private key is managed client-side
-    res.json({ recipientPublicKey: recipient.publicKey });
+    res.json({ 
+      recipientPublicKey: recipient.publicKey,
+      canCommunicate: true
+    });
   } catch (error) {
     console.error('Get shared key error:', error);
-    res.status(500).json({ error: 'Failed to fetch recipient public key', details: error.message });
+    res.status(500).json({ error: 'Failed to fetch recipient public key' });
   }
 });
-
 module.exports = router;

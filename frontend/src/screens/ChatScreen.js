@@ -128,10 +128,21 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   };
 
   const getSharedKey = async (recipientId) => {
-    const response = await axios.get(`/auth/shared_key/${recipientId}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    return await deriveSharedKey(response.data.recipientPublicKey);
+    try {
+      const response = await axios.get(`/auth/shared_key/${recipientId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      
+      if (!response.data?.recipientPublicKey) {
+        throw new Error('Recipient has not set up encryption');
+      }
+      
+      return await deriveSharedKey(response.data.recipientPublicKey);
+    } catch (error) {
+      console.error('Error getting shared key:', error);
+      // Fallback to unencrypted communication or show error
+      throw error;
+    }
   };
 
   const formatChatListDate = (date) => {
@@ -685,25 +696,60 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   };
 
   const addContact = async () => {
+    if (!newContactNumber) {
+      setError('Virtual number is required');
+      return;
+    }
+  
     try {
-      const { data } = await axios.post('/auth/add_contact', { userId, virtualNumber: newContactNumber }, { headers: { Authorization: `Bearer ${token}` } });
+      const { data } = await axios.post(
+        '/auth/add_contact',
+        { 
+          userId, 
+          virtualNumber: newContactNumber,
+          name: newContactName || undefined 
+        },
+        { 
+          headers: { Authorization: `Bearer ${token}` } 
+        }
+      );
+  
       if (data.userId) {
-        const { publicKey } = await generateDHKeyPair();
-        await axios.post('/auth/update_public_key', { userId, publicKey }, { headers: { Authorization: `Bearer ${token}` } });
-        setUsers((prev) => {
-          const updatedUsers = [...prev, { id: data.userId, virtualNumber: newContactNumber, username: newContactName || data.username || 'Unsaved Number', photo: data.photo || 'https://placehold.co/40x40', unreadCount: 0 }];
-          localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
-          return updatedUsers;
-        });
-        setNewContactNumber('');
-        setNewContactName('');
-        setMenuTab('');
-        setError('');
-      } else {
-        setError('Number not registered');
+        try {
+          const { publicKey } = await generateDHKeyPair();
+          await axios.post(
+            '/auth/update_public_key', 
+            { userId, publicKey }, 
+            { headers: { Authorization: `Bearer ${token}` } 
+          });
+          
+          setUsers((prev) => {
+            const updatedUsers = [
+              ...prev,
+              { 
+                id: data.userId, 
+                virtualNumber: newContactNumber, 
+                username: newContactName || data.username || 'Unsaved Number', 
+                photo: data.photo || 'https://placehold.co/40x40', 
+                unreadCount: 0 
+              }
+            ];
+            localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
+            return updatedUsers;
+          });
+          
+          setNewContactNumber('');
+          setNewContactName('');
+          setMenuTab('');
+          setError('');
+        } catch (keyError) {
+          console.error('Error updating public key:', keyError);
+          setError('Contact added but encryption setup failed');
+        }
       }
     } catch (error) {
-      setError(error.response?.data?.error || 'Number not available');
+      console.error('Add contact error:', error);
+      setError(error.response?.data?.error || 'Failed to add contact');
     }
   };
 
