@@ -547,58 +547,127 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   };
 
   const sendMessage = async () => {
-    if (!selectedChat || (!message && !file && contentType === 'text')) {
-      setError('Please enter a message or select a file');
-      return;
-    }
-
-    socket.emit('stopTyping', { userId, recipientId: selectedChat });
-    setTyping(false);
-
-    const sharedKey = await getSharedKey(selectedChat);
-    const { encrypted, iv } = contentType === 'text' ? await encryptMessage(message, sharedKey) : { encrypted: message, iv: '' };
-    const tempId = Date.now().toString();
-    const tempMsg = {
-      _id: tempId,
-      senderId: userId,
-      recipientId: selectedChat,
-      contentType,
-      content: file ? URL.createObjectURL(file) : message,
-      iv,
-      caption,
-      status: 'sent',
-      replyTo,
-      createdAt: new Date(),
-      tempId,
-    };
-
-    dispatch(addMessage({ recipientId: selectedChat, message: tempMsg }));
-    const cachedMessages = JSON.parse(localStorage.getItem(`chat_${selectedChat}`)) || [];
-    localStorage.setItem(`chat_${selectedChat}`, JSON.stringify([...cachedMessages, { ...tempMsg, content: encrypted }]));
-
-    if (isAtBottomRef.current) {
-      setTimeout(() => {
-        chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
-      }, 0);
-    } else {
-      setShowJumpToBottom(true);
-    }
-
-    setMessage('');
-    setFile(null);
-    setCaption('');
-    setContentType('text');
-    setShowPicker(false);
-    setUploadProgress(null);
-    setReplyTo(null);
-    setMediaPreview(null);
-    setError('');
-
-    if (navigator.onLine) {
-      await sendMessageToServer({ ...tempMsg, content: encrypted, file, iv });
-    } else {
-      setPendingMessages((prev) => [...prev, { ...tempMsg, content: encrypted, file, iv }]);
-      await saveMessages([{ ...tempMsg, content: encrypted, iv }]);
+    try {
+      // Validate input
+      if (!selectedChat) {
+        setError('No chat selected');
+        return;
+      }
+      if (!message && !file && contentType === 'text') {
+        setError('Please enter a message or select a file');
+        return;
+      }
+  
+      // Stop typing indicator
+      socket.emit('stopTyping', { userId, recipientId: selectedChat });
+      setTyping(false);
+  
+      // Prepare temporary message (unencrypted for local display)
+      const tempId = Date.now().toString();
+      const tempMsg = {
+        _id: tempId,
+        senderId: userId,
+        recipientId: selectedChat,
+        contentType,
+        content: file ? URL.createObjectURL(file) : message,
+        caption,
+        status: 'sending', // New status to indicate message is being sent
+        replyTo,
+        createdAt: new Date(),
+        tempId,
+      };
+  
+      // Add message to local state immediately for responsiveness
+      dispatch(addMessage({ recipientId: selectedChat, message: tempMsg }));
+      
+      // Handle encryption (only for text messages)
+      let encryptedContent = message;
+      let iv = '';
+      
+      if (contentType === 'text') {
+        try {
+          const sharedKey = await getSharedKey(selectedChat);
+          const encryptionResult = await encryptMessage(message, sharedKey);
+          encryptedContent = encryptionResult.encrypted;
+          iv = encryptionResult.iv;
+        } catch (encryptionError) {
+          console.error('Encryption failed:', encryptionError);
+          // Fallback to unencrypted if encryption fails
+          encryptedContent = message;
+          iv = '';
+          // Optionally notify user encryption failed
+          setError('Message sent without encryption');
+        }
+      }
+  
+      // Update local cache with encrypted content
+      const cachedMessages = JSON.parse(localStorage.getItem(`chat_${selectedChat}`)) || [];
+      localStorage.setItem(
+        `chat_${selectedChat}`,
+        JSON.stringify([...cachedMessages, { ...tempMsg, content: encryptedContent, iv }])
+      );
+  
+      // Scroll to bottom if needed
+      if (isAtBottomRef.current) {
+        setTimeout(() => {
+          chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
+        }, 0);
+      } else {
+        setShowJumpToBottom(true);
+      }
+  
+      // Clear input fields
+      setMessage('');
+      setFile(null);
+      setCaption('');
+      setContentType('text');
+      setShowPicker(false);
+      setUploadProgress(null);
+      setReplyTo(null);
+      setMediaPreview(null);
+  
+      // Prepare message for server
+      const messageForServer = {
+        ...tempMsg,
+        content: encryptedContent,
+        iv,
+        status: 'sent' // Update status for server
+      };
+  
+      // Handle online/offline sending
+      if (navigator.onLine) {
+        try {
+          await sendMessageToServer(messageForServer);
+          // Update local message status to 'sent' after successful server send
+          dispatch(updateMessageStatus({
+            recipientId: selectedChat,
+            messageId: tempId,
+            status: 'sent'
+          }));
+        } catch (sendError) {
+          console.error('Failed to send message:', sendError);
+          // Update local message status to 'failed'
+          dispatch(updateMessageStatus({
+            recipientId: selectedChat,
+            messageId: tempId,
+            status: 'failed'
+          }));
+          setError('Failed to send message');
+        }
+      } else {
+        // Offline handling
+        setPendingMessages((prev) => [...prev, messageForServer]);
+        await saveMessages([messageForServer]);
+        // Update local message status to indicate it's pending
+        dispatch(updateMessageStatus({
+          recipientId: selectedChat,
+          messageId: tempId,
+          status: 'pending'
+        }));
+      }
+    } catch (error) {
+      console.error('Error in sendMessage:', error);
+      setError('An unexpected error occurred');
     }
   };
 
