@@ -23,11 +23,17 @@ if (process.env.CLOUDINARY_URL) {
 const storage = multer.memoryStorage();
 const upload = multer({ storage });
 
+// Register a new user
 router.post('/register', upload.single('photo'), async (req, res) => {
   const { email, password, name, role, country } = req.body;
   const photo = req.file;
 
   try {
+    // Validate input
+    if (!email || !password || !name || !country) {
+      return res.status(400).json({ error: 'All fields are required' });
+    }
+
     let user = await User.findOne({ email });
     if (user) return res.status(400).json({ error: 'User already exists' });
 
@@ -38,7 +44,24 @@ router.post('/register', upload.single('photo'), async (req, res) => {
     if (!countryCode) return res.status(400).json({ error: 'Invalid country' });
 
     const callingCode = getCountryCallingCode(countryCode);
-    const virtualNumber = `${callingCode}${Math.floor(100000000 + Math.random() * 900000000)}`;
+    let virtualNumber;
+    let isUnique = false;
+    let attempts = 0;
+    const maxAttempts = 10;
+
+    // Ensure virtual number is unique
+    while (!isUnique && attempts < maxAttempts) {
+      virtualNumber = `${callingCode}${Math.floor(100000000 + Math.random() * 900000000)}`;
+      const existingUser = await User.findOne({ virtualNumber });
+      if (!existingUser) {
+        isUnique = true;
+      }
+      attempts++;
+    }
+
+    if (!isUnique) {
+      return res.status(500).json({ error: 'Unable to generate a unique virtual number' });
+    }
 
     let photoUrl = null;
     if (photo) {
@@ -55,10 +78,13 @@ router.post('/register', upload.single('photo'), async (req, res) => {
       email,
       password: hashedPassword,
       username: name,
-      role,
+      role: parseInt(role) || 0,
       country,
       virtualNumber,
       photo: photoUrl,
+      contacts: [],
+      status: 'offline', // Default status
+      lastSeen: null,    // Default lastSeen
     });
 
     await user.save();
@@ -71,10 +97,15 @@ router.post('/register', upload.single('photo'), async (req, res) => {
   }
 });
 
+// User login
 router.post('/login', async (req, res) => {
   const { email, password } = req.body;
 
   try {
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required' });
+    }
+
     const user = await User.findOne({ email });
     if (!user) return res.status(400).json({ error: 'Invalid credentials' });
 
@@ -85,10 +116,11 @@ router.post('/login', async (req, res) => {
     res.json({ token, userId: user._id, role: user.role, photo: user.photo, virtualNumber: user.virtualNumber });
   } catch (error) {
     console.error('Login error:', error);
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json({ error: 'Server error', details: error.message });
   }
 });
 
+// Refresh token
 router.post('/refresh', auth, async (req, res) => {
   try {
     const user = await User.findById(req.user.id);
@@ -102,7 +134,7 @@ router.post('/refresh', auth, async (req, res) => {
   }
 });
 
-
+// Update user photo
 router.post('/update_photo', auth, upload.single('photo'), async (req, res) => {
   try {
     const { userId } = req.body;
@@ -124,6 +156,7 @@ router.post('/update_photo', auth, upload.single('photo'), async (req, res) => {
   }
 });
 
+// Update username
 router.post('/update_username', auth, async (req, res) => {
   try {
     const { userId, username } = req.body;
@@ -141,6 +174,7 @@ router.post('/update_username', auth, async (req, res) => {
   }
 });
 
+// Update country and virtual number
 router.post('/update_country', auth, async (req, res) => {
   try {
     const { userId, country } = req.body;
@@ -150,7 +184,23 @@ router.post('/update_country', auth, async (req, res) => {
     if (!countryCode) return res.status(400).json({ error: 'Invalid country' });
 
     const callingCode = getCountryCallingCode(countryCode);
-    const virtualNumber = `${callingCode}${Math.floor(100000000 + Math.random() * 900000000)}`;
+    let virtualNumber;
+    let isUnique = false;
+    let attempts = 0;
+    const maxAttempts = 10;
+
+    while (!isUnique && attempts < maxAttempts) {
+      virtualNumber = `${callingCode}${Math.floor(100000000 + Math.random() * 900000000)}`;
+      const existingUser = await User.findOne({ virtualNumber });
+      if (!existingUser) {
+        isUnique = true;
+      }
+      attempts++;
+    }
+
+    if (!isUnique) {
+      return res.status(500).json({ error: 'Unable to generate a unique virtual number' });
+    }
 
     const user = await User.findByIdAndUpdate(
       userId,
@@ -166,41 +216,99 @@ router.post('/update_country', auth, async (req, res) => {
   }
 });
 
+// Get user details
 router.get('/user/:id', auth, async (req, res) => {
   try {
-    const user = await User.findById(req.params.id).select('-password');
+    const user = await User.findById(req.params.id)
+      .select('-password')
+      .populate('contacts', 'virtualNumber username photo');
     if (!user) return res.status(404).json({ error: 'User not found' });
     res.json(user);
   } catch (error) {
     console.error('Get user error:', error);
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json({ error: 'Server error', details: error.message });
   }
 });
 
+// Add a contact
 router.post('/add_contact', auth, async (req, res) => {
   const { userId, virtualNumber } = req.body;
+
   try {
-    const contact = await User.findOne({ virtualNumber });
-    if (!contact) return res.status(404).json({ error: 'User not found' });
+    const targetUser = await User.findOne({ virtualNumber });
+    if (!targetUser) return res.status(404).json({ error: 'User not found' });
+
     const user = await User.findById(userId);
-    if (!user.contacts.includes(contact._id)) {
-      user.contacts.push(contact._id);
-      await user.save();
+    if (!user) return res.status(404).json({ error: 'Current user not found' });
+
+    // Check if contact already exists
+    if (user.contacts.some((contactId) => contactId.toString() === targetUser._id.toString())) {
+      return res.status(400).json({ error: 'This virtual number is already in your contacts' });
     }
-    res.json({ userId: contact._id, virtualNumber: contact.virtualNumber, username: contact.username, photo: contact.photo });
+
+    user.contacts.push(targetUser._id);
+    await user.save();
+
+    res.status(201).json({ userId: targetUser._id, username: targetUser.username, photo: targetUser.photo });
   } catch (error) {
-    console.error('Add contact error:', error);
-    res.status(500).json({ error: 'Server error' });
+    console.error('Error adding contact:', error);
+    res.status(500).json({ error: 'Failed to add contact', details: error.message });
   }
 });
 
+// Get user's contacts
 router.get('/contacts', auth, async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).populate('contacts', 'virtualNumber username photo');
-    res.json(user.contacts.map(c => ({ id: c._id, virtualNumber: c.virtualNumber, username: c.username, photo: c.photo })));
+    const user = await User.findById(req.user.id)
+      .populate('contacts', 'virtualNumber username photo')
+      .select('contacts');
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const contacts = user.contacts.map((c) => ({
+      id: c._id,
+      virtualNumber: c.virtualNumber,
+      username: c.username,
+      photo: c.photo || 'https://placehold.co/40x40',
+    }));
+
+    res.json(contacts);
   } catch (error) {
     console.error('Fetch contacts error:', error);
     res.status(500).json({ error: 'Failed to fetch contacts', details: error.message });
+  }
+});
+
+// Update theme preference
+router.post('/update_theme', auth, async (req, res) => {
+  try {
+    const { userId, theme } = req.body;
+    if (!theme || !['light', 'dark'].includes(theme)) {
+      return res.status(400).json({ error: 'Invalid theme value' });
+    }
+
+    const user = await User.findByIdAndUpdate(userId, { theme }, { new: true });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    res.json({ theme: user.theme });
+  } catch (error) {
+    console.error('Update theme error:', error);
+    res.status(500).json({ error: 'Failed to update theme', details: error.message });
+  }
+});
+
+// Update public key for E2EE
+router.post('/update_public_key', auth, async (req, res) => {
+  try {
+    const { userId, publicKey } = req.body;
+    if (!publicKey) return res.status(400).json({ error: 'Public key is required' });
+
+    const user = await User.findByIdAndUpdate(userId, { publicKey }, { new: true });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Update public key error:', error);
+    res.status(500).json({ error: 'Failed to update public key', details: error.message });
   }
 });
 

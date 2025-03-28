@@ -11,4 +11,7 @@ const messageSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 });
 
+// Add indexes for faster queries
+messageSchema.index({ senderId: 1, recipientId: 1, createdAt: -1 });
+
 module.exports = mongoose.model('Message', messageSchema);

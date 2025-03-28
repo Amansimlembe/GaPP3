@@ -24,8 +24,12 @@ const messageSlice = createSlice({
     setSelectedChat: (state, action) => {
       state.selectedChat = action.payload;
     },
+    resetState: (state) => {
+      state.chats = {};
+      state.selectedChat = null;
+    },
   },
 });
 
-export const { setMessages, addMessage, updateMessageStatus, setSelectedChat } = messageSlice.actions;
+export const { setMessages, addMessage, updateMessageStatus, setSelectedChat, resetState } = messageSlice.actions;
 export const store = configureStore({ reducer: { messages: messageSlice.reducer } });
