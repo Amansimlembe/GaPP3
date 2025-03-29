@@ -110,11 +110,17 @@ const generateVirtualNumber = (countryCode, userId) => {
   return phoneNumber ? phoneNumber.formatInternational() : rawNumber;
 };
 
+// ... imports and setup remain unchanged ...
+
 // Register a new user
 router.post('/register', limiter, upload.single('photo'), async (req, res) => {
   try {
+    logger.info('Register request received', { body: req.body, file: !!req.file });
     const { error } = registerSchema.validate(req.body);
-    if (error) return res.status(400).json({ error: error.details[0].message });
+    if (error) {
+      logger.warn('Validation failed', { error: error.details[0].message });
+      return res.status(400).json({ error: error.details[0].message });
+    }
 
     const { email, password, username, country } = req.body;
     const existingUser = await User.findOne({ $or: [{ email }, { username }] });
@@ -142,7 +148,7 @@ router.post('/register', limiter, upload.single('photo'), async (req, res) => {
       country,
       virtualNumber,
       publicKey: publicKeyPem,
-      privateKey: privateKeyPem, // Will be encrypted by pre-save hook
+      privateKey: privateKeyPem,
       photo: 'https://placehold.co/40x40',
     });
 
@@ -162,7 +168,7 @@ router.post('/register', limiter, upload.single('photo'), async (req, res) => {
     logger.info('User registered', { userId: user._id, email });
     res.status(201).json({ token, userId: user._id, virtualNumber, username, photo: user.photo });
   } catch (error) {
-    logger.error('Register error:', { error: error.message });
+    logger.error('Register error:', { error: error.message, stack: error.stack });
     res.status(500).json({ error: 'Failed to register', details: error.message });
   }
 });
@@ -170,8 +176,12 @@ router.post('/register', limiter, upload.single('photo'), async (req, res) => {
 // Login
 router.post('/login', limiter, async (req, res) => {
   try {
+    logger.info('Login request received', { body: req.body });
     const { error } = loginSchema.validate(req.body);
-    if (error) return res.status(400).json({ error: error.details[0].message });
+    if (error) {
+      logger.warn('Validation failed', { error: error.details[0].message });
+      return res.status(400).json({ error: error.details[0].message });
+    }
 
     const { email, password } = req.body;
     const user = await User.findOne({ email });
@@ -189,11 +199,12 @@ router.post('/login', limiter, async (req, res) => {
     logger.info('User logged in', { userId: user._id, email });
     res.json({ token, userId: user._id, virtualNumber: user.virtualNumber, username: user.username, photo: user.photo || 'https://placehold.co/40x40' });
   } catch (error) {
-    logger.error('Login error:', { error: error.message });
+    logger.error('Login error:', { error: error.message, stack: error.stack });
     res.status(500).json({ error: 'Failed to login', details: error.message });
   }
 });
 
+// ... rest of auth.js remains unchanged ...
 // Update country
 router.post('/update_country', authMiddleware, async (req, res) => {
   try {
