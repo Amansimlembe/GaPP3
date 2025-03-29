@@ -70,12 +70,17 @@ const registerSchema = Joi.object({
   password: Joi.string().min(6).required(),
   username: Joi.string().min(3).max(20).required(),
   country: Joi.string().required(),
-  role: Joi.number().integer().min(0).max(1).required(), // Add role validation
+  role: Joi.number().integer().min(0).max(1).required(),
 });
 
 const loginSchema = Joi.object({
   email: Joi.string().email().required(),
   password: Joi.string().min(6).required(),
+});
+
+const addContactSchema = Joi.object({
+  userId: Joi.string().required(),
+  virtualNumber: Joi.string().required(),
 });
 
 // Generate virtual number
@@ -127,7 +132,7 @@ router.post('/register', upload.single('photo'), async (req, res) => {
       publicKey: publicKeyPem,
       privateKey: privateKeyPem,
       photo: 'https://placehold.co/40x40',
-      role: parseInt(role), // Store role as integer
+      role: parseInt(role),
     });
 
     if (req.file) {
@@ -186,6 +191,58 @@ router.post('/login', async (req, res) => {
   } catch (error) {
     logger.error('Login error:', { error: error.message, stack: error.stack });
     res.status(500).json({ error: 'Failed to login', details: error.message });
+  }
+});
+
+// Add a contact
+router.post('/add_contact', authMiddleware, async (req, res) => {
+  try {
+    const { error } = addContactSchema.validate(req.body);
+    if (error) return res.status(400).json({ error: error.details[0].message });
+
+    const { userId, virtualNumber } = req.body;
+    if (userId !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
+
+    const contact = await User.findOne({ virtualNumber });
+    if (!contact) return res.status(404).json({ error: 'Contact not found' });
+    if (contact._id.toString() === userId) return res.status(400).json({ error: 'Cannot add yourself as a contact' });
+
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    if (!user.contacts.includes(contact._id)) {
+      user.contacts.push(contact._id);
+
+      const userPrivateKey = crypto.createPrivateKey(user.privateKey);
+      const contactPublicKey = crypto.createPublicKey(contact.publicKey);
+      const sharedKey = crypto.diffieHellman({
+        privateKey: userPrivateKey,
+        publicKey: contactPublicKey,
+      });
+      const sharedKeyBase64 = sharedKey.toString('base64');
+      user.sharedKeys.push({ contactId: contact._id, key: sharedKeyBase64 });
+      await user.save();
+
+      const contactPrivateKey = crypto.createPrivateKey(contact.privateKey);
+      const userPublicKey = crypto.createPublicKey(user.publicKey);
+      const contactSharedKey = crypto.diffieHellman({
+        privateKey: contactPrivateKey,
+        publicKey: userPublicKey,
+      });
+      contact.sharedKeys.push({ contactId: user._id, key: contactSharedKey.toString('base64') });
+      await contact.save();
+    }
+
+    logger.info('Contact added', { userId, contactId: contact._id });
+    res.json({
+      userId: contact._id,
+      virtualNumber: contact.virtualNumber,
+      username: contact.username,
+      photo: contact.photo || 'https://placehold.co/40x40',
+    });
+  } catch (error) {
+    logger.error('Add contact error:', { error: error.message, stack: error.stack });
+    res.status(500).json({ error: 'Failed to add contact', details: error.message });
   }
 });
 // Update country
@@ -293,57 +350,7 @@ router.get('/contacts', authMiddleware, async (req, res) => {
   }
 });
 
-// Add a contact
-router.post('/add_contact', authMiddleware, async (req, res) => {
-  try {
-    const { error } = addContactSchema.validate(req.body);
-    if (error) return res.status(400).json({ error: error.details[0].message });
 
-    const { userId, virtualNumber } = req.body;
-    if (userId !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
-
-    const contact = await User.findOne({ virtualNumber });
-    if (!contact) return res.status(404).json({ error: 'Contact not found' });
-    if (contact._id.toString() === userId) return res.status(400).json({ error: 'Cannot add yourself as a contact' });
-
-    const user = await User.findById(userId);
-    if (!user.contacts.includes(contact._id)) {
-      user.contacts.push(contact._id);
-
-      const userPrivateKeyPem = user.decryptPrivateKey(req.body.password || user.password); // Password needed if not in JWT
-      const userPrivateKey = crypto.createPrivateKey(userPrivateKeyPem);
-      const contactPublicKey = crypto.createPublicKey(contact.publicKey);
-      const sharedKey = crypto.diffieHellman({
-        privateKey: userPrivateKey,
-        publicKey: contactPublicKey,
-      });
-      const sharedKeyBase64 = sharedKey.toString('base64');
-      user.sharedKeys.push({ contactId: contact._id, key: sharedKeyBase64 });
-      await user.save();
-
-      const contactPrivateKeyPem = contact.decryptPrivateKey(contact.password); // Assumes password is available
-      const contactPrivateKey = crypto.createPrivateKey(contactPrivateKeyPem);
-      const userPublicKey = crypto.createPublicKey(user.publicKey);
-      const contactSharedKey = crypto.diffieHellman({
-        privateKey: contactPrivateKey,
-        publicKey: userPublicKey,
-      });
-      contact.sharedKeys.push({ contactId: user._id, key: contactSharedKey.toString('base64') });
-      await contact.save();
-    }
-
-    logger.info('Contact added', { userId, contactId: contact._id });
-    res.json({
-      userId: contact._id,
-      virtualNumber: contact.virtualNumber,
-      username: contact.username,
-      photo: contact.photo || 'https://placehold.co/40x40',
-    });
-  } catch (error) {
-    logger.error('Add contact error:', { error: error.message });
-    res.status(500).json({ error: 'Failed to add contact', details: error.message });
-  }
-});
 
 // Get shared key for a contact
 router.get('/shared_key/:recipientId', authMiddleware, async (req, res) => {
