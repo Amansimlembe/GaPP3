@@ -7,14 +7,27 @@ const path = require('path');
 const cloudinary = require('cloudinary').v2;
 const mongoose = require('mongoose');
 const redis = require('redis');
-const authRoutes = require('./routes/auth');
+const winston = require('winston');
+const rateLimit = require('express-rate-limit');
+const { router: authRoutes, authMiddleware } = require('./routes/auth');
 const jobseekerRoutes = require('./routes/jobseeker');
 const employerRoutes = require('./routes/employer');
 const socialRoutes = require('./routes/social');
 const Message = require('./models/Message');
 
-// In-memory cache for online status
-const onlineUsers = new Map(); // Map<userId, { lastSeen: Date, socketId: string, status: string }>
+// Winston logger
+const logger = winston.createLogger({
+  level: 'info',
+  format: winston.format.combine(winston.format.timestamp(), winston.format.json()),
+  transports: [
+    new winston.transports.Console(),
+    new winston.transports.File({ filename: 'logs/error.log', level: 'error' }),
+    new winston.transports.File({ filename: 'logs/combined.log' }),
+  ],
+});
+
+// Online users map
+const onlineUsers = new Map();
 
 const app = express();
 const server = http.createServer(app);
@@ -30,29 +43,31 @@ const redisClient = redis.createClient({
   password: process.env.REDIS_PASSWORD,
 });
 
-redisClient.on('connect', () => console.log('Connected to Redis'));
-redisClient.on('error', (err) => console.error('Redis error:', err));
+redisClient.on('connect', () => logger.info('Connected to Redis'));
+redisClient.on('error', (err) => logger.error('Redis error:', { error: err.message }));
 redisClient.connect();
 
 // Cloudinary configuration
-if (process.env.CLOUDINARY_URL) {
-  cloudinary.config({ cloudinary_url: process.env.CLOUDINARY_URL });
-} else {
-  cloudinary.config({
-    cloud_name: process.env.CLOUDINARY_CLOUD_NAME || 'dsygdul20',
-    api_key: process.env.CLOUDINARY_API_KEY || '442966176347917',
-    api_secret: process.env.CLOUDINARY_API_SECRET || '78quUIGGD4YkjmLe87FJG21EOfk',
-  });
-}
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+// Global rate limiter
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 500,
+  message: { error: 'Too many requests, please try again later.' },
+});
 
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, '../frontend/build')));
-
-// Request logging middleware
+app.use(globalLimiter);
 app.use((req, res, next) => {
-  console.log(`[${new Date().toISOString()}] Incoming request: ${req.method} ${req.url} from ${req.ip}`);
+  logger.info('Incoming request', { method: req.method, url: req.url, ip: req.ip });
   next();
 });
 
@@ -63,13 +78,12 @@ const connectDB = async () => {
       useNewUrlParser: true,
       useUnifiedTopology: true,
     });
-    console.log('MongoDB Atlas connected');
+    logger.info('MongoDB Atlas connected');
 
-    // Create indexes for better query performance
     await Message.collection.createIndex({ senderId: 1, recipientId: 1, createdAt: -1 });
-    console.log('Messages index created');
+    logger.info('Messages index created');
   } catch (error) {
-    console.error('MongoDB connection error:', error);
+    logger.error('MongoDB connection error:', { error: error.message });
     process.exit(1);
   }
 };
@@ -83,31 +97,30 @@ app.use('/social', socialRoutes(io));
 
 // Socket.IO events
 io.on('connection', (socket) => {
-  console.log(`[${new Date().toISOString()}] User connected: ${socket.id}`);
+  logger.info('User connected', { socketId: socket.id });
 
   socket.on('join', async (userId) => {
     if (!userId) {
-      console.error('Join event received without userId');
+      logger.error('Join event received without userId');
       return;
     }
 
     socket.join(userId);
-    console.log(`[${new Date().toISOString()}] ${userId} joined`);
+    logger.info('User joined', { userId });
 
-    // Mark user as online in Redis
     try {
-      await redisClient.set(`online:${userId}`, 'true', { EX: 3600 }); // Expire after 1 hour
+      await redisClient.set(`online:${userId}`, 'true', { EX: 3600 });
       onlineUsers.set(userId, { lastSeen: new Date(), socketId: socket.id, status: 'online' });
       io.emit('onlineStatus', { userId, status: 'online', lastSeen: onlineUsers.get(userId).lastSeen });
     } catch (error) {
-      console.error(`Error setting online status for ${userId} in Redis:`, error);
+      logger.error('Error setting online status in Redis', { userId, error: error.message });
     }
   });
 
   socket.on('message', async (data) => {
     try {
       if (!data.recipientId || !data._id) {
-        console.error('Invalid message data:', data);
+        logger.error('Invalid message data', { data });
         return;
       }
 
@@ -120,18 +133,19 @@ io.on('connection', (socket) => {
         await message.save();
         io.to(data.recipientId).emit('message', { ...data, status });
         io.to(data.senderId).emit('message', { ...data, status });
+        logger.info('Message sent', { messageId: data._id, status });
       } else {
-        console.error(`Message not found: ${data._id}`);
+        logger.error('Message not found', { messageId: data._id });
       }
     } catch (error) {
-      console.error('Error handling message event:', error);
+      logger.error('Error handling message event', { error: error.message });
     }
   });
 
   socket.on('messageStatus', async ({ messageId, status, recipientId }) => {
     try {
       if (!messageId || !status || !recipientId) {
-        console.error('Invalid messageStatus data:', { messageId, status, recipientId });
+        logger.error('Invalid messageStatus data', { messageId, status, recipientId });
         return;
       }
 
@@ -141,67 +155,73 @@ io.on('connection', (socket) => {
         await message.save();
         io.to(recipientId).emit('messageStatus', { messageId, status });
         io.to(message.senderId).emit('messageStatus', { messageId, status });
+        logger.info('Message status updated', { messageId, status });
       } else {
-        console.error(`Message not found for status update: ${messageId}`);
+        logger.error('Message not found for status update', { messageId });
       }
     } catch (error) {
-      console.error('Error handling messageStatus event:', error);
+      logger.error('Error handling messageStatus event', { error: error.message });
     }
   });
 
   socket.on('typing', ({ userId, recipientId }) => {
     if (!userId || !recipientId) {
-      console.error('Invalid typing event data:', { userId, recipientId });
+      logger.error('Invalid typing event data', { userId, recipientId });
       return;
     }
     io.to(recipientId).emit('typing', { userId, recipientId });
+    logger.info('Typing event', { userId, recipientId });
   });
 
   socket.on('stopTyping', ({ userId, recipientId }) => {
     if (!userId || !recipientId) {
-      console.error('Invalid stopTyping event data:', { userId, recipientId });
+      logger.error('Invalid stopTyping event data', { userId, recipientId });
       return;
     }
     io.to(recipientId).emit('stopTyping', { userId, recipientId });
+    logger.info('Stop typing event', { userId, recipientId });
   });
 
   socket.on('newPost', (post) => {
     if (!post) {
-      console.error('Invalid newPost event data');
+      logger.error('Invalid newPost event data');
       return;
     }
     io.emit('newPost', post);
+    logger.info('New post event', { postId: post._id });
   });
 
   socket.on('postUpdate', (post) => {
     if (!post) {
-      console.error('Invalid postUpdate event data');
+      logger.error('Invalid postUpdate event data');
       return;
     }
     io.emit('postUpdate', post);
+    logger.info('Post update event', { postId: post._id });
   });
 
   socket.on('postDeleted', (postId) => {
     if (!postId) {
-      console.error('Invalid postDeleted event data');
+      logger.error('Invalid postDeleted event data');
       return;
     }
     io.emit('postDeleted', postId);
+    logger.info('Post deleted event', { postId });
   });
 
   socket.on('ping', ({ userId }) => {
-    console.log(`[${new Date().toISOString()}] Received ping from user: ${userId}`);
+    logger.info('Received ping', { userId });
     if (onlineUsers.has(userId)) {
       onlineUsers.set(userId, { ...onlineUsers.get(userId), lastSeen: new Date() });
     }
   });
 
   socket.on('error', (error) => {
-    console.error(`[${new Date().toISOString()}] Socket error:`, error);
+    logger.error('Socket error', { error: error.message });
   });
 
   socket.on('disconnect', async () => {
-    console.log(`[${new Date().toISOString()}] User disconnected: ${socket.id}`);
+    logger.info('User disconnected', { socketId: socket.id });
     const rooms = Array.from(socket.rooms);
     const userId = rooms.find((room) => room !== socket.id);
     if (userId) {
@@ -213,7 +233,7 @@ io.on('connection', (socket) => {
           io.emit('onlineStatus', { userId, status: 'offline', lastSeen: userStatus.lastSeen });
         }
       } catch (error) {
-        console.error(`Error removing online status for ${userId} from Redis:`, error);
+        logger.error('Error removing online status from Redis', { userId, error: error.message });
       }
     }
   });
@@ -226,41 +246,40 @@ app.get('/health', (req, res) => {
 
 // Global error handler
 app.use((err, req, res, next) => {
-  console.error(`[${new Date().toISOString()}] Global error:`, err.stack);
+  logger.error('Global error', { error: err.stack });
   res.status(500).json({ error: 'Internal Server Error', details: process.env.NODE_ENV === 'development' ? err.message : 'An unexpected error occurred' });
 });
 
-// SPA fallback with logging
+// SPA fallback
 app.get('*', (req, res) => {
-  console.log(`[${new Date().toISOString()}] Serving frontend index.html`);
+  logger.info('Serving frontend index.html');
   res.sendFile(path.join(__dirname, '../frontend/build', 'index.html'));
 });
 
 // Start server
 const PORT = process.env.PORT || 8000;
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`[${new Date().toISOString()}] Server running on port ${PORT}`);
+  logger.info(`Server running on port ${PORT}`);
 });
 
-// Server error logging
 server.on('error', (error) => {
-  console.error(`[${new Date().toISOString()}] Server startup error:`, error);
+  logger.error('Server startup error', { error: error.message });
 });
 
 // Graceful shutdown
 const shutdown = async () => {
-  console.log('Shutting down server...');
+  logger.info('Shutting down server...');
   try {
     await redisClient.quit();
-    console.log('Redis connection closed');
+    logger.info('Redis connection closed');
     await mongoose.connection.close();
-    console.log('MongoDB connection closed');
+    logger.info('MongoDB connection closed');
     server.close(() => {
-      console.log('HTTP server closed');
+      logger.info('HTTP server closed');
       process.exit(0);
     });
   } catch (error) {
-    console.error('Error during shutdown:', error);
+    logger.error('Error during shutdown', { error: error.message });
     process.exit(1);
   }
 };
@@ -268,5 +287,4 @@ const shutdown = async () => {
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
-// Export io and onlineUsers for use in other modules
 module.exports = { io, onlineUsers };

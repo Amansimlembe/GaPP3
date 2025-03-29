@@ -35,8 +35,14 @@ const LoginScreen = ({ setAuth }) => {
       const { data } = await axios.post(url, isLogin ? { email, password } : formData, {
         headers: !isLogin ? { 'Content-Type': 'multipart/form-data' } : {},
       });
-      // Update setAuth to include username
+      // Include username in setAuth and store in localStorage
       setAuth(data.token, data.userId, data.role, data.photo, data.virtualNumber, data.username);
+      localStorage.setItem('token', data.token);
+      localStorage.setItem('userId', data.userId);
+      localStorage.setItem('role', data.role);
+      localStorage.setItem('photo', data.photo || 'https://placehold.co/40x40');
+      localStorage.setItem('virtualNumber', data.virtualNumber);
+      localStorage.setItem('username', data.username); // Store username
       setError('');
     } catch (error) {
       console.error('Auth error:', error);

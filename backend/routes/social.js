@@ -5,28 +5,47 @@ const Message = require('../models/Message');
 const User = require('../models/User');
 const cloudinary = require('cloudinary').v2;
 const multer = require('multer');
-const authMiddleware = require('../middleware/auth');
+const { authMiddleware } = require('../routes/auth');
 const cache = require('memory-cache');
+const winston = require('winston');
+const rateLimit = require('express-rate-limit');
+const Joi = require('joi');
 
-// Cloudinary configuration
-if (!cloudinary.config().cloud_name) {
-  cloudinary.config({
-    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-    api_key: process.env.CLOUDINARY_API_KEY,
-    api_secret: process.env.CLOUDINARY_API_SECRET,
-  });
-}
+const logger = winston.createLogger({
+  level: 'info',
+  format: winston.format.combine(winston.format.timestamp(), winston.format.json()),
+  transports: [
+    new winston.transports.Console(),
+    new winston.transports.File({ filename: 'logs/error.log', level: 'error' }),
+    new winston.transports.File({ filename: 'logs/combined.log' }),
+  ],
+});
 
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
+const socialLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 200,
+  message: { error: 'Too many requests, please try again later.' },
+});
 
-// In-memory cache for online status
-const onlineUsers = new Map(); // Map<userId, { lastSeen: Date, socketId: string }>
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'video/mp4', 'audio/mpeg', 'application/pdf'];
+    if (!allowedTypes.includes(file.mimetype)) {
+      return cb(new Error('Invalid file type. Only JPEG, PNG, GIF, MP4, MP3, and PDF are allowed.'));
+    }
+    cb(null, true);
+  },
+});
 
-// Cache middleware
 const cacheMiddleware = (duration) => (req, res, next) => {
   const key = '__express__' + req.originalUrl || req.url;
   const cachedBody = cache.get(key);
-  if (cachedBody) return res.send(cachedBody);
+  if (cachedBody) {
+    logger.info('Cache hit', { key });
+    return res.send(cachedBody);
+  }
   res.sendResponse = res.send;
   res.send = (body) => {
     cache.put(key, body, duration * 1000);
@@ -35,13 +54,44 @@ const cacheMiddleware = (duration) => (req, res, next) => {
   next();
 };
 
-// Factory function to create the router with io
+const postSchema = Joi.object({
+  contentType: Joi.string().valid('image', 'video', 'audio', 'raw', 'text').required(),
+  caption: Joi.string().allow('').optional(),
+});
+
+const messageSchema = Joi.object({
+  senderId: Joi.string().required(),
+  recipientId: Joi.string().required(),
+  contentType: Joi.string().valid('text', 'image', 'video', 'audio', 'document').required(),
+  caption: Joi.string().allow('').optional(),
+  iv: Joi.string().when('contentType', { is: 'text', then: Joi.required(), otherwise: Joi.optional() }),
+  replyTo: Joi.string().optional(),
+});
+
+const messageStatusSchema = Joi.object({
+  messageId: Joi.string().required(),
+  status: Joi.string().valid('sent', 'delivered', 'read').required(),
+  recipientId: Joi.string().required(),
+});
+
+const likeSchema = Joi.object({
+  postId: Joi.string().required(),
+  userId: Joi.string().required(), // Added for consistency with frontend
+});
+
+const commentSchema = Joi.object({
+  postId: Joi.string().required(),
+  comment: Joi.string().max(500).required(),
+  userId: Joi.string().required(), // Added for consistency with frontend
+});
+
 module.exports = (io) => {
-  // Track online status and Socket.IO events
   io.on('connection', (socket) => {
+    logger.info('User connected', { socketId: socket.id });
+
     socket.on('join', async (userId) => {
       try {
-        onlineUsers.set(userId, { lastSeen: new Date(), socketId: socket.id });
+        socket.join(userId);
         const user = await User.findById(userId);
         if (user) {
           user.status = 'online';
@@ -49,9 +99,9 @@ module.exports = (io) => {
           await user.save();
           io.emit('onlineStatus', { userId, status: 'online', lastSeen: user.lastSeen });
         }
-        console.log(`${userId} joined`);
+        logger.info('User joined', { userId });
       } catch (error) {
-        console.error('Error handling join event:', error);
+        logger.error('Error handling join event', { error: error.message });
       }
     });
 
@@ -63,33 +113,31 @@ module.exports = (io) => {
           user.lastSeen = new Date();
           await user.save();
           io.emit('onlineStatus', { userId, status: 'offline', lastSeen: user.lastSeen });
-          onlineUsers.delete(userId);
         }
-        console.log(`${userId} left`);
+        logger.info('User left', { userId });
       } catch (error) {
-        console.error('Error handling leave event:', error);
+        logger.error('Error handling leave event', { error: error.message });
       }
     });
 
     socket.on('ping', async ({ userId }) => {
       try {
-        if (onlineUsers.has(userId)) {
-          onlineUsers.set(userId, { ...onlineUsers.get(userId), lastSeen: new Date() });
-          const user = await User.findById(userId);
-          if (user && user.status !== 'online') {
-            user.status = 'online';
-            user.lastSeen = new Date();
-            await user.save();
-            io.emit('onlineStatus', { userId, status: 'online', lastSeen: user.lastSeen });
-          }
+        const user = await User.findById(userId);
+        if (user && user.status !== 'online') {
+          user.status = 'online';
+          user.lastSeen = new Date();
+          await user.save();
+          io.emit('onlineStatus', { userId, status: 'online', lastSeen: user.lastSeen });
         }
+        logger.info('Ping received', { userId });
       } catch (error) {
-        console.error('Error handling ping event:', error);
+        logger.error('Error handling ping event', { error: error.message });
       }
     });
 
     socket.on('message', (msg) => {
       io.emit('message', msg);
+      logger.info('Message broadcast', { messageId: msg._id });
     });
 
     socket.on('messageStatus', async ({ messageId, status, recipientId }) => {
@@ -99,23 +147,41 @@ module.exports = (io) => {
           message.status = status;
           await message.save();
           io.emit('messageStatus', { messageId, status });
+          logger.info('Message status updated', { messageId, status });
         }
       } catch (error) {
-        console.error('Error updating message status:', error);
+        logger.error('Error updating message status', { error: error.message });
       }
     });
 
     socket.on('typing', ({ userId, recipientId }) => {
-      io.emit('typing', { userId, recipientId });
+      io.to(recipientId).emit('typing', { userId, recipientId });
+      logger.info('Typing event', { userId, recipientId });
     });
 
     socket.on('stopTyping', ({ userId, recipientId }) => {
-      io.emit('stopTyping', { userId, recipientId });
+      io.to(recipientId).emit('stopTyping', { userId, recipientId });
+      logger.info('Stop typing event', { userId, recipientId });
+    });
+
+    socket.on('newPost', (post) => {
+      io.emit('newPost', post);
+      logger.info('New post event', { postId: post._id });
+    });
+
+    socket.on('postUpdate', (post) => {
+      io.emit('postUpdate', post);
+      logger.info('Post update event', { postId: post._id });
+    });
+
+    socket.on('postDeleted', (postId) => {
+      io.emit('postDeleted', postId);
+      logger.info('Post deleted event', { postId });
     });
 
     socket.on('disconnect', async () => {
       try {
-        const userId = [...onlineUsers.entries()].find(([_, value]) => value.socketId === socket.id)?.[0];
+        const userId = Array.from(socket.rooms).find((room) => room !== socket.id);
         if (userId) {
           const user = await User.findById(userId);
           if (user) {
@@ -124,11 +190,10 @@ module.exports = (io) => {
             await user.save();
             io.emit('onlineStatus', { userId, status: 'offline', lastSeen: user.lastSeen });
           }
-          onlineUsers.delete(userId);
-          console.log(`User disconnected: ${socket.id}`);
+          logger.info('User disconnected', { userId, socketId: socket.id });
         }
       } catch (error) {
-        console.error('Error handling disconnect event:', error);
+        logger.error('Error handling disconnect event', { error: error.message });
       }
     });
   });
@@ -139,45 +204,50 @@ module.exports = (io) => {
       const userId = req.params.userId;
       const user = await User.findById(userId).select('status lastSeen');
       if (!user) return res.status(404).json({ error: 'User not found' });
+      logger.info('User status fetched', { userId });
       res.json({ status: user.status || 'offline', lastSeen: user.lastSeen });
     } catch (error) {
-      console.error('User status error:', error);
+      logger.error('User status error', { error: error.message });
       res.status(500).json({ error: 'Failed to fetch user status', details: error.message });
     }
   });
 
   // Get social feed
-  router.get('/feed', cacheMiddleware(60), async (req, res) => {
+  router.get('/feed', socialLimiter, cacheMiddleware(60), async (req, res) => {
     try {
       const posts = await Post.find()
         .sort({ createdAt: -1 })
-        .populate('userId', 'username photo');
+        .lean(); // Use lean for performance, no need to populate since username/photo are in Post
+      logger.info('Social feed fetched');
       res.json(posts);
     } catch (error) {
-      console.error('Feed fetch error:', error);
+      logger.error('Feed fetch error', { error: error.message });
       res.status(500).json({ error: 'Failed to fetch feed', details: error.message });
     }
   });
 
   // Get user's posts
-  router.get('/my-posts/:userId', authMiddleware, cacheMiddleware(60), async (req, res) => {
+  router.get('/my-posts/:userId', authMiddleware, socialLimiter, cacheMiddleware(60), async (req, res) => {
     try {
       const posts = await Post.find({ userId: req.params.userId })
         .sort({ createdAt: -1 })
-        .populate('userId', 'username photo');
+        .lean();
+      logger.info('User posts fetched', { userId: req.params.userId });
       res.json(posts);
     } catch (error) {
-      console.error('My posts fetch error:', error);
+      logger.error('My posts fetch error', { error: error.message });
       res.status(500).json({ error: 'Failed to fetch posts', details: error.message });
     }
   });
 
   // Create a new post
-  router.post('/post', authMiddleware, upload.single('content'), async (req, res) => {
+  router.post('/post', authMiddleware, socialLimiter, upload.single('content'), async (req, res) => {
     try {
+      const { error } = postSchema.validate(req.body);
+      if (error) return res.status(400).json({ error: error.details[0].message });
+
       const { id: userId } = req.user;
       const { contentType, caption } = req.body;
-      if (!contentType) return res.status(400).json({ error: 'Content type is required' });
 
       let contentUrl = caption || '';
       if (req.file) {
@@ -192,6 +262,8 @@ module.exports = (io) => {
       }
 
       const user = await User.findById(userId);
+      if (!user) return res.status(404).json({ error: 'User not found' });
+
       const post = new Post({
         userId,
         contentType,
@@ -202,66 +274,134 @@ module.exports = (io) => {
         likedBy: [],
       });
       await post.save();
-      res.json(post);
+
+      io.emit('newPost', post.toObject());
+      logger.info('Post created', { postId: post._id, userId });
+      res.json(post.toObject());
     } catch (error) {
-      console.error('Post error:', error);
+      logger.error('Post error', { error: error.message });
       res.status(500).json({ error: 'Failed to post', details: error.message });
     }
   });
 
   // Delete a post
-  router.delete('/post/:postId', authMiddleware, async (req, res) => {
+  router.delete('/post/:postId', authMiddleware, socialLimiter, async (req, res) => {
     try {
       const post = await Post.findById(req.params.postId);
       if (!post) return res.status(404).json({ error: 'Post not found' });
       if (post.userId.toString() !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
-      await Post.deleteJUan({ _id: req.params.postId });
+
+      await Post.deleteOne({ _id: req.params.postId });
       io.emit('postDeleted', req.params.postId);
+      logger.info('Post deleted', { postId: req.params.postId, userId: req.user.id });
       res.json({ success: true });
     } catch (error) {
-      console.error('Delete post error:', error);
+      logger.error('Delete post error', { error: error.message });
       res.status(500).json({ error: 'Failed to delete post', details: error.message });
     }
   });
 
-  // Send a message
-  router.post('/message', authMiddleware, upload.single('content'), async (req, res) => {
+  // Like a post
+  router.post('/like', authMiddleware, socialLimiter, async (req, res) => {
     try {
-      const { senderId, recipientId, contentType, caption, iv, replyTo } = req.body;
-      if (!senderId || !recipientId || !contentType) {
-        return res.status(400).json({ error: 'Sender ID, recipient ID, and content type are required' });
-      }
+      const { error } = likeSchema.validate(req.body);
+      if (error) return res.status(400).json({ error: error.details[0].message });
 
-      if (senderId !== req.user.id) {
-        return res.status(403).json({ error: 'Not authorized to send as this user' });
+      const { postId, userId } = req.body;
+      if (userId !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
+
+      const post = await Post.findById(postId);
+      if (!post) return res.status(404).json({ error: 'Post not found' });
+
+      if (!post.likedBy.includes(userId)) {
+        post.likedBy.push(userId);
+        post.likes = (post.likes || 0) + 1;
+        await post.save();
+        io.emit('postUpdate', post.toObject());
+        logger.info('Post liked', { postId, userId });
       }
+      res.json(post.toObject());
+    } catch (error) {
+      logger.error('Like error', { error: error.message });
+      res.status(500).json({ error: 'Failed to like post', details: error.message });
+    }
+  });
+
+  // Unlike a post
+  router.post('/unlike', authMiddleware, socialLimiter, async (req, res) => {
+    try {
+      const { error } = likeSchema.validate(req.body);
+      if (error) return res.status(400).json({ error: error.details[0].message });
+
+      const { postId, userId } = req.body;
+      if (userId !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
+
+      const post = await Post.findById(postId);
+      if (!post) return res.status(404).json({ error: 'Post not found' });
+      if (!post.likedBy?.includes(userId)) return res.status(400).json({ error: 'Not liked yet' });
+
+      post.likes = (post.likes || 0) - 1;
+      post.likedBy = post.likedBy.filter((id) => id.toString() !== userId);
+      await post.save();
+      io.emit('postUpdate', post.toObject());
+      logger.info('Post unliked', { postId, userId });
+      res.json(post.toObject());
+    } catch (error) {
+      logger.error('Unlike error', { error: error.message });
+      res.status(500).json({ error: 'Failed to unlike post', details: error.message });
+    }
+  });
+
+  // Comment on a post
+  router.post('/comment', authMiddleware, socialLimiter, async (req, res) => {
+    try {
+      const { error } = commentSchema.validate(req.body);
+      if (error) return res.status(400).json({ error: error.details[0].message });
+
+      const { postId, comment, userId } = req.body;
+      if (userId !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
+
+      const user = await User.findById(userId);
+      if (!user) return res.status(404).json({ error: 'User not found' });
+
+      const post = await Post.findById(postId);
+      if (!post) return res.status(404).json({ error: 'Post not found' });
+
+      const commentData = { userId, username: user.username, photo: user.photo, comment, createdAt: new Date() };
+      post.comments = [...(post.comments || []), commentData];
+      await post.save();
+      io.emit('postUpdate', post.toObject());
+      logger.info('Comment added', { postId, userId });
+      res.json(commentData);
+    } catch (error) {
+      logger.error('Comment error', { error: error.message });
+      res.status(500).json({ error: 'Failed to comment', details: error.message });
+    }
+  });
+
+  // Send a message
+  router.post('/message', authMiddleware, socialLimiter, upload.single('content'), async (req, res) => {
+    try {
+      const { error } = messageSchema.validate(req.body);
+      if (error) return res.status(400).json({ error: error.details[0].message });
+
+      const { senderId, recipientId, contentType, caption, iv, replyTo } = req.body;
+      if (senderId !== req.user.id) return res.status(403).json({ error: 'Not authorized to send as this user' });
 
       const sender = await User.findById(senderId);
       const recipient = await User.findById(recipientId);
-      if (!sender || !recipient) {
-        return res.status(404).json({ error: 'Sender or recipient not found' });
-      }
+      if (!sender || !recipient) return res.status(404).json({ error: 'Sender or recipient not found' });
 
       let contentUrl = req.body.content || '';
       if (req.file) {
         let resourceType;
         switch (contentType) {
-          case 'image':
-            resourceType = 'image';
-            break;
-          case 'video':
-            resourceType = 'video';
-            break;
-          case 'audio':
-            resourceType = 'video'; // Cloudinary uses 'video' for audio
-            break;
-          case 'document':
-            resourceType = 'raw';
-            break;
-          default:
-            resourceType = 'raw';
+          case 'image': resourceType = 'image'; break;
+          case 'video': resourceType = 'video'; break;
+          case 'audio': resourceType = 'video'; break; // Cloudinary uses 'video' for audio
+          case 'document': resourceType = 'raw'; break;
+          default: resourceType = 'raw';
         }
-
         const result = await new Promise((resolve, reject) => {
           cloudinary.uploader.upload_stream(
             { resource_type: resourceType, public_id: `${contentType}_${senderId}_${Date.now()}`, folder: `gapp_chat_${contentType}s` },
@@ -269,8 +409,6 @@ module.exports = (io) => {
           ).end(req.file.buffer);
         });
         contentUrl = result.secure_url;
-      } else if (contentType === 'text' && !iv) {
-        return res.status(400).json({ error: 'Initialization vector (iv) is required for text messages' });
       }
 
       const message = new Message({
@@ -286,35 +424,34 @@ module.exports = (io) => {
       });
       await message.save();
 
-      io.emit('message', {
+      const messageData = {
         ...message.toObject(),
         senderVirtualNumber: sender.virtualNumber,
         senderUsername: sender.username,
         senderPhoto: sender.photo,
-      });
+      };
+      io.to(recipientId).emit('message', messageData);
+      io.to(senderId).emit('message', messageData);
 
-      res.json(message);
+      logger.info('Message sent', { messageId: message._id, senderId, recipientId });
+      res.json(message.toObject());
     } catch (error) {
-      console.error('Message error:', error);
+      logger.error('Message error', { error: error.message });
       res.status(500).json({ error: 'Failed to send message', details: error.message });
     }
   });
 
   // Fetch messages
-  router.get('/messages', authMiddleware, async (req, res) => {
+  router.get('/messages', authMiddleware, socialLimiter, async (req, res) => {
     try {
       const { userId, recipientId, limit = 50, skip = 0 } = req.query;
-      if (!userId || !recipientId) {
-        return res.status(400).json({ error: 'User ID and Recipient ID are required' });
-      }
-
-      if (req.user.id !== userId) {
-        return res.status(403).json({ error: 'Unauthorized access' });
-      }
+      if (!userId || !recipientId) return res.status(400).json({ error: 'User ID and Recipient ID are required' });
+      if (req.user.id !== userId) return res.status(403).json({ error: 'Unauthorized access' });
 
       const cacheKey = `messages_${userId}_${recipientId}_${skip}_${limit}`;
       const cachedMessages = cache.get(cacheKey);
       if (cachedMessages) {
+        logger.info('Messages cache hit', { cacheKey });
         return res.json(cachedMessages);
       }
 
@@ -338,115 +475,64 @@ module.exports = (io) => {
         .lean();
 
       const response = {
-        messages: messages.reverse(), // Reverse to chronological order
+        messages: messages.reverse(),
         totalMessages,
         hasMore: parseInt(skip) + messages.length < totalMessages,
       };
 
-      // Handle case where no messages exist (new contact)
       if (messages.length === 0) {
         response.messages = [];
         response.hasMore = false;
       }
 
-      cache.put(cacheKey, response, 5 * 60 * 1000); // Cache for 5 minutes
+      cache.put(cacheKey, response, 5 * 60 * 1000);
+      logger.info('Messages fetched', { userId, recipientId });
       res.json(response);
     } catch (error) {
-      console.error('Fetch messages error:', error);
+      logger.error('Fetch messages error', { error: error.message });
       res.status(500).json({ error: 'Failed to fetch messages', details: error.message });
     }
   });
 
   // Delete a message
-  router.delete('/message/:messageId', authMiddleware, async (req, res) => {
+  router.delete('/message/:messageId', authMiddleware, socialLimiter, async (req, res) => {
     try {
       const message = await Message.findById(req.params.messageId);
       if (!message) return res.status(404).json({ error: 'Message not found' });
-
-      if (message.senderId.toString() !== req.user.id) {
-        return res.status(403).json({ error: 'Not authorized to delete this message' });
-      }
+      if (message.senderId.toString() !== req.user.id) return res.status(403).json({ error: 'Not authorized to delete this message' });
 
       await Message.deleteOne({ _id: req.params.messageId });
       io.emit('messageDeleted', req.params.messageId);
+      logger.info('Message deleted', { messageId: req.params.messageId, userId: req.user.id });
       res.json({ success: true });
     } catch (error) {
-      console.error('Delete message error:', error);
+      logger.error('Delete message error', { error: error.message });
       res.status(500).json({ error: 'Failed to delete message', details: error.message });
     }
   });
 
   // Update message status
-  router.post('/message/status', authMiddleware, async (req, res) => {
+  router.post('/message/status', authMiddleware, socialLimiter, async (req, res) => {
     try {
+      const { error } = messageStatusSchema.validate(req.body);
+      if (error) return res.status(400).json({ error: error.details[0].message });
+
       const { messageId, status, recipientId } = req.body;
       const message = await Message.findById(messageId);
       if (!message) return res.status(404).json({ error: 'Message not found' });
       if (message.recipientId.toString() !== recipientId || req.user.id !== recipientId) {
         return res.status(403).json({ error: 'Not authorized to update this message status' });
       }
+
       message.status = status;
       await message.save();
-      io.emit('messageStatus', { messageId, status });
+      io.to(message.senderId).emit('messageStatus', { messageId, status });
+      io.to(recipientId).emit('messageStatus', { messageId, status });
+      logger.info('Message status updated', { messageId, status, recipientId });
       res.json({ success: true });
     } catch (error) {
-      console.error('Message status error:', error);
+      logger.error('Message status error', { error: error.message });
       res.status(500).json({ error: 'Failed to update status', details: error.message });
-    }
-  });
-
-  // Like a post
-  router.post('/like', authMiddleware, async (req, res) => {
-    const { postId } = req.body;
-    const userId = req.user.id;
-    try {
-      const post = await Post.findById(postId);
-      if (!post) return res.status(404).json({ error: 'Post not found' });
-      if (!post.likedBy.includes(userId)) {
-        post.likedBy.push(userId);
-        post.likes = (post.likes || 0) + 1;
-        await post.save();
-      }
-      res.json(post);
-    } catch (error) {
-      console.error('Like error:', error);
-      res.status(500).json({ error: 'Server error', details: error.message });
-    }
-  });
-
-  // Unlike a post
-  router.post('/unlike', authMiddleware, async (req, res) => {
-    try {
-      const { postId } = req.body;
-      const userId = req.user.id;
-      const post = await Post.findById(postId);
-      if (!post) return res.status(404).json({ error: 'Post not found' });
-      if (!post.likedBy?.includes(userId)) return res.status(400).json({ error: 'Not liked yet' });
-      post.likes = (post.likes || 0) - 1;
-      post.likedBy = post.likedBy.filter((id) => id.toString() !== userId);
-      await post.save();
-      res.json(post);
-    } catch (error) {
-      console.error('Unlike error:', error);
-      res.status(500).json({ error: 'Failed to unlike post', details: error.message });
-    }
-  });
-
-  // Comment on a post
-  router.post('/comment', authMiddleware, async (req, res) => {
-    try {
-      const { postId, comment } = req.body;
-      const userId = req.user.id;
-      const user = await User.findById(userId);
-      const post = await Post.findById(postId);
-      if (!post) return res.status(404).json({ error: 'Post not found' });
-      const commentData = { userId, username: user.username, photo: user.photo, comment, createdAt: new Date() };
-      post.comments = [...(post.comments || []), commentData];
-      await post.save();
-      res.json(commentData);
-    } catch (error) {
-      console.error('Comment error:', error);
-      res.status(500).json({ error: 'Failed to comment', details: error.message });
     }
   });
 

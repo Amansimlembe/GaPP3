@@ -19,14 +19,11 @@ import {
   FaArrowDown,
   FaDownload,
   FaUserPlus,
-  FaUsers,
-  FaPaintBrush,
-  FaCog,
   FaSignOutAlt,
 } from 'react-icons/fa';
 import { useDispatch, useSelector } from 'react-redux';
 import { setMessages, addMessage, updateMessageStatus, setSelectedChat, resetState } from '../store';
-import { saveMessages, getMessages } from '../db';
+import { saveMessages, getMessages, clearOldMessages } from '../db';
 
 const socket = io('https://gapp-6yc3.onrender.com', {
   reconnection: true,
@@ -34,6 +31,7 @@ const socket = io('https://gapp-6yc3.onrender.com', {
   reconnectionDelay: 1000,
   reconnectionDelayMax: 5000,
   randomizationFactor: 0.5,
+  withCredentials: true,
 });
 
 const ChatScreen = ({ token, userId, setAuth }) => {
@@ -63,17 +61,12 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   const [showMessageMenu, setShowMessageMenu] = useState(null);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   const [mediaPreview, setMediaPreview] = useState(null);
-  const [holdTimer, setHoldTimer] = useState(null);
-  const [swipeStartX, setSwipeStartX] = useState(null);
   const [page, setPage] = useState(0);
   const [hasMore, setHasMore] = useState(true);
   const [loading, setLoading] = useState(false);
   const [userStatus, setUserStatus] = useState({ status: 'offline', lastSeen: null });
   const [pendingMessages, setPendingMessages] = useState([]);
-  const [decryptionPending, setDecryptionPending] = useState({});
   const chatRef = useRef(null);
-  const menuRef = useRef(null);
-  const messageMenuRef = useRef(null);
   const typingTimeoutRef = useRef(null);
   const isAtBottomRef = useRef(true);
 
@@ -105,14 +98,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       const response = await axios.get(`https://gapp-6yc3.onrender.com/auth/shared_key/${recipientId}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (response.data.error) {
-        if (response.data.code === 'NO_SHARED_KEY') {
-          console.warn('No shared key - sending unencrypted');
-          return null;
-        }
-        throw new Error(response.data.error);
-      }
-      return response.data.sharedKey;
+      return response.data.sharedKey || null;
     } catch (error) {
       console.error('Error getting shared key:', error.message);
       return null;
@@ -148,7 +134,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   const formatLastSeen = (lastSeen) => {
     if (!lastSeen) return '';
     const date = new Date(lastSeen);
-    return `Last seen at ${formatTime(date)}`;
+    return `Last seen ${date.toLocaleDateString()} at ${formatTime(date)}`;
   };
 
   useEffect(() => {
@@ -160,70 +146,36 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       socket.emit('ping', { userId });
     }, 30000);
 
+    // Periodic cleanup of old messages (older than 30 days)
+    clearOldMessages(30).catch((error) => console.error('Error clearing old messages:', error));
+
     const fetchUsers = async () => {
       try {
         const cachedUsers = JSON.parse(localStorage.getItem('cachedUsers')) || [];
         if (cachedUsers.length > 0) {
           setUsers(cachedUsers);
-          const usersWithLatestMessage = await Promise.all(
-            cachedUsers.map(async (user) => {
-              if (!user.id) {
-                console.warn('User missing ID:', user);
-                return { ...user, latestMessage: null, unreadCount: 0 };
-              }
-              try {
-                const { data } = await axios.get('https://gapp-6yc3.onrender.com/social/messages', {
-                  headers: { Authorization: `Bearer ${token}` },
-                  params: { userId, recipientId: user.id, limit: 1, skip: 0 },
-                });
-                const latestMessage = data.messages.length > 0 ? data.messages[0] : null;
-                const unreadCount = latestMessage && latestMessage.recipientId === userId && latestMessage.status !== 'read' ? 1 : 0;
-                return { ...user, latestMessage, unreadCount };
-              } catch (error) {
-                console.error(`Error fetching latest message for user ${user.id}:`, error.response?.status || error.message);
-                return { ...user, latestMessage: null, unreadCount: 0 };
-              }
-            })
-          );
-          usersWithLatestMessage.sort((a, b) => {
-            const dateA = a.latestMessage ? new Date(a.latestMessage.createdAt) : new Date(0);
-            const dateB = b.latestMessage ? new Date(b.latestMessage.createdAt) : new Date(0);
-            return dateB - dateA;
-          });
-          setUsers(usersWithLatestMessage);
-          localStorage.setItem('cachedUsers', JSON.stringify(usersWithLatestMessage));
-        } else {
-          const { data } = await axios.get('https://gapp-6yc3.onrender.com/auth/contacts', {
-            headers: { Authorization: `Bearer ${token}` },
-          });
-          const usersWithLatestMessage = await Promise.all(
-            data.map(async (user) => {
-              if (!user.id) {
-                console.warn('Contact missing ID:', user);
-                return { ...user, latestMessage: null, unreadCount: 0 };
-              }
-              try {
-                const { data: messagesData } = await axios.get('https://gapp-6yc3.onrender.com/social/messages', {
-                  headers: { Authorization: `Bearer ${token}` },
-                  params: { userId, recipientId: user.id, limit: 1, skip: 0 },
-                });
-                const latestMessage = messagesData.messages.length > 0 ? messagesData.messages[0] : null;
-                const unreadCount = latestMessage && latestMessage.recipientId === userId && latestMessage.status !== 'read' ? 1 : 0;
-                return { ...user, latestMessage, unreadCount };
-              } catch (error) {
-                console.error(`Error fetching latest message for user ${user.id}:`, error.response?.status || error.message);
-                return { ...user, latestMessage: null, unreadCount: 0 };
-              }
-            })
-          );
-          usersWithLatestMessage.sort((a, b) => {
-            const dateA = a.latestMessage ? new Date(a.latestMessage.createdAt) : new Date(0);
-            const dateB = b.latestMessage ? new Date(b.latestMessage.createdAt) : new Date(0);
-            return dateB - dateA;
-          });
-          setUsers(usersWithLatestMessage);
-          localStorage.setItem('cachedUsers', JSON.stringify(usersWithLatestMessage));
         }
+        const { data } = await axios.get('https://gapp-6yc3.onrender.com/auth/contacts', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const usersWithLatestMessage = await Promise.all(
+          data.map(async (user) => {
+            const { data: messagesData } = await axios.get('https://gapp-6yc3.onrender.com/social/messages', {
+              headers: { Authorization: `Bearer ${token}` },
+              params: { userId, recipientId: user.id, limit: 1, skip: 0 },
+            });
+            const latestMessage = messagesData.messages[0] || null;
+            const unreadCount = latestMessage && latestMessage.recipientId === userId && latestMessage.status !== 'read' ? 1 : 0;
+            return { ...user, latestMessage, unreadCount, status: 'offline', lastSeen: null };
+          })
+        );
+        usersWithLatestMessage.sort((a, b) => {
+          const dateA = a.latestMessage ? new Date(a.latestMessage.createdAt) : new Date(0);
+          const dateB = b.latestMessage ? new Date(b.latestMessage.createdAt) : new Date(0);
+          return dateB - dateA;
+        });
+        setUsers(usersWithLatestMessage);
+        localStorage.setItem('cachedUsers', JSON.stringify(usersWithLatestMessage));
       } catch (error) {
         console.error('Fetch users error:', error);
         setError('Failed to load contacts');
@@ -231,110 +183,36 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     };
     fetchUsers();
 
-    const loadOfflineMessages = async () => {
-      const offlineMessages = await getMessages(selectedChat);
-      if (offlineMessages.length > 0) {
-        const pendingDecryption = {};
-        for (const msg of offlineMessages) {
-          const chatId = msg.recipientId === userId ? msg.senderId : msg.recipientId;
-          if (msg.contentType === 'text' && msg.iv) {
-            pendingDecryption[msg._id] = { encryptedContent: msg.content, iv: msg.iv };
-            dispatch(addMessage({ recipientId: chatId, message: { ...msg, content: 'Decrypting...' } }));
-          } else {
-            dispatch(addMessage({ recipientId: chatId, message: msg }));
-          }
-        }
-        setDecryptionPending(pendingDecryption);
-      }
-    };
-
-    const decryptPendingMessages = async () => {
-      if (Object.keys(decryptionPending).length === 0 || !navigator.onLine) return;
-
-      const updatedMessages = [];
-      for (const [messageId, { encryptedContent, iv }] of Object.entries(decryptionPending)) {
-        const chatId = (chats[selectedChat] || []).find((m) => m._id === messageId)?.senderId === userId ? selectedChat : userId;
-        const sharedKey = await getSharedKey(chatId);
-        if (sharedKey) {
-          try {
-            const decryptedContent = await decryptMessage(encryptedContent, iv, sharedKey);
-            updatedMessages.push({ _id: messageId, content: decryptedContent });
-          } catch (error) {
-            console.error(`Failed to decrypt message ${messageId}:`, error);
-          }
-        }
-      }
-
-      if (updatedMessages.length > 0) {
-        dispatch(
-          setMessages({
-            recipientId: selectedChat,
-            messages: (chats[selectedChat] || []).map((msg) =>
-              updatedMessages.find((um) => um._id === msg._id) ? { ...msg, content: updatedMessages.find((um) => um._id === msg._id).content } : msg
-            ),
-          })
-        );
-        setDecryptionPending({});
-      }
-    };
-
     const fetchMessages = async (pageNum = 0, isInitialLoad = true) => {
       if (!selectedChat || loading) return;
       setLoading(true);
       try {
-        const cachedMessages = await getMessages(selectedChat);
-        let messages = [];
-
-        if (cachedMessages.length > 0 && pageNum === 0) {
-          messages = cachedMessages.slice(-messagesPerPage);
-          setHasMore(cachedMessages.length >= messagesPerPage);
-        } else {
-          const { data } = await axios.get('https://gapp-6yc3.onrender.com/social/messages', {
-            headers: { Authorization: `Bearer ${token}` },
-            params: { userId, recipientId: selectedChat, limit: messagesPerPage, skip: pageNum * messagesPerPage },
-          });
-          const sharedKey = await getSharedKey(selectedChat);
-          messages = await Promise.all(
-            data.messages.map(async (msg) => ({
-              ...msg,
-              content: msg.contentType === 'text' && sharedKey ? await decryptMessage(msg.content, msg.iv, sharedKey) : msg.content,
-              status: msg.status || 'sent',
-            }))
-          );
-          setHasMore(data.hasMore);
-          await saveMessages(messages); // Save to IndexedDB
-        }
+        const { data } = await axios.get('https://gapp-6yc3.onrender.com/social/messages', {
+          headers: { Authorization: `Bearer ${token}` },
+          params: { userId, recipientId: selectedChat, limit: messagesPerPage, skip: pageNum * messagesPerPage },
+        });
+        const sharedKey = await getSharedKey(selectedChat);
+        const messages = await Promise.all(
+          data.messages.map(async (msg) => ({
+            ...msg,
+            content: msg.contentType === 'text' && sharedKey && msg.iv ? await decryptMessage(msg.content, msg.iv, sharedKey) : msg.content,
+          }))
+        );
+        setHasMore(data.hasMore);
 
         if (isInitialLoad) {
           dispatch(setMessages({ recipientId: selectedChat, messages }));
           const unreadMessages = messages.filter((msg) => msg.recipientId === userId && msg.status !== 'read');
-          if (unreadMessages.length > 0) {
-            unreadMessages.forEach((msg) => {
-              socket.emit('messageStatus', { messageId: msg._id, status: 'read', recipientId: userId });
-            });
-          }
-          setNotifications((prev) => {
-            const updatedNotifications = { ...prev, [selectedChat]: 0 };
-            localStorage.setItem('chatNotifications', JSON.stringify(updatedNotifications));
-            return updatedNotifications;
-          });
-          setUnreadCount(0);
-          setFirstUnreadMessageId(null);
+          setUnreadCount(unreadMessages.length);
+          if (unreadMessages.length > 0) setFirstUnreadMessageId(unreadMessages[0]._id);
           chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'auto' });
         } else {
-          dispatch(
-            setMessages({
-              recipientId: selectedChat,
-              messages: [...messages, ...(chats[selectedChat] || [])],
-            })
-          );
+          dispatch(setMessages({ recipientId: selectedChat, messages: [...messages, ...(chats[selectedChat] || [])] }));
         }
+        await saveMessages(messages);
       } catch (error) {
         console.error('Fetch messages error:', error);
-        if (isInitialLoad) {
-          dispatch(setMessages({ recipientId: selectedChat, messages: [] }));
-          setError('No previous messages');
-        }
+        if (isInitialLoad) setError('Failed to load messages');
       } finally {
         setLoading(false);
       }
@@ -343,7 +221,6 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     if (selectedChat) {
       setPage(0);
       setHasMore(true);
-      loadOfflineMessages();
       fetchMessages(0, true);
 
       const fetchUserStatus = async () => {
@@ -362,25 +239,24 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     socket.on('message', async (msg) => {
       const chatId = msg.senderId === userId ? msg.recipientId : msg.senderId;
       const sharedKey = await getSharedKey(chatId);
-      const decryptedContent = msg.contentType === 'text' && sharedKey ? await decryptMessage(msg.content, msg.iv, sharedKey) : msg.content;
-      const senderKnown = users.some((u) => u.id === msg.senderId);
-      const updatedMsg = { ...msg, content: decryptedContent, username: senderKnown ? msg.senderUsername : 'Unsaved Number' };
+      const content = msg.contentType === 'text' && sharedKey && msg.iv ? await decryptMessage(msg.content, msg.iv, sharedKey) : msg.content;
+      const updatedMsg = { ...msg, content };
 
       dispatch(addMessage({ recipientId: chatId, message: updatedMsg }));
-      await saveMessages([msg]);
+      await saveMessages([updatedMsg]);
 
-      if (msg.recipientId === userId && !senderKnown) {
+      if (msg.recipientId === userId && !users.some((u) => u.id === msg.senderId)) {
         setUsers((prev) => {
           const updatedUsers = [
             ...prev,
-            { id: msg.senderId, virtualNumber: msg.senderVirtualNumber, username: 'Unsaved Number', photo: msg.senderPhoto || 'https://placehold.co/40x40', unreadCount: 0 },
+            { id: msg.senderId, virtualNumber: msg.senderVirtualNumber, username: msg.senderUsername || 'Unsaved Number', photo: msg.senderPhoto || 'https://placehold.co/40x40', unreadCount: 0 },
           ];
           localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
           return updatedUsers;
         });
       }
 
-      if ((msg.senderId === userId && msg.recipientId === selectedChat) || (msg.senderId === selectedChat && msg.recipientId === userId)) {
+      if (chatId === selectedChat) {
         if (msg.recipientId === userId) {
           socket.emit('messageStatus', { messageId: msg._id, status: 'delivered', recipientId: userId });
           if (isAtBottomRef.current) {
@@ -398,18 +274,14 @@ const ChatScreen = ({ token, userId, setAuth }) => {
         }
       } else if (msg.recipientId === userId) {
         setNotifications((prev) => {
-          const updatedNotifications = { ...prev, [msg.senderId]: (prev[msg.senderId] || 0) + 1 };
-          localStorage.setItem('chatNotifications', JSON.stringify(updatedNotifications));
-          return updatedNotifications;
+          const updated = { ...prev, [msg.senderId]: (prev[msg.senderId] || 0) + 1 };
+          localStorage.setItem('chatNotifications', JSON.stringify(updated));
+          return updated;
         });
         setUsers((prev) => {
           const updatedUsers = prev.map((user) =>
-            user.id === msg.senderId ? { ...user, latestMessage: msg, unreadCount: (user.unreadCount || 0) + 1 } : user
-          ).sort((a, b) => {
-            const dateA = a.latestMessage ? new Date(a.latestMessage.createdAt) : new Date(0);
-            const dateB = b.latestMessage ? new Date(b.latestMessage.createdAt) : new Date(0);
-            return dateB - dateA;
-          });
+            user.id === msg.senderId ? { ...user, latestMessage: updatedMsg, unreadCount: (user.unreadCount || 0) + 1 } : user
+          ).sort((a, b) => (b.latestMessage?.createdAt || 0) - (a.latestMessage?.createdAt || 0));
           localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
           return updatedUsers;
         });
@@ -426,8 +298,9 @@ const ChatScreen = ({ token, userId, setAuth }) => {
 
     socket.on('messageStatus', ({ messageId, status }) => {
       dispatch(updateMessageStatus({ recipientId: selectedChat, messageId, status }));
-      if (status === 'read') {
-        setUsers((prev) => prev.map((user) => (user.id === selectedChat ? { ...user, unreadCount: 0 } : user)));
+      if (status === 'read' && selectedChat) {
+        setUnreadCount(0);
+        setFirstUnreadMessageId(null);
       }
     });
 
@@ -436,27 +309,17 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       if (contactId === selectedChat) setUserStatus({ status, lastSeen });
     });
 
-    const handleClickOutside = (event) => {
-      if (menuRef.current && !menuRef.current.contains(event.target)) setShowMenu(false);
-      if (messageMenuRef.current && !messageMenuRef.current.contains(event.target)) setShowMessageMenu(null);
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-
     const handleScroll = () => {
       if (chatRef.current) {
         const { scrollTop, scrollHeight, clientHeight } = chatRef.current;
         isAtBottomRef.current = scrollHeight - scrollTop - clientHeight < 50;
         setShowJumpToBottom(!isAtBottomRef.current);
 
-        if (scrollTop < 50 && hasMore && !loading) {
-          setPage((prevPage) => prevPage + 1);
-        }
+        if (scrollTop < 50 && hasMore && !loading) setPage((prev) => prev + 1);
 
         if (isAtBottomRef.current && selectedChat) {
           const unreadMessages = (chats[selectedChat] || []).filter((msg) => msg.recipientId === userId && msg.status !== 'read');
-          unreadMessages.forEach((msg) => {
-            socket.emit('messageStatus', { messageId: msg._id, status: 'read', recipientId: userId });
-          });
+          unreadMessages.forEach((msg) => socket.emit('messageStatus', { messageId: msg._id, status: 'read', recipientId: userId }));
           setUnreadCount(0);
           setFirstUnreadMessageId(null);
         }
@@ -468,12 +331,9 @@ const ChatScreen = ({ token, userId, setAuth }) => {
 
     const handleOnline = async () => {
       if (pendingMessages.length > 0) {
-        for (const msg of pendingMessages) {
-          await sendMessageToServer(msg);
-        }
+        for (const msg of pendingMessages) await sendMessageToServer(msg);
         setPendingMessages([]);
       }
-      await decryptPendingMessages();
     };
     window.addEventListener('online', handleOnline);
 
@@ -483,7 +343,6 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       socket.off('stopTyping');
       socket.off('messageStatus');
       socket.off('onlineStatus');
-      document.removeEventListener('mousedown', handleClickOutside);
       chatRef.current?.removeEventListener('scroll', handleScroll);
       window.removeEventListener('online', handleOnline);
       clearInterval(keepAlive);
@@ -496,7 +355,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     formData.append('recipientId', msgData.recipientId);
     formData.append('contentType', msgData.contentType);
     formData.append('caption', msgData.caption || '');
-    if (msgData.contentType === 'text') formData.append('iv', msgData.iv);
+    if (msgData.contentType === 'text' && msgData.iv) formData.append('iv', msgData.iv);
     if (msgData.file) formData.append('content', msgData.file);
     else formData.append('content', msgData.content);
     if (msgData.replyTo) formData.append('replyTo', msgData.replyTo);
@@ -509,17 +368,11 @@ const ChatScreen = ({ token, userId, setAuth }) => {
           if (msgData.file) setUploadProgress(Math.round((progressEvent.loaded * 100) / progressEvent.total));
         },
       });
-      socket.emit('message', {
-        ...data,
-        senderVirtualNumber: localStorage.getItem('virtualNumber'),
-        senderUsername: localStorage.getItem('username'),
-        senderPhoto: localStorage.getItem('photo'),
-      });
       dispatch(
         setMessages({
           recipientId: selectedChat,
           messages: (chats[selectedChat] || []).map((msg) =>
-            msg._id === msgData.tempId ? { ...data, content: msg.content, status: 'sent' } : msg
+            msg._id === msgData.tempId ? { ...data, content: msg.content } : msg
           ),
         })
       );
@@ -527,26 +380,13 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       setUploadProgress(null);
     } catch (error) {
       console.error('Send message error:', error);
-      dispatch(
-        setMessages({
-          recipientId: selectedChat,
-          messages: (chats[selectedChat] || []).filter((msg) => msg._id !== msgData.tempId),
-        })
-      );
       setUploadProgress(null);
       setError('Failed to send message');
     }
   };
 
   const sendMessage = async () => {
-    if (!selectedChat) {
-      setError('No chat selected');
-      return;
-    }
-    if (!message && !file) {
-      setError('Please enter a message or select a file');
-      return;
-    }
+    if (!selectedChat || (!message && !file)) return;
 
     socket.emit('stopTyping', { userId, recipientId: selectedChat });
     setTyping(false);
@@ -560,40 +400,32 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       content: file ? URL.createObjectURL(file) : message,
       caption,
       status: 'sending',
-      replyTo,
+      replyTo: replyTo?._id || null,
       createdAt: new Date(),
-      tempId,
     };
 
     dispatch(addMessage({ recipientId: selectedChat, message: tempMsg }));
+    if (isAtBottomRef.current) chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
 
     let encryptedContent = message;
     let iv = '';
-
     if (contentType === 'text') {
       const sharedKey = await getSharedKey(selectedChat);
       if (sharedKey) {
-        const encryptionResult = await encryptMessage(message, sharedKey);
-        encryptedContent = encryptionResult.encrypted;
-        iv = encryptionResult.iv;
+        const { encrypted, iv: encryptionIv } = await encryptMessage(message, sharedKey);
+        encryptedContent = encrypted;
+        iv = encryptionIv;
       }
     }
 
-    const messageForServer = { ...tempMsg, content: encryptedContent, iv, status: 'sent' };
-    await saveMessages([messageForServer]);
-
-    if (isAtBottomRef.current) {
-      chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
-    } else {
-      setShowJumpToBottom(true);
-    }
+    const messageForServer = { ...tempMsg, content: encryptedContent, iv, file, tempId };
+    await saveMessages([{ ...messageForServer, content: message }]);
 
     setMessage('');
     setFile(null);
     setCaption('');
     setContentType('text');
     setShowPicker(false);
-    setUploadProgress(null);
     setReplyTo(null);
     setMediaPreview(null);
 
@@ -603,22 +435,12 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     } else {
       setPendingMessages((prev) => [...prev, messageForServer]);
       dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: tempId, status: 'pending' }));
-      if (contentType === 'text' && iv) {
-        setDecryptionPending((prev) => ({
-          ...prev,
-          [tempId]: { encryptedContent, iv },
-        }));
-      }
     }
 
     setUsers((prev) => {
       const updatedUsers = prev.map((user) =>
-        user.id === selectedChat ? { ...user, latestMessage: { ...messageForServer, content: message } } : user
-      ).sort((a, b) => {
-        const dateA = a.latestMessage ? new Date(a.latestMessage.createdAt) : new Date(0);
-        const dateB = b.latestMessage ? new Date(b.latestMessage.createdAt) : new Date(0);
-        return dateB - dateA;
-      });
+        user.id === selectedChat ? { ...user, latestMessage: { ...tempMsg, content: message } } : user
+      ).sort((a, b) => (b.latestMessage?.createdAt || 0) - (a.latestMessage?.createdAt || 0));
       localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
       return updatedUsers;
     });
@@ -626,7 +448,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
 
   const handleTyping = (e) => {
     setMessage(e.target.value);
-    if (!typing) {
+    if (!typing && e.target.value) {
       socket.emit('typing', { userId, recipientId: selectedChat });
       setTyping(true);
     }
@@ -692,33 +514,26 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       const { data } = await axios.post('https://gapp-6yc3.onrender.com/social/message', formData, {
         headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
       });
-      socket.emit('message', {
-        ...data,
-        senderVirtualNumber: localStorage.getItem('virtualNumber'),
-        senderUsername: localStorage.getItem('username'),
-        senderPhoto: localStorage.getItem('photo'),
-      });
+      dispatch(addMessage({ recipientId: contact.id, message: data }));
     } catch (error) {
       setError('Failed to forward message');
     }
   };
 
   const copyMessage = (msg) => {
-    if (msg.contentType === 'text' && msg.content !== 'Decrypting...') {
+    if (msg.contentType === 'text') {
       navigator.clipboard.writeText(msg.content);
       alert('Message copied to clipboard');
     }
   };
 
   const shareMessage = (msg) => {
-    if (navigator.share && msg.content !== 'Decrypting...') {
+    if (navigator.share) {
       navigator.share({
         title: 'Shared Message',
         text: msg.contentType === 'text' ? msg.content : undefined,
         url: msg.contentType !== 'text' ? msg.content : undefined,
       });
-    } else {
-      alert('Sharing not supported on this device');
     }
   };
 
@@ -727,15 +542,12 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       setError('Virtual number is required');
       return;
     }
-
-    setLoading(true);
     try {
       const { data } = await axios.post(
         'https://gapp-6yc3.onrender.com/auth/add_contact',
         { userId, virtualNumber: newContactNumber },
         { headers: { Authorization: `Bearer ${token}` } }
       );
-
       const newContact = {
         id: data.userId,
         virtualNumber: data.virtualNumber,
@@ -746,26 +558,17 @@ const ChatScreen = ({ token, userId, setAuth }) => {
         status: 'offline',
         lastSeen: null,
       };
-
       setUsers((prev) => {
-        const updatedUsers = [...prev, newContact].sort((a, b) => {
-          const dateA = a.latestMessage ? new Date(a.latestMessage.createdAt) : new Date(0);
-          const dateB = b.latestMessage ? new Date(b.latestMessage.createdAt) : new Date(0);
-          return dateB - dateA;
-        });
+        const updatedUsers = [...prev, newContact].sort((a, b) => (b.latestMessage?.createdAt || 0) - (a.latestMessage?.createdAt || 0));
         localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
         return updatedUsers;
       });
-
       setNewContactNumber('');
       setNewContactName('');
       setMenuTab('');
       setError('');
-      setLoading(false);
-      dispatch(setSelectedChat(data.userId)); // Open chatbox immediately
+      dispatch(setSelectedChat(data.userId));
     } catch (error) {
-      console.error('Add contact error:', error);
-      setLoading(false);
       setError(error.response?.data?.error || 'Failed to add contact');
     }
   };
@@ -786,46 +589,8 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     isAtBottomRef.current = true;
     setUnreadCount(0);
     setFirstUnreadMessageId(null);
-
     const unreadMessages = (chats[selectedChat] || []).filter((msg) => msg.recipientId === userId && msg.status !== 'read');
-    unreadMessages.forEach((msg) => {
-      socket.emit('messageStatus', { messageId: msg._id, status: 'read', recipientId: userId });
-    });
-  };
-
-  const scrollToMessage = (messageId) => {
-    const element = document.getElementById(`message-${messageId}`);
-    if (element) element.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  };
-
-  const handleHoldStart = (msgId) => {
-    const timer = setTimeout(() => {
-      setShowMessageMenu(msgId);
-    }, 500); // Reduced for faster response
-    setHoldTimer(timer);
-  };
-
-  const handleHoldEnd = () => {
-    if (holdTimer) {
-      clearTimeout(holdTimer);
-      setHoldTimer(null);
-    }
-  };
-
-  const handleSwipeStart = (e) => {
-    const touch = e.touches[0];
-    setSwipeStartX(touch.clientX);
-  };
-
-  const handleSwipeEnd = (e, msg) => {
-    if (swipeStartX === null) return;
-    const touch = e.changedTouches[0];
-    const swipeDistance = touch.clientX - swipeStartX;
-    if (swipeDistance < -50) {
-      setReplyTo(msg);
-      scrollToMessage(msg._id);
-    }
-    setSwipeStartX(null);
+    unreadMessages.forEach((msg) => socket.emit('messageStatus', { messageId: msg._id, status: 'read', recipientId: userId }));
   };
 
   const handleLogout = () => {
@@ -850,15 +615,15 @@ const ChatScreen = ({ token, userId, setAuth }) => {
         <div className="flex-1 overflow-y-auto">
           {users.map((user) => (
             <motion.div
-              key={user.id || user.virtualNumber}
+              key={user.id}
               whileHover={{ backgroundColor: '#f0f0f0' }}
-              onClick={() => user.id && dispatch(setSelectedChat(user.id))}
+              onClick={() => dispatch(setSelectedChat(user.id))}
               className={`flex items-center p-3 border-b border-gray-200 cursor-pointer ${selectedChat === user.id ? 'bg-gray-100' : ''}`}
             >
               <div className="relative">
                 <img src={user.photo || 'https://placehold.co/40x40'} alt="Profile" className="w-12 h-12 rounded-full mr-3" />
                 {user.status === 'online' && (
-                  <span className="absolute bottom-0 right-3 w-5 h-5 bg-green-500 border-2 border-white rounded-full"></span>
+                  <span className="absolute bottom-0 right-3 w-3 h-3 bg-green-500 border-2 border-white rounded-full"></span>
                 )}
               </div>
               <div className="flex-1">
@@ -869,11 +634,11 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                   )}
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-sm text-gray-600 truncate">
+                  <span className="text-sm text-gray-600 truncate max-w-[70%]">
                     {user.latestMessage ? user.latestMessage.content : 'No messages yet'}
                   </span>
                   {(user.unreadCount || notifications[user.id]) > 0 && (
-                    <span className="ml-auto bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
+                    <span className="ml-2 bg-green-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
                       {user.unreadCount || notifications[user.id]}
                     </span>
                   )}
@@ -884,7 +649,6 @@ const ChatScreen = ({ token, userId, setAuth }) => {
         </div>
         {showMenu && (
           <motion.div
-            ref={menuRef}
             initial={{ opacity: 0, y: 50 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 50 }}
@@ -904,46 +668,33 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                   <FaUserPlus className="text-primary mr-3" />
                   <span className="text-primary">New Number</span>
                 </motion.div>
-                <motion.div whileHover={{ scale: 1.05 }} className="flex items-center p-3 rounded-lg cursor-pointer text-red-500 hover:bg-gray-200" onClick={handleLogout}>
+                <motion.div whileHover={{ scale: 1.05 }} className="flex items-center p-3 rounded-lg cursor-pointer text-red-500" onClick={handleLogout}>
                   <FaSignOutAlt className="text-red-500 mr-3" />
-                  <span className="text-red-500">Logout</span>
+                  <span>Logout</span>
                 </motion.div>
               </div>
-              <AnimatePresence>
-                {menuTab === 'newNumber' && (
-                  <motion.div
-                    initial={{ opacity: 0, height: 0 }}
-                    animate={{ opacity: 1, height: 'auto' }}
-                    exit={{ opacity: 0, height: 0 }}
-                    className="mt-4"
-                  >
-                    <input
-                      type="text"
-                      value={newContactNumber}
-                      onChange={(e) => setNewContactNumber(e.target.value)}
-                      className="w-full p-2 mb-2 border rounded-lg"
-                      placeholder="Enter virtual number"
-                      disabled={loading}
-                    />
-                    <input
-                      type="text"
-                      value={newContactName}
-                      onChange={(e) => setNewContactName(e.target.value)}
-                      className="w-full p-2 mb-2 border rounded-lg"
-                      placeholder="Enter contact name (optional)"
-                      disabled={loading}
-                    />
-                    <button
-                      onClick={addContact}
-                      className="w-full bg-primary text-white p-2 rounded-lg hover:bg-secondary disabled:bg-gray-400"
-                      disabled={loading}
-                    >
-                      {loading ? 'Saving...' : 'Save Contact'}
-                    </button>
-                    {error && <p className="text-red-500 text-sm mt-2">{error}</p>}
-                  </motion.div>
-                )}
-              </AnimatePresence>
+              {menuTab === 'newNumber' && (
+                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="mt-4">
+                  <input
+                    type="text"
+                    value={newContactNumber}
+                    onChange={(e) => setNewContactNumber(e.target.value)}
+                    className="w-full p-2 mb-2 border rounded-lg"
+                    placeholder="Enter virtual number"
+                  />
+                  <input
+                    type="text"
+                    value={newContactName}
+                    onChange={(e) => setNewContactName(e.target.value)}
+                    className="w-full p-2 mb-2 border rounded-lg"
+                    placeholder="Enter contact name (optional)"
+                  />
+                  <button onClick={addContact} className="w-full bg-primary text-white p-2 rounded-lg hover:bg-secondary">
+                    Save Contact
+                  </button>
+                  {error && <p className="text-red-500 text-sm mt-2">{error}</p>}
+                </motion.div>
+              )}
             </div>
           </motion.div>
         )}
@@ -954,12 +705,10 @@ const ChatScreen = ({ token, userId, setAuth }) => {
           <>
             <div className="bg-white p-3 flex items-center border-b border-gray-200 fixed top-0 md:left-[33.33%] md:w-2/3 left-0 right-0 z-10">
               {isSmallDevice && (
-                <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
-                  <FaArrowLeft
-                    onClick={() => dispatch(setSelectedChat(null))}
-                    className="text-xl text-primary cursor-pointer mr-3 hover:text-secondary"
-                  />
-                </motion.div>
+                <FaArrowLeft
+                  onClick={() => dispatch(setSelectedChat(null))}
+                  className="text-xl text-primary cursor-pointer mr-3 hover:text-secondary"
+                />
               )}
               <img
                 src={users.find((u) => u.id === selectedChat)?.photo || 'https://placehold.co/40x40'}
@@ -967,9 +716,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                 className="w-10 h-10 rounded-full mr-2"
               />
               <div>
-                <span className="font-semibold">
-                  {users.find((u) => u.id === selectedChat)?.username || users.find((u) => u.id === selectedChat)?.virtualNumber || 'Unknown'}
-                </span>
+                <span className="font-semibold">{users.find((u) => u.id === selectedChat)?.username || 'Unknown'}</span>
                 <div className="text-sm text-gray-500">
                   {isTyping[selectedChat] ? (
                     <span className="text-green-500">Typing...</span>
@@ -988,14 +735,11 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                 <>
                   {(chats[selectedChat] || []).map((msg, index) => {
                     const currentDate = new Date(msg.createdAt);
-                    const prevMsg = index > 0 ? (chats[selectedChat] || [])[index - 1] : null;
-                    const prevDate = prevMsg ? new Date(prevMsg.createdAt) : null;
-                    let showDateHeader =
-                      !prevDate ||
-                      currentDate.toDateString() !== prevDate.toDateString();
+                    const prevMsg = index > 0 ? chats[selectedChat][index - 1] : null;
+                    const showDateHeader = !prevMsg || currentDate.toDateString() !== new Date(prevMsg.createdAt).toDateString();
 
                     return (
-                      <motion.div key={msg._id} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2 }}>
+                      <motion.div key={msg._id} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
                         {showDateHeader && (
                           <div className="text-center my-2">
                             <span className="bg-gray-300 text-gray-700 px-2 py-1 rounded-full text-sm">{formatDateHeader(msg.createdAt)}</span>
@@ -1007,129 +751,59 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                           </div>
                         )}
                         <div
-                          id={`message-${msg._id}`}
-                          className={`flex ${msg.senderId === userId ? 'justify-end' : 'justify-start'} px-2 py-1 relative`}
-                          onTouchStart={(e) => handleHoldStart(msg._id)}
-                          onTouchEnd={(e) => {
-                            handleHoldEnd();
-                            handleSwipeEnd(e, msg);
+                          className={`flex ${msg.senderId === userId ? 'justify-end' : 'justify-start'} px-2 py-1`}
+                          onContextMenu={(e) => {
+                            e.preventDefault();
+                            setShowMessageMenu(msg._id);
                           }}
-                          onMouseDown={() => handleHoldStart(msg._id)}
-                          onMouseUp={handleHoldEnd}
                         >
                           <div
                             className={`max-w-[70%] p-2 rounded-lg shadow-sm ${
                               msg.senderId === userId ? 'bg-green-500 text-white rounded-br-none' : 'bg-white text-black rounded-bl-none'
-                            } transition-all ${selectedMessages.includes(msg._id) ? 'bg-opacity-50' : ''}`}
+                            } ${selectedMessages.includes(msg._id) ? 'bg-opacity-50' : ''}`}
                             onClick={() => {
                               if (selectedMessages.length > 0) {
                                 setSelectedMessages((prev) =>
                                   prev.includes(msg._id) ? prev.filter((id) => id !== msg._id) : [...prev, msg._id]
                                 );
+                              } else if (msg.contentType === 'video' || msg.contentType === 'image') {
+                                viewMessage(msg);
                               }
                             }}
-                            onDoubleClick={msg.contentType === 'video' ? () => viewMessage(msg) : null}
                           >
-                            {msg.replyTo && (
-                              <div className="bg-gray-100 p-1 rounded mb-1 text-xs italic text-gray-700 border-l-4 border-green-500">
-                                {msg.replyTo.contentType === 'text' && (
-                                  <p>{msg.replyTo.content.slice(0, 20) + (msg.replyTo.content.length > 20 ? '...' : '')}</p>
-                                )}
-                                {msg.replyTo.contentType === 'image' && (
-                                  <div className="flex items-center">
-                                    <img src={msg.replyTo.content} alt="Reply Preview" className="w-8 h-8 object-cover rounded mr-2" />
-                                    <span>Image</span>
-                                  </div>
-                                )}
-                                {msg.replyTo.contentType === 'video' && (
-                                  <div className="flex items-center">
-                                    <video src={msg.replyTo.content} className="w-8 h-8 object-cover rounded mr-2" />
-                                    <span>Video</span>
-                                  </div>
-                                )}
-                                {msg.replyTo.contentType === 'audio' && (
-                                  <div className="flex items-center">
-                                    <FaPlay className="text-green-500 mr-2" />
-                                    <span>Audio</span>
-                                  </div>
-                                )}
-                                {msg.replyTo.contentType === 'document' && (
-                                  <div className="flex items-center">
-                                    <FaFileAlt className="text-blue-600 mr-2" />
-                                    <span>Document</span>
-                                  </div>
-                                )}
+                            {msg.replyTo && chats[selectedChat]?.find((m) => m._id === msg.replyTo) && (
+                              <div
+                                className="bg-gray-100 p-1 rounded mb-1 text-xs italic text-gray-700 border-l-4 border-green-500 cursor-pointer"
+                                onClick={() => chatRef.current.scrollTo({ top: document.getElementById(`message-${msg.replyTo}`).offsetTop - 50, behavior: 'smooth' })}
+                              >
+                                <p>{chats[selectedChat].find((m) => m._id === msg.replyTo).content.slice(0, 20) + '...'}</p>
                               </div>
                             )}
                             {msg.contentType === 'text' && <p className="text-sm break-words">{msg.content}</p>}
                             {msg.contentType === 'image' && (
-                              <div className="relative border-t border-l border-r border-gray-300 rounded-lg shadow-md p-1">
-                                <img
-                                  src={msg.content}
-                                  alt="Chat"
-                                  className="max-w-[80%] max-h-64 object-contain rounded-lg"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    viewMessage(msg);
-                                  }}
-                                />
-                                {msg.caption && (
-                                  <p className="text-xs italic text-gray-300 max-w-[80%] p-2 border-b border-l border-r border-gray-300 rounded-b-lg break-words">
-                                    {msg.caption}
-                                  </p>
-                                )}
-                              </div>
+                              <img src={msg.content} alt="Chat" className="max-w-[80%] max-h-64 object-contain rounded-lg" />
                             )}
                             {msg.contentType === 'video' && (
-                              <div className="relative border-t border-l border-r border-gray-300 rounded-lg shadow-md p-1">
-                                <video
-                                  src={msg.content}
-                                  className="max-w-[80%] max-h-64 object-contain rounded-lg"
-                                  onClick={(e) => e.stopPropagation()}
-                                />
-                                {msg.caption && (
-                                  <p className="text-xs italic text-gray-300 max-w-[80%] p-2 border-b border-l border-r border-gray-300 rounded-b-lg break-words">
-                                    {msg.caption}
-                                  </p>
-                                )}
-                              </div>
+                              <video src={msg.content} className="max-w-[80%] max-h-64 object-contain rounded-lg" controls />
                             )}
-                            {msg.contentType === 'audio' && (
-                              <div className="relative flex items-center">
-                                <audio
-                                  src={msg.content}
-                                  controls
-                                  className="max-w-[80%] h-10"
-                                  onError={(e) => console.error('Audio playback error:', e)}
-                                />
-                                {msg.caption && <p className="text-xs mt-1 italic text-gray-300 ml-2">{msg.caption}</p>}
-                              </div>
-                            )}
+                            {msg.contentType === 'audio' && <audio src={msg.content} controls className="max-w-[80%] h-10" />}
                             {msg.contentType === 'document' && (
                               <div className="flex items-center bg-gray-100 p-2 rounded-lg">
                                 <FaFileAlt className="text-blue-600 mr-2" />
-                                <span className="text-blue-600 font-semibold truncate max-w-[200px] text-sm">
-                                  {msg.content.split('/').pop().slice(0, 30) + (msg.content.split('/').pop().length > 30 ? '...' : '')}
-                                </span>
-                                <a
-                                  href={msg.content}
-                                  download
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="ml-2 text-blue-600 hover:text-blue-800"
-                                  onClick={(e) => e.stopPropagation()}
-                                >
+                                <span className="text-blue-600 truncate max-w-[200px]">{msg.content.split('/').pop()}</span>
+                                <a href={msg.content} download className="ml-2 text-blue-600">
                                   <FaDownload />
                                 </a>
-                                {msg.caption && <p className="text-xs ml-2 italic text-gray-600">{msg.caption}</p>}
                               </div>
                             )}
+                            {msg.caption && <p className="text-xs italic mt-1">{msg.caption}</p>}
                             <div className="flex justify-between items-center mt-1">
                               {msg.senderId === userId && (
                                 <span className="text-xs">
+                                  {msg.status === 'pending' && '🕒'}
                                   {msg.status === 'sent' && '✔'}
                                   {msg.status === 'delivered' && '✔✔'}
-                                  {msg.status === 'read' && <span className="text-blue-500">✔✔</span>}
+                                  {msg.status === 'read' && <span className="text-blue-300">✔✔</span>}
                                 </span>
                               )}
                               <span className="text-xs text-gray-500">{formatTime(msg.createdAt)}</span>
@@ -1137,59 +811,23 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                           </div>
                           {showMessageMenu === msg._id && (
                             <motion.div
-                              ref={messageMenuRef}
                               initial={{ opacity: 0, scale: 0.8 }}
                               animate={{ opacity: 1, scale: 1 }}
                               className={`absolute ${msg.senderId === userId ? 'right-0' : 'left-0'} top-0 bg-white p-2 rounded-lg shadow-lg z-20 flex space-x-2`}
+                              onClick={() => setShowMessageMenu(null)}
                             >
-                              <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
-                                <FaReply
-                                  onClick={() => {
-                                    setReplyTo(msg);
-                                    scrollToMessage(msg._id);
-                                    setShowMessageMenu(null);
-                                  }}
-                                  className="text-primary cursor-pointer hover:text-secondary"
-                                />
-                              </motion.div>
-                              <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
-                                <FaForward
-                                  onClick={() => {
-                                    forwardMessage(msg);
-                                    setShowMessageMenu(null);
-                                  }}
-                                  className="text-primary cursor-pointer hover:text-secondary"
-                                />
-                              </motion.div>
-                              <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
-                                <FaCopy
-                                  onClick={() => {
-                                    copyMessage(msg);
-                                    setShowMessageMenu(null);
-                                  }}
-                                  className="text-primary cursor-pointer hover:text-secondary"
-                                />
-                              </motion.div>
-                              <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
-                                <FaShare
-                                  onClick={() => {
-                                    shareMessage(msg);
-                                    setShowMessageMenu(null);
-                                  }}
-                                  className="text-primary cursor-pointer hover:text-secondary"
-                                />
-                              </motion.div>
+                              <FaReply onClick={() => setReplyTo(msg)} className="text-primary cursor-pointer" />
+                              <FaForward onClick={() => forwardMessage(msg)} className="text-primary cursor-pointer" />
+                              <FaCopy onClick={() => copyMessage(msg)} className="text-primary cursor-pointer" />
+                              <FaShare onClick={() => shareMessage(msg)} className="text-primary cursor-pointer" />
                               {msg.senderId === userId && (
-                                <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
-                                  <FaTrash
-                                    onClick={() => {
-                                      setSelectedMessages([msg._id]);
-                                      setShowDeleteConfirm(true);
-                                      setShowMessageMenu(null);
-                                    }}
-                                    className="text-red-500 cursor-pointer hover:text-red-700"
-                                  />
-                                </motion.div>
+                                <FaTrash
+                                  onClick={() => {
+                                    setSelectedMessages([msg._id]);
+                                    setShowDeleteConfirm(true);
+                                  }}
+                                  className="text-red-500 cursor-pointer"
+                                />
                               )}
                             </motion.div>
                           )}
@@ -1197,37 +835,20 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                       </motion.div>
                     );
                   })}
-                  {loading && page > 0 && (
-                    <div className="text-center py-2">
-                      <p className="text-gray-500">Loading more messages...</p>
-                    </div>
-                  )}
+                  {loading && page > 0 && <div className="text-center py-2">Loading more...</div>}
                 </>
               )}
             </div>
-            <div className="bg-white p-2 border-t border-gray-200 shadow-lg fixed bottom-0 md:left-[33.33%] md:w-2/3 left-0 right-0 z-30 mb-16">
+            <div className="bg-white p-2 border-t border-gray-200 fixed bottom-0 md:left-[33.33%] md:w-2/3 left-0 right-0 z-10">
               {mediaPreview && (
                 <div className="bg-gray-100 p-2 mb-2 rounded w-full max-w-[80%] mx-auto">
-                  {mediaPreview.type === 'image' && (
-                    <img src={mediaPreview.url} alt="Preview" className="max-w-full max-h-64 object-contain rounded-lg p-[2px]" />
-                  )}
-                  {mediaPreview.type === 'video' && (
-                    <video src={mediaPreview.url} className="max-w-full max-h-64 object-contain rounded-lg p-[2px]" controls />
-                  )}
-                  {mediaPreview.type === 'audio' && (
-                    <div className="flex items-center">
-                      <FaPlay className="text-green-500 mr-2" />
-                      <div className={`bg-gray-200 h-2 rounded-full ${isSmallDevice ? 'w-[250px]' : 'w-[400px]'}`}>
-                        <div className="bg-green-500 h-2 rounded-full w-1/3"></div>
-                      </div>
-                    </div>
-                  )}
+                  {mediaPreview.type === 'image' && <img src={mediaPreview.url} alt="Preview" className="max-w-full max-h-64 object-contain rounded-lg" />}
+                  {mediaPreview.type === 'video' && <video src={mediaPreview.url} className="max-w-full max-h-64 object-contain rounded-lg" controls />}
+                  {mediaPreview.type === 'audio' && <audio src={mediaPreview.url} controls className="w-full" />}
                   {mediaPreview.type === 'document' && (
                     <div className="flex items-center">
                       <FaFileAlt className="text-blue-600 mr-2" />
-                      <span className="text-blue-600 font-semibold truncate max-w-[200px] text-sm">
-                        {mediaPreview.name.slice(0, 30) + (mediaPreview.name.length > 30 ? '...' : '')}
-                      </span>
+                      <span className="text-blue-600 truncate max-w-[200px]">{mediaPreview.name}</span>
                     </div>
                   )}
                   <input
@@ -1236,7 +857,6 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                     onChange={(e) => setCaption(e.target.value)}
                     placeholder="Add a caption..."
                     className="w-full p-1 mt-2 border rounded-lg text-sm"
-                    style={{ maxWidth: mediaPreview.type === 'image' || mediaPreview.type === 'video' ? '80%' : '100%' }}
                   />
                   <button onClick={() => setMediaPreview(null)} className="absolute top-2 right-2 bg-red-500 text-white p-1 rounded-full">
                     <FaTrash />
@@ -1247,9 +867,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                 <div className="bg-gray-100 p-2 mb-2 rounded w-full max-w-[80%] mx-auto flex justify-between items-center">
                   <div>
                     <p className="text-xs italic text-gray-700">Replying to:</p>
-                    <p className="text-sm">
-                      {replyTo.contentType === 'text' ? replyTo.content.slice(0, 20) + (replyTo.content.length > 20 ? '...' : '') : replyTo.contentType}
-                    </p>
+                    <p className="text-sm">{replyTo.content.slice(0, 20) + '...'}</p>
                   </div>
                   <button onClick={() => setReplyTo(null)} className="text-red-500">
                     <FaTrash />
@@ -1257,34 +875,19 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                 </div>
               )}
               <div className="flex items-center">
-                <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }} className="relative">
-                  <FaPaperclip onClick={() => setShowPicker(!showPicker)} className="text-xl text-primary cursor-pointer hover:text-secondary mr-2" />
-                  {showPicker && (
-                    <motion.div
-                      initial={{ opacity: 0, scale: 0.8 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      exit={{ opacity: 0, scale: 0.8 }}
-                      className="absolute bottom-12 left-0 bg-white p-2 rounded-lg shadow-lg z-20 flex space-x-2"
-                    >
-                      <label className="cursor-pointer">
-                        <FaFileAlt className="text-blue-600" />
-                        <input type="file" accept=".pdf,.doc,.docx" onChange={(e) => handleFileChange(e, 'document')} className="hidden" />
-                      </label>
-                      <label className="cursor-pointer">
-                        <FaPlay className="text-green-500" />
-                        <input type="file" accept="audio/*" onChange={(e) => handleFileChange(e, 'audio')} className="hidden" />
-                      </label>
-                      <label className="cursor-pointer">
-                        <img src="https://placehold.co/20x20" alt="Image" />
-                        <input type="file" accept="image/*" onChange={(e) => handleFileChange(e, 'image')} className="hidden" />
-                      </label>
-                      <label className="cursor-pointer">
-                        <video width="20" height="20" />
-                        <input type="file" accept="video/*" onChange={(e) => handleFileChange(e, 'video')} className="hidden" />
-                      </label>
-                    </motion.div>
-                  )}
-                </motion.div>
+                <FaPaperclip onClick={() => setShowPicker(!showPicker)} className="text-xl text-primary cursor-pointer mr-2" />
+                {showPicker && (
+                  <motion.div
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    className="absolute bottom-12 left-2 bg-white p-2 rounded-lg shadow-lg z-20 flex space-x-2"
+                  >
+                    <label><FaFileAlt className="text-blue-600" /><input type="file" accept=".pdf" onChange={(e) => handleFileChange(e, 'document')} className="hidden" /></label>
+                    <label><FaPlay className="text-green-500" /><input type="file" accept="audio/*" onChange={(e) => handleFileChange(e, 'audio')} className="hidden" /></label>
+                    <label><img src="https://placehold.co/20x20" alt="Image" /><input type="file" accept="image/*" onChange={(e) => handleFileChange(e, 'image')} className="hidden" /></label>
+                    <label><video width="20" height="20" /><input type="file" accept="video/*" onChange={(e) => handleFileChange(e, 'video')} className="hidden" /></label>
+                  </motion.div>
+                )}
                 <input
                   type="text"
                   value={message}
@@ -1292,11 +895,9 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                   onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
                   placeholder="Type a message..."
                   className="flex-1 p-2 border rounded-lg mr-2"
-                  disabled={contentType !== 'text' && file}
+                  disabled={file}
                 />
-                <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
-                  <FaPaperPlane onClick={sendMessage} className="text-xl text-primary cursor-pointer hover:text-secondary" />
-                </motion.div>
+                <FaPaperPlane onClick={sendMessage} className="text-xl text-primary cursor-pointer" />
               </div>
               {uploadProgress !== null && (
                 <div className="w-full bg-gray-200 rounded-full h-2 mt-2">
@@ -1312,24 +913,16 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                 className="fixed bottom-20 md:left-[66%] left-1/2 transform -translate-x-1/2 bg-primary text-white p-2 rounded-full cursor-pointer z-40"
                 onClick={jumpToBottom}
               >
-                <FaArrowDown />
+                <FaArrowDown /> {unreadCount > 0 && `(${unreadCount})`}
               </motion.div>
             )}
             {showDeleteConfirm && (
-              <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
-              >
+              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
                 <div className="bg-white p-6 rounded-lg shadow-lg">
-                  <p className="mb-4">Are you sure you want to delete {selectedMessages.length} message(s)?</p>
+                  <p className="mb-4">Delete {selectedMessages.length} message(s)?</p>
                   <div className="flex justify-end space-x-2">
-                    <button onClick={() => setShowDeleteConfirm(false)} className="bg-gray-300 text-black p-2 rounded-lg">
-                      Cancel
-                    </button>
-                    <button onClick={deleteMessages} className="bg-red-500 text-white p-2 rounded-lg">
-                      Delete
-                    </button>
+                    <button onClick={() => setShowDeleteConfirm(false)} className="bg-gray-300 text-black p-2 rounded-lg">Cancel</button>
+                    <button onClick={deleteMessages} className="bg-red-500 text-white p-2 rounded-lg">Delete</button>
                   </div>
                 </div>
               </motion.div>
@@ -1346,9 +939,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                 {viewMedia.type === 'audio' && <audio src={viewMedia.url} controls className="w-full max-w-md" />}
                 {viewMedia.type === 'document' && (
                   <div className="bg-white p-4 rounded-lg">
-                    <a href={viewMedia.url} download target="_blank" rel="noopener noreferrer" className="text-blue-600">
-                      Download Document
-                    </a>
+                    <a href={viewMedia.url} download className="text-blue-600">Download Document</a>
                   </div>
                 )}
               </motion.div>

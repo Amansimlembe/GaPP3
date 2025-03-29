@@ -6,8 +6,7 @@ const messageSlice = createSlice({
   reducers: {
     setMessages: (state, action) => {
       const { recipientId, messages } = action.payload;
-      // Assume messages are already sorted from backend
-      state.chats[recipientId] = messages;
+      state.chats[recipientId] = messages; // Chats is an object with recipientId keys
     },
     addMessage: (state, action) => {
       const { recipientId, message } = action.payload;
@@ -43,7 +42,6 @@ export const store = configureStore({
     getDefaultMiddleware().concat((store) => (next) => (action) => {
       const result = next(action);
       if ([setMessages.type, addMessage.type, updateMessageStatus.type].includes(action.type)) {
-        // Asynchronous localStorage write to avoid blocking
         setTimeout(() => {
           localStorage.setItem('reduxState', JSON.stringify(store.getState().messages));
         }, 0);
@@ -52,7 +50,6 @@ export const store = configureStore({
     }),
 });
 
-// Load persisted state on initialization
 const persistedState = localStorage.getItem('reduxState');
 if (persistedState) {
   store.dispatch({
@@ -61,7 +58,6 @@ if (persistedState) {
   });
 }
 
-// Add a custom reducer to handle initial state loading
 messageSlice.reducer = (state = messageSlice.getInitialState(), action) => {
   if (action.type === 'messages/setInitialState') {
     return { ...state, ...action.payload };

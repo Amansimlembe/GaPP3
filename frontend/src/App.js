@@ -9,7 +9,7 @@ import EmployerScreen from './screens/EmployerScreen';
 import FeedScreen from './screens/FeedScreen';
 import ChatScreen from './screens/ChatScreen';
 import ProfileScreen from './screens/ProfileScreen';
-import CountrySelector from './components/CountrySelector'; // Updated import path
+import CountrySelector from './components/CountrySelector';
 import io from 'socket.io-client';
 
 const socket = io('https://gapp-6yc3.onrender.com', {
@@ -18,8 +18,8 @@ const socket = io('https://gapp-6yc3.onrender.com', {
   reconnectionDelay: 1000,
   reconnectionDelayMax: 5000,
   randomizationFactor: 0.5,
+  withCredentials: true,
 });
-
 
 const getTokenExpiration = (token) => {
   try {
@@ -32,7 +32,7 @@ const getTokenExpiration = (token) => {
         .join('')
     );
     const decoded = JSON.parse(jsonPayload);
-    return decoded.exp * 1000;
+    return decoded.exp * 1000; // Convert to milliseconds
   } catch (error) {
     console.error('Error decoding token:', error);
     return null;
@@ -42,22 +42,20 @@ const getTokenExpiration = (token) => {
 const App = () => {
   const [token, setToken] = useState(localStorage.getItem('token') || '');
   const [userId, setUserId] = useState(localStorage.getItem('userId') || '');
-  const [role, setRole] = useState(Number(localStorage.getItem('role')) || 0); // Ensure number
-  const [photo, setPhoto] = useState(localStorage.getItem('photo') || '');
+  const [role, setRole] = useState(Number(localStorage.getItem('role')) || 0);
+  const [photo, setPhoto] = useState(localStorage.getItem('photo') || 'https://placehold.co/40x40');
   const [virtualNumber, setVirtualNumber] = useState(localStorage.getItem('virtualNumber') || '');
   const [username, setUsername] = useState(localStorage.getItem('username') || '');
   const [chatNotifications, setChatNotifications] = useState(0);
   const [feedKey, setFeedKey] = useState(0);
-  const [isAuthenticated, setIsAuthenticated] = useState(
-    !!localStorage.getItem('token') && !!localStorage.getItem('userId')
-  );
+  const [isAuthenticated, setIsAuthenticated] = useState(!!localStorage.getItem('token') && !!localStorage.getItem('userId'));
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
 
   const refreshToken = async () => {
     try {
       const response = await axios.post(
-        '/auth/refresh', // Updated to relative path
-        {},
+        'https://gapp-6yc3.onrender.com/auth/refresh', // Use full URL for consistency
+        { userId },
         { headers: { Authorization: `Bearer ${token}` } }
       );
       const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername } = response.data;
@@ -82,6 +80,8 @@ const App = () => {
             originalRequest.headers['Authorization'] = `Bearer ${newToken}`;
             return axios(originalRequest);
           }
+          console.log('Redirecting to login due to failed token refresh');
+          return Promise.reject(error); // Let the app handle redirection
         }
         return Promise.reject(error);
       }
@@ -108,55 +108,55 @@ const App = () => {
   }, [token, userId]);
 
   useEffect(() => {
-    if (theme === 'dark') {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
-    }
+    document.documentElement.classList.toggle('dark', theme === 'dark');
     localStorage.setItem('theme', theme);
   }, [theme]);
 
   useEffect(() => {
-    console.log('Current auth state:', { token, userId, role, photo, virtualNumber, username });
-    localStorage.setItem('token', token);
-    localStorage.setItem('userId', userId);
-    localStorage.setItem('role', role);
-    localStorage.setItem('photo', photo);
-    localStorage.setItem('virtualNumber', virtualNumber);
-    localStorage.setItem('username', username);
-
-    if (userId && token) {
-      socket.emit('join', userId);
-      socket.on('message', (msg) => {
-        if (msg.recipientId === userId) {
-          setChatNotifications((prev) => prev + 1);
-        }
-      });
-      setIsAuthenticated(true);
-    } else {
-      console.error('Missing userId or token for socket join:', { userId, token });
+    if (!userId || !token) {
       setIsAuthenticated(false);
+      return;
     }
 
-    return () => socket.off('message');
-  }, [token, userId, role, photo, virtualNumber, username]);
+    socket.emit('join', userId);
+
+    socket.on('message', (msg) => {
+      if (msg.recipientId === userId) {
+        setChatNotifications((prev) => prev + 1);
+      }
+    });
+
+    socket.on('connect_error', (error) => {
+      console.error('Socket connection error:', error);
+    });
+
+    setIsAuthenticated(true);
+
+    return () => {
+      socket.off('message');
+      socket.off('connect_error');
+    };
+  }, [token, userId]);
 
   const setAuth = (newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername) => {
-    console.log('Setting auth:', { newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername });
     setToken(newToken || '');
     setUserId(newUserId || '');
-    setRole(Number(newRole) || 0); // Ensure number
-    setPhoto(newPhoto || '');
+    setRole(Number(newRole) || 0);
+    setPhoto(newPhoto || 'https://placehold.co/40x40');
     setVirtualNumber(newVirtualNumber || '');
     setUsername(newUsername || '');
     localStorage.setItem('token', newToken || '');
     localStorage.setItem('userId', newUserId || '');
-    localStorage.setItem('role', String(newRole || 0)); // Store as string but convert on read
-    localStorage.setItem('photo', newPhoto || '');
+    localStorage.setItem('role', String(newRole || 0));
+    localStorage.setItem('photo', newPhoto || 'https://placehold.co/40x40');
     localStorage.setItem('virtualNumber', newVirtualNumber || '');
     localStorage.setItem('username', newUsername || '');
     setIsAuthenticated(!!newToken && !!newUserId);
+    if (!newToken || !newUserId) {
+      socket.emit('leave', userId);
+    }
   };
+
   const toggleTheme = () => {
     setTheme((prevTheme) => (prevTheme === 'light' ? 'dark' : 'light'));
   };
@@ -166,13 +166,16 @@ const App = () => {
   };
 
   if (!isAuthenticated) {
-    console.log('Redirecting to login due to missing token or userId');
-    return <LoginScreen setAuth={setAuth} />;
+    return (
+      <div className="min-h-screen bg-gray-100 dark:bg-gray-900">
+        <LoginScreen setAuth={setAuth} />
+      </div>
+    );
   }
 
   return (
     <Router>
-      <div className={`min-h-screen flex flex-col ${theme}`}>
+      <div className={`min-h-screen flex flex-col ${theme === 'dark' ? 'dark' : ''} bg-gray-100 dark:bg-gray-900`}>
         {!virtualNumber && (
           <CountrySelector
             token={token}
@@ -181,12 +184,12 @@ const App = () => {
             onComplete={(newVirtualNumber) => setAuth(token, userId, role, photo, newVirtualNumber, username)}
           />
         )}
-        <div className="flex-1 container p-0 relative">
+        <div className="flex-1 p-0 relative">
           <Switch>
             <Route
               path="/jobs"
               render={() =>
-                parseInt(role) === 0 ? (
+                role === 0 ? (
                   <JobSeekerScreen token={token} userId={userId} />
                 ) : (
                   <EmployerScreen token={token} userId={userId} />
@@ -196,7 +199,7 @@ const App = () => {
             <Route path="/feed" render={() => <FeedScreen token={token} userId={userId} key={feedKey} />} />
             <Route
               path="/chat"
-              render={() => <ChatScreen token={token} userId={userId} onNavigate={handleChatNavigation} setAuth={setAuth} />}
+              render={() => <ChatScreen token={token} userId={userId} setAuth={setAuth} />}
             />
             <Route
               path="/profile"
@@ -220,11 +223,11 @@ const App = () => {
           initial={{ y: 100 }}
           animate={{ y: 0 }}
           transition={{ duration: 0.5 }}
-          className="fixed bottom-0 left-0 right-0 bg-primary text-white p-2 flex justify-around items-center shadow-lg z-20 bottom-nav"
+          className="fixed bottom-0 left-0 right-0 bg-primary text-white p-2 flex justify-around items-center shadow-lg z-20"
         >
           <Link
             to="/feed"
-            onClick={() => setFeedKey(feedKey + 1)}
+            onClick={() => setFeedKey((prev) => prev + 1)}
             className="flex flex-col items-center p-2 hover:bg-secondary rounded"
           >
             <FaHome className="text-xl" />
