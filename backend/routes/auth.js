@@ -1,8 +1,5 @@
 // auth.js
-
-
-
-const router = express.Router();
+const express = require('express');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
@@ -13,14 +10,14 @@ const Joi = require('joi');
 const winston = require('winston');
 const User = require('../models/User');
 
+const router = express.Router();
 
+// Cloudinary configuration
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
-
-const express = require('express');
 
 // Winston logger
 const logger = winston.createLogger({
@@ -91,7 +88,7 @@ const loginSchema = Joi.object({
 
 const addContactSchema = Joi.object({
   userId: Joi.string().required(),
-  virtualNumber: Joi.string().required(),
+  virtualNumber: Joi.string().pattern(/^\+\d{10,15}$/).required(),
 });
 
 // Generate virtual number
@@ -106,9 +103,6 @@ const generateVirtualNumber = (countryCode, userId) => {
 };
 
 // Register a new user
-// Add Cloudinary configuration at the top of auth.js
-
-
 router.post('/register', upload.single('photo'), async (req, res) => {
   try {
     logger.info('Register request received', { body: req.body, file: !!req.file });
@@ -212,14 +206,10 @@ router.post('/login', async (req, res) => {
     res.status(500).json({ error: 'Failed to login', details: error.message });
   }
 });
-// auth.js (updated /add_contact endpoint)
+
+// Updated /add_contact endpoint
 router.post('/add_contact', authMiddleware, async (req, res) => {
   try {
-    const addContactSchema = Joi.object({
-      userId: Joi.string().required(),
-      virtualNumber: Joi.string().pattern(/^\+\d{10,15}$/).required(), // Enforce format
-    });
-
     const { error } = addContactSchema.validate(req.body);
     if (error) return res.status(400).json({ error: error.details[0].message });
 
@@ -249,7 +239,7 @@ router.post('/add_contact', authMiddleware, async (req, res) => {
     }
 
     if (!user.contacts.includes(contact._id)) {
-      user.contacts = user.contacts || []; // Ensure array
+      user.contacts = user.contacts || [];
       user.sharedKeys = user.sharedKeys || [];
       contact.sharedKeys = contact.sharedKeys || [];
 
@@ -285,9 +275,14 @@ router.post('/add_contact', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Failed to add contact', details: error.message });
   }
 });
+
 // Update country
 router.post('/update_country', authMiddleware, async (req, res) => {
   try {
+    const updateCountrySchema = Joi.object({
+      userId: Joi.string().required(),
+      country: Joi.string().required(),
+    });
     const { error } = updateCountrySchema.validate(req.body);
     if (error) return res.status(400).json({ error: error.details[0].message });
 
@@ -342,6 +337,10 @@ router.post('/update_photo', authMiddleware, upload.single('photo'), async (req,
 // Update username
 router.post('/update_username', authMiddleware, async (req, res) => {
   try {
+    const updateUsernameSchema = Joi.object({
+      userId: Joi.string().required(),
+      username: Joi.string().min(3).max(20).required(),
+    });
     const { error } = updateUsernameSchema.validate(req.body);
     if (error) return res.status(400).json({ error: error.details[0].message });
 
@@ -389,8 +388,6 @@ router.get('/contacts', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch contacts', details: error.message });
   }
 });
-
-
 
 // Get shared key for a contact
 router.get('/shared_key/:recipientId', authMiddleware, async (req, res) => {
