@@ -6,6 +6,7 @@
     "@reduxjs/toolkit": "^2.6.1",
     "axios": "^1.8.4",
     "country-list": "^2.3.0",
+    "crypto-browserify": "^3.12.0", 
     "framer-motion": "^10.18.0",
     "idb": "^8.0.2",
     "libphonenumber-js": "^1.12.6",
@@ -16,13 +17,15 @@
     "react-router-dom": "^5.3.4",
     "react-scripts": "5.0.1",
     "react-swipeable": "^7.0.2",
-    "socket.io-client": "^4.8.1",
-    "crypto-js": "^4.2.0" 
+    "socket.io-client": "^4.8.1"
+  },
+  "devDependencies": {
+    "react-app-rewired": "^2.2.1" 
   },
   "scripts": {
-    "start": "react-scripts start",
-    "build": "react-scripts build",
-    "test": "react-scripts test",
+    "start": "react-app-rewired start",
+    "build": "react-app-rewired build",
+    "test": "react-app-rewired test",
     "eject": "react-scripts eject"
   },
   "browserslist": {
