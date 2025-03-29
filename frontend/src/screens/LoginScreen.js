@@ -3,14 +3,11 @@ import axios from 'axios';
 import { motion } from 'framer-motion';
 import { getCountries } from 'libphonenumber-js';
 
-// Set base URL for Axios requests
-axios.defaults.baseURL = 'https://gapp-6yc3.onrender.com';
-
 const LoginScreen = ({ setAuth }) => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [role, setRole] = useState('0');
-  const [username, setUsername] = useState('');
+  const [username, setUsername] = useState(''); // Changed from name to username
   const [photo, setPhoto] = useState(null);
   const [isLogin, setIsLogin] = useState(true);
   const [error, setError] = useState('');
@@ -19,48 +16,37 @@ const LoginScreen = ({ setAuth }) => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-
-    // Basic frontend validation
-    if (!email || !password) {
-      setError('Email and password are required');
-      return;
-    }
-
-    if (!isLogin) {
-      if (!username || !selectedCountry) {
-        setError('Username and country are required for registration');
-        return;
-      }
-    }
-
     const formData = new FormData();
     formData.append('email', email);
     formData.append('password', password);
     if (!isLogin) {
-      formData.append('username', username);
+      formData.append('username', username); // Changed from name to username
       formData.append('role', role);
       if (photo) formData.append('photo', photo);
+      if (!selectedCountry) {
+        setError('Please select a country');
+        return;
+      }
       formData.append('country', selectedCountry);
     }
 
     try {
       const url = isLogin ? '/auth/login' : '/auth/register';
-      const payload = isLogin ? { email, password } : formData;
-      const config = isLogin ? {} : { headers: { 'Content-Type': 'multipart/form-data' } };
-
-      const { data } = await axios.post(url, payload, config);
+      const { data } = await axios.post(url, isLogin ? { email, password } : formData, {
+        headers: !isLogin ? { 'Content-Type': 'multipart/form-data' } : {},
+      });
+      // Include username in setAuth and store in localStorage
       setAuth(data.token, data.userId, data.role, data.photo, data.virtualNumber, data.username);
       localStorage.setItem('token', data.token);
       localStorage.setItem('userId', data.userId);
       localStorage.setItem('role', data.role);
       localStorage.setItem('photo', data.photo || 'https://placehold.co/40x40');
       localStorage.setItem('virtualNumber', data.virtualNumber);
-      localStorage.setItem('username', data.username);
+      localStorage.setItem('username', data.username); // Store username
       setError('');
     } catch (error) {
-      console.error('Auth error:', error.response?.data || error);
-      const errorMessage = error.response?.data?.error || error.message || 'Authentication failed';
-      setError(errorMessage);
+      console.error('Auth error:', error);
+      setError(error.response?.data?.error || 'Authentication failed');
     }
   };
 
@@ -87,7 +73,6 @@ const LoginScreen = ({ setAuth }) => {
                 onChange={(e) => setUsername(e.target.value)}
                 className="w-full p-2 mb-4 border rounded-lg"
                 placeholder="Username"
-                required={!isLogin}
               />
               <input
                 type="text"
@@ -101,9 +86,7 @@ const LoginScreen = ({ setAuth }) => {
                 onChange={(e) => setSelectedCountry(e.target.value)}
                 className="w-full p-2 mb-4 border rounded-lg"
                 size="5"
-                required={!isLogin}
               >
-                <option value="">Select a country</option>
                 {filteredCountries.map(c => (
                   <option key={c.code} value={c.code}>{c.name}</option>
                 ))}
@@ -116,7 +99,6 @@ const LoginScreen = ({ setAuth }) => {
             onChange={(e) => setEmail(e.target.value)}
             className="w-full p-2 mb-4 border rounded-lg"
             placeholder="Email"
-            required
           />
           <input
             type="password"
@@ -124,7 +106,6 @@ const LoginScreen = ({ setAuth }) => {
             onChange={(e) => setPassword(e.target.value)}
             className="w-full p-2 mb-4 border rounded-lg"
             placeholder="Password"
-            required
           />
           {!isLogin && (
             <>
