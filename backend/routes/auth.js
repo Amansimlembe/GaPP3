@@ -91,21 +91,22 @@ const addContactSchema = Joi.object({
   virtualNumber: Joi.string().pattern(/^\+\d{10,15}$/).required(),
 });
 
-// Generate virtual number
 const generateVirtualNumber = (countryCode, userId) => {
   if (!countryCode || typeof countryCode !== 'string') throw new Error('Invalid country code');
+
   const hash = crypto.createHash('sha256').update(userId).digest('hex');
   const numericPart = parseInt(hash.substring(0, 8), 16).toString().padStart(9, '0').slice(0, 9);
   const countryCallingCode = getCountryCallingCode(countryCode.toUpperCase());
+
   const rawNumber = `+${countryCallingCode}${numericPart}`;
   const phoneNumber = parsePhoneNumberFromString(rawNumber, countryCode.toUpperCase());
-  return phoneNumber ? phoneNumber.formatInternational() : rawNumber;
-};
 
-// Register a new user
+  return phoneNumber ? phoneNumber.formatInternational().replace(/\s+/g, '') : rawNumber.replace(/\s+/g, '');
+};
 router.post('/register', upload.single('photo'), async (req, res) => {
   try {
     logger.info('Register request received', { body: req.body, file: !!req.file });
+
     const { error } = registerSchema.validate(req.body);
     if (error) {
       logger.warn('Validation failed', { error: error.details[0].message });
@@ -119,14 +120,13 @@ router.post('/register', upload.single('photo'), async (req, res) => {
       return res.status(400).json({ error: 'Email or username already exists' });
     }
 
+    // Generate keys
     const { publicKey, privateKey } = await new Promise((resolve, reject) => {
       crypto.generateKeyPair('ec', { namedCurve: 'secp256k1' }, (err, pub, priv) => {
         if (err) reject(err);
         else resolve({ publicKey: pub, privateKey: priv });
       });
     });
-    const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' });
-    const privateKeyPem = privateKey.export({ type: 'pkcs8', format: 'pem' });
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const virtualNumber = generateVirtualNumber(country, crypto.randomBytes(16).toString('hex'));
@@ -137,12 +137,13 @@ router.post('/register', upload.single('photo'), async (req, res) => {
       username,
       country,
       virtualNumber,
-      publicKey: publicKeyPem,
-      privateKey: privateKeyPem,
-      photo: 'https://placehold.co/40x40',
+      publicKey: publicKey.export({ type: 'spki', format: 'pem' }),
+      privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }),
+      photo: 'https://placehold.co/40x40', // Default image
       role: parseInt(role),
     });
 
+    // **Upload Photo if Available**
     if (req.file) {
       try {
         const result = await new Promise((resolve, reject) => {
@@ -151,6 +152,7 @@ router.post('/register', upload.single('photo'), async (req, res) => {
             (error, result) => (error ? reject(error) : resolve(result))
           ).end(req.file.buffer);
         });
+
         user.photo = result.secure_url;
       } catch (uploadError) {
         logger.error('Photo upload error:', { error: uploadError.message, stack: uploadError.stack });
@@ -159,15 +161,28 @@ router.post('/register', upload.single('photo'), async (req, res) => {
     }
 
     await user.save();
-    const token = jwt.sign({ id: user._id, email, virtualNumber, role: user.role }, process.env.JWT_SECRET, { expiresIn: '24h' });
+
+    const token = jwt.sign(
+      { id: user._id, email, virtualNumber, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: '24h' }
+    );
 
     logger.info('User registered', { userId: user._id, email, role: user.role });
-    res.status(201).json({ token, userId: user._id, virtualNumber, username, photo: user.photo, role: user.role });
+    res.status(201).json({
+      token,
+      userId: user._id,
+      virtualNumber,
+      username,
+      photo: user.photo,
+      role: user.role,
+    });
   } catch (error) {
     logger.error('Register error:', { error: error.message, stack: error.stack });
     res.status(500).json({ error: 'Failed to register', details: error.message });
   }
 });
+
 
 // Login
 router.post('/login', async (req, res) => {

@@ -53,6 +53,7 @@ const LoginScreen = ({ setAuth }) => {
         const { data } = await axios.post('https://gapp-6yc3.onrender.com/auth/register', formData, {
           headers: { 'Content-Type': 'multipart/form-data' },
         });
+        
         setAuth(data.token, data.userId, data.role, data.photo, data.virtualNumber, data.username);
         localStorage.setItem('token', data.token);
         localStorage.setItem('userId', data.userId);
@@ -121,6 +122,7 @@ const LoginScreen = ({ setAuth }) => {
                 onChange={(e) => setPhoto(e.target.files[0])}
                 className="w-full p-2 mb-4 border rounded-lg"
               />
+              
             </>
           )}
           <input
