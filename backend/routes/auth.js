@@ -1,6 +1,6 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
-const crypto = require('crypto');
+const forge = require('node-forge'); // Replace crypto with node-forge for key generation
 const bcrypt = require('bcryptjs');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
@@ -8,6 +8,7 @@ const { getCountryCallingCode, parsePhoneNumberFromString } = require('libphonen
 const Joi = require('joi');
 const winston = require('winston');
 const User = require('../models/User');
+const crypto = require('crypto'); // Keep for SHA-256 hashing in virtual number generation
 
 const router = express.Router();
 
@@ -106,11 +107,10 @@ router.post('/register', upload.single('photo'), async (req, res) => {
     const existingUser = await User.findOne({ $or: [{ email }, { username }] });
     if (existingUser) return res.status(400).json({ error: 'Email or username already exists' });
 
-    const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', {
-      modulusLength: 2048,
-      publicKeyEncoding: { type: 'spki', format: 'pem' },
-      privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
-    });
+    // Generate RSA key pair with node-forge
+    const { publicKey, privateKey } = forge.pki.rsa.generateKeyPair({ bits: 2048 });
+    const publicKeyPem = forge.pki.publicKeyToPem(publicKey);
+    const privateKeyPem = forge.pki.privateKeyToPem(privateKey);
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const virtualNumber = generateVirtualNumber(country, crypto.randomBytes(16).toString('hex'));
@@ -121,8 +121,8 @@ router.post('/register', upload.single('photo'), async (req, res) => {
       username,
       country,
       virtualNumber,
-      publicKey,
-      privateKey,
+      publicKey: publicKeyPem,
+      privateKey: privateKeyPem,
       photo: 'https://placehold.co/40x40',
       role: parseInt(role),
     });
@@ -141,7 +141,7 @@ router.post('/register', upload.single('photo'), async (req, res) => {
     const token = jwt.sign({ id: user._id, email, virtualNumber, role: user.role }, process.env.JWT_SECRET, { expiresIn: '24h' });
 
     logger.info('User registered', { userId: user._id, email, role: user.role });
-    res.status(201).json({ token, userId: user._id, virtualNumber, username, photo: user.photo, role: user.role, privateKey });
+    res.status(201).json({ token, userId: user._id, virtualNumber, username, photo: user.photo, role: user.role, privateKey: privateKeyPem });
   } catch (error) {
     logger.error('Register error:', { error: error.message, stack: error.stack });
     if (error.code === 11000) return res.status(400).json({ error: 'Duplicate email, username, or virtual number' });

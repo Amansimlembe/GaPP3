@@ -1,9 +1,8 @@
-// ChatScreen.js
 import React, { useState, useEffect, useRef } from 'react';
 import io from 'socket.io-client';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
-import crypto from 'crypto'; // Add this import for Node.js crypto module
+import forge from 'node-forge'; // Replace crypto with node-forge
 import {
   FaPaperPlane,
   FaPaperclip,
@@ -75,33 +74,32 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   const messagesPerPage = 50;
   const isSmallDevice = window.innerWidth < 768;
 
-  // RSA Encryption Functions
+  // RSA Encryption Functions using node-forge
   const encryptMessage = async (content, recipientPublicKey) => {
-    const publicKey = crypto.createPublicKey(recipientPublicKey);
-    const buffer = Buffer.from(content, 'utf8');
-    const encrypted = crypto.publicEncrypt(
-      {
-        key: publicKey,
-        padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
-        oaepHash: 'sha256',
-      },
-      buffer
-    );
-    return encrypted.toString('base64');
+    try {
+      const publicKey = forge.pki.publicKeyFromPem(recipientPublicKey);
+      const encrypted = publicKey.encrypt(forge.util.encodeUtf8(content), 'RSA-OAEP', {
+        md: forge.md.sha256.create(),
+      });
+      return forge.util.encode64(encrypted);
+    } catch (error) {
+      console.error('Encryption error:', error);
+      setError('Failed to encrypt message');
+      return content; // Fallback to plaintext if encryption fails
+    }
   };
 
   const decryptMessage = async (encryptedContent, privateKeyPem) => {
-    const privateKey = crypto.createPrivateKey(privateKeyPem);
-    const buffer = Buffer.from(encryptedContent, 'base64');
-    const decrypted = crypto.privateDecrypt(
-      {
-        key: privateKey,
-        padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
-        oaepHash: 'sha256',
-      },
-      buffer
-    );
-    return decrypted.toString('utf8');
+    try {
+      const privateKey = forge.pki.privateKeyFromPem(privateKeyPem);
+      const decrypted = privateKey.decrypt(forge.util.decode64(encryptedContent), 'RSA-OAEP', {
+        md: forge.md.sha256.create(),
+      });
+      return forge.util.decodeUtf8(decrypted);
+    } catch (error) {
+      console.error('Decryption error:', error);
+      return encryptedContent; // Fallback to encrypted content if decryption fails
+    }
   };
 
   const getPublicKey = async (recipientId) => {
@@ -611,12 +609,12 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   };
 
   return (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.3 }} className="flex h-screen bg-gray-100">
-      <div className={`w-full md:w-1/3 bg-white border-r border-gray-200 flex flex-col ${isSmallDevice && selectedChat ? 'hidden' : 'block'}`}>
-        <div className="p-4 flex justify-between items-center border-b border-gray-200">
-          <h2 className="text-xl font-bold text-primary">Chats</h2>
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.3 }} className="flex h-screen bg-gray-100 dark:bg-gray-900">
+      <div className={`w-full md:w-1/3 bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 flex flex-col ${isSmallDevice && selectedChat ? 'hidden' : 'block'}`}>
+        <div className="p-4 flex justify-between items-center border-b border-gray-200 dark:border-gray-700">
+          <h2 className="text-xl font-bold text-primary dark:text-gray-100">Chats</h2>
           <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
-            <FaEllipsisH onClick={() => setShowMenu(true)} className="text-2xl text-primary cursor-pointer hover:text-secondary" />
+            <FaEllipsisH onClick={() => setShowMenu(true)} className="text-2xl text-primary dark:text-gray-100 cursor-pointer hover:text-secondary" />
           </motion.div>
         </div>
         <div className="flex-1 overflow-y-auto">
@@ -624,24 +622,31 @@ const ChatScreen = ({ token, userId, setAuth }) => {
             <motion.div
               key={user.id}
               whileHover={{ backgroundColor: '#f0f0f0' }}
-              onClick={() => dispatch(setSelectedChat(user.id))}
-              className={`flex items-center p-3 border-b border-gray-200 cursor-pointer ${selectedChat === user.id ? 'bg-gray-100' : ''}`}
+              onClick={() => {
+                dispatch(setSelectedChat(user.id));
+                setNotifications((prev) => {
+                  const updated = { ...prev, [user.id]: 0 };
+                  localStorage.setItem('chatNotifications', JSON.stringify(updated));
+                  return updated;
+                });
+              }}
+              className={`flex items-center p-3 border-b border-gray-200 dark:border-gray-700 cursor-pointer ${selectedChat === user.id ? 'bg-gray-100 dark:bg-gray-700' : ''}`}
             >
               <div className="relative">
                 <img src={user.photo || 'https://placehold.co/40x40'} alt="Profile" className="w-12 h-12 rounded-full mr-3" />
                 {user.status === 'online' && (
-                  <span className="absolute bottom-0 right-3 w-3 h-3 bg-green-500 border-2 border-white rounded-full"></span>
+                  <span className="absolute bottom-0 right-3 w-3 h-3 bg-green-500 border-2 border-white dark:border-gray-800 rounded-full"></span>
                 )}
               </div>
               <div className="flex-1">
                 <div className="flex justify-between">
-                  <span className="font-semibold">{user.username || user.virtualNumber}</span>
+                  <span className="font-semibold dark:text-gray-100">{user.username || user.virtualNumber}</span>
                   {user.latestMessage && (
-                    <span className="text-xs text-gray-500">{formatChatListDate(user.latestMessage.createdAt)}</span>
+                    <span className="text-xs text-gray-500 dark:text-gray-400">{formatChatListDate(user.latestMessage.createdAt)}</span>
                   )}
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-sm text-gray-600 truncate max-w-[70%]">
+                  <span className="text-sm text-gray-600 dark:text-gray-300 truncate max-w-[70%]">
                     {user.latestMessage ? user.latestMessage.content : 'No messages yet'}
                   </span>
                   {(user.unreadCount || notifications[user.id]) > 0 && (
@@ -661,19 +666,19 @@ const ChatScreen = ({ token, userId, setAuth }) => {
             exit={{ opacity: 0, y: 50 }}
             className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
           >
-            <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
+            <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg w-full max-w-md">
               <div className="flex items-center mb-4">
-                <FaArrowLeft onClick={() => setShowMenu(false)} className="text-2xl text-primary cursor-pointer hover:text-secondary mr-4" />
-                <h2 className="text-xl font-bold text-primary">Menu</h2>
+                <FaArrowLeft onClick={() => setShowMenu(false)} className="text-2xl text-primary dark:text-gray-100 cursor-pointer hover:text-secondary mr-4" />
+                <h2 className="text-xl font-bold text-primary dark:text-gray-100">Menu</h2>
               </div>
               <div className="space-y-2">
                 <motion.div
                   whileHover={{ scale: 1.05 }}
                   onClick={() => setMenuTab('newNumber')}
-                  className={`flex items-center p-3 rounded-lg cursor-pointer ${menuTab === 'newNumber' ? 'bg-gray-200' : ''}`}
+                  className={`flex items-center p-3 rounded-lg cursor-pointer ${menuTab === 'newNumber' ? 'bg-gray-200 dark:bg-gray-700' : ''}`}
                 >
-                  <FaUserPlus className="text-primary mr-3" />
-                  <span className="text-primary">New Number</span>
+                  <FaUserPlus className="text-primary dark:text-gray-100 mr-3" />
+                  <span className="text-primary dark:text-gray-100">New Number</span>
                 </motion.div>
                 <motion.div whileHover={{ scale: 1.05 }} className="flex items-center p-3 rounded-lg cursor-pointer text-red-500" onClick={handleLogout}>
                   <FaSignOutAlt className="text-red-500 mr-3" />
@@ -686,14 +691,14 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                     type="text"
                     value={newContactNumber}
                     onChange={(e) => setNewContactNumber(e.target.value)}
-                    className="w-full p-2 mb-2 border rounded-lg"
+                    className="w-full p-2 mb-2 border rounded-lg dark:bg-gray-700 dark:text-white"
                     placeholder="Enter virtual number (e.g., +12025550123)"
                   />
                   <input
                     type="text"
                     value={newContactName}
                     onChange={(e) => setNewContactName(e.target.value)}
-                    className="w-full p-2 mb-2 border rounded-lg"
+                    className="w-full p-2 mb-2 border rounded-lg dark:bg-gray-700 dark:text-white"
                     placeholder="Enter contact name (optional)"
                   />
                   <button onClick={addContact} className="w-full bg-primary text-white p-2 rounded-lg hover:bg-secondary">
@@ -710,11 +715,11 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       <div className={`flex-1 flex flex-col ${isSmallDevice && !selectedChat ? 'hidden' : 'block'}`}>
         {selectedChat ? (
           <>
-            <div className="bg-white p-3 flex items-center border-b border-gray-200 fixed top-0 md:left-[33.33%] md:w-2/3 left-0 right-0 z-10">
+            <div className="bg-white dark:bg-gray-800 p-3 flex items-center border-b border-gray-200 dark:border-gray-700 fixed top-0 md:left-[33.33%] md:w-2/3 left-0 right-0 z-10">
               {isSmallDevice && (
                 <FaArrowLeft
                   onClick={() => dispatch(setSelectedChat(null))}
-                  className="text-xl text-primary cursor-pointer mr-3 hover:text-secondary"
+                  className="text-xl text-primary dark:text-gray-100 cursor-pointer mr-3 hover:text-secondary"
                 />
               )}
               <img
@@ -723,8 +728,8 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                 className="w-10 h-10 rounded-full mr-2"
               />
               <div>
-                <span className="font-semibold">{users.find((u) => u.id === selectedChat)?.username || 'Unknown'}</span>
-                <div className="text-sm text-gray-500">
+                <span className="font-semibold dark:text-gray-100">{users.find((u) => u.id === selectedChat)?.username || 'Unknown'}</span>
+                <div className="text-sm text-gray-500 dark:text-gray-400">
                   {isTyping[selectedChat] ? (
                     <span className="text-green-500">Typing...</span>
                   ) : userStatus.status === 'online' ? (
@@ -737,11 +742,11 @@ const ChatScreen = ({ token, userId, setAuth }) => {
             </div>
             <div
               ref={chatRef}
-              className="flex-1 overflow-y-auto bg-gray-100 p-2 pt-16"
+              className="flex-1 overflow-y-auto bg-gray-100 dark:bg-gray-900 p-2 pt-16"
               style={{ paddingBottom: typingBoxRef.current ? `${typingBoxRef.current.offsetHeight}px` : '80px' }}
             >
               {(chats[selectedChat] || []).length === 0 ? (
-                <p className="text-center text-gray-500 mt-4">No messages yet</p>
+                <p className="text-center text-gray-500 dark:text-gray-400 mt-4">No messages yet</p>
               ) : (
                 <>
                   {(chats[selectedChat] || []).map((msg, index) => {
@@ -753,7 +758,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                       <motion.div key={msg._id} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
                         {showDateHeader && (
                           <div className="text-center my-2">
-                            <span className="bg-gray-300 text-gray-700 px-2 py-1 rounded-full text-sm">{formatDateHeader(msg.createdAt)}</span>
+                            <span className="bg-gray-300 dark:bg-gray-700 text-gray-700 dark:text-gray-300 px-2 py-1 rounded-full text-sm">{formatDateHeader(msg.createdAt)}</span>
                           </div>
                         )}
                         {firstUnreadMessageId === msg._id && unreadCount > 0 && (
@@ -770,7 +775,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                         >
                           <div
                             className={`max-w-[70%] p-2 rounded-lg shadow-sm ${
-                              msg.senderId === userId ? 'bg-green-500 text-white rounded-br-none' : 'bg-white text-black rounded-bl-none'
+                              msg.senderId === userId ? 'bg-green-500 text-white rounded-br-none' : 'bg-white dark:bg-gray-800 text-black dark:text-gray-100 rounded-bl-none'
                             } ${selectedMessages.includes(msg._id) ? 'bg-opacity-50' : ''}`}
                             onClick={() => {
                               if (selectedMessages.length > 0) {
@@ -784,7 +789,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                           >
                             {msg.replyTo && chats[selectedChat]?.find((m) => m._id === msg.replyTo) && (
                               <div
-                                className="bg-gray-100 p-1 rounded mb-1 text-xs italic text-gray-700 border-l-4 border-green-500 cursor-pointer"
+                                className="bg-gray-100 dark:bg-gray-700 p-1 rounded mb-1 text-xs italic text-gray-700 dark:text-gray-300 border-l-4 border-green-500 cursor-pointer"
                                 onClick={() => chatRef.current.scrollTo({ top: document.getElementById(`message-${msg.replyTo}`).offsetTop - 50, behavior: 'smooth' })}
                               >
                                 <p>{chats[selectedChat].find((m) => m._id === msg.replyTo).content.slice(0, 20) + '...'}</p>
@@ -799,7 +804,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                             )}
                             {msg.contentType === 'audio' && <audio src={msg.content} controls className="max-w-[80%] h-10" />}
                             {msg.contentType === 'document' && (
-                              <div className="flex items-center bg-gray-100 p-2 rounded-lg">
+                              <div className="flex items-center bg-gray-100 dark:bg-gray-700 p-2 rounded-lg">
                                 <FaFileAlt className="text-blue-600 mr-2" />
                                 <span className="text-blue-600 truncate max-w-[200px]">{msg.content.split('/').pop()}</span>
                                 <a href={msg.content} download className="ml-2 text-blue-600">
@@ -817,20 +822,20 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                                   {msg.status === 'read' && <span className="text-blue-300">✔✔</span>}
                                 </span>
                               )}
-                              <span className="text-xs text-gray-500">{formatTime(msg.createdAt)}</span>
+                              <span className="text-xs text-gray-500 dark:text-gray-400">{formatTime(msg.createdAt)}</span>
                             </div>
                           </div>
                           {showMessageMenu === msg._id && (
                             <motion.div
                               initial={{ opacity: 0, scale: 0.8 }}
                               animate={{ opacity: 1, scale: 1 }}
-                              className={`absolute ${msg.senderId === userId ? 'right-0' : 'left-0'} top-0 bg-white p-2 rounded-lg shadow-lg z-20 flex space-x-2`}
+                              className={`absolute ${msg.senderId === userId ? 'right-0' : 'left-0'} top-0 bg-white dark:bg-gray-800 p-2 rounded-lg shadow-lg z-20 flex space-x-2`}
                               onClick={() => setShowMessageMenu(null)}
                             >
-                              <FaReply onClick={() => setReplyTo(msg)} className="text-primary cursor-pointer" />
-                              <FaForward onClick={() => forwardMessage(msg)} className="text-primary cursor-pointer" />
-                              <FaCopy onClick={() => copyMessage(msg)} className="text-primary cursor-pointer" />
-                              <FaShare onClick={() => shareMessage(msg)} className="text-primary cursor-pointer" />
+                              <FaReply onClick={() => setReplyTo(msg)} className="text-primary dark:text-gray-100 cursor-pointer" />
+                              <FaForward onClick={() => forwardMessage(msg)} className="text-primary dark:text-gray-100 cursor-pointer" />
+                              <FaCopy onClick={() => copyMessage(msg)} className="text-primary dark:text-gray-100 cursor-pointer" />
+                              <FaShare onClick={() => shareMessage(msg)} className="text-primary dark:text-gray-100 cursor-pointer" />
                               {msg.senderId === userId && (
                                 <FaTrash
                                   onClick={() => {
@@ -846,7 +851,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                       </motion.div>
                     );
                   })}
-                  {loading && page > 0 && <div className="text-center py-2">Loading more...</div>}
+                  {loading && page > 0 && <div className="text-center py-2 dark:text-gray-300">Loading more...</div>}
                 </>
               )}
             </div>
@@ -855,11 +860,11 @@ const ChatScreen = ({ token, userId, setAuth }) => {
               variants={typingBoxVariants}
               initial="hidden"
               animate={mediaPreview || replyTo ? 'expanded' : 'visible'}
-              className="bg-white p-2 border-t border-gray-200 fixed md:left-[33.33%] md:w-2/3 left-0 right-0 z-30 shadow-lg rounded-t-lg"
+              className="bg-white dark:bg-gray-800 p-2 border-t border-gray-200 dark:border-gray-700 fixed md:left-[33.33%] md:w-2/3 left-0 right-0 z-30 shadow-lg rounded-t-lg"
               style={{ bottom: '0px' }}
             >
               {mediaPreview && (
-                <div className="bg-gray-100 p-2 mb-2 rounded w-full max-w-[80%] mx-auto">
+                <div className="bg-gray-100 dark:bg-gray-700 p-2 mb-2 rounded w-full max-w-[80%] mx-auto">
                   {mediaPreview.type === 'image' && <img src={mediaPreview.url} alt="Preview" className="max-w-full max-h-64 object-contain rounded-lg" />}
                   {mediaPreview.type === 'video' && <video src={mediaPreview.url} className="max-w-full max-h-64 object-contain rounded-lg" controls />}
                   {mediaPreview.type === 'audio' && <audio src={mediaPreview.url} controls className="w-full" />}
@@ -874,7 +879,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                     value={caption}
                     onChange={(e) => setCaption(e.target.value)}
                     placeholder="Add a caption..."
-                    className="w-full p-1 mt-2 border rounded-lg text-sm"
+                    className="w-full p-1 mt-2 border rounded-lg dark:bg-gray-700 dark:text-white text-sm"
                   />
                   <button onClick={() => setMediaPreview(null)} className="absolute top-2 right-2 bg-red-500 text-white p-1 rounded-full">
                     <FaTrash />
@@ -882,9 +887,9 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                 </div>
               )}
               {replyTo && (
-                <div className="bg-gray-100 p-2 mb-2 rounded w-full max-w-[80%] mx-auto flex justify-between items-center">
+                <div className="bg-gray-100 dark:bg-gray-700 p-2 mb-2 rounded w-full max-w-[80%] mx-auto flex justify-between items-center">
                   <div>
-                    <p className="text-xs italic text-gray-700">Replying to:</p>
+                    <p className="text-xs italic text-gray-700 dark:text-gray-300">Replying to:</p>
                     <p className="text-sm">{replyTo.content.slice(0, 20) + '...'}</p>
                   </div>
                   <button onClick={() => setReplyTo(null)} className="text-red-500">
@@ -893,12 +898,12 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                 </div>
               )}
               <div className="flex items-center">
-                <FaPaperclip onClick={() => setShowPicker(!showPicker)} className="text-xl text-primary cursor-pointer mr-2" />
+                <FaPaperclip onClick={() => setShowPicker(!showPicker)} className="text-xl text-primary dark:text-gray-100 cursor-pointer mr-2" />
                 {showPicker && (
                   <motion.div
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
-                    className="absolute bottom-12 left-2 bg-white p-2 rounded-lg shadow-lg z-20 flex space-x-2"
+                    className="absolute bottom-12 left-2 bg-white dark:bg-gray-800 p-2 rounded-lg shadow-lg z-20 flex space-x-2"
                   >
                     <label><FaFileAlt className="text-blue-600" /><input type="file" accept=".pdf" onChange={(e) => handleFileChange(e, 'document')} className="hidden" /></label>
                     <label><FaPlay className="text-green-500" /><input type="file" accept="audio/*" onChange={(e) => handleFileChange(e, 'audio')} className="hidden" /></label>
@@ -912,13 +917,13 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                   onChange={handleTyping}
                   onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
                   placeholder="Type a message..."
-                  className="flex-1 p-2 border rounded-lg mr-2 focus:outline-none focus:ring-2 focus:ring-primary"
+                  className="flex-1 p-2 border rounded-lg mr-2 focus:outline-none focus:ring-2 focus:ring-primary dark:bg-gray-700 dark:text-white"
                   disabled={file}
                 />
-                <FaPaperPlane onClick={sendMessage} className="text-xl text-primary cursor-pointer hover:text-secondary" />
+                <FaPaperPlane onClick={sendMessage} className="text-xl text-primary dark:text-gray-100 cursor-pointer hover:text-secondary" />
               </div>
               {uploadProgress !== null && (
-                <div className="w-full bg-gray-200 rounded-full h-2 mt-2">
+                <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2 mt-2">
                   <div className="bg-primary h-2 rounded-full" style={{ width: `${uploadProgress}%` }}></div>
                 </div>
               )}
@@ -936,10 +941,10 @@ const ChatScreen = ({ token, userId, setAuth }) => {
             )}
             {showDeleteConfirm && (
               <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                <div className="bg-white p-6 rounded-lg shadow-lg">
-                  <p className="mb-4">Delete {selectedMessages.length} message(s)?</p>
+                <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg">
+                  <p className="mb-4 dark:text-gray-100">Delete {selectedMessages.length} message(s)?</p>
                   <div className="flex justify-end space-x-2">
-                    <button onClick={() => setShowDeleteConfirm(false)} className="bg-gray-300 text-black p-2 rounded-lg">Cancel</button>
+                    <button onClick={() => setShowDeleteConfirm(false)} className="bg-gray-300 dark:bg-gray-600 text-black dark:text-white p-2 rounded-lg">Cancel</button>
                     <button onClick={deleteMessages} className="bg-red-500 text-white p-2 rounded-lg">Delete</button>
                   </div>
                 </div>
@@ -956,7 +961,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                 {viewMedia.type === 'video' && <video src={viewMedia.url} controls className="max-w-full max-h-full" />}
                 {viewMedia.type === 'audio' && <audio src={viewMedia.url} controls className="w-full max-w-md" />}
                 {viewMedia.type === 'document' && (
-                  <div className="bg-white p-4 rounded-lg">
+                  <div className="bg-white dark:bg-gray-800 p-4 rounded-lg">
                     <a href={viewMedia.url} download className="text-blue-600">Download Document</a>
                   </div>
                 )}
@@ -965,7 +970,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
           </>
         ) : (
           <div className="flex-1 flex items-center justify-center">
-            <p className="text-gray-500">Select a chat to start messaging</p>
+            <p className="text-gray-500 dark:text-gray-400">Select a chat to start messaging</p>
           </div>
         )}
       </div>
