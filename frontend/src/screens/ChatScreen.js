@@ -535,10 +535,13 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       });
     }
   };
-
   const addContact = async () => {
     if (!newContactNumber) {
       setError('Virtual number is required');
+      return;
+    }
+    if (!/^\+\d{10,15}$/.test(newContactNumber)) {
+      setError('Invalid virtual number format (e.g., +12025550123)');
       return;
     }
     try {
@@ -550,7 +553,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       const newContact = {
         id: data.userId,
         virtualNumber: data.virtualNumber,
-        username: newContactName || data.username || data.virtualNumber, // Fallback to virtual number if no username
+        username: newContactName || data.username || data.virtualNumber,
         photo: data.photo || 'https://placehold.co/40x40',
         unreadCount: 0,
         latestMessage: null,
@@ -569,7 +572,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       dispatch(setSelectedChat(data.userId));
     } catch (error) {
       console.error('Add contact error:', error);
-      setError(error.response?.data?.error || 'Failed to add contact');
+      setError(error.response?.data?.details || error.response?.data?.error || 'Failed to add contact');
     }
   };
 

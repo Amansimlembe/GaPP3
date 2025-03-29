@@ -1,5 +1,7 @@
 // auth.js
-const express = require('express');
+
+
+
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
@@ -10,6 +12,15 @@ const { getCountryCallingCode, parsePhoneNumberFromString } = require('libphonen
 const Joi = require('joi');
 const winston = require('winston');
 const User = require('../models/User');
+
+
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+const express = require('express');
 
 // Winston logger
 const logger = winston.createLogger({
@@ -95,6 +106,9 @@ const generateVirtualNumber = (countryCode, userId) => {
 };
 
 // Register a new user
+// Add Cloudinary configuration at the top of auth.js
+
+
 router.post('/register', upload.single('photo'), async (req, res) => {
   try {
     logger.info('Register request received', { body: req.body, file: !!req.file });
@@ -136,13 +150,18 @@ router.post('/register', upload.single('photo'), async (req, res) => {
     });
 
     if (req.file) {
-      const result = await new Promise((resolve, reject) => {
-        cloudinary.uploader.upload_stream(
-          { resource_type: 'image', folder: 'gapp_profile_photos' },
-          (error, result) => (error ? reject(error) : resolve(result))
-        ).end(req.file.buffer);
-      });
-      user.photo = result.secure_url;
+      try {
+        const result = await new Promise((resolve, reject) => {
+          cloudinary.uploader.upload_stream(
+            { resource_type: 'image', folder: 'gapp_profile_photos' },
+            (error, result) => (error ? reject(error) : resolve(result))
+          ).end(req.file.buffer);
+        });
+        user.photo = result.secure_url;
+      } catch (uploadError) {
+        logger.error('Photo upload error:', { error: uploadError.message, stack: uploadError.stack });
+        return res.status(500).json({ error: 'Failed to upload photo', details: uploadError.message });
+      }
     }
 
     await user.save();
@@ -198,13 +217,15 @@ router.post('/add_contact', authMiddleware, async (req, res) => {
   try {
     const addContactSchema = Joi.object({
       userId: Joi.string().required(),
-      virtualNumber: Joi.string().required(),
+      virtualNumber: Joi.string().pattern(/^\+\d{10,15}$/).required(), // Enforce format
     });
 
     const { error } = addContactSchema.validate(req.body);
     if (error) return res.status(400).json({ error: error.details[0].message });
 
     const { userId, virtualNumber } = req.body;
+    logger.info('Adding contact', { userId, virtualNumber });
+
     if (userId !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
 
     const contact = await User.findOne({ virtualNumber });
@@ -214,11 +235,25 @@ router.post('/add_contact', authMiddleware, async (req, res) => {
     const user = await User.findById(userId);
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    if (!user.contacts.includes(contact._id)) {
-      user.contacts.push(contact._id);
+    // Validate cryptographic keys
+    for (const [keyName, keyValue] of [
+      ['user.privateKey', user.privateKey],
+      ['user.publicKey', user.publicKey],
+      ['contact.privateKey', contact.privateKey],
+      ['contact.publicKey', contact.publicKey],
+    ]) {
+      if (!keyValue || typeof keyValue !== 'string' || !keyValue.startsWith('-----BEGIN')) {
+        logger.error('Invalid key detected', { userId, contactId: contact._id, keyName });
+        return res.status(500).json({ error: `Invalid ${keyName} format` });
+      }
+    }
 
-      // Generate shared key without immediate decryption
-      const userPrivateKey = crypto.createPrivateKey(user.privateKey); // Assumes privateKey is in PEM format
+    if (!user.contacts.includes(contact._id)) {
+      user.contacts = user.contacts || []; // Ensure array
+      user.sharedKeys = user.sharedKeys || [];
+      contact.sharedKeys = contact.sharedKeys || [];
+
+      const userPrivateKey = crypto.createPrivateKey(user.privateKey);
       const contactPublicKey = crypto.createPublicKey(contact.publicKey);
       const sharedKey = crypto.diffieHellman({
         privateKey: userPrivateKey,
@@ -227,7 +262,6 @@ router.post('/add_contact', authMiddleware, async (req, res) => {
       const sharedKeyBase64 = sharedKey.toString('base64');
       user.sharedKeys.push({ contactId: contact._id, key: sharedKeyBase64 });
 
-      // Update contact's shared key
       const contactPrivateKey = crypto.createPrivateKey(contact.privateKey);
       const userPublicKey = crypto.createPublicKey(user.publicKey);
       const contactSharedKey = crypto.diffieHellman({
@@ -247,7 +281,7 @@ router.post('/add_contact', authMiddleware, async (req, res) => {
       photo: contact.photo || 'https://placehold.co/40x40',
     });
   } catch (error) {
-    logger.error('Add contact error:', { error: error.message, stack: error.stack });
+    logger.error('Add contact error:', { error: error.message, stack: error.stack, body: req.body });
     res.status(500).json({ error: 'Failed to add contact', details: error.message });
   }
 });
