@@ -19,7 +19,6 @@ export const saveMessages = async (messages) => {
   const db = await dbPromise;
   const tx = db.transaction('messages', 'readwrite');
   const store = tx.objectStore('messages');
-  // Batch writes to minimize overhead
   await Promise.all(messages.map((msg) => store.put(msg)));
   await tx.done;
 };
@@ -43,7 +42,6 @@ export const clearOldMessages = async (daysToKeep = 30) => {
   const allMessages = await store.getAll();
   const cutoff = new Date(Date.now() - daysToKeep * 24 * 60 * 60 * 1000);
 
-  // Batch deletes for efficiency
   const deletes = allMessages
     .filter((msg) => new Date(msg.createdAt) < cutoff)
     .map((msg) => store.delete(msg._id));

@@ -1,4 +1,3 @@
-// LoginScreen.js
 import React, { useState } from 'react';
 import axios from 'axios';
 import { motion } from 'framer-motion';
@@ -30,8 +29,9 @@ const LoginScreen = ({ setAuth }) => {
         localStorage.setItem('photo', data.photo || 'https://placehold.co/40x40');
         localStorage.setItem('virtualNumber', data.virtualNumber);
         localStorage.setItem('username', data.username);
+        localStorage.setItem('privateKey', data.privateKey); // Store private key for RSA decryption
       } catch (error) {
-        console.error('Auth error:', error);
+        console.error('Login error:', error);
         setError(error.response?.data?.error || 'Authentication failed');
       }
     } else {
@@ -40,7 +40,7 @@ const LoginScreen = ({ setAuth }) => {
       formData.append('email', email);
       formData.append('password', password);
       formData.append('username', username);
-      formData.append('role', role); // Ensure role is included
+      formData.append('role', role);
       formData.append('country', selectedCountry);
       if (photo) formData.append('photo', photo);
 
@@ -61,8 +61,9 @@ const LoginScreen = ({ setAuth }) => {
         localStorage.setItem('photo', data.photo || 'https://placehold.co/40x40');
         localStorage.setItem('virtualNumber', data.virtualNumber);
         localStorage.setItem('username', data.username);
+        localStorage.setItem('privateKey', data.privateKey); // Store private key for RSA decryption
       } catch (error) {
-        console.error('Auth error:', error);
+        console.error('Registration error:', error);
         setError(error.response?.data?.error || 'Registration failed');
       }
     }
@@ -122,7 +123,6 @@ const LoginScreen = ({ setAuth }) => {
                 onChange={(e) => setPhoto(e.target.files[0])}
                 className="w-full p-2 mb-4 border rounded-lg"
               />
-              
             </>
           )}
           <input

@@ -1,4 +1,3 @@
-// App.js
 import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Route, Switch, Link, Redirect } from 'react-router-dom';
 import { motion } from 'framer-motion';
@@ -62,8 +61,9 @@ const App = () => {
         { userId },
         { headers: { Authorization: `Bearer ${token}` } }
       );
-      const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername } = response.data;
+      const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername, privateKey } = response.data;
       setAuth(newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername);
+      localStorage.setItem('privateKey', privateKey); // Store privateKey for RSA decryption
       return newToken;
     } catch (error) {
       console.error('Token refresh failed:', error);
@@ -125,7 +125,7 @@ const App = () => {
     socket.emit('join', userId);
 
     socket.on('message', (msg) => {
-      if (msg.recipientId === userId) {
+      if (msg.recipientId === userId && (!selectedChat || selectedChat !== msg.senderId)) {
         setChatNotifications((prev) => prev + 1);
       }
     });
@@ -140,12 +140,12 @@ const App = () => {
       socket.off('message');
       socket.off('connect_error');
     };
-  }, [token, userId]);
+  }, [userId, token, selectedChat]);
 
   const setAuth = (newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername) => {
     setToken(newToken || '');
     setUserId(newUserId || '');
-    setRole(Number(newRole) || 0); // Ensure role is a number
+    setRole(Number(newRole) || 0);
     setPhoto(newPhoto || 'https://placehold.co/40x40');
     setVirtualNumber(newVirtualNumber || '');
     setUsername(newUsername || '');
@@ -158,6 +158,7 @@ const App = () => {
     setIsAuthenticated(!!newToken && !!newUserId);
     if (!newToken || !newUserId) {
       socket.emit('leave', userId);
+      localStorage.removeItem('privateKey');
     }
   };
 

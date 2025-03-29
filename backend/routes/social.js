@@ -64,7 +64,6 @@ const messageSchema = Joi.object({
   recipientId: Joi.string().required(),
   contentType: Joi.string().valid('text', 'image', 'video', 'audio', 'document').required(),
   caption: Joi.string().allow('').optional(),
-  iv: Joi.string().when('contentType', { is: 'text', then: Joi.required(), otherwise: Joi.optional() }),
   replyTo: Joi.string().optional(),
 });
 
@@ -76,13 +75,13 @@ const messageStatusSchema = Joi.object({
 
 const likeSchema = Joi.object({
   postId: Joi.string().required(),
-  userId: Joi.string().required(), // Added for consistency with frontend
+  userId: Joi.string().required(),
 });
 
 const commentSchema = Joi.object({
   postId: Joi.string().required(),
   comment: Joi.string().max(500).required(),
-  userId: Joi.string().required(), // Added for consistency with frontend
+  userId: Joi.string().required(),
 });
 
 module.exports = (io) => {
@@ -198,7 +197,6 @@ module.exports = (io) => {
     });
   });
 
-  // Get user status
   router.get('/user-status/:userId', authMiddleware, async (req, res) => {
     try {
       const userId = req.params.userId;
@@ -212,12 +210,9 @@ module.exports = (io) => {
     }
   });
 
-  // Get social feed
   router.get('/feed', socialLimiter, cacheMiddleware(60), async (req, res) => {
     try {
-      const posts = await Post.find()
-        .sort({ createdAt: -1 })
-        .lean(); // Use lean for performance, no need to populate since username/photo are in Post
+      const posts = await Post.find().sort({ createdAt: -1 }).lean();
       logger.info('Social feed fetched');
       res.json(posts);
     } catch (error) {
@@ -226,12 +221,9 @@ module.exports = (io) => {
     }
   });
 
-  // Get user's posts
   router.get('/my-posts/:userId', authMiddleware, socialLimiter, cacheMiddleware(60), async (req, res) => {
     try {
-      const posts = await Post.find({ userId: req.params.userId })
-        .sort({ createdAt: -1 })
-        .lean();
+      const posts = await Post.find({ userId: req.params.userId }).sort({ createdAt: -1 }).lean();
       logger.info('User posts fetched', { userId: req.params.userId });
       res.json(posts);
     } catch (error) {
@@ -240,7 +232,6 @@ module.exports = (io) => {
     }
   });
 
-  // Create a new post
   router.post('/post', authMiddleware, socialLimiter, upload.single('content'), async (req, res) => {
     try {
       const { error } = postSchema.validate(req.body);
@@ -284,7 +275,6 @@ module.exports = (io) => {
     }
   });
 
-  // Delete a post
   router.delete('/post/:postId', authMiddleware, socialLimiter, async (req, res) => {
     try {
       const post = await Post.findById(req.params.postId);
@@ -301,7 +291,6 @@ module.exports = (io) => {
     }
   });
 
-  // Like a post
   router.post('/like', authMiddleware, socialLimiter, async (req, res) => {
     try {
       const { error } = likeSchema.validate(req.body);
@@ -327,7 +316,6 @@ module.exports = (io) => {
     }
   });
 
-  // Unlike a post
   router.post('/unlike', authMiddleware, socialLimiter, async (req, res) => {
     try {
       const { error } = likeSchema.validate(req.body);
@@ -352,7 +340,6 @@ module.exports = (io) => {
     }
   });
 
-  // Comment on a post
   router.post('/comment', authMiddleware, socialLimiter, async (req, res) => {
     try {
       const { error } = commentSchema.validate(req.body);
@@ -379,14 +366,12 @@ module.exports = (io) => {
     }
   });
 
-  // Send a message
-  // Send a message
   router.post('/message', authMiddleware, socialLimiter, upload.single('content'), async (req, res) => {
     try {
       const { error } = messageSchema.validate(req.body);
       if (error) return res.status(400).json({ error: error.details[0].message });
 
-      const { senderId, recipientId, contentType, caption, iv, replyTo } = req.body;
+      const { senderId, recipientId, contentType, caption, replyTo } = req.body;
       if (senderId !== req.user.id) return res.status(403).json({ error: 'Not authorized to send as this user' });
 
       const sender = await User.findById(senderId);
@@ -417,7 +402,6 @@ module.exports = (io) => {
         recipientId,
         contentType,
         content: contentUrl,
-        iv: contentType === 'text' ? iv : undefined,
         caption,
         status: 'sent',
         replyTo: replyTo || undefined,
@@ -442,7 +426,6 @@ module.exports = (io) => {
     }
   });
 
-  // Fetch messages
   router.get('/messages', authMiddleware, socialLimiter, async (req, res) => {
     try {
       const { userId, recipientId, limit = 50, skip = 0 } = req.query;
@@ -469,7 +452,7 @@ module.exports = (io) => {
           { senderId: recipientId, recipientId: userId },
         ],
       })
-        .select('senderId recipientId contentType content iv caption status replyTo createdAt')
+        .select('senderId recipientId contentType content caption status replyTo createdAt')
         .sort({ createdAt: -1 })
         .skip(parseInt(skip))
         .limit(parseInt(limit))
@@ -495,7 +478,6 @@ module.exports = (io) => {
     }
   });
 
-  // Delete a message
   router.delete('/message/:messageId', authMiddleware, socialLimiter, async (req, res) => {
     try {
       const message = await Message.findById(req.params.messageId);
@@ -512,7 +494,6 @@ module.exports = (io) => {
     }
   });
 
-  // Update message status
   router.post('/message/status', authMiddleware, socialLimiter, async (req, res) => {
     try {
       const { error } = messageStatusSchema.validate(req.body);

@@ -1,6 +1,4 @@
-// user.js
 const mongoose = require('mongoose');
-const crypto = require('crypto');
 
 const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true, match: /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/ },
@@ -12,20 +10,11 @@ const userSchema = new mongoose.Schema({
   contacts: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   role: { type: Number, default: 0 },
   publicKey: { type: String, required: true },
-  privateKey: { type: String, required: true }, // Stored as PEM, not encrypted
-  sharedKeys: [
-    {
-      contactId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-      key: { type: String, required: true },
-    },
-  ],
+  privateKey: { type: String, required: true },
   status: { type: String, default: 'offline', enum: ['online', 'offline'] },
   lastSeen: { type: Date },
 });
 
-// Remove pre-save hook for encryption since privateKey is stored as PEM
-// Indexes
 userSchema.index({ virtualNumber: 1 });
-userSchema.index({ 'sharedKeys.contactId': 1 });
 
 module.exports = mongoose.model('User', userSchema);

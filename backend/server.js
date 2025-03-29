@@ -15,7 +15,6 @@ const employerRoutes = require('./routes/employer');
 const socialRoutes = require('./routes/social');
 const Message = require('./models/Message');
 
-// Winston logger
 const logger = winston.createLogger({
   level: 'info',
   format: winston.format.combine(winston.format.timestamp(), winston.format.json()),
@@ -26,7 +25,6 @@ const logger = winston.createLogger({
   ],
 });
 
-// Online users map
 const onlineUsers = new Map();
 
 const app = express();
@@ -37,10 +35,8 @@ const io = new Server(server, {
   pingInterval: 25000,
 });
 
-// Attach io to app for use in routes
 app.set('io', io);
 
-// Redis client setup
 const redisClient = redis.createClient({
   url: `redis://${process.env.REDIS_HOST}:${process.env.REDIS_PORT}`,
   password: process.env.REDIS_PASSWORD,
@@ -50,21 +46,18 @@ redisClient.on('connect', () => logger.info('Connected to Redis'));
 redisClient.on('error', (err) => logger.error('Redis error:', { error: err.message }));
 redisClient.connect();
 
-// Cloudinary configuration
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-// Global rate limiter
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 500,
   message: { error: 'Too many requests, please try again later.' },
 });
 
-// Middleware
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, '../frontend/build')));
@@ -74,7 +67,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// MongoDB connection
 const connectDB = async () => {
   try {
     await mongoose.connect(process.env.MONGO_URI, {
@@ -92,13 +84,11 @@ const connectDB = async () => {
 };
 connectDB();
 
-// Routes
 app.use('/auth', authRoutes);
 app.use('/jobseeker', jobseekerRoutes);
 app.use('/employer', employerRoutes);
 app.use('/social', socialRoutes(io));
 
-// Socket.IO events
 io.on('connection', (socket) => {
   logger.info('User connected', { socketId: socket.id });
 
@@ -186,7 +176,6 @@ io.on('connection', (socket) => {
   });
 
   socket.on('newContact', (contact) => {
-    // This event is emitted from auth.js, just log it here for debugging
     logger.info('New contact event received on server', { contact });
   });
 
@@ -220,24 +209,20 @@ io.on('connection', (socket) => {
   });
 });
 
-// Health check endpoint
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'OK', uptime: process.uptime() });
 });
 
-// Global error handler
 app.use((err, req, res, next) => {
   logger.error('Global error', { error: err.stack });
   res.status(500).json({ error: 'Internal Server Error', details: process.env.NODE_ENV === 'development' ? err.message : 'An unexpected error occurred' });
 });
 
-// SPA fallback
 app.get('*', (req, res) => {
   logger.info('Serving frontend index.html');
   res.sendFile(path.join(__dirname, '../frontend/build', 'index.html'));
 });
 
-// Start server
 const PORT = process.env.PORT || 8000;
 server.listen(PORT, '0.0.0.0', () => {
   logger.info(`Server running on port ${PORT}`);
@@ -247,7 +232,6 @@ server.on('error', (error) => {
   logger.error('Server startup error', { error: error.message });
 });
 
-// Graceful shutdown
 const shutdown = async () => {
   logger.info('Shutting down server...');
   try {

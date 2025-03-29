@@ -53,11 +53,18 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
       setMyPosts((prev) => prev.filter((p) => p._id !== postId));
     });
 
+    socket.on('onlineStatus', ({ userId: updatedUserId, status, lastSeen }) => {
+      if (updatedUserId === userId) {
+        console.log(`User ${userId} is now ${status}, last seen: ${lastSeen}`);
+      }
+    });
+
     document.documentElement.classList.toggle('dark', darkMode);
     localStorage.setItem('darkMode', darkMode);
 
     return () => {
       socket.off('postDeleted');
+      socket.off('onlineStatus');
       socket.emit('leave', userId);
     };
   }, [token, userId, darkMode]);
@@ -112,10 +119,11 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
       return;
     }
     try {
-      await axios.post('https://gapp-6yc3.onrender.com/auth/update_username', { userId, username }, {
+      const { data } = await axios.post('https://gapp-6yc3.onrender.com/auth/update_username', { userId, username }, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      localStorage.setItem('username', username);
+      setUsername(data.username);
+      localStorage.setItem('username', data.username);
       setEditUsername(false);
       setError('');
       alert('Username updated successfully');

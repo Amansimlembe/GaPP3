@@ -3,6 +3,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import io from 'socket.io-client';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
+import crypto from 'crypto'; // Add this import for Node.js crypto module
 import {
   FaPaperPlane,
   FaPaperclip,
@@ -74,45 +75,48 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   const messagesPerPage = 50;
   const isSmallDevice = window.innerWidth < 768;
 
-  // Encryption Functions
-  const encryptMessage = async (content, sharedKey) => {
-    const iv = window.crypto.getRandomValues(new Uint8Array(12));
-    const encoder = new TextEncoder();
-    const key = await window.crypto.subtle.importKey('raw', Uint8Array.from(atob(sharedKey), (c) => c.charCodeAt(0)), { name: 'AES-GCM' }, false, ['encrypt']);
-    const encrypted = await window.crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, encoder.encode(content));
-    return { encrypted: btoa(String.fromCharCode(...new Uint8Array(encrypted))), iv: btoa(String.fromCharCode(...iv)) };
-  };
-
-  const decryptMessage = async (encryptedContent, iv, sharedKey) => {
-    const decoder = new TextDecoder();
-    const key = await window.crypto.subtle.importKey('raw', Uint8Array.from(atob(sharedKey), (c) => c.charCodeAt(0)), { name: 'AES-GCM' }, false, ['decrypt']);
-    const decrypted = await window.crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv: Uint8Array.from(atob(iv), (c) => c.charCodeAt(0)) },
-      key,
-      Uint8Array.from(atob(encryptedContent), (c) => c.charCodeAt(0))
+  // RSA Encryption Functions
+  const encryptMessage = async (content, recipientPublicKey) => {
+    const publicKey = crypto.createPublicKey(recipientPublicKey);
+    const buffer = Buffer.from(content, 'utf8');
+    const encrypted = crypto.publicEncrypt(
+      {
+        key: publicKey,
+        padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+        oaepHash: 'sha256',
+      },
+      buffer
     );
-    return decoder.decode(decrypted);
+    return encrypted.toString('base64');
   };
 
-  const getSharedKey = async (recipientId, retries = 3, delay = 1000) => {
-    for (let attempt = 0; attempt < retries; attempt++) {
-      try {
-        const response = await axios.get(`https://gapp-6yc3.onrender.com/auth/shared_key/${recipientId}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        return response.data.sharedKey || null;
-      } catch (error) {
-        console.error(`Attempt ${attempt + 1} - Error getting shared key:`, error.response?.data?.error || error.message);
-        if (error.response?.status === 403 && attempt < retries - 1) {
-          console.log(`Retrying in ${delay}ms...`);
-          await new Promise((resolve) => setTimeout(resolve, delay));
-          continue;
-        }
-        setError('Failed to get encryption key after retries. Messages may not be encrypted.');
-        return null;
-      }
+  const decryptMessage = async (encryptedContent, privateKeyPem) => {
+    const privateKey = crypto.createPrivateKey(privateKeyPem);
+    const buffer = Buffer.from(encryptedContent, 'base64');
+    const decrypted = crypto.privateDecrypt(
+      {
+        key: privateKey,
+        padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+        oaepHash: 'sha256',
+      },
+      buffer
+    );
+    return decrypted.toString('utf8');
+  };
+
+  const getPublicKey = async (recipientId) => {
+    try {
+      const response = await axios.get(`https://gapp-6yc3.onrender.com/auth/public_key/${recipientId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      return response.data.publicKey;
+    } catch (error) {
+      console.error('Error fetching public key:', error);
+      setError('Failed to fetch recipient public key');
+      return null;
     }
   };
+
   // Date and Time Formatting (unchanged)
   const formatChatListDate = (date) => {
     const messageDate = new Date(date);
@@ -197,12 +201,19 @@ const ChatScreen = ({ token, userId, setAuth }) => {
           headers: { Authorization: `Bearer ${token}` },
           params: { userId, recipientId: selectedChat, limit: messagesPerPage, skip: pageNum * messagesPerPage },
         });
-        const sharedKey = await getSharedKey(selectedChat);
+        const privateKeyPem = localStorage.getItem('privateKey');
+        if (!privateKeyPem) throw new Error('Private key not found');
+
         const messages = await Promise.all(
-          data.messages.map(async (msg) => ({
-            ...msg,
-            content: msg.contentType === 'text' && sharedKey && msg.iv ? await decryptMessage(msg.content, msg.iv, sharedKey) : msg.content,
-          }))
+          data.messages.map(async (msg) => {
+            if (msg.contentType === 'text' && msg.recipientId === userId) {
+              return {
+                ...msg,
+                content: await decryptMessage(msg.content, privateKeyPem),
+              };
+            }
+            return msg;
+          })
         );
         setHasMore(data.hasMore);
 
@@ -251,14 +262,17 @@ const ChatScreen = ({ token, userId, setAuth }) => {
         localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
         return updatedUsers;
       });
-      dispatch(setSelectedChat(contact.userId)); // Auto-select new contact
-      setError(''); // Clear any previous errors
+      dispatch(setSelectedChat(contact.userId));
+      setError('');
     });
 
     socket.on('message', async (msg) => {
       const chatId = msg.senderId === userId ? msg.recipientId : msg.senderId;
-      const sharedKey = await getSharedKey(chatId);
-      const content = msg.contentType === 'text' && sharedKey && msg.iv ? await decryptMessage(msg.content, msg.iv, sharedKey) : msg.content;
+      const privateKeyPem = localStorage.getItem('privateKey');
+      let content = msg.content;
+      if (msg.contentType === 'text' && msg.recipientId === userId && privateKeyPem) {
+        content = await decryptMessage(msg.content, privateKeyPem);
+      }
       const updatedMsg = { ...msg, content };
 
       dispatch(addMessage({ recipientId: chatId, message: updatedMsg }));
@@ -350,7 +364,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
 
     const handleOnline = async () => {
       if (pendingMessages.length > 0) {
-        for (const msg of pendingMessages) await sendMessageToServer(msg);
+        for (const msg of pendingMessages) await sendMessage(msg);
         setPendingMessages([]);
       }
     };
@@ -392,20 +406,36 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     if (isAtBottomRef.current) chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
 
     let encryptedContent = message;
-    let iv = '';
     if (contentType === 'text') {
-      const sharedKey = await getSharedKey(selectedChat);
-      if (sharedKey) {
-        const { encrypted, iv: encryptionIv } = await encryptMessage(message, sharedKey);
-        encryptedContent = encrypted;
-        iv = encryptionIv;
+      const recipientPublicKey = await getPublicKey(selectedChat);
+      if (recipientPublicKey) {
+        encryptedContent = await encryptMessage(message, recipientPublicKey);
       } else {
-        setError('Encryption key unavailable. Sending unencrypted message.');
+        setError('Failed to encrypt message: Public key unavailable');
+        return;
       }
     }
 
-    const messageForServer = { ...tempMsg, content: encryptedContent, iv, file, tempId };
-    await saveMessages([{ ...messageForServer, content: message }]);
+    const formData = new FormData();
+    formData.append('senderId', userId);
+    formData.append('recipientId', selectedChat);
+    formData.append('contentType', contentType);
+    formData.append('content', file ? file : encryptedContent);
+    formData.append('caption', caption);
+    if (replyTo) formData.append('replyTo', replyTo._id);
+
+    try {
+      const { data } = await axios.post('https://gapp-6yc3.onrender.com/social/message', formData, {
+        headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
+      });
+      dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: tempId, status: 'sent' }));
+      dispatch(addMessage({ recipientId: selectedChat, message: data }));
+      await saveMessages([data]);
+    } catch (error) {
+      console.error('Send message error:', error);
+      setError('Failed to send message');
+      setPendingMessages((prev) => [...prev, { ...tempMsg, content: encryptedContent }]);
+    }
 
     setMessage('');
     setFile(null);
@@ -415,14 +445,6 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     setReplyTo(null);
     setMediaPreview(null);
 
-    if (navigator.onLine) {
-      await sendMessageToServer(messageForServer);
-      dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: tempId, status: 'sent' }));
-    } else {
-      setPendingMessages((prev) => [...prev, messageForServer]);
-      dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: tempId, status: 'pending' }));
-    }
-
     setUsers((prev) => {
       const updatedUsers = prev.map((user) =>
         user.id === selectedChat ? { ...user, latestMessage: { ...tempMsg, content: message } } : user
@@ -431,7 +453,6 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       return updatedUsers;
     });
   };
-  
 
   const handleTyping = (e) => {
     setMessage(e.target.value);
@@ -456,9 +477,6 @@ const ChatScreen = ({ token, userId, setAuth }) => {
           })
         )
       );
-
-
-
       dispatch(
         setMessages({
           recipientId: selectedChat,
@@ -490,15 +508,18 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       return;
     }
 
-    const sharedKey = await getSharedKey(contact.id);
-    const { encrypted, iv } = msg.contentType === 'text' && sharedKey ? await encryptMessage(msg.content, sharedKey) : { encrypted: msg.content, iv: msg.iv || '' };
+    const recipientPublicKey = await getPublicKey(contact.id);
+    let contentToForward = msg.content;
+    if (msg.contentType === 'text' && recipientPublicKey) {
+      contentToForward = await encryptMessage(msg.content, recipientPublicKey);
+    }
+
     const formData = new FormData();
     formData.append('senderId', userId);
     formData.append('recipientId', contact.id);
     formData.append('contentType', msg.contentType);
     formData.append('caption', msg.caption || '');
-    formData.append('content', encrypted);
-    if (msg.contentType === 'text' && sharedKey) formData.append('iv', iv);
+    formData.append('content', contentToForward);
 
     try {
       const { data } = await axios.post('https://gapp-6yc3.onrender.com/social/message', formData, {
@@ -525,7 +546,6 @@ const ChatScreen = ({ token, userId, setAuth }) => {
         url: msg.contentType !== 'text' ? msg.content : undefined,
       });
     }
-
   };
 
   const addContact = async () => {
@@ -544,7 +564,6 @@ const ChatScreen = ({ token, userId, setAuth }) => {
         { userId, virtualNumber: newContactNumber },
         { headers: { Authorization: `Bearer ${token}` } }
       );
-      // Wait for socket event to update UI, no manual state update here
       setNewContactNumber('');
       setNewContactName('');
       setMenuTab('');
@@ -584,7 +603,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     setShowMenu(false);
   };
 
-  // Animation variants for typing box
+  // Animation variants for typing box (unchanged)
   const typingBoxVariants = {
     hidden: { y: 100, opacity: 0 },
     visible: { y: 0, opacity: 1, transition: { type: 'spring', stiffness: 300, damping: 20 } },
