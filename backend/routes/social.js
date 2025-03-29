@@ -380,6 +380,7 @@ module.exports = (io) => {
   });
 
   // Send a message
+  // Send a message
   router.post('/message', authMiddleware, socialLimiter, upload.single('content'), async (req, res) => {
     try {
       const { error } = messageSchema.validate(req.body);
@@ -436,7 +437,7 @@ module.exports = (io) => {
       logger.info('Message sent', { messageId: message._id, senderId, recipientId });
       res.json(message.toObject());
     } catch (error) {
-      logger.error('Message error', { error: error.message });
+      logger.error('Message error', { error: error.message, stack: error.stack });
       res.status(500).json({ error: 'Failed to send message', details: error.message });
     }
   });

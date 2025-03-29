@@ -1,3 +1,4 @@
+// auth.js
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
@@ -42,30 +43,86 @@ const upload = multer({
   },
 });
 
+// JWT Authentication Middleware
+const authMiddleware = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  logger.info('Auth Header:', { authHeader });
+
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    logger.error('No token provided or malformed header', { authHeader });
+    return res.status(401).json({ error: 'No token provided' });
+  }
+
+  const token = authHeader.split(' ')[1];
+  logger.info('Extracted Token:', { token });
+
+  if (!token) {
+    logger.error('Token missing after Bearer');
+    return res.status(401).json({ error: 'Token missing' });
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
+    logger.info('Decoded Token:', { decoded });
+    req.user = decoded;
+    next();
+  } catch (error) {
+    logger.error('Auth middleware error:', { error: error.message });
+    return res.status(401).json({ error: 'Invalid token', details: error.message });
+  }
+};
+
 // Validation schemas
 const registerSchema = Joi.object({
   email: Joi.string().email().required(),
   password: Joi.string().min(6).required(),
   username: Joi.string().min(3).max(20).required(),
-  country: Joi.string().length(2).uppercase().required(), // ISO 3166-1 alpha-2
+  country: Joi.string().required(),
   role: Joi.number().integer().min(0).max(1).required(),
 });
 
-// Generate virtual number without spaces
+const loginSchema = Joi.object({
+  email: Joi.string().email().required(),
+  password: Joi.string().min(6).required(),
+});
+
+const addContactSchema = Joi.object({
+  userId: Joi.string().required(),
+  virtualNumber: Joi.string().pattern(/^\+\d{10,15}$/).required(),
+});
+
 const generateVirtualNumber = (countryCode, userId) => {
-  if (!countryCode || typeof countryCode !== 'string' || countryCode.length !== 2) {
-    throw new Error('Invalid country code: must be a 2-letter ISO code');
+  // Validate countryCode
+  if (!countryCode || typeof countryCode !== 'string') {
+    throw new Error('Invalid country code');
   }
+
+  // Ensure userId is provided
+  if (!userId) {
+    throw new Error('Invalid user ID');
+  }
+
   try {
-    const hash = crypto.createHash('sha256').update(userId).digest('hex');
+    // Generate hash from userId
+    const hash = crypto.createHash('sha256').update(userId.toString()).digest('hex');
+    // Convert first 8 characters of hash to number and pad to 9 digits
     const numericPart = parseInt(hash.substring(0, 8), 16).toString().padStart(9, '0').slice(0, 9);
+    
+    // Get country calling code
     const countryCallingCode = getCountryCallingCode(countryCode.toUpperCase());
-    return `+${countryCallingCode}${numericPart}`; // No spaces
+    const rawNumber = `+${countryCallingCode}${numericPart}`;
+    
+    // Parse and format the phone number
+    const phoneNumber = parsePhoneNumberFromString(rawNumber, countryCode.toUpperCase());
+    
+    // Return formatted number without spaces
+    return phoneNumber 
+      ? phoneNumber.formatInternational().replace(/\s/g, '')
+      : rawNumber.replace(/\s/g, '');
   } catch (error) {
-    throw new Error(`Failed to generate virtual number: ${error.message}`);
+    throw new Error(`Failed to generate phone number: ${error.message}`);
   }
 };
-
 // Register a new user
 router.post('/register', upload.single('photo'), async (req, res) => {
   try {
@@ -143,7 +200,6 @@ router.post('/register', upload.single('photo'), async (req, res) => {
   }
 });
 
-
 // Login
 router.post('/login', async (req, res) => {
   try {
@@ -182,7 +238,7 @@ router.post('/login', async (req, res) => {
   }
 });
 
-// Updated /add_contact endpoint
+// Updated /add_contact endpoint/ Updated /add_contact endpoint
 router.post('/add_contact', authMiddleware, async (req, res) => {
   try {
     const { error } = addContactSchema.validate(req.body);
@@ -238,13 +294,20 @@ router.post('/add_contact', authMiddleware, async (req, res) => {
       await Promise.all([user.save(), contact.save()]);
     }
 
-    logger.info('Contact added', { userId, contactId: contact._id });
-    res.json({
+    const contactData = {
       userId: contact._id,
       virtualNumber: contact.virtualNumber,
       username: contact.username,
       photo: contact.photo || 'https://placehold.co/40x40',
-    });
+      status: contact.status || 'offline',
+      lastSeen: contact.lastSeen,
+    };
+
+    logger.info('Contact added', { userId, contactId: contact._id });
+    // Emit Socket.IO event to update contact list
+    req.app.get('io').to(userId).emit('newContact', contactData);
+
+    res.json(contactData);
   } catch (error) {
     logger.error('Add contact error:', { error: error.message, stack: error.stack, body: req.body });
     res.status(500).json({ error: 'Failed to add contact', details: error.message });

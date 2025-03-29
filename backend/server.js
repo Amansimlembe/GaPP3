@@ -37,6 +37,9 @@ const io = new Server(server, {
   pingInterval: 25000,
 });
 
+// Attach io to app for use in routes
+app.set('io', io);
+
 // Redis client setup
 const redisClient = redis.createClient({
   url: `redis://${process.env.REDIS_HOST}:${process.env.REDIS_PORT}`,
@@ -182,31 +185,9 @@ io.on('connection', (socket) => {
     logger.info('Stop typing event', { userId, recipientId });
   });
 
-  socket.on('newPost', (post) => {
-    if (!post) {
-      logger.error('Invalid newPost event data');
-      return;
-    }
-    io.emit('newPost', post);
-    logger.info('New post event', { postId: post._id });
-  });
-
-  socket.on('postUpdate', (post) => {
-    if (!post) {
-      logger.error('Invalid postUpdate event data');
-      return;
-    }
-    io.emit('postUpdate', post);
-    logger.info('Post update event', { postId: post._id });
-  });
-
-  socket.on('postDeleted', (postId) => {
-    if (!postId) {
-      logger.error('Invalid postDeleted event data');
-      return;
-    }
-    io.emit('postDeleted', postId);
-    logger.info('Post deleted event', { postId });
+  socket.on('newContact', (contact) => {
+    // This event is emitted from auth.js, just log it here for debugging
+    logger.info('New contact event received on server', { contact });
   });
 
   socket.on('ping', ({ userId }) => {

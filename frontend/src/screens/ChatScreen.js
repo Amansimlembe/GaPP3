@@ -1,4 +1,4 @@
-// ChatScreen.js (updated)
+// ChatScreen.js
 import React, { useState, useEffect, useRef } from 'react';
 import io from 'socket.io-client';
 import axios from 'axios';
@@ -101,11 +101,11 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       });
       return response.data.sharedKey || null;
     } catch (error) {
-      console.error('Error getting shared key:', error.message);
+      console.error('Error getting shared key:', error.response?.data?.error || error.message);
+      setError('Failed to get encryption key. Messages may not be encrypted.');
       return null;
     }
   };
-
   // Date and Time Formatting (unchanged)
   const formatChatListDate = (date) => {
     const messageDate = new Date(date);
@@ -138,7 +138,6 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     const date = new Date(lastSeen);
     return `Last seen ${date.toLocaleDateString()} at ${formatTime(date)}`;
   };
-
   useEffect(() => {
     if (!userId || !token) return;
 
@@ -165,7 +164,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
             });
             const latestMessage = messagesData.messages[0] || null;
             const unreadCount = latestMessage && latestMessage.recipientId === userId && latestMessage.status !== 'read' ? 1 : 0;
-            return { ...user, latestMessage, unreadCount, status: 'offline', lastSeen: null };
+            return { ...user, latestMessage, unreadCount, status: user.status || 'offline', lastSeen: user.lastSeen || null };
           })
         );
         usersWithLatestMessage.sort((a, b) => {
@@ -235,6 +234,18 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       fetchUserStatus();
     }
 
+    socket.on('newContact', (contact) => {
+      setUsers((prev) => {
+        if (prev.some((u) => u.id === contact.userId)) return prev;
+        const updatedUsers = [...prev, { ...contact, unreadCount: 0, latestMessage: null }].sort((a, b) =>
+          (b.latestMessage?.createdAt || 0) - (a.latestMessage?.createdAt || 0)
+        );
+        localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
+        return updatedUsers;
+      });
+      dispatch(setSelectedChat(contact.userId)); // Auto-select new contact
+    });
+
     socket.on('message', async (msg) => {
       const chatId = msg.senderId === userId ? msg.recipientId : msg.senderId;
       const sharedKey = await getSharedKey(chatId);
@@ -248,7 +259,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
         setUsers((prev) => {
           const updatedUsers = [
             ...prev,
-            { id: msg.senderId, virtualNumber: msg.senderVirtualNumber, username: msg.senderUsername || 'Unsaved Number', photo: msg.senderPhoto || 'https://placehold.co/40x40', unreadCount: 0 },
+            { id: msg.senderId, virtualNumber: msg.senderVirtualNumber, username: msg.senderUsername || 'Unsaved Number', photo: msg.senderPhoto || 'https://placehold.co/40x40', unreadCount: 0, latestMessage: null },
           ];
           localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
           return updatedUsers;
@@ -337,6 +348,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     window.addEventListener('online', handleOnline);
 
     return () => {
+      socket.off('newContact');
       socket.off('message');
       socket.off('typing');
       socket.off('stopTyping');
@@ -347,42 +359,6 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       clearInterval(keepAlive);
     };
   }, [token, userId, selectedChat, page, dispatch]);
-
-  const sendMessageToServer = async (msgData) => {
-    const formData = new FormData();
-    formData.append('senderId', msgData.senderId);
-    formData.append('recipientId', msgData.recipientId);
-    formData.append('contentType', msgData.contentType);
-    formData.append('caption', msgData.caption || '');
-    if (msgData.contentType === 'text' && msgData.iv) formData.append('iv', msgData.iv);
-    if (msgData.file) formData.append('content', msgData.file);
-    else formData.append('content', msgData.content);
-    if (msgData.replyTo) formData.append('replyTo', msgData.replyTo);
-
-    try {
-      if (msgData.file) setUploadProgress(0);
-      const { data } = await axios.post('https://gapp-6yc3.onrender.com/social/message', formData, {
-        headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
-        onUploadProgress: (progressEvent) => {
-          if (msgData.file) setUploadProgress(Math.round((progressEvent.loaded * 100) / progressEvent.total));
-        },
-      });
-      dispatch(
-        setMessages({
-          recipientId: selectedChat,
-          messages: (chats[selectedChat] || []).map((msg) =>
-            msg._id === msgData.tempId ? { ...data, content: msg.content } : msg
-          ),
-        })
-      );
-      await saveMessages([data]);
-      setUploadProgress(null);
-    } catch (error) {
-      console.error('Send message error:', error);
-      setUploadProgress(null);
-      setError('Failed to send message');
-    }
-  };
 
   const sendMessage = async () => {
     if (!selectedChat || (!message && !file)) return;
@@ -414,6 +390,8 @@ const ChatScreen = ({ token, userId, setAuth }) => {
         const { encrypted, iv: encryptionIv } = await encryptMessage(message, sharedKey);
         encryptedContent = encrypted;
         iv = encryptionIv;
+      } else {
+        setError('Encryption key unavailable. Sending unencrypted message.');
       }
     }
 
@@ -444,6 +422,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       return updatedUsers;
     });
   };
+  
 
   const handleTyping = (e) => {
     setMessage(e.target.value);
@@ -534,7 +513,11 @@ const ChatScreen = ({ token, userId, setAuth }) => {
         url: msg.contentType !== 'text' ? msg.content : undefined,
       });
     }
+
   };
+
+
+
   const addContact = async () => {
     if (!newContactNumber) {
       setError('Virtual number is required');
@@ -550,6 +533,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
         { userId, virtualNumber: newContactNumber },
         { headers: { Authorization: `Bearer ${token}` } }
       );
+
       const newContact = {
         id: data.userId,
         virtualNumber: data.virtualNumber,
@@ -565,11 +549,10 @@ const ChatScreen = ({ token, userId, setAuth }) => {
         localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
         return updatedUsers;
       });
-      setNewContactNumber('');
+     setNewContactNumber('');
       setNewContactName('');
       setMenuTab('');
       setError('');
-      dispatch(setSelectedChat(data.userId));
     } catch (error) {
       console.error('Add contact error:', error);
       setError(error.response?.data?.details || error.response?.data?.error || 'Failed to add contact');
