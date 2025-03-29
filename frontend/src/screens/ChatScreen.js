@@ -383,10 +383,10 @@ const ChatScreen = ({ token, userId, setAuth }) => {
 
   const sendMessage = async () => {
     if (!selectedChat || (!message && !file)) return;
-
+  
     socket.emit('stopTyping', { userId, recipientId: selectedChat });
     setTyping(false);
-
+  
     const tempId = Date.now().toString();
     const tempMsg = {
       _id: tempId,
@@ -399,10 +399,10 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       replyTo: replyTo?._id || null,
       createdAt: new Date(),
     };
-
+  
     dispatch(addMessage({ recipientId: selectedChat, message: tempMsg }));
     if (isAtBottomRef.current) chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
-
+  
     let encryptedContent = message;
     if (contentType === 'text') {
       const recipientPublicKey = await getPublicKey(selectedChat);
@@ -413,7 +413,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
         return;
       }
     }
-
+  
     const formData = new FormData();
     formData.append('senderId', userId);
     formData.append('recipientId', selectedChat);
@@ -421,7 +421,13 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     formData.append('content', file ? file : encryptedContent);
     formData.append('caption', caption);
     if (replyTo) formData.append('replyTo', replyTo._id);
-
+  
+    // Log formData entries
+    console.log('Sending formData:');
+    for (let [key, value] of formData.entries()) {
+      console.log(`${key}: ${value instanceof File ? value.name : value}`);
+    }
+  
     try {
       const { data } = await axios.post('https://gapp-6yc3.onrender.com/social/message', formData, {
         headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
@@ -430,11 +436,11 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       dispatch(addMessage({ recipientId: selectedChat, message: data }));
       await saveMessages([data]);
     } catch (error) {
-      console.error('Send message error:', error);
+      console.error('Send message error:', error.response?.data || error.message); // Improved error logging
       setError('Failed to send message');
       setPendingMessages((prev) => [...prev, { ...tempMsg, content: encryptedContent }]);
     }
-
+  
     setMessage('');
     setFile(null);
     setCaption('');
@@ -442,7 +448,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     setShowPicker(false);
     setReplyTo(null);
     setMediaPreview(null);
-
+  
     setUsers((prev) => {
       const updatedUsers = prev.map((user) =>
         user.id === selectedChat ? { ...user, latestMessage: { ...tempMsg, content: message } } : user
