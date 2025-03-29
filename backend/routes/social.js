@@ -368,16 +368,17 @@ module.exports = (io) => {
 
   router.post('/message', authMiddleware, socialLimiter, upload.single('content'), async (req, res) => {
     try {
-      const { error } = messageSchema.validate(req.body);
-      if (error) return res.status(400).json({ error: error.details[0].message });
-
       const { senderId, recipientId, contentType, caption, replyTo } = req.body;
+      const validationData = { senderId, recipientId, contentType, caption, replyTo };
+      const { error } = messageSchema.validate(validationData);
+      if (error) return res.status(400).json({ error: error.details[0].message });
+  
       if (senderId !== req.user.id) return res.status(403).json({ error: 'Not authorized to send as this user' });
-
+  
       const sender = await User.findById(senderId);
       const recipient = await User.findById(recipientId);
       if (!sender || !recipient) return res.status(404).json({ error: 'Sender or recipient not found' });
-
+  
       let contentUrl = req.body.content || '';
       if (req.file) {
         let resourceType;
@@ -395,8 +396,12 @@ module.exports = (io) => {
           ).end(req.file.buffer);
         });
         contentUrl = result.secure_url;
+      } else if (!contentUrl && contentType === 'text') {
+        contentUrl = req.body.content; // Ensure text content is accepted
+      } else {
+        return res.status(400).json({ error: 'Content is required for non-text messages' });
       }
-
+  
       const message = new Message({
         senderId,
         recipientId,
@@ -408,7 +413,7 @@ module.exports = (io) => {
         createdAt: new Date(),
       });
       await message.save();
-
+  
       const messageData = {
         ...message.toObject(),
         senderVirtualNumber: sender.virtualNumber,
@@ -417,7 +422,7 @@ module.exports = (io) => {
       };
       io.to(recipientId).emit('message', messageData);
       io.to(senderId).emit('message', messageData);
-
+  
       logger.info('Message sent', { messageId: message._id, senderId, recipientId });
       res.json(message.toObject());
     } catch (error) {

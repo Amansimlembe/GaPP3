@@ -272,7 +272,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
         content = await decryptMessage(msg.content, privateKeyPem);
       }
       const updatedMsg = { ...msg, content };
-
+    
       dispatch(addMessage({ recipientId: chatId, message: updatedMsg }));
       await saveMessages([updatedMsg]);
 
@@ -380,9 +380,15 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       clearInterval(keepAlive);
     };
   }, [token, userId, selectedChat, page, dispatch]);
-
   const sendMessage = async () => {
-    if (!selectedChat || (!message && !file)) return;
+    if (!selectedChat) {
+      setError('Please select a chat first');
+      return;
+    }
+    if (!message && !file) {
+      setError('Please enter a message or attach a file');
+      return;
+    }
   
     socket.emit('stopTyping', { userId, recipientId: selectedChat });
     setTyping(false);
@@ -404,28 +410,45 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     if (isAtBottomRef.current) chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
   
     let encryptedContent = message;
-    if (contentType === 'text') {
+    if (contentType === 'text' && !file) {
       const recipientPublicKey = await getPublicKey(selectedChat);
-      if (recipientPublicKey) {
-        encryptedContent = await encryptMessage(message, recipientPublicKey);
-      } else {
+      if (!recipientPublicKey) {
         setError('Failed to encrypt message: Public key unavailable');
         return;
       }
+      encryptedContent = await encryptMessage(message, recipientPublicKey);
     }
   
+    const messageData = {
+      _id: tempId,
+      senderId: userId,
+      recipientId: selectedChat,
+      contentType,
+      content: file ? file : encryptedContent,
+      caption,
+      status: 'sent',
+      replyTo: replyTo?._id || null,
+      createdAt: new Date(),
+      senderVirtualNumber: localStorage.getItem('virtualNumber'),
+      senderUsername: localStorage.getItem('username'),
+      senderPhoto: localStorage.getItem('photo'),
+    };
+  
+    // Emit via Socket.IO first
+    socket.emit('message', messageData);
+  
+    // Then save to backend
     const formData = new FormData();
-    formData.append('senderId', userId);
-    formData.append('recipientId', selectedChat);
+    formData.append('senderId', userId || '');
+    formData.append('recipientId', selectedChat || '');
     formData.append('contentType', contentType);
     formData.append('content', file ? file : encryptedContent);
-    formData.append('caption', caption);
+    formData.append('caption', caption || '');
     if (replyTo) formData.append('replyTo', replyTo._id);
   
-    // Log formData entries
     console.log('Sending formData:');
     for (let [key, value] of formData.entries()) {
-      console.log(`${key}: ${value instanceof File ? value.name : value}`);
+      console.log(`${key}: ${value instanceof File ? `File: ${value.name}` : value}`);
     }
   
     try {
@@ -436,8 +459,8 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       dispatch(addMessage({ recipientId: selectedChat, message: data }));
       await saveMessages([data]);
     } catch (error) {
-      console.error('Send message error:', error.response?.data || error.message); // Improved error logging
-      setError('Failed to send message');
+      console.error('Send message error:', error.response?.data || error.message);
+      setError(`Failed to send message: ${error.response?.data?.error || error.message}`);
       setPendingMessages((prev) => [...prev, { ...tempMsg, content: encryptedContent }]);
     }
   
