@@ -94,16 +94,23 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     return decoder.decode(decrypted);
   };
 
-  const getSharedKey = async (recipientId) => {
-    try {
-      const response = await axios.get(`https://gapp-6yc3.onrender.com/auth/shared_key/${recipientId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      return response.data.sharedKey || null;
-    } catch (error) {
-      console.error('Error getting shared key:', error.response?.data?.error || error.message);
-      setError('Failed to get encryption key. Messages may not be encrypted.');
-      return null;
+  const getSharedKey = async (recipientId, retries = 3, delay = 1000) => {
+    for (let attempt = 0; attempt < retries; attempt++) {
+      try {
+        const response = await axios.get(`https://gapp-6yc3.onrender.com/auth/shared_key/${recipientId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        return response.data.sharedKey || null;
+      } catch (error) {
+        console.error(`Attempt ${attempt + 1} - Error getting shared key:`, error.response?.data?.error || error.message);
+        if (error.response?.status === 403 && attempt < retries - 1) {
+          console.log(`Retrying in ${delay}ms...`);
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          continue;
+        }
+        setError('Failed to get encryption key after retries. Messages may not be encrypted.');
+        return null;
+      }
     }
   };
   // Date and Time Formatting (unchanged)
@@ -138,6 +145,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     const date = new Date(lastSeen);
     return `Last seen ${date.toLocaleDateString()} at ${formatTime(date)}`;
   };
+
   useEffect(() => {
     if (!userId || !token) return;
 
@@ -244,6 +252,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
         return updatedUsers;
       });
       dispatch(setSelectedChat(contact.userId)); // Auto-select new contact
+      setError(''); // Clear any previous errors
     });
 
     socket.on('message', async (msg) => {
@@ -447,6 +456,9 @@ const ChatScreen = ({ token, userId, setAuth }) => {
           })
         )
       );
+
+
+
       dispatch(
         setMessages({
           recipientId: selectedChat,
@@ -516,8 +528,6 @@ const ChatScreen = ({ token, userId, setAuth }) => {
 
   };
 
-
-
   const addContact = async () => {
     if (!newContactNumber) {
       setError('Virtual number is required');
@@ -528,31 +538,16 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       return;
     }
     try {
-      const { data } = await axios.post(
+      setError('Adding contact...');
+      await axios.post(
         'https://gapp-6yc3.onrender.com/auth/add_contact',
         { userId, virtualNumber: newContactNumber },
         { headers: { Authorization: `Bearer ${token}` } }
       );
-
-      const newContact = {
-        id: data.userId,
-        virtualNumber: data.virtualNumber,
-        username: newContactName || data.username || data.virtualNumber,
-        photo: data.photo || 'https://placehold.co/40x40',
-        unreadCount: 0,
-        latestMessage: null,
-        status: 'offline',
-        lastSeen: null,
-      };
-      setUsers((prev) => {
-        const updatedUsers = [...prev, newContact].sort((a, b) => (b.latestMessage?.createdAt || 0) - (a.latestMessage?.createdAt || 0));
-        localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
-        return updatedUsers;
-      });
-     setNewContactNumber('');
+      // Wait for socket event to update UI, no manual state update here
+      setNewContactNumber('');
       setNewContactName('');
       setMenuTab('');
-      setError('');
     } catch (error) {
       console.error('Add contact error:', error);
       setError(error.response?.data?.details || error.response?.data?.error || 'Failed to add contact');
