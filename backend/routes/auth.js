@@ -1,3 +1,4 @@
+// auth.js
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
@@ -6,7 +7,6 @@ const bcrypt = require('bcryptjs');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
 const { getCountryCallingCode, parsePhoneNumberFromString } = require('libphonenumber-js');
-const rateLimit = require('express-rate-limit');
 const Joi = require('joi');
 const winston = require('winston');
 const User = require('../models/User');
@@ -20,13 +20,6 @@ const logger = winston.createLogger({
     new winston.transports.File({ filename: 'logs/error.log', level: 'error' }),
     new winston.transports.File({ filename: 'logs/combined.log' }),
   ],
-});
-
-// Rate limiter
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
-  message: { error: 'Too many requests, please try again later.' },
 });
 
 // Multer configuration
@@ -77,26 +70,12 @@ const registerSchema = Joi.object({
   password: Joi.string().min(6).required(),
   username: Joi.string().min(3).max(20).required(),
   country: Joi.string().required(),
+  role: Joi.number().integer().min(0).max(1).required(), // Add role validation
 });
 
 const loginSchema = Joi.object({
   email: Joi.string().email().required(),
   password: Joi.string().min(6).required(),
-});
-
-const updateCountrySchema = Joi.object({
-  userId: Joi.string().required(),
-  country: Joi.string().required(),
-});
-
-const updateUsernameSchema = Joi.object({
-  userId: Joi.string().required(),
-  username: Joi.string().min(3).max(20).required(),
-});
-
-const addContactSchema = Joi.object({
-  userId: Joi.string().required(),
-  virtualNumber: Joi.string().required(),
 });
 
 // Generate virtual number
@@ -110,10 +89,8 @@ const generateVirtualNumber = (countryCode, userId) => {
   return phoneNumber ? phoneNumber.formatInternational() : rawNumber;
 };
 
-// ... imports and setup remain unchanged ...
-
 // Register a new user
-router.post('/register', limiter, upload.single('photo'), async (req, res) => {
+router.post('/register', upload.single('photo'), async (req, res) => {
   try {
     logger.info('Register request received', { body: req.body, file: !!req.file });
     const { error } = registerSchema.validate(req.body);
@@ -122,7 +99,7 @@ router.post('/register', limiter, upload.single('photo'), async (req, res) => {
       return res.status(400).json({ error: error.details[0].message });
     }
 
-    const { email, password, username, country } = req.body;
+    const { email, password, username, country, role } = req.body;
     const existingUser = await User.findOne({ $or: [{ email }, { username }] });
     if (existingUser) {
       logger.warn('Duplicate email or username', { email, username });
@@ -150,6 +127,7 @@ router.post('/register', limiter, upload.single('photo'), async (req, res) => {
       publicKey: publicKeyPem,
       privateKey: privateKeyPem,
       photo: 'https://placehold.co/40x40',
+      role: parseInt(role), // Store role as integer
     });
 
     if (req.file) {
@@ -163,10 +141,10 @@ router.post('/register', limiter, upload.single('photo'), async (req, res) => {
     }
 
     await user.save();
-    const token = jwt.sign({ id: user._id, email, virtualNumber }, process.env.JWT_SECRET, { expiresIn: '24h' });
+    const token = jwt.sign({ id: user._id, email, virtualNumber, role: user.role }, process.env.JWT_SECRET, { expiresIn: '24h' });
 
-    logger.info('User registered', { userId: user._id, email });
-    res.status(201).json({ token, userId: user._id, virtualNumber, username, photo: user.photo });
+    logger.info('User registered', { userId: user._id, email, role: user.role });
+    res.status(201).json({ token, userId: user._id, virtualNumber, username, photo: user.photo, role: user.role });
   } catch (error) {
     logger.error('Register error:', { error: error.message, stack: error.stack });
     res.status(500).json({ error: 'Failed to register', details: error.message });
@@ -174,7 +152,7 @@ router.post('/register', limiter, upload.single('photo'), async (req, res) => {
 });
 
 // Login
-router.post('/login', limiter, async (req, res) => {
+router.post('/login', async (req, res) => {
   try {
     logger.info('Login request received', { body: req.body });
     const { error } = loginSchema.validate(req.body);
@@ -190,21 +168,26 @@ router.post('/login', limiter, async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    const token = jwt.sign({ id: user._id, email, virtualNumber: user.virtualNumber }, process.env.JWT_SECRET, { expiresIn: '24h' });
+    const token = jwt.sign({ id: user._id, email, virtualNumber: user.virtualNumber, role: user.role }, process.env.JWT_SECRET, { expiresIn: '24h' });
 
     user.status = 'online';
     user.lastSeen = new Date();
     await user.save();
 
-    logger.info('User logged in', { userId: user._id, email });
-    res.json({ token, userId: user._id, virtualNumber: user.virtualNumber, username: user.username, photo: user.photo || 'https://placehold.co/40x40' });
+    logger.info('User logged in', { userId: user._id, email, role: user.role });
+    res.json({
+      token,
+      userId: user._id,
+      virtualNumber: user.virtualNumber,
+      username: user.username,
+      photo: user.photo || 'https://placehold.co/40x40',
+      role: user.role,
+    });
   } catch (error) {
     logger.error('Login error:', { error: error.message, stack: error.stack });
     res.status(500).json({ error: 'Failed to login', details: error.message });
   }
 });
-
-// ... rest of auth.js remains unchanged ...
 // Update country
 router.post('/update_country', authMiddleware, async (req, res) => {
   try {

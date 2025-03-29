@@ -1,3 +1,4 @@
+// App.js
 import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Route, Switch, Link, Redirect } from 'react-router-dom';
 import { motion } from 'framer-motion';
@@ -11,7 +12,7 @@ import ChatScreen from './screens/ChatScreen';
 import ProfileScreen from './screens/ProfileScreen';
 import CountrySelector from './components/CountrySelector';
 import io from 'socket.io-client';
-import { useSelector } from 'react-redux'; // Add this to access selectedChat
+import { useSelector } from 'react-redux';
 
 const socket = io('https://gapp-6yc3.onrender.com', {
   reconnection: true,
@@ -33,7 +34,7 @@ const getTokenExpiration = (token) => {
         .join('')
     );
     const decoded = JSON.parse(jsonPayload);
-    return decoded.exp * 1000; // Convert to milliseconds
+    return decoded.exp * 1000;
   } catch (error) {
     console.error('Error decoding token:', error);
     return null;
@@ -51,7 +52,7 @@ const App = () => {
   const [feedKey, setFeedKey] = useState(0);
   const [isAuthenticated, setIsAuthenticated] = useState(!!localStorage.getItem('token') && !!localStorage.getItem('userId'));
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
-  const { selectedChat } = useSelector((state) => state.messages); // Access selectedChat from Redux
+  const { selectedChat } = useSelector((state) => state.messages);
   const isSmallDevice = window.innerWidth < 768;
 
   const refreshToken = async () => {
@@ -106,7 +107,7 @@ const App = () => {
     };
 
     checkTokenExpiration();
-    const interval = setInterval(checkTokenExpiration, 60 * 60 * 1000); // Check hourly
+    const interval = setInterval(checkTokenExpiration, 60 * 60 * 1000);
     return () => clearInterval(interval);
   }, [token, userId]);
 
@@ -144,7 +145,7 @@ const App = () => {
   const setAuth = (newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername) => {
     setToken(newToken || '');
     setUserId(newUserId || '');
-    setRole(Number(newRole) || 0);
+    setRole(Number(newRole) || 0); // Ensure role is a number
     setPhoto(newPhoto || 'https://placehold.co/40x40');
     setVirtualNumber(newVirtualNumber || '');
     setUsername(newUsername || '');
@@ -191,19 +192,10 @@ const App = () => {
           <Switch>
             <Route
               path="/jobs"
-              render={() =>
-                role === 0 ? (
-                  <JobSeekerScreen token={token} userId={userId} />
-                ) : (
-                  <EmployerScreen token={token} userId={userId} />
-                )
-              }
+              render={() => (role === 0 ? <JobSeekerScreen token={token} userId={userId} /> : <EmployerScreen token={token} userId={userId} />)}
             />
             <Route path="/feed" render={() => <FeedScreen token={token} userId={userId} key={feedKey} />} />
-            <Route
-              path="/chat"
-              render={() => <ChatScreen token={token} userId={userId} setAuth={setAuth} />}
-            />
+            <Route path="/chat" render={() => <ChatScreen token={token} userId={userId} setAuth={setAuth} />} />
             <Route
               path="/profile"
               render={() => (
@@ -224,7 +216,7 @@ const App = () => {
         </div>
         <motion.div
           initial={{ y: 100 }}
-          animate={{ y: isSmallDevice && selectedChat ? 100 : 0 }} // Hide when chat is open on small devices
+          animate={{ y: isSmallDevice && selectedChat ? 100 : 0 }}
           transition={{ duration: 0.5 }}
           className="fixed bottom-0 left-0 right-0 bg-primary text-white p-2 flex justify-around items-center shadow-lg z-20"
         >

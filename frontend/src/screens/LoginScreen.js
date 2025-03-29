@@ -1,3 +1,4 @@
+// LoginScreen.js
 import React, { useState } from 'react';
 import axios from 'axios';
 import { motion } from 'framer-motion';
@@ -6,8 +7,8 @@ import { getCountries } from 'libphonenumber-js';
 const LoginScreen = ({ setAuth }) => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [role, setRole] = useState('0');
-  const [username, setUsername] = useState(''); // Changed from name to username
+  const [role, setRole] = useState('0'); // Default to Job Seeker
+  const [username, setUsername] = useState('');
   const [photo, setPhoto] = useState(null);
   const [isLogin, setIsLogin] = useState(true);
   const [error, setError] = useState('');
@@ -16,47 +17,62 @@ const LoginScreen = ({ setAuth }) => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    const formData = new FormData();
-    formData.append('email', email);
-    formData.append('password', password);
-    if (!isLogin) {
-      formData.append('username', username); // Changed from name to username
-      formData.append('role', role);
+    setError(''); // Clear previous errors
+
+    if (isLogin) {
+      // Login request
+      try {
+        const { data } = await axios.post('https://gapp-6yc3.onrender.com/auth/login', { email, password });
+        setAuth(data.token, data.userId, data.role, data.photo, data.virtualNumber, data.username);
+        localStorage.setItem('token', data.token);
+        localStorage.setItem('userId', data.userId);
+        localStorage.setItem('role', data.role);
+        localStorage.setItem('photo', data.photo || 'https://placehold.co/40x40');
+        localStorage.setItem('virtualNumber', data.virtualNumber);
+        localStorage.setItem('username', data.username);
+      } catch (error) {
+        console.error('Auth error:', error);
+        setError(error.response?.data?.error || 'Authentication failed');
+      }
+    } else {
+      // Registration request
+      const formData = new FormData();
+      formData.append('email', email);
+      formData.append('password', password);
+      formData.append('username', username);
+      formData.append('role', role); // Ensure role is included
+      formData.append('country', selectedCountry);
       if (photo) formData.append('photo', photo);
+
       if (!selectedCountry) {
         setError('Please select a country');
         return;
       }
-      formData.append('country', selectedCountry);
-    }
 
-    try {
-      const url = isLogin ? '/auth/login' : '/auth/register';
-      const { data } = await axios.post(url, isLogin ? { email, password } : formData, {
-        headers: !isLogin ? { 'Content-Type': 'multipart/form-data' } : {},
-      });
-      // Include username in setAuth and store in localStorage
-      setAuth(data.token, data.userId, data.role, data.photo, data.virtualNumber, data.username);
-      localStorage.setItem('token', data.token);
-      localStorage.setItem('userId', data.userId);
-      localStorage.setItem('role', data.role);
-      localStorage.setItem('photo', data.photo || 'https://placehold.co/40x40');
-      localStorage.setItem('virtualNumber', data.virtualNumber);
-      localStorage.setItem('username', data.username); // Store username
-      setError('');
-    } catch (error) {
-      console.error('Auth error:', error);
-      setError(error.response?.data?.error || 'Authentication failed');
+      try {
+        const { data } = await axios.post('https://gapp-6yc3.onrender.com/auth/register', formData, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+        });
+        setAuth(data.token, data.userId, data.role, data.photo, data.virtualNumber, data.username);
+        localStorage.setItem('token', data.token);
+        localStorage.setItem('userId', data.userId);
+        localStorage.setItem('role', data.role);
+        localStorage.setItem('photo', data.photo || 'https://placehold.co/40x40');
+        localStorage.setItem('virtualNumber', data.virtualNumber);
+        localStorage.setItem('username', data.username);
+      } catch (error) {
+        console.error('Auth error:', error);
+        setError(error.response?.data?.error || 'Registration failed');
+      }
     }
   };
 
-  const countries = getCountries().map(code => ({
+  const countries = getCountries().map((code) => ({
     code,
     name: new Intl.DisplayNames(['en'], { type: 'region' }).of(code),
   }));
-  const filteredCountries = countries.filter(c => 
-    c.name.toLowerCase().includes(search.toLowerCase()) || 
-    c.code.toLowerCase().includes(search.toLowerCase())
+  const filteredCountries = countries.filter((c) =>
+    c.name.toLowerCase().includes(search.toLowerCase()) || c.code.toLowerCase().includes(search.toLowerCase())
   );
 
   return (
@@ -87,10 +103,24 @@ const LoginScreen = ({ setAuth }) => {
                 className="w-full p-2 mb-4 border rounded-lg"
                 size="5"
               >
-                {filteredCountries.map(c => (
+                {filteredCountries.map((c) => (
                   <option key={c.code} value={c.code}>{c.name}</option>
                 ))}
               </select>
+              <select
+                value={role}
+                onChange={(e) => setRole(e.target.value)}
+                className="w-full p-2 mb-4 border rounded-lg"
+              >
+                <option value="0">Job Seeker</option>
+                <option value="1">Employer</option>
+              </select>
+              <input
+                type="file"
+                accept="image/*"
+                onChange={(e) => setPhoto(e.target.files[0])}
+                className="w-full p-2 mb-4 border rounded-lg"
+              />
             </>
           )}
           <input
@@ -107,20 +137,6 @@ const LoginScreen = ({ setAuth }) => {
             className="w-full p-2 mb-4 border rounded-lg"
             placeholder="Password"
           />
-          {!isLogin && (
-            <>
-              <select value={role} onChange={(e) => setRole(e.target.value)} className="w-full p-2 mb-4 border rounded-lg">
-                <option value="0">Job Seeker</option>
-                <option value="1">Employer</option>
-              </select>
-              <input
-                type="file"
-                accept="image/*"
-                onChange={(e) => setPhoto(e.target.files[0])}
-                className="w-full p-2 mb-4 border rounded-lg"
-              />
-            </>
-          )}
           <button type="submit" className="w-full bg-primary text-white p-2 rounded-lg hover:bg-secondary">
             {isLogin ? 'Login' : 'Register'}
           </button>
