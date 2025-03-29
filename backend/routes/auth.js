@@ -1,4 +1,3 @@
-// auth.js
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
@@ -43,70 +42,34 @@ const upload = multer({
   },
 });
 
-// JWT Authentication Middleware
-const authMiddleware = (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  logger.info('Auth Header:', { authHeader });
-
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    logger.error('No token provided or malformed header', { authHeader });
-    return res.status(401).json({ error: 'No token provided' });
-  }
-
-  const token = authHeader.split(' ')[1];
-  logger.info('Extracted Token:', { token });
-
-  if (!token) {
-    logger.error('Token missing after Bearer');
-    return res.status(401).json({ error: 'Token missing' });
-  }
-
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
-    logger.info('Decoded Token:', { decoded });
-    req.user = decoded;
-    next();
-  } catch (error) {
-    logger.error('Auth middleware error:', { error: error.message });
-    return res.status(401).json({ error: 'Invalid token', details: error.message });
-  }
-};
-
 // Validation schemas
 const registerSchema = Joi.object({
   email: Joi.string().email().required(),
   password: Joi.string().min(6).required(),
   username: Joi.string().min(3).max(20).required(),
-  country: Joi.string().required(),
+  country: Joi.string().length(2).uppercase().required(), // ISO 3166-1 alpha-2
   role: Joi.number().integer().min(0).max(1).required(),
 });
 
-const loginSchema = Joi.object({
-  email: Joi.string().email().required(),
-  password: Joi.string().min(6).required(),
-});
-
-const addContactSchema = Joi.object({
-  userId: Joi.string().required(),
-  virtualNumber: Joi.string().pattern(/^\+\d{10,15}$/).required(),
-});
-
+// Generate virtual number without spaces
 const generateVirtualNumber = (countryCode, userId) => {
-  if (!countryCode || typeof countryCode !== 'string') throw new Error('Invalid country code');
-
-  const hash = crypto.createHash('sha256').update(userId).digest('hex');
-  const numericPart = parseInt(hash.substring(0, 8), 16).toString().padStart(9, '0').slice(0, 9);
-  const countryCallingCode = getCountryCallingCode(countryCode.toUpperCase());
-
-  const rawNumber = `+${countryCallingCode}${numericPart}`;
-  const phoneNumber = parsePhoneNumberFromString(rawNumber, countryCode.toUpperCase());
-
-  return phoneNumber ? phoneNumber.formatInternational().replace(/\s+/g, '') : rawNumber.replace(/\s+/g, '');
+  if (!countryCode || typeof countryCode !== 'string' || countryCode.length !== 2) {
+    throw new Error('Invalid country code: must be a 2-letter ISO code');
+  }
+  try {
+    const hash = crypto.createHash('sha256').update(userId).digest('hex');
+    const numericPart = parseInt(hash.substring(0, 8), 16).toString().padStart(9, '0').slice(0, 9);
+    const countryCallingCode = getCountryCallingCode(countryCode.toUpperCase());
+    return `+${countryCallingCode}${numericPart}`; // No spaces
+  } catch (error) {
+    throw new Error(`Failed to generate virtual number: ${error.message}`);
+  }
 };
+
+// Register a new user
 router.post('/register', upload.single('photo'), async (req, res) => {
   try {
     logger.info('Register request received', { body: req.body, file: !!req.file });
-
     const { error } = registerSchema.validate(req.body);
     if (error) {
       logger.warn('Validation failed', { error: error.details[0].message });
@@ -114,19 +77,27 @@ router.post('/register', upload.single('photo'), async (req, res) => {
     }
 
     const { email, password, username, country, role } = req.body;
+
+    // Check Cloudinary configuration
+    if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) {
+      logger.error('Cloudinary configuration missing');
+      return res.status(500).json({ error: 'Server configuration error: Cloudinary not set up' });
+    }
+
     const existingUser = await User.findOne({ $or: [{ email }, { username }] });
     if (existingUser) {
       logger.warn('Duplicate email or username', { email, username });
       return res.status(400).json({ error: 'Email or username already exists' });
     }
 
-    // Generate keys
     const { publicKey, privateKey } = await new Promise((resolve, reject) => {
       crypto.generateKeyPair('ec', { namedCurve: 'secp256k1' }, (err, pub, priv) => {
         if (err) reject(err);
         else resolve({ publicKey: pub, privateKey: priv });
       });
     });
+    const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' });
+    const privateKeyPem = privateKey.export({ type: 'pkcs8', format: 'pem' });
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const virtualNumber = generateVirtualNumber(country, crypto.randomBytes(16).toString('hex'));
@@ -137,13 +108,12 @@ router.post('/register', upload.single('photo'), async (req, res) => {
       username,
       country,
       virtualNumber,
-      publicKey: publicKey.export({ type: 'spki', format: 'pem' }),
-      privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }),
-      photo: 'https://placehold.co/40x40', // Default image
+      publicKey: publicKeyPem,
+      privateKey: privateKeyPem,
+      photo: 'https://placehold.co/40x40',
       role: parseInt(role),
     });
 
-    // **Upload Photo if Available**
     if (req.file) {
       try {
         const result = await new Promise((resolve, reject) => {
@@ -152,7 +122,6 @@ router.post('/register', upload.single('photo'), async (req, res) => {
             (error, result) => (error ? reject(error) : resolve(result))
           ).end(req.file.buffer);
         });
-
         user.photo = result.secure_url;
       } catch (uploadError) {
         logger.error('Photo upload error:', { error: uploadError.message, stack: uploadError.stack });
@@ -161,24 +130,15 @@ router.post('/register', upload.single('photo'), async (req, res) => {
     }
 
     await user.save();
-
-    const token = jwt.sign(
-      { id: user._id, email, virtualNumber, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: '24h' }
-    );
+    const token = jwt.sign({ id: user._id, email, virtualNumber, role: user.role }, process.env.JWT_SECRET, { expiresIn: '24h' });
 
     logger.info('User registered', { userId: user._id, email, role: user.role });
-    res.status(201).json({
-      token,
-      userId: user._id,
-      virtualNumber,
-      username,
-      photo: user.photo,
-      role: user.role,
-    });
+    res.status(201).json({ token, userId: user._id, virtualNumber, username, photo: user.photo, role: user.role });
   } catch (error) {
-    logger.error('Register error:', { error: error.message, stack: error.stack });
+    logger.error('Register error:', { error: error.message, stack: error.stack, body: req.body });
+    if (error.code === 11000) {
+      return res.status(400).json({ error: 'Duplicate email, username, or virtual number' });
+    }
     res.status(500).json({ error: 'Failed to register', details: error.message });
   }
 });
