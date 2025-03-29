@@ -66,6 +66,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   const [loading, setLoading] = useState(false);
   const [userStatus, setUserStatus] = useState({ status: 'offline', lastSeen: null });
   const [pendingMessages, setPendingMessages] = useState([]);
+  const [isInputFocused, setIsInputFocused] = useState(false); // New state for input focus
   const chatRef = useRef(null);
   const typingTimeoutRef = useRef(null);
   const isAtBottomRef = useRef(true);
@@ -73,7 +74,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   const messagesPerPage = 50;
   const isSmallDevice = window.innerWidth < 768;
 
-  // Encryption Functions
+  // Encryption Functions (unchanged)
   const encryptMessage = async (content, sharedKey) => {
     const iv = window.crypto.getRandomValues(new Uint8Array(12));
     const encoder = new TextEncoder();
@@ -105,6 +106,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     }
   };
 
+  // Date Formatting Functions (unchanged)
   const formatChatListDate = (date) => {
     const messageDate = new Date(date);
     const now = new Date();
@@ -137,6 +139,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     return `Last seen ${date.toLocaleDateString()} at ${formatTime(date)}`;
   };
 
+  // useEffect and other logic (unchanged except for scroll adjustment)
   useEffect(() => {
     if (!userId || !token) return;
 
@@ -146,15 +149,12 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       socket.emit('ping', { userId });
     }, 30000);
 
-    // Periodic cleanup of old messages (older than 30 days)
     clearOldMessages(30).catch((error) => console.error('Error clearing old messages:', error));
 
     const fetchUsers = async () => {
       try {
         const cachedUsers = JSON.parse(localStorage.getItem('cachedUsers')) || [];
-        if (cachedUsers.length > 0) {
-          setUsers(cachedUsers);
-        }
+        if (cachedUsers.length > 0) setUsers(cachedUsers);
         const { data } = await axios.get('https://gapp-6yc3.onrender.com/auth/contacts', {
           headers: { Authorization: `Bearer ${token}` },
         });
@@ -349,6 +349,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     };
   }, [token, userId, selectedChat, page, dispatch]);
 
+  // Send Message and other functions (unchanged except for minor tweaks)
   const sendMessageToServer = async (msgData) => {
     const formData = new FormData();
     formData.append('senderId', msgData.senderId);
@@ -603,8 +604,16 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     setShowMenu(false);
   };
 
+  // WhatsApp-like animation variants for the typing box
+  const typingBoxVariants = {
+    hidden: { y: 100, opacity: 0 },
+    visible: { y: 0, opacity: 1, transition: { type: 'spring', stiffness: 300, damping: 30 } },
+    focused: { y: -10, boxShadow: '0 2px 10px rgba(0,0,0,0.1)', transition: { duration: 0.2 } },
+  };
+
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.3 }} className="flex h-screen bg-gray-100">
+      {/* Chat List (unchanged) */}
       <div className={`w-full md:w-1/3 bg-white border-r border-gray-200 flex flex-col ${isSmallDevice && selectedChat ? 'hidden' : 'block'}`}>
         <div className="p-4 flex justify-between items-center border-b border-gray-200">
           <h2 className="text-xl font-bold text-primary">Chats</h2>
@@ -700,6 +709,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
         )}
       </div>
 
+      {/* Chat Area */}
       <div className={`flex-1 flex flex-col ${isSmallDevice && !selectedChat ? 'hidden' : 'block'}`}>
         {selectedChat ? (
           <>
@@ -728,7 +738,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                 </div>
               </div>
             </div>
-            <div ref={chatRef} className="flex-1 overflow-y-auto bg-gray-100 p-2 pt-16 pb-32">
+            <div ref={chatRef} className="flex-1 overflow-y-auto bg-gray-100 p-2 pt-16 pb-20">
               {(chats[selectedChat] || []).length === 0 ? (
                 <p className="text-center text-gray-500 mt-4">No messages yet</p>
               ) : (
@@ -839,7 +849,14 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                 </>
               )}
             </div>
-            <div className="bg-white p-2 border-t border-gray-200 fixed bottom-0 md:left-[33.33%] md:w-2/3 left-0 right-0 z-10">
+
+            {/* Typing Box with WhatsApp-like Animation */}
+            <motion.div
+              variants={typingBoxVariants}
+              initial="hidden"
+              animate={isInputFocused ? 'focused' : 'visible'}
+              className="fixed bottom-16 md:left-[33.33%] md:w-2/3 left-0 right-0 bg-white p-3 border-t border-gray-200 z-20 rounded-t-lg shadow-lg"
+            >
               {mediaPreview && (
                 <div className="bg-gray-100 p-2 mb-2 rounded w-full max-w-[80%] mx-auto">
                   {mediaPreview.type === 'image' && <img src={mediaPreview.url} alt="Preview" className="max-w-full max-h-64 object-contain rounded-lg" />}
@@ -875,12 +892,12 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                 </div>
               )}
               <div className="flex items-center">
-                <FaPaperclip onClick={() => setShowPicker(!showPicker)} className="text-xl text-primary cursor-pointer mr-2" />
+                <FaPaperclip onClick={() => setShowPicker(!showPicker)} className="text-xl text-gray-600 cursor-pointer mr-2" />
                 {showPicker && (
                   <motion.div
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    className="absolute bottom-12 left-2 bg-white p-2 rounded-lg shadow-lg z-20 flex space-x-2"
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="absolute bottom-12 left-2 bg-white p-2 rounded-lg shadow-lg z-30 flex space-x-2"
                   >
                     <label><FaFileAlt className="text-blue-600" /><input type="file" accept=".pdf" onChange={(e) => handleFileChange(e, 'document')} className="hidden" /></label>
                     <label><FaPlay className="text-green-500" /><input type="file" accept="audio/*" onChange={(e) => handleFileChange(e, 'audio')} className="hidden" /></label>
@@ -892,30 +909,38 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                   type="text"
                   value={message}
                   onChange={handleTyping}
+                  onFocus={() => setIsInputFocused(true)}
+                  onBlur={() => setIsInputFocused(false)}
                   onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
                   placeholder="Type a message..."
-                  className="flex-1 p-2 border rounded-lg mr-2"
+                  className="flex-1 p-2 border rounded-full bg-gray-50 focus:outline-none focus:ring-2 focus:ring-green-500 text-sm"
                   disabled={file}
                 />
-                <FaPaperPlane onClick={sendMessage} className="text-xl text-primary cursor-pointer" />
+                <motion.div whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }}>
+                  <FaPaperPlane onClick={sendMessage} className="text-xl text-green-500 cursor-pointer ml-2" />
+                </motion.div>
               </div>
               {uploadProgress !== null && (
-                <div className="w-full bg-gray-200 rounded-full h-2 mt-2">
-                  <div className="bg-primary h-2 rounded-full" style={{ width: `${uploadProgress}%` }}></div>
+                <div className="w-full bg-gray-200 rounded-full h-1 mt-2">
+                  <div className="bg-green-500 h-1 rounded-full" style={{ width: `${uploadProgress}%` }}></div>
                 </div>
               )}
               {error && <p className="text-red-500 text-sm mt-2">{error}</p>}
-            </div>
+            </motion.div>
+
+            {/* Jump to Bottom Button */}
             {showJumpToBottom && (
               <motion.div
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
-                className="fixed bottom-20 md:left-[66%] left-1/2 transform -translate-x-1/2 bg-primary text-white p-2 rounded-full cursor-pointer z-40"
+                className="fixed bottom-32 md:left-[66%] left-1/2 transform -translate-x-1/2 bg-green-500 text-white p-2 rounded-full cursor-pointer z-40"
                 onClick={jumpToBottom}
               >
                 <FaArrowDown /> {unreadCount > 0 && `(${unreadCount})`}
               </motion.div>
             )}
+
+            {/* Delete Confirmation Modal */}
             {showDeleteConfirm && (
               <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
                 <div className="bg-white p-6 rounded-lg shadow-lg">
@@ -927,6 +952,8 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                 </div>
               </motion.div>
             )}
+
+            {/* Media Viewer */}
             {viewMedia && (
               <motion.div
                 initial={{ opacity: 0 }}
