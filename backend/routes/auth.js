@@ -193,10 +193,14 @@ router.post('/login', async (req, res) => {
     res.status(500).json({ error: 'Failed to login', details: error.message });
   }
 });
-
-// Add a contact
+// auth.js (updated /add_contact endpoint)
 router.post('/add_contact', authMiddleware, async (req, res) => {
   try {
+    const addContactSchema = Joi.object({
+      userId: Joi.string().required(),
+      virtualNumber: Joi.string().required(),
+    });
+
     const { error } = addContactSchema.validate(req.body);
     if (error) return res.status(400).json({ error: error.details[0].message });
 
@@ -213,7 +217,8 @@ router.post('/add_contact', authMiddleware, async (req, res) => {
     if (!user.contacts.includes(contact._id)) {
       user.contacts.push(contact._id);
 
-      const userPrivateKey = crypto.createPrivateKey(user.privateKey);
+      // Generate shared key without immediate decryption
+      const userPrivateKey = crypto.createPrivateKey(user.privateKey); // Assumes privateKey is in PEM format
       const contactPublicKey = crypto.createPublicKey(contact.publicKey);
       const sharedKey = crypto.diffieHellman({
         privateKey: userPrivateKey,
@@ -221,8 +226,8 @@ router.post('/add_contact', authMiddleware, async (req, res) => {
       });
       const sharedKeyBase64 = sharedKey.toString('base64');
       user.sharedKeys.push({ contactId: contact._id, key: sharedKeyBase64 });
-      await user.save();
 
+      // Update contact's shared key
       const contactPrivateKey = crypto.createPrivateKey(contact.privateKey);
       const userPublicKey = crypto.createPublicKey(user.publicKey);
       const contactSharedKey = crypto.diffieHellman({
@@ -230,7 +235,8 @@ router.post('/add_contact', authMiddleware, async (req, res) => {
         publicKey: userPublicKey,
       });
       contact.sharedKeys.push({ contactId: user._id, key: contactSharedKey.toString('base64') });
-      await contact.save();
+
+      await Promise.all([user.save(), contact.save()]);
     }
 
     logger.info('Contact added', { userId, contactId: contact._id });

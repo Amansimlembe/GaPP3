@@ -1,4 +1,4 @@
-// @ts-nocheck
+// ChatScreen.js (updated)
 import React, { useState, useEffect, useRef } from 'react';
 import io from 'socket.io-client';
 import axios from 'axios';
@@ -67,14 +67,14 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   const [userStatus, setUserStatus] = useState({ status: 'offline', lastSeen: null });
   const [pendingMessages, setPendingMessages] = useState([]);
   const chatRef = useRef(null);
-  const typingBoxRef = useRef(null); // Ref for typing box to calculate height
+  const typingBoxRef = useRef(null);
   const typingTimeoutRef = useRef(null);
   const isAtBottomRef = useRef(true);
 
   const messagesPerPage = 50;
   const isSmallDevice = window.innerWidth < 768;
 
-  // Encryption Functions (unchanged)
+  // Encryption Functions
   const encryptMessage = async (content, sharedKey) => {
     const iv = window.crypto.getRandomValues(new Uint8Array(12));
     const encoder = new TextEncoder();
@@ -550,7 +550,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       const newContact = {
         id: data.userId,
         virtualNumber: data.virtualNumber,
-        username: newContactName || data.username || 'Unsaved Number',
+        username: newContactName || data.username || data.virtualNumber, // Fallback to virtual number if no username
         photo: data.photo || 'https://placehold.co/40x40',
         unreadCount: 0,
         latestMessage: null,
@@ -568,6 +568,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       setError('');
       dispatch(setSelectedChat(data.userId));
     } catch (error) {
+      console.error('Add contact error:', error);
       setError(error.response?.data?.error || 'Failed to add contact');
     }
   };
@@ -686,7 +687,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                     value={newContactNumber}
                     onChange={(e) => setNewContactNumber(e.target.value)}
                     className="w-full p-2 mb-2 border rounded-lg"
-                    placeholder="Enter virtual number"
+                    placeholder="Enter virtual number (e.g., +12025550123)"
                   />
                   <input
                     type="text"
@@ -737,7 +738,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
             <div
               ref={chatRef}
               className="flex-1 overflow-y-auto bg-gray-100 p-2 pt-16"
-              style={{ paddingBottom: typingBoxRef.current ? `${typingBoxRef.current.offsetHeight}px` : '80px' }} // Dynamic padding
+              style={{ paddingBottom: typingBoxRef.current ? `${typingBoxRef.current.offsetHeight}px` : '80px' }}
             >
               {(chats[selectedChat] || []).length === 0 ? (
                 <p className="text-center text-gray-500 mt-4">No messages yet</p>
@@ -855,7 +856,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
               initial="hidden"
               animate={mediaPreview || replyTo ? 'expanded' : 'visible'}
               className="bg-white p-2 border-t border-gray-200 fixed md:left-[33.33%] md:w-2/3 left-0 right-0 z-30 shadow-lg rounded-t-lg"
-              style={{ bottom: '0px' }} // Positioned at bottom, above nav bar due to z-index
+              style={{ bottom: '0px' }}
             >
               {mediaPreview && (
                 <div className="bg-gray-100 p-2 mb-2 rounded w-full max-w-[80%] mx-auto">
