@@ -1,8 +1,7 @@
 const redis = require('redis');
-const { promisify } = require('util');
 const winston = require('winston');
 
-// Logger setup for Redis-specific logs
+// Logger setup
 const logger = winston.createLogger({
   level: 'info',
   format: winston.format.combine(winston.format.timestamp(), winston.format.json()),
@@ -15,7 +14,7 @@ const logger = winston.createLogger({
 
 // Redis client configuration
 const redisClient = redis.createClient({
-  url: process.env.REDIS_URL || 'redis://localhost:6379', // Default to localhost if no env var
+  url: process.env.REDIS_URL || 'redis://localhost:6379',
   socket: {
     reconnectStrategy: (retries) => {
       if (retries > 10) {
@@ -28,29 +27,10 @@ const redisClient = redis.createClient({
 });
 
 // Handle Redis connection events
-redisClient.on('connect', () => {
-  logger.info('Connected to Redis');
-});
-
-redisClient.on('error', (err) => {
-  logger.error('Redis client error', { error: err.message });
-});
-
-redisClient.on('reconnecting', () => {
-  logger.info('Reconnecting to Redis');
-});
-
-redisClient.on('end', () => {
-  logger.warn('Redis connection closed');
-});
-
-// Promisify Redis methods for async/await usage
-const getAsync = promisify(redisClient.get).bind(redisClient);
-const setAsync = promisify(redisClient.set).bind(redisClient);
-const setexAsync = promisify(redisClient.setex).bind(redisClient);
-const delAsync = promisify(redisClient.del).bind(redisClient);
-const lpushAsync = promisify(redisClient.lpush).bind(redisClient);
-const lrangeAsync = promisify(redisClient.lrange).bind(redisClient);
+redisClient.on('connect', () => logger.info('Connected to Redis'));
+redisClient.on('error', (err) => logger.error('Redis client error', { error: err.message }));
+redisClient.on('reconnecting', () => logger.info('Reconnecting to Redis'));
+redisClient.on('end', () => logger.warn('Redis connection closed'));
 
 // Connect to Redis on module load
 (async () => {
@@ -61,15 +41,15 @@ const lrangeAsync = promisify(redisClient.lrange).bind(redisClient);
   }
 })();
 
-// Export promisified methods and raw client for flexibility
+// Export the client and its methods directly (no promisify needed)
 module.exports = {
   client: redisClient,
-  get: getAsync,
-  set: setAsync,
-  setex: setexAsync,
-  del: delAsync,
-  lpush: lpushAsync,
-  lrange: lrangeAsync,
+  get: (key) => redisClient.get(key),
+  set: (key, value) => redisClient.set(key, value),
+  setex: (key, seconds, value) => redisClient.setEx(key, seconds, value),
+  del: (key) => redisClient.del(key),
+  lpush: (key, value) => redisClient.lPush(key, value),
+  lrange: (key, start, stop) => redisClient.lRange(key, start, stop),
   quit: async () => {
     try {
       await redisClient.quit();
