@@ -13,62 +13,70 @@ const LoginScreen = ({ setAuth }) => {
   const [error, setError] = useState('');
   const [selectedCountry, setSelectedCountry] = useState('');
   const [search, setSearch] = useState('');
+const handleSubmit = async (e) => {
+  e.preventDefault();
+  setError('');
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    setError(''); // Clear previous errors
-
-    if (isLogin) {
-      // Login request
-      try {
-        const { data } = await axios.post('https://gapp-6yc3.onrender.com/auth/login', { email, password });
-        setAuth(data.token, data.userId, data.role, data.photo, data.virtualNumber, data.username);
-        localStorage.setItem('token', data.token);
-        localStorage.setItem('userId', data.userId);
-        localStorage.setItem('role', data.role);
-        localStorage.setItem('photo', data.photo || 'https://placehold.co/40x40');
-        localStorage.setItem('virtualNumber', data.virtualNumber);
-        localStorage.setItem('username', data.username);
-        localStorage.setItem('privateKey', data.privateKey); // Store private key for RSA decryption
-      } catch (error) {
-        console.error('Login error:', error);
-        setError(error.response?.data?.error || 'Authentication failed');
-      }
-    } else {
-      // Registration request
-      const formData = new FormData();
-      formData.append('email', email);
-      formData.append('password', password);
-      formData.append('username', username);
-      formData.append('role', role);
-      formData.append('country', selectedCountry);
-      if (photo) formData.append('photo', photo);
-
-      if (!selectedCountry) {
-        setError('Please select a country');
+  if (isLogin) {
+    try {
+      const { data } = await axios.post('https://gapp-6yc3.onrender.com/auth/login', { email, password });
+      console.log('Login response:', data); // Debug
+      if (!data.privateKey || !data.privateKey.includes('-----BEGIN RSA PRIVATE KEY-----')) {
+        setError('Received invalid private key from server');
         return;
       }
-
-      try {
-        const { data } = await axios.post('https://gapp-6yc3.onrender.com/auth/register', formData, {
-          headers: { 'Content-Type': 'multipart/form-data' },
-        });
-        
-        setAuth(data.token, data.userId, data.role, data.photo, data.virtualNumber, data.username);
-        localStorage.setItem('token', data.token);
-        localStorage.setItem('userId', data.userId);
-        localStorage.setItem('role', data.role);
-        localStorage.setItem('photo', data.photo || 'https://placehold.co/40x40');
-        localStorage.setItem('virtualNumber', data.virtualNumber);
-        localStorage.setItem('username', data.username);
-        localStorage.setItem('privateKey', data.privateKey); // Store private key for RSA decryption
-      } catch (error) {
-        console.error('Registration error:', error);
-        setError(error.response?.data?.error || 'Registration failed');
-      }
+      setAuth(data.token, data.userId, data.role, data.photo, data.virtualNumber, data.username);
+      localStorage.setItem('token', data.token);
+      localStorage.setItem('userId', data.userId);
+      localStorage.setItem('role', data.role);
+      localStorage.setItem('photo', data.photo || 'https://placehold.co/40x40');
+      localStorage.setItem('virtualNumber', data.virtualNumber);
+      localStorage.setItem('username', data.username);
+      localStorage.setItem('privateKey', data.privateKey);
+      console.log('Stored private key:', localStorage.getItem('privateKey')); // Verify storage
+    } catch (error) {
+      console.error('Login error:', error);
+      setError(error.response?.data?.error || 'Authentication failed');
     }
-  };
+  } else {
+    // Registration (similar validation added)
+    const formData = new FormData();
+    formData.append('email', email);
+    formData.append('password', password);
+    formData.append('username', username);
+    formData.append('role', role);
+    formData.append('country', selectedCountry);
+    if (photo) formData.append('photo', photo);
 
+    if (!selectedCountry) {
+      setError('Please select a country');
+      return;
+    }
+
+    try {
+      const { data } = await axios.post('https://gapp-6yc3.onrender.com/auth/register', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      console.log('Register response:', data); // Debug
+      if (!data.privateKey || !data.privateKey.includes('-----BEGIN RSA PRIVATE KEY-----')) {
+        setError('Received invalid private key from server');
+        return;
+      }
+      setAuth(data.token, data.userId, data.role, data.photo, data.virtualNumber, data.username);
+      localStorage.setItem('token', data.token);
+      localStorage.setItem('userId', data.userId);
+      localStorage.setItem('role', data.role);
+      localStorage.setItem('photo', data.photo || 'https://placehold.co/40x40');
+      localStorage.setItem('virtualNumber', data.virtualNumber);
+      localStorage.setItem('username', data.username);
+      localStorage.setItem('privateKey', data.privateKey);
+      console.log('Stored private key:', localStorage.getItem('privateKey')); // Verify storage
+    } catch (error) {
+      console.error('Registration error:', error);
+      setError(error.response?.data?.error || 'Registration failed');
+    }
+  }
+};
   const countries = getCountries().map((code) => ({
     code,
     name: new Intl.DisplayNames(['en'], { type: 'region' }).of(code),

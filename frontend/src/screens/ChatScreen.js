@@ -267,19 +267,24 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       dispatch(setSelectedChat(contact.userId));
       setError('');
     });
-
     socket.on('message', async (msg) => {
       const chatId = msg.senderId === userId ? msg.recipientId : msg.senderId;
       const privateKeyPem = localStorage.getItem('privateKey');
       let content = msg.content;
-      if (msg.contentType === 'text' && msg.recipientId === userId && privateKeyPem) {
-        content = await decryptMessage(msg.content, privateKeyPem);
-      }
-      const updatedMsg = { ...msg, content };
     
+      if (msg.contentType === 'text' && msg.recipientId === userId) {
+        if (!privateKeyPem) {
+          setError('Private key not found. Messages cannot be decrypted.');
+          console.warn('Private key missing from localStorage');
+        } else {
+          content = await decryptMessage(msg.content, privateKeyPem);
+        }
+      }
+    
+      const updatedMsg = { ...msg, content };
       dispatch(addMessage({ recipientId: chatId, message: updatedMsg }));
       await saveMessages([updatedMsg]);
-
+    
       if (msg.recipientId === userId && !users.some((u) => u.id === msg.senderId)) {
         setUsers((prev) => {
           const updatedUsers = [
@@ -290,7 +295,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
           return updatedUsers;
         });
       }
-
+    
       if (chatId === selectedChat) {
         if (msg.recipientId === userId) {
           socket.emit('messageStatus', { messageId: msg._id, status: 'delivered', recipientId: userId });
@@ -468,6 +473,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     });
   };
 
+  
   const handleTyping = (e) => {
     setMessage(e.target.value);
     if (!typing && e.target.value) {
