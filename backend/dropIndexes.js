@@ -14,7 +14,7 @@ async function connectWithRetry() {
       return;
     } catch (err) {
       console.log(`Connection attempt ${i + 1} failed: ${err.message}`);
-      if (i < 2) await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2s before retry
+      if (i < 2) await new Promise(resolve => setTimeout(resolve, 2000));
     }
   }
   throw new Error('Failed to connect after 3 attempts');
