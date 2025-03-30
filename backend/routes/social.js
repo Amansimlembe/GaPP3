@@ -366,6 +366,7 @@ module.exports = (io) => {
     }
   });
 
+
   router.post('/message', authMiddleware, socialLimiter, upload.single('content'), async (req, res) => {
     try {
       const { senderId, recipientId, contentType, caption, replyTo } = req.body;
@@ -379,15 +380,18 @@ module.exports = (io) => {
       const recipient = await User.findById(recipientId);
       if (!sender || !recipient) return res.status(404).json({ error: 'Sender or recipient not found' });
   
-      let contentUrl = req.body.content || '';
-      if (req.file) {
+      let contentUrl = '';
+      if (contentType === 'text') {
+        contentUrl = req.body.content || '';
+        if (!contentUrl) return res.status(400).json({ error: 'Text content is required for text messages' });
+      } else if (req.file) {
         let resourceType;
         switch (contentType) {
           case 'image': resourceType = 'image'; break;
           case 'video': resourceType = 'video'; break;
           case 'audio': resourceType = 'video'; break; // Cloudinary uses 'video' for audio
           case 'document': resourceType = 'raw'; break;
-          default: resourceType = 'raw';
+          default: return res.status(400).json({ error: 'Invalid content type' });
         }
         const result = await new Promise((resolve, reject) => {
           cloudinary.uploader.upload_stream(
@@ -396,10 +400,8 @@ module.exports = (io) => {
           ).end(req.file.buffer);
         });
         contentUrl = result.secure_url;
-      } else if (!contentUrl && contentType === 'text') {
-        contentUrl = req.body.content; // Ensure text content is accepted
       } else {
-        return res.status(400).json({ error: 'Content is required for non-text messages' });
+        return res.status(400).json({ error: 'Content file is required for non-text messages' });
       }
   
       const message = new Message({

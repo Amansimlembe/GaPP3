@@ -91,14 +91,18 @@ const ChatScreen = ({ token, userId, setAuth }) => {
 
   const decryptMessage = async (encryptedContent, privateKeyPem) => {
     try {
+      if (!privateKeyPem || !privateKeyPem.includes('-----BEGIN RSA PRIVATE KEY-----')) {
+        throw new Error('Invalid or missing private key in PEM format');
+      }
       const privateKey = forge.pki.privateKeyFromPem(privateKeyPem);
       const decrypted = privateKey.decrypt(forge.util.decode64(encryptedContent), 'RSA-OAEP', {
         md: forge.md.sha256.create(),
       });
       return forge.util.decodeUtf8(decrypted);
     } catch (error) {
-      console.error('Decryption error:', error);
-      return encryptedContent; // Fallback to encrypted content if decryption fails
+      console.error('Decryption error:', error.message);
+      setError('Failed to decrypt message: Invalid private key');
+      return encryptedContent; // Fallback
     }
   };
 
@@ -380,6 +384,8 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       clearInterval(keepAlive);
     };
   }, [token, userId, selectedChat, page, dispatch]);
+  
+
   const sendMessage = async () => {
     if (!selectedChat) {
       setError('Please select a chat first');
@@ -419,28 +425,9 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       encryptedContent = await encryptMessage(message, recipientPublicKey);
     }
   
-    const messageData = {
-      _id: tempId,
-      senderId: userId,
-      recipientId: selectedChat,
-      contentType,
-      content: file ? file : encryptedContent,
-      caption,
-      status: 'sent',
-      replyTo: replyTo?._id || null,
-      createdAt: new Date(),
-      senderVirtualNumber: localStorage.getItem('virtualNumber'),
-      senderUsername: localStorage.getItem('username'),
-      senderPhoto: localStorage.getItem('photo'),
-    };
-  
-    // Emit via Socket.IO first
-    socket.emit('message', messageData);
-  
-    // Then save to backend
     const formData = new FormData();
-    formData.append('senderId', userId || '');
-    formData.append('recipientId', selectedChat || '');
+    formData.append('senderId', userId);
+    formData.append('recipientId', selectedChat);
     formData.append('contentType', contentType);
     formData.append('content', file ? file : encryptedContent);
     formData.append('caption', caption || '');
