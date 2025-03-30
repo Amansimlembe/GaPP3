@@ -9,6 +9,8 @@ const redis = require('redis');
 const winston = require('winston');
 const { router: authRoutes, authMiddleware } = require('./routes/auth');
 const socialRoutes = require('./routes/social');
+const jobseekerRoutes = require('./routes/jobseeker');
+ const employerRoutes = require('./routes/employer');
 
 const logger = winston.createLogger({
   level: 'info',
