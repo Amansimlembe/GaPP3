@@ -57,7 +57,7 @@ const authMiddleware = async (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
-    await redis.setEx(sessionKey, 24 * 60 * 60, JSON.stringify(decoded));
+    await redis.setex(sessionKey, 24 * 60 * 60, JSON.stringify(decoded)); // Changed setEx to setex
     req.user = decoded;
     next();
   } catch (error) {
@@ -126,10 +126,12 @@ router.post('/register', upload.single('photo'), async (req, res) => {
     });
 
     if (req.file) {
-      const result = await cloudinary.uploader.upload_stream({
-        resource_type: 'image',
-        folder: 'gapp_profile_photos',
-      }).end(req.file.buffer);
+      const result = await new Promise((resolve, reject) => {
+        cloudinary.uploader.upload_stream(
+          { resource_type: 'image', folder: 'gapp_profile_photos' },
+          (error, result) => (error ? reject(error) : resolve(result))
+        ).end(req.file.buffer);
+      });
       user.photo = result.secure_url;
     }
 
@@ -246,10 +248,12 @@ router.post('/update_photo', authMiddleware, upload.single('photo'), async (req,
     if (!req.file) return res.status(400).json({ error: 'No photo provided' });
 
     const user = await User.findById(userId);
-    const result = await cloudinary.uploader.upload_stream({
-      resource_type: 'image',
-      folder: 'gapp_profile_photos',
-    }).end(req.file.buffer);
+    const result = await new Promise((resolve, reject) => {
+      cloudinary.uploader.upload_stream(
+        { resource_type: 'image', folder: 'gapp_profile_photos' },
+        (error, result) => (error ? reject(error) : resolve(result))
+      ).end(req.file.buffer);
+    });
 
     user.photo = result.secure_url;
     await user.save();
@@ -307,7 +311,7 @@ router.get('/contacts', authMiddleware, async (req, res) => {
       lastSeen: contact.lastSeen,
     }));
 
-    await redis.setEx(cacheKey, 300, JSON.stringify(contacts));
+    await redis.setex(cacheKey, 300, JSON.stringify(contacts)); // Changed setEx to setex
     logger.info('Contacts fetched', { userId: req.user.id });
     res.json(contacts);
   } catch (error) {
@@ -327,7 +331,7 @@ router.get('/public_key/:userId', authMiddleware, async (req, res) => {
     const user = await User.findById(req.params.userId).select('publicKey');
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    await redis.setEx(cacheKey, 3600, user.publicKey);
+    await redis.setex(cacheKey, 3600, user.publicKey); // Changed setEx to setex
     logger.info('Public key fetched', { requesterId: req.user.id, targetUserId: req.params.userId });
     res.json({ publicKey: user.publicKey });
   } catch (error) {

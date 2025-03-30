@@ -41,21 +41,21 @@ redisClient.on('end', () => logger.warn('Redis connection closed'));
   }
 })();
 
-// Export the client and its methods directly (no promisify needed)
+// Export Redis methods directly as async functions
 module.exports = {
-  client: redisClient,
-  get: (key) => redisClient.get(key),
-  set: (key, value) => redisClient.set(key, value),
-  setex: (key, seconds, value) => redisClient.setEx(key, seconds, value),
-  del: (key) => redisClient.del(key),
-  lpush: (key, value) => redisClient.lPush(key, value),
-  lrange: (key, start, stop) => redisClient.lRange(key, start, stop),
-  quit: async () => {
-    try {
-      await redisClient.quit();
-      logger.info('Redis connection closed gracefully');
-    } catch (err) {
-      logger.error('Error closing Redis connection', { error: err.message });
-    }
-  },
-};
+    client: redisClient,
+    get: async (key) => await redisClient.get(key),
+    set: async (key, value) => await redisClient.set(key, value),
+    setex: async (key, seconds, value) => await redisClient.setEx(key, seconds, value), // Changed to setex
+    del: async (key) => await redisClient.del(key),
+    lpush: async (key, value) => await redisClient.lPush(key, value),
+    lrange: async (key, start, stop) => await redisClient.lRange(key, start, stop),
+    quit: async () => {
+      try {
+        await redisClient.quit();
+        logger.info('Redis connection closed gracefully');
+      } catch (err) {
+        logger.error('Error closing Redis connection', { error: err.message });
+      }
+    },
+  };
