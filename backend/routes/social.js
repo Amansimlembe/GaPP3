@@ -11,6 +11,7 @@ const winston = require('winston');
 const rateLimit = require('express-rate-limit');
 const Joi = require('joi');
 
+// Logger setup
 const logger = winston.createLogger({
   level: 'info',
   format: winston.format.combine(winston.format.timestamp(), winston.format.json()),
@@ -21,9 +22,11 @@ const logger = winston.createLogger({
   ],
 });
 
+// Rate limiters
 const socialLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 200, message: { error: 'Too many requests, please try again later.' } });
 const messageLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100, message: { error: 'Too many messages sent, please try again later.' } });
 
+// Multer setup for file uploads
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 50 * 1024 * 1024 },
@@ -34,11 +37,19 @@ const upload = multer({
   },
 });
 
+// Joi schemas
 const postSchema = Joi.object({ contentType: Joi.string().valid('image', 'video', 'audio', 'raw', 'text').required(), caption: Joi.string().max(500).allow('').optional() });
 const messageSchema = Joi.object({ senderId: Joi.string().required(), recipientId: Joi.string().required(), contentType: Joi.string().valid('text', 'image', 'video', 'audio', 'document').required(), caption: Joi.string().max(500).allow('').optional(), replyTo: Joi.string().optional() });
 const messageStatusSchema = Joi.object({ messageId: Joi.string().required(), status: Joi.string().valid('sent', 'delivered', 'read').required(), recipientId: Joi.string().required() });
 const likeSchema = Joi.object({ postId: Joi.string().required(), userId: Joi.string().required() });
 const commentSchema = Joi.object({ postId: Joi.string().required(), comment: Joi.string().max(500).required(), userId: Joi.string().required() });
+
+// Cloudinary configuration
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
 
 module.exports = (io) => {
   io.on('connection', (socket) => {
@@ -124,9 +135,6 @@ module.exports = (io) => {
 
     socket.on('typing', ({ userId, recipientId }) => io.to(recipientId).emit('typing', { userId, recipientId }));
     socket.on('stopTyping', ({ userId, recipientId }) => io.to(recipientId).emit('stopTyping', { userId, recipientId }));
-    socket.on('newPost', (post) => io.emit('newPost', post));
-    socket.on('postUpdate', (post) => io.emit('postUpdate', post));
-    socket.on('postDeleted', (postId) => io.emit('postDeleted', postId));
 
     socket.on('disconnect', async () => {
       try {
@@ -219,7 +227,6 @@ module.exports = (io) => {
       const post = new Post({ userId, contentType, content: contentUrl, caption, username: user.username, photo: user.photo, likedBy: [] });
       await post.save();
       await redis.del('feed');
-      io.emit('newPost', post.toObject());
       res.json(post.toObject());
     } catch (error) {
       logger.error('Post creation error', { error: error.message, userId: req.user.id });
@@ -235,7 +242,6 @@ module.exports = (io) => {
 
       await Post.deleteOne({ _id: req.params.postId });
       await redis.del('feed');
-      io.emit('postDeleted', req.params.postId);
       res.json({ success: true });
     } catch (error) {
       logger.error('Post deletion error', { error: error.message, postId: req.params.postId });
@@ -259,7 +265,6 @@ module.exports = (io) => {
         post.likes = (post.likes || 0) + 1;
         await post.save();
         await redis.del('feed');
-        io.emit('postUpdate', post.toObject());
       }
       res.json(post.toObject());
     } catch (error) {
@@ -284,7 +289,6 @@ module.exports = (io) => {
       post.likedBy = post.likedBy.filter((id) => id.toString() !== userId);
       await post.save();
       await redis.del('feed');
-      io.emit('postUpdate', post.toObject());
       res.json(post.toObject());
     } catch (error) {
       logger.error('Unlike error', { error: error.message, postId: req.body.postId });
@@ -310,7 +314,6 @@ module.exports = (io) => {
       post.comments = [...(post.comments || []), commentData];
       await post.save();
       await redis.del('feed');
-      io.emit('postUpdate', post.toObject());
       res.json(commentData);
     } catch (error) {
       logger.error('Comment error', { error: error.message, postId: req.body.postId });
@@ -436,3 +439,10 @@ module.exports = (io) => {
 
   return router;
 };
+
+// Cleanup on server shutdown
+process.on('SIGTERM', async () => {
+  logger.info('SIGTERM received, closing Redis connection');
+  await redis.quit();
+  process.exit(0);
+});
