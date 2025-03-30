@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { BrowserRouter as Router, Route, Switch, Link, Redirect } from 'react-router-dom';
+import { BrowserRouter as Router, Route, Routes, Navigate, Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { FaHome, FaBriefcase, FaComments, FaUser, FaMoon, FaSun } from 'react-icons/fa';
 import axios from 'axios';
+import io from 'socket.io-client';
+import { useSelector } from 'react-redux';
 import LoginScreen from './screens/LoginScreen';
 import JobSeekerScreen from './screens/JobSeekerScreen';
 import EmployerScreen from './screens/EmployerScreen';
@@ -10,8 +12,6 @@ import FeedScreen from './screens/FeedScreen';
 import ChatScreen from './screens/ChatScreen';
 import ProfileScreen from './screens/ProfileScreen';
 import CountrySelector from './components/CountrySelector';
-import io from 'socket.io-client';
-import { useSelector } from 'react-redux';
 
 const socket = io('https://gapp-6yc3.onrender.com', {
   reconnection: true,
@@ -33,7 +33,7 @@ const getTokenExpiration = (token) => {
         .join('')
     );
     const decoded = JSON.parse(jsonPayload);
-    return decoded.exp * 1000;
+    return decoded.exp * 1000; // Convert to milliseconds
   } catch (error) {
     console.error('Error decoding token:', error);
     return null;
@@ -48,11 +48,41 @@ const App = () => {
   const [virtualNumber, setVirtualNumber] = useState(localStorage.getItem('virtualNumber') || '');
   const [username, setUsername] = useState(localStorage.getItem('username') || '');
   const [chatNotifications, setChatNotifications] = useState(0);
-  const [feedKey, setFeedKey] = useState(0);
-  const [isAuthenticated, setIsAuthenticated] = useState(!!localStorage.getItem('token') && !!localStorage.getItem('userId'));
+  const [isAuthenticated, setIsAuthenticated] = useState(!!token && !!userId);
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
   const { selectedChat } = useSelector((state) => state.messages);
   const isSmallDevice = window.innerWidth < 768;
+
+  const setAuth = (newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername) => {
+    const token = newToken || '';
+    const userId = newUserId || '';
+    const role = Number(newRole) || 0;
+    const photo = newPhoto || 'https://placehold.co/40x40';
+    const virtualNumber = newVirtualNumber || '';
+    const username = newUsername || '';
+
+    setToken(token);
+    setUserId(userId);
+    setRole(role);
+    setPhoto(photo);
+    setVirtualNumber(virtualNumber);
+    setUsername(username);
+
+    localStorage.setItem('token', token);
+    localStorage.setItem('userId', userId);
+    localStorage.setItem('role', String(role));
+    localStorage.setItem('photo', photo);
+    localStorage.setItem('virtualNumber', virtualNumber);
+    localStorage.setItem('username', username);
+
+    const authenticated = !!token && !!userId;
+    setIsAuthenticated(authenticated);
+    if (!authenticated) {
+      socket.emit('leave', userId);
+      localStorage.removeItem('privateKey');
+      setChatNotifications(0);
+    }
+  };
 
   const refreshToken = async () => {
     try {
@@ -63,7 +93,7 @@ const App = () => {
       );
       const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername, privateKey } = response.data;
       setAuth(newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername);
-      localStorage.setItem('privateKey', privateKey); // Store privateKey for RSA decryption
+      localStorage.setItem('privateKey', privateKey);
       return newToken;
     } catch (error) {
       console.error('Token refresh failed:', error);
@@ -84,14 +114,13 @@ const App = () => {
             originalRequest.headers['Authorization'] = `Bearer ${newToken}`;
             return axios(originalRequest);
           }
-          console.log('Redirecting to login due to failed token refresh');
           return Promise.reject(error);
         }
         return Promise.reject(error);
       }
     );
     return () => axios.interceptors.response.eject(interceptor);
-  }, [token]);
+  }, [token, userId]);
 
   useEffect(() => {
     if (!token || !userId) return;
@@ -107,7 +136,7 @@ const App = () => {
     };
 
     checkTokenExpiration();
-    const interval = setInterval(checkTokenExpiration, 60 * 60 * 1000);
+    const interval = setInterval(checkTokenExpiration, 60 * 60 * 1000); // Check hourly
     return () => clearInterval(interval);
   }, [token, userId]);
 
@@ -142,26 +171,6 @@ const App = () => {
     };
   }, [userId, token, selectedChat]);
 
-  const setAuth = (newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername) => {
-    setToken(newToken || '');
-    setUserId(newUserId || '');
-    setRole(Number(newRole) || 0);
-    setPhoto(newPhoto || 'https://placehold.co/40x40');
-    setVirtualNumber(newVirtualNumber || '');
-    setUsername(newUsername || '');
-    localStorage.setItem('token', newToken || '');
-    localStorage.setItem('userId', newUserId || '');
-    localStorage.setItem('role', String(newRole || 0));
-    localStorage.setItem('photo', newPhoto || 'https://placehold.co/40x40');
-    localStorage.setItem('virtualNumber', newVirtualNumber || '');
-    localStorage.setItem('username', newUsername || '');
-    setIsAuthenticated(!!newToken && !!newUserId);
-    if (!newToken || !newUserId) {
-      socket.emit('leave', userId);
-      localStorage.removeItem('privateKey');
-    }
-  };
-
   const toggleTheme = () => {
     setTheme((prevTheme) => (prevTheme === 'light' ? 'dark' : 'light'));
   };
@@ -190,16 +199,16 @@ const App = () => {
           />
         )}
         <div className="flex-1 p-0 relative">
-          <Switch>
+          <Routes>
             <Route
               path="/jobs"
-              render={() => (role === 0 ? <JobSeekerScreen token={token} userId={userId} /> : <EmployerScreen token={token} userId={userId} />)}
+              element={role === 0 ? <JobSeekerScreen token={token} userId={userId} /> : <EmployerScreen token={token} userId={userId} />}
             />
-            <Route path="/feed" render={() => <FeedScreen token={token} userId={userId} key={feedKey} />} />
-            <Route path="/chat" render={() => <ChatScreen token={token} userId={userId} setAuth={setAuth} />} />
+            <Route path="/feed" element={<FeedScreen token={token} userId={userId} />} />
+            <Route path="/chat" element={<ChatScreen token={token} userId={userId} setAuth={setAuth} />} />
             <Route
               path="/profile"
-              render={() => (
+              element={
                 <ProfileScreen
                   token={token}
                   userId={userId}
@@ -208,12 +217,10 @@ const App = () => {
                   virtualNumber={virtualNumber}
                   photo={photo}
                 />
-              )}
+              }
             />
-            <Route path="/" exact>
-              <Redirect to="/feed" />
-            </Route>
-          </Switch>
+            <Route path="/" element={<Navigate to="/feed" replace />} />
+          </Routes>
         </div>
         <motion.div
           initial={{ y: 100 }}
@@ -221,11 +228,7 @@ const App = () => {
           transition={{ duration: 0.5 }}
           className="fixed bottom-0 left-0 right-0 bg-primary text-white p-2 flex justify-around items-center shadow-lg z-20"
         >
-          <Link
-            to="/feed"
-            onClick={() => setFeedKey((prev) => prev + 1)}
-            className="flex flex-col items-center p-2 hover:bg-secondary rounded"
-          >
+          <Link to="/feed" className="flex flex-col items-center p-2 hover:bg-secondary rounded">
             <FaHome className="text-xl" />
             <span className="text-xs">Feed</span>
           </Link>

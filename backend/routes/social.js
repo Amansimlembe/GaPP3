@@ -6,7 +6,7 @@ const User = require('../models/User');
 const cloudinary = require('cloudinary').v2;
 const multer = require('multer');
 const { authMiddleware } = require('../routes/auth');
-const cache = require('memory-cache');
+const redis = require('../redis');
 const winston = require('winston');
 const rateLimit = require('express-rate-limit');
 const Joi = require('joi');
@@ -21,68 +21,24 @@ const logger = winston.createLogger({
   ],
 });
 
-const socialLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 200,
-  message: { error: 'Too many requests, please try again later.' },
-});
+const socialLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 200, message: { error: 'Too many requests, please try again later.' } });
+const messageLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100, message: { error: 'Too many messages sent, please try again later.' } });
 
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 50 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'video/mp4', 'audio/mpeg', 'application/pdf'];
-    if (!allowedTypes.includes(file.mimetype)) {
-      return cb(new Error('Invalid file type. Only JPEG, PNG, GIF, MP4, MP3, and PDF are allowed.'));
-    }
+    if (!allowedTypes.includes(file.mimetype)) return cb(new Error('Invalid file type. Only JPEG, PNG, GIF, MP4, MP3, and PDF allowed.'));
     cb(null, true);
   },
 });
 
-const cacheMiddleware = (duration) => (req, res, next) => {
-  const key = '__express__' + req.originalUrl || req.url;
-  const cachedBody = cache.get(key);
-  if (cachedBody) {
-    logger.info('Cache hit', { key });
-    return res.send(cachedBody);
-  }
-  res.sendResponse = res.send;
-  res.send = (body) => {
-    cache.put(key, body, duration * 1000);
-    res.sendResponse(body);
-  };
-  next();
-};
-
-const postSchema = Joi.object({
-  contentType: Joi.string().valid('image', 'video', 'audio', 'raw', 'text').required(),
-  caption: Joi.string().allow('').optional(),
-});
-
-const messageSchema = Joi.object({
-  senderId: Joi.string().required(),
-  recipientId: Joi.string().required(),
-  contentType: Joi.string().valid('text', 'image', 'video', 'audio', 'document').required(),
-  caption: Joi.string().allow('').optional(),
-  replyTo: Joi.string().optional(),
-});
-
-const messageStatusSchema = Joi.object({
-  messageId: Joi.string().required(),
-  status: Joi.string().valid('sent', 'delivered', 'read').required(),
-  recipientId: Joi.string().required(),
-});
-
-const likeSchema = Joi.object({
-  postId: Joi.string().required(),
-  userId: Joi.string().required(),
-});
-
-const commentSchema = Joi.object({
-  postId: Joi.string().required(),
-  comment: Joi.string().max(500).required(),
-  userId: Joi.string().required(),
-});
+const postSchema = Joi.object({ contentType: Joi.string().valid('image', 'video', 'audio', 'raw', 'text').required(), caption: Joi.string().max(500).allow('').optional() });
+const messageSchema = Joi.object({ senderId: Joi.string().required(), recipientId: Joi.string().required(), contentType: Joi.string().valid('text', 'image', 'video', 'audio', 'document').required(), caption: Joi.string().max(500).allow('').optional(), replyTo: Joi.string().optional() });
+const messageStatusSchema = Joi.object({ messageId: Joi.string().required(), status: Joi.string().valid('sent', 'delivered', 'read').required(), recipientId: Joi.string().required() });
+const likeSchema = Joi.object({ postId: Joi.string().required(), userId: Joi.string().required() });
+const commentSchema = Joi.object({ postId: Joi.string().required(), comment: Joi.string().max(500).required(), userId: Joi.string().required() });
 
 module.exports = (io) => {
   io.on('connection', (socket) => {
@@ -92,91 +48,85 @@ module.exports = (io) => {
       try {
         socket.join(userId);
         const user = await User.findById(userId);
-        if (user) {
-          user.status = 'online';
-          user.lastSeen = new Date();
-          await user.save();
-          io.emit('onlineStatus', { userId, status: 'online', lastSeen: user.lastSeen });
+        if (!user) return logger.warn('User not found on join', { userId });
+
+        user.status = 'online';
+        user.lastSeen = new Date();
+        await user.save();
+        io.emit('onlineStatus', { userId, status: 'online', lastSeen: user.lastSeen });
+
+        const undelivered = await redis.lrange(`undelivered:${userId}`, 0, -1);
+        if (undelivered.length) {
+          undelivered.forEach((msg) => io.to(userId).emit('message', JSON.parse(msg)));
+          await redis.del(`undelivered:${userId}`);
         }
         logger.info('User joined', { userId });
       } catch (error) {
-        logger.error('Error handling join event', { error: error.message });
+        logger.error('Join event error', { error: error.message, userId });
       }
     });
 
     socket.on('leave', async (userId) => {
       try {
         const user = await User.findById(userId);
-        if (user) {
-          user.status = 'offline';
-          user.lastSeen = new Date();
-          await user.save();
-          io.emit('onlineStatus', { userId, status: 'offline', lastSeen: user.lastSeen });
-        }
+        if (!user) return logger.warn('User not found on leave', { userId });
+
+        user.status = 'offline';
+        user.lastSeen = new Date();
+        await user.save();
+        io.emit('onlineStatus', { userId, status: 'offline', lastSeen: user.lastSeen });
         logger.info('User left', { userId });
       } catch (error) {
-        logger.error('Error handling leave event', { error: error.message });
+        logger.error('Leave event error', { error: error.message, userId });
       }
     });
 
     socket.on('ping', async ({ userId }) => {
       try {
         const user = await User.findById(userId);
-        if (user && user.status !== 'online') {
+        if (!user) return;
+        if (user.status !== 'online') {
           user.status = 'online';
           user.lastSeen = new Date();
           await user.save();
           io.emit('onlineStatus', { userId, status: 'online', lastSeen: user.lastSeen });
         }
-        logger.info('Ping received', { userId });
       } catch (error) {
-        logger.error('Error handling ping event', { error: error.message });
+        logger.error('Ping event error', { error: error.message, userId });
       }
     });
 
-    socket.on('message', (msg) => {
-      io.emit('message', msg);
-      logger.info('Message broadcast', { messageId: msg._id });
+    socket.on('message', async (msg) => {
+      try {
+        const recipientOnline = io.sockets.adapter.rooms.has(msg.recipientId);
+        if (recipientOnline) io.to(msg.recipientId).emit('message', msg);
+        else await redis.lpush(`undelivered:${msg.recipientId}`, JSON.stringify(msg));
+        io.to(msg.senderId).emit('message', msg);
+        logger.info('Message broadcast', { messageId: msg._id });
+      } catch (error) {
+        logger.error('Message broadcast error', { error: error.message, messageId: msg._id });
+      }
     });
 
     socket.on('messageStatus', async ({ messageId, status, recipientId }) => {
       try {
         const message = await Message.findById(messageId);
-        if (message && message.recipientId.toString() === recipientId) {
-          message.status = status;
-          await message.save();
-          io.emit('messageStatus', { messageId, status });
-          logger.info('Message status updated', { messageId, status });
-        }
+        if (!message || message.recipientId.toString() !== recipientId) return;
+        message.status = status;
+        await message.save();
+        io.to(message.senderId).emit('messageStatus', { messageId, status });
+        io.to(recipientId).emit('messageStatus', { messageId, status });
+        logger.info('Message status updated', { messageId, status });
       } catch (error) {
-        logger.error('Error updating message status', { error: error.message });
+        logger.error('Message status update error', { error: error.message, messageId });
       }
     });
 
-    socket.on('typing', ({ userId, recipientId }) => {
-      io.to(recipientId).emit('typing', { userId, recipientId });
-      logger.info('Typing event', { userId, recipientId });
-    });
-
-    socket.on('stopTyping', ({ userId, recipientId }) => {
-      io.to(recipientId).emit('stopTyping', { userId, recipientId });
-      logger.info('Stop typing event', { userId, recipientId });
-    });
-
-    socket.on('newPost', (post) => {
-      io.emit('newPost', post);
-      logger.info('New post event', { postId: post._id });
-    });
-
-    socket.on('postUpdate', (post) => {
-      io.emit('postUpdate', post);
-      logger.info('Post update event', { postId: post._id });
-    });
-
-    socket.on('postDeleted', (postId) => {
-      io.emit('postDeleted', postId);
-      logger.info('Post deleted event', { postId });
-    });
+    socket.on('typing', ({ userId, recipientId }) => io.to(recipientId).emit('typing', { userId, recipientId }));
+    socket.on('stopTyping', ({ userId, recipientId }) => io.to(recipientId).emit('stopTyping', { userId, recipientId }));
+    socket.on('newPost', (post) => io.emit('newPost', post));
+    socket.on('postUpdate', (post) => io.emit('postUpdate', post));
+    socket.on('postDeleted', (postId) => io.emit('postDeleted', postId));
 
     socket.on('disconnect', async () => {
       try {
@@ -192,43 +142,54 @@ module.exports = (io) => {
           logger.info('User disconnected', { userId, socketId: socket.id });
         }
       } catch (error) {
-        logger.error('Error handling disconnect event', { error: error.message });
+        logger.error('Disconnect event error', { error: error.message });
       }
     });
   });
 
   router.get('/user-status/:userId', authMiddleware, async (req, res) => {
     try {
-      const userId = req.params.userId;
-      const user = await User.findById(userId).select('status lastSeen');
+      const user = await User.findById(req.params.userId).select('status lastSeen');
       if (!user) return res.status(404).json({ error: 'User not found' });
-      logger.info('User status fetched', { userId });
       res.json({ status: user.status || 'offline', lastSeen: user.lastSeen });
     } catch (error) {
-      logger.error('User status error', { error: error.message });
-      res.status(500).json({ error: 'Failed to fetch user status', details: error.message });
+      logger.error('User status fetch error', { error: error.message, userId: req.params.userId });
+      res.status(500).json({ error: 'Failed to fetch user status' });
     }
   });
 
-  router.get('/feed', socialLimiter, cacheMiddleware(60), async (req, res) => {
+  router.get('/feed', socialLimiter, async (req, res) => {
     try {
+      const cacheKey = 'feed';
+      const cachedFeed = await redis.get(cacheKey);
+      if (cachedFeed) {
+        logger.info('Feed cache hit', { cacheKey });
+        return res.json(JSON.parse(cachedFeed));
+      }
       const posts = await Post.find().sort({ createdAt: -1 }).lean();
-      logger.info('Social feed fetched');
+      await redis.setex(cacheKey, 60, JSON.stringify(posts));
       res.json(posts);
     } catch (error) {
       logger.error('Feed fetch error', { error: error.message });
-      res.status(500).json({ error: 'Failed to fetch feed', details: error.message });
+      res.status(500).json({ error: 'Failed to fetch feed' });
     }
   });
 
-  router.get('/my-posts/:userId', authMiddleware, socialLimiter, cacheMiddleware(60), async (req, res) => {
+  router.get('/my-posts/:userId', authMiddleware, socialLimiter, async (req, res) => {
     try {
+      if (req.user.id !== req.params.userId) return res.status(403).json({ error: 'Unauthorized' });
+      const cacheKey = `my-posts:${req.params.userId}`;
+      const cachedPosts = await redis.get(cacheKey);
+      if (cachedPosts) {
+        logger.info('Posts cache hit', { cacheKey });
+        return res.json(JSON.parse(cachedPosts));
+      }
       const posts = await Post.find({ userId: req.params.userId }).sort({ createdAt: -1 }).lean();
-      logger.info('User posts fetched', { userId: req.params.userId });
+      await redis.setex(cacheKey, 60, JSON.stringify(posts));
       res.json(posts);
     } catch (error) {
-      logger.error('My posts fetch error', { error: error.message });
-      res.status(500).json({ error: 'Failed to fetch posts', details: error.message });
+      logger.error('My posts fetch error', { error: error.message, userId: req.params.userId });
+      res.status(500).json({ error: 'Failed to fetch posts' });
     }
   });
 
@@ -239,39 +200,30 @@ module.exports = (io) => {
 
       const { id: userId } = req.user;
       const { contentType, caption } = req.body;
-
-      let contentUrl = caption || '';
+      let contentUrl = contentType === 'text' ? req.body.content || caption : '';
       if (req.file) {
-        const resourceType = ['image', 'video', 'audio', 'raw'].includes(contentType) ? contentType : 'raw';
+        const resourceType = { image: 'image', video: 'video', audio: 'video', raw: 'raw' }[contentType] || 'raw';
         const result = await new Promise((resolve, reject) => {
           cloudinary.uploader.upload_stream(
-            { resource_type: resourceType, public_id: `${contentType}_${userId}_${Date.now()}`, folder: `gapp_${contentType}s` },
-            (error, result) => (error ? reject(error) : resolve(result))
+            { resource_type: resourceType, folder: `gapp_${contentType}s`, public_id: `${contentType}_${userId}_${Date.now()}` },
+            (error, result) => error ? reject(error) : resolve(result)
           ).end(req.file.buffer);
         });
         contentUrl = result.secure_url;
       }
+      if (!contentUrl) return res.status(400).json({ error: 'Content is required' });
 
       const user = await User.findById(userId);
       if (!user) return res.status(404).json({ error: 'User not found' });
 
-      const post = new Post({
-        userId,
-        contentType,
-        content: contentUrl,
-        caption,
-        username: user.username,
-        photo: user.photo,
-        likedBy: [],
-      });
+      const post = new Post({ userId, contentType, content: contentUrl, caption, username: user.username, photo: user.photo, likedBy: [] });
       await post.save();
-
+      await redis.del('feed');
       io.emit('newPost', post.toObject());
-      logger.info('Post created', { postId: post._id, userId });
       res.json(post.toObject());
     } catch (error) {
-      logger.error('Post error', { error: error.message });
-      res.status(500).json({ error: 'Failed to post', details: error.message });
+      logger.error('Post creation error', { error: error.message, userId: req.user.id });
+      res.status(500).json({ error: 'Failed to create post' });
     }
   });
 
@@ -279,15 +231,15 @@ module.exports = (io) => {
     try {
       const post = await Post.findById(req.params.postId);
       if (!post) return res.status(404).json({ error: 'Post not found' });
-      if (post.userId.toString() !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
+      if (post.userId.toString() !== req.user.id) return res.status(403).json({ error: 'Unauthorized' });
 
       await Post.deleteOne({ _id: req.params.postId });
+      await redis.del('feed');
       io.emit('postDeleted', req.params.postId);
-      logger.info('Post deleted', { postId: req.params.postId, userId: req.user.id });
       res.json({ success: true });
     } catch (error) {
-      logger.error('Delete post error', { error: error.message });
-      res.status(500).json({ error: 'Failed to delete post', details: error.message });
+      logger.error('Post deletion error', { error: error.message, postId: req.params.postId });
+      res.status(500).json({ error: 'Failed to delete post' });
     }
   });
 
@@ -297,7 +249,7 @@ module.exports = (io) => {
       if (error) return res.status(400).json({ error: error.details[0].message });
 
       const { postId, userId } = req.body;
-      if (userId !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
+      if (userId !== req.user.id) return res.status(403).json({ error: 'Unauthorized' });
 
       const post = await Post.findById(postId);
       if (!post) return res.status(404).json({ error: 'Post not found' });
@@ -306,13 +258,13 @@ module.exports = (io) => {
         post.likedBy.push(userId);
         post.likes = (post.likes || 0) + 1;
         await post.save();
+        await redis.del('feed');
         io.emit('postUpdate', post.toObject());
-        logger.info('Post liked', { postId, userId });
       }
       res.json(post.toObject());
     } catch (error) {
-      logger.error('Like error', { error: error.message });
-      res.status(500).json({ error: 'Failed to like post', details: error.message });
+      logger.error('Like error', { error: error.message, postId: req.body.postId });
+      res.status(500).json({ error: 'Failed to like post' });
     }
   });
 
@@ -322,21 +274,21 @@ module.exports = (io) => {
       if (error) return res.status(400).json({ error: error.details[0].message });
 
       const { postId, userId } = req.body;
-      if (userId !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
+      if (userId !== req.user.id) return res.status(403).json({ error: 'Unauthorized' });
 
       const post = await Post.findById(postId);
       if (!post) return res.status(404).json({ error: 'Post not found' });
-      if (!post.likedBy?.includes(userId)) return res.status(400).json({ error: 'Not liked yet' });
+      if (!post.likedBy.includes(userId)) return res.status(400).json({ error: 'Not liked yet' });
 
       post.likes = (post.likes || 0) - 1;
       post.likedBy = post.likedBy.filter((id) => id.toString() !== userId);
       await post.save();
+      await redis.del('feed');
       io.emit('postUpdate', post.toObject());
-      logger.info('Post unliked', { postId, userId });
       res.json(post.toObject());
     } catch (error) {
-      logger.error('Unlike error', { error: error.message });
-      res.status(500).json({ error: 'Failed to unlike post', details: error.message });
+      logger.error('Unlike error', { error: error.message, postId: req.body.postId });
+      res.status(500).json({ error: 'Failed to unlike post' });
     }
   });
 
@@ -346,7 +298,7 @@ module.exports = (io) => {
       if (error) return res.status(400).json({ error: error.details[0].message });
 
       const { postId, comment, userId } = req.body;
-      if (userId !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
+      if (userId !== req.user.id) return res.status(403).json({ error: 'Unauthorized' });
 
       const user = await User.findById(userId);
       if (!user) return res.status(404).json({ error: 'User not found' });
@@ -357,131 +309,83 @@ module.exports = (io) => {
       const commentData = { userId, username: user.username, photo: user.photo, comment, createdAt: new Date() };
       post.comments = [...(post.comments || []), commentData];
       await post.save();
+      await redis.del('feed');
       io.emit('postUpdate', post.toObject());
-      logger.info('Comment added', { postId, userId });
       res.json(commentData);
     } catch (error) {
-      logger.error('Comment error', { error: error.message });
-      res.status(500).json({ error: 'Failed to comment', details: error.message });
+      logger.error('Comment error', { error: error.message, postId: req.body.postId });
+      res.status(500).json({ error: 'Failed to comment' });
     }
   });
 
-
-  router.post('/message', authMiddleware, socialLimiter, upload.single('content'), async (req, res) => {
+  router.post('/message', authMiddleware, messageLimiter, upload.single('content'), async (req, res) => {
     try {
-      const { senderId, recipientId, contentType, caption, replyTo } = req.body;
-      const validationData = { senderId, recipientId, contentType, caption, replyTo };
-      const { error } = messageSchema.validate(validationData);
+      const { error } = messageSchema.validate(req.body);
       if (error) return res.status(400).json({ error: error.details[0].message });
-  
-      if (senderId !== req.user.id) return res.status(403).json({ error: 'Not authorized to send as this user' });
-  
+
+      const { senderId, recipientId, contentType, caption, replyTo } = req.body;
+      if (senderId !== req.user.id) return res.status(403).json({ error: 'Unauthorized' });
+
       const sender = await User.findById(senderId);
       const recipient = await User.findById(recipientId);
       if (!sender || !recipient) return res.status(404).json({ error: 'Sender or recipient not found' });
-  
-      let contentUrl = '';
-      if (contentType === 'text') {
-        contentUrl = req.body.content || '';
-        if (!contentUrl) return res.status(400).json({ error: 'Text content is required for text messages' });
-      } else if (req.file) {
-        let resourceType;
-        switch (contentType) {
-          case 'image': resourceType = 'image'; break;
-          case 'video': resourceType = 'video'; break;
-          case 'audio': resourceType = 'video'; break; // Cloudinary uses 'video' for audio
-          case 'document': resourceType = 'raw'; break;
-          default: return res.status(400).json({ error: 'Invalid content type' });
-        }
+
+      let contentUrl = req.body.content;
+      if (['image', 'video', 'audio', 'document'].includes(contentType) && req.file) {
+        const resourceType = { image: 'image', video: 'video', audio: 'video', document: 'raw' }[contentType];
         const result = await new Promise((resolve, reject) => {
           cloudinary.uploader.upload_stream(
-            { resource_type: resourceType, public_id: `${contentType}_${senderId}_${Date.now()}`, folder: `gapp_chat_${contentType}s` },
-            (error, result) => (error ? reject(error) : resolve(result))
+            { resource_type: resourceType, folder: `gapp_chat_${contentType}s`, public_id: `${contentType}_${senderId}_${Date.now()}` },
+            (error, result) => error ? reject(error) : resolve(result)
           ).end(req.file.buffer);
         });
         contentUrl = result.secure_url;
-      } else {
-        return res.status(400).json({ error: 'Content file is required for non-text messages' });
+      } else if (contentType === 'text' && !contentUrl) {
+        return res.status(400).json({ error: 'Text content is required' });
       }
-  
-      const message = new Message({
-        senderId,
-        recipientId,
-        contentType,
-        content: contentUrl,
-        caption,
-        status: 'sent',
-        replyTo: replyTo || undefined,
-        createdAt: new Date(),
-      });
+
+      const message = new Message({ senderId, recipientId, contentType, content: contentUrl, caption, status: 'sent', replyTo: replyTo || undefined });
       await message.save();
-  
-      const messageData = {
-        ...message.toObject(),
-        senderVirtualNumber: sender.virtualNumber,
-        senderUsername: sender.username,
-        senderPhoto: sender.photo,
-      };
-      io.to(recipientId).emit('message', messageData);
+
+      const messageData = { ...message.toObject(), senderVirtualNumber: sender.virtualNumber, senderUsername: sender.username, senderPhoto: sender.photo };
+
+      const recipientOnline = io.sockets.adapter.rooms.has(recipientId);
+      if (recipientOnline) io.to(recipientId).emit('message', messageData);
+      else await redis.lpush(`undelivered:${recipientId}`, JSON.stringify(messageData));
       io.to(senderId).emit('message', messageData);
-  
-      logger.info('Message sent', { messageId: message._id, senderId, recipientId });
       res.json(message.toObject());
     } catch (error) {
-      logger.error('Message error', { error: error.message, stack: error.stack });
-      res.status(500).json({ error: 'Failed to send message', details: error.message });
+      logger.error('Message send error', { error: error.message, senderId: req.user.id });
+      res.status(500).json({ error: 'Failed to send message' });
     }
   });
 
   router.get('/messages', authMiddleware, socialLimiter, async (req, res) => {
     try {
       const { userId, recipientId, limit = 50, skip = 0 } = req.query;
-      if (!userId || !recipientId) return res.status(400).json({ error: 'User ID and Recipient ID are required' });
-      if (req.user.id !== userId) return res.status(403).json({ error: 'Unauthorized access' });
+      if (!userId || !recipientId) return res.status(400).json({ error: 'User ID and Recipient ID required' });
+      if (req.user.id !== userId) return res.status(403).json({ error: 'Unauthorized' });
 
-      const cacheKey = `messages_${userId}_${recipientId}_${skip}_${limit}`;
-      const cachedMessages = cache.get(cacheKey);
+      const cacheKey = `messages:${userId}:${recipientId}:${skip}:${limit}`;
+      const cachedMessages = await redis.get(cacheKey);
       if (cachedMessages) {
         logger.info('Messages cache hit', { cacheKey });
-        return res.json(cachedMessages);
+        return res.json(JSON.parse(cachedMessages));
       }
 
-      const totalMessages = await Message.countDocuments({
-        $or: [
-          { senderId: userId, recipientId: recipientId },
-          { senderId: recipientId, recipientId: userId },
-        ],
-      });
-
-      const messages = await Message.find({
-        $or: [
-          { senderId: userId, recipientId: recipientId },
-          { senderId: recipientId, recipientId: userId },
-        ],
-      })
-        .select('senderId recipientId contentType content caption status replyTo createdAt')
+      const total = await Message.countDocuments({ $or: [{ senderId: userId, recipientId }, { senderId: recipientId, recipientId: userId }] });
+      const messages = await Message.find({ $or: [{ senderId: userId, recipientId }, { senderId: recipientId, recipientId: userId }] })
         .sort({ createdAt: -1 })
         .skip(parseInt(skip))
         .limit(parseInt(limit))
         .lean();
 
-      const response = {
-        messages: messages.reverse(),
-        totalMessages,
-        hasMore: parseInt(skip) + messages.length < totalMessages,
-      };
-
-      if (messages.length === 0) {
-        response.messages = [];
-        response.hasMore = false;
-      }
-
-      cache.put(cacheKey, response, 5 * 60 * 1000);
-      logger.info('Messages fetched', { userId, recipientId });
+      const response = { messages: messages.reverse(), hasMore: parseInt(skip) + messages.length < total };
+      await redis.setex(cacheKey, 300, JSON.stringify(response));
       res.json(response);
     } catch (error) {
-      logger.error('Fetch messages error', { error: error.message });
-      res.status(500).json({ error: 'Failed to fetch messages', details: error.message });
+      logger.error('Messages fetch error', { error: error.message, userId: req.query.userId });
+      res.status(500).json({ error: 'Failed to fetch messages' });
     }
   });
 
@@ -489,15 +393,22 @@ module.exports = (io) => {
     try {
       const message = await Message.findById(req.params.messageId);
       if (!message) return res.status(404).json({ error: 'Message not found' });
-      if (message.senderId.toString() !== req.user.id) return res.status(403).json({ error: 'Not authorized to delete this message' });
+      if (message.senderId.toString() !== req.user.id) return res.status(403).json({ error: 'Unauthorized' });
 
       await Message.deleteOne({ _id: req.params.messageId });
-      io.emit('messageDeleted', req.params.messageId);
-      logger.info('Message deleted', { messageId: req.params.messageId, userId: req.user.id });
+      const undeliveredKey = `undelivered:${message.recipientId}`;
+      const undelivered = await redis.lrange(undeliveredKey, 0, -1);
+      if (undelivered.length) {
+        const updated = undelivered.filter((msg) => JSON.parse(msg)._id !== req.params.messageId);
+        await redis.del(undeliveredKey);
+        if (updated.length) await redis.lpush(undeliveredKey, updated);
+      }
+      io.to(message.recipientId).emit('messageDeleted', req.params.messageId);
+      io.to(message.senderId).emit('messageDeleted', req.params.messageId);
       res.json({ success: true });
     } catch (error) {
-      logger.error('Delete message error', { error: error.message });
-      res.status(500).json({ error: 'Failed to delete message', details: error.message });
+      logger.error('Message deletion error', { error: error.message, messageId: req.params.messageId });
+      res.status(500).json({ error: 'Failed to delete message' });
     }
   });
 
@@ -507,21 +418,19 @@ module.exports = (io) => {
       if (error) return res.status(400).json({ error: error.details[0].message });
 
       const { messageId, status, recipientId } = req.body;
+      if (req.user.id !== recipientId) return res.status(403).json({ error: 'Unauthorized' });
+
       const message = await Message.findById(messageId);
-      if (!message) return res.status(404).json({ error: 'Message not found' });
-      if (message.recipientId.toString() !== recipientId || req.user.id !== recipientId) {
-        return res.status(403).json({ error: 'Not authorized to update this message status' });
-      }
+      if (!message || message.recipientId.toString() !== recipientId) return res.status(404).json({ error: 'Message not found or unauthorized' });
 
       message.status = status;
       await message.save();
       io.to(message.senderId).emit('messageStatus', { messageId, status });
       io.to(recipientId).emit('messageStatus', { messageId, status });
-      logger.info('Message status updated', { messageId, status, recipientId });
       res.json({ success: true });
     } catch (error) {
-      logger.error('Message status error', { error: error.message });
-      res.status(500).json({ error: 'Failed to update status', details: error.message });
+      logger.error('Message status update error', { error: error.message, messageId: req.body.messageId });
+      res.status(500).json({ error: 'Failed to update message status' });
     }
   });
 

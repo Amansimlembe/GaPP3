@@ -1,17 +1,50 @@
 const mongoose = require('mongoose');
 
 const messageSchema = new mongoose.Schema({
-  senderId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  recipientId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  contentType: { type: String, required: true },
-  content: { type: String, required: true }, // RSA-encrypted content
-  caption: { type: String },
-  status: { type: String, default: 'sent' },
-  replyTo: { type: mongoose.Schema.Types.ObjectId, ref: 'Message' },
-  createdAt: { type: Date, default: Date.now }
+  senderId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: true,
+  },
+  recipientId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: true,
+  },
+  contentType: {
+    type: String,
+    required: true,
+    enum: ['text', 'image', 'video', 'audio', 'document'],
+  },
+  content: {
+    type: String,
+    required: true, // Stores RSA-encrypted content or Cloudinary URL
+  },
+  caption: {
+    type: String,
+    trim: true,
+    maxlength: 500,
+  },
+  status: {
+    type: String,
+    enum: ['sent', 'delivered', 'read'],
+    default: 'sent',
+  },
+  replyTo: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Message',
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now,
+  },
+}, {
+  timestamps: false, // Only use createdAt explicitly
 });
 
-// Add indexes for faster queries
+// Indexes for performance
 messageSchema.index({ senderId: 1, recipientId: 1, createdAt: -1 });
+messageSchema.index({ recipientId: 1, createdAt: -1 });
+messageSchema.index({ status: 1 });
 
 module.exports = mongoose.model('Message', messageSchema);

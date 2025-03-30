@@ -1,29 +1,15 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import io from 'socket.io-client';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
-import forge from 'node-forge'; // Replace crypto with node-forge
+import forge from 'node-forge';
 import {
-  FaPaperPlane,
-  FaPaperclip,
-  FaTrash,
-  FaArrowLeft,
-  FaReply,
-  FaEllipsisH,
-  FaSave,
-  FaShare,
-  FaCopy,
-  FaForward,
-  FaFileAlt,
-  FaPlay,
-  FaArrowDown,
-  FaDownload,
-  FaUserPlus,
-  FaSignOutAlt,
+  FaPaperPlane, FaPaperclip, FaTrash, FaArrowLeft, FaReply, FaEllipsisH, FaForward, FaFileAlt,
+  FaPlay, FaArrowDown, FaUserPlus, FaSignOutAlt,
 } from 'react-icons/fa';
 import { useDispatch, useSelector } from 'react-redux';
 import { setMessages, addMessage, updateMessageStatus, setSelectedChat, resetState } from '../store';
-import { saveMessages, getMessages, clearOldMessages } from '../db';
+import { saveMessages, getMessages, clearOldMessages, deleteMessage } from '../db';
 
 const socket = io('https://gapp-6yc3.onrender.com', {
   reconnection: true,
@@ -42,18 +28,13 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   const [file, setFile] = useState(null);
   const [caption, setCaption] = useState('');
   const [contentType, setContentType] = useState('text');
-  const [showPicker, setShowPicker] = useState(false);
   const [notifications, setNotifications] = useState(() => JSON.parse(localStorage.getItem('chatNotifications')) || {});
-  const [selectedMessages, setSelectedMessages] = useState([]);
-  const [uploadProgress, setUploadProgress] = useState(null);
-  const [viewMedia, setViewMedia] = useState(null);
   const [typing, setTyping] = useState(false);
   const [isTyping, setIsTyping] = useState({});
   const [replyTo, setReplyTo] = useState(null);
   const [showMenu, setShowMenu] = useState(false);
   const [menuTab, setMenuTab] = useState('');
   const [newContactNumber, setNewContactNumber] = useState('');
-  const [newContactName, setNewContactName] = useState('');
   const [error, setError] = useState('');
   const [unreadCount, setUnreadCount] = useState(0);
   const [firstUnreadMessageId, setFirstUnreadMessageId] = useState(null);
@@ -61,142 +42,77 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   const [showMessageMenu, setShowMessageMenu] = useState(null);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   const [mediaPreview, setMediaPreview] = useState(null);
+  const [showPicker, setShowPicker] = useState(false);
+  const [viewMedia, setViewMedia] = useState(null);
   const [page, setPage] = useState(0);
   const [hasMore, setHasMore] = useState(true);
   const [loading, setLoading] = useState(false);
   const [userStatus, setUserStatus] = useState({ status: 'offline', lastSeen: null });
-  const [pendingMessages, setPendingMessages] = useState([]);
   const chatRef = useRef(null);
-  const typingBoxRef = useRef(null);
   const typingTimeoutRef = useRef(null);
   const isAtBottomRef = useRef(true);
-
   const messagesPerPage = 50;
   const isSmallDevice = window.innerWidth < 768;
 
-  // RSA Encryption Functions using node-forge
-  const encryptMessage = async (content, recipientPublicKey) => {
-    try {
-      const publicKey = forge.pki.publicKeyFromPem(recipientPublicKey);
-      const encrypted = publicKey.encrypt(forge.util.encodeUtf8(content), 'RSA-OAEP', {
-        md: forge.md.sha256.create(),
-      });
-      return forge.util.encode64(encrypted);
-    } catch (error) {
-      console.error('Encryption error:', error);
-      setError('Failed to encrypt message');
-      return content; // Fallback to plaintext if encryption fails
-    }
-  };
+  // RSA Encryption/Decryption
+  const encryptMessage = useCallback(async (content, recipientPublicKey, isMedia = false) => {
+    const publicKey = forge.pki.publicKeyFromPem(recipientPublicKey);
+    const buffer = isMedia ? forge.util.createBuffer(content, 'raw') : forge.util.encodeUtf8(content);
+    return forge.util.encode64(publicKey.encrypt(buffer, 'RSA-OAEP', { md: forge.md.sha256.create() }));
+  }, []);
 
-  const decryptMessage = async (encryptedContent, privateKeyPem) => {
-    try {
-      if (!privateKeyPem || !privateKeyPem.includes('-----BEGIN RSA PRIVATE KEY-----')) {
-        throw new Error('Invalid or missing private key in PEM format');
-      }
-      const privateKey = forge.pki.privateKeyFromPem(privateKeyPem);
-      const decrypted = privateKey.decrypt(forge.util.decode64(encryptedContent), 'RSA-OAEP', {
-        md: forge.md.sha256.create(),
-      });
-      return forge.util.decodeUtf8(decrypted);
-    } catch (error) {
-      console.error('Decryption error:', error.message);
-      setError('Failed to decrypt message: Invalid private key');
-      return encryptedContent; // Fallback
-    }
-  };
+  const decryptMessage = useCallback(async (encryptedContent, privateKeyPem, isMedia = false) => {
+    const privateKey = forge.pki.privateKeyFromPem(privateKeyPem);
+    const decrypted = privateKey.decrypt(forge.util.decode64(encryptedContent), 'RSA-OAEP', { md: forge.md.sha256.create() });
+    return isMedia ? decrypted : forge.util.decodeUtf8(decrypted);
+  }, []);
 
-  const getPublicKey = async (recipientId) => {
-    try {
-      const response = await axios.get(`https://gapp-6yc3.onrender.com/auth/public_key/${recipientId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      return response.data.publicKey;
-    } catch (error) {
-      console.error('Error fetching public key:', error);
-      setError('Failed to fetch recipient public key');
-      return null;
-    }
-  };
+  const getPublicKey = useCallback(async (recipientId) => {
+    const { data } = await axios.get(`https://gapp-6yc3.onrender.com/auth/public_key/${recipientId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    return data.publicKey;
+  }, [token]);
 
-  // Date and Time Formatting (unchanged)
-  const formatChatListDate = (date) => {
-    const messageDate = new Date(date);
-    const now = new Date();
-    const diffTime = now - messageDate;
-    const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
-    if (diffDays === 0) return messageDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
-    else if (diffDays === 1) return 'Yesterday';
-    else return messageDate.toLocaleDateString('en-US', { month: 'short', day: '2-digit' });
-  };
-
-  const formatDateHeader = (date) => {
-    const today = new Date();
-    const messageDate = new Date(date);
-    const todayDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-    const messageDateOnly = new Date(messageDate.getFullYear(), messageDate.getMonth(), messageDate.getDate());
-    const diffTime = todayDate - messageDateOnly;
-    const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
-    if (diffDays === 0) return 'Today';
-    else if (diffDays === 1) return 'Yesterday';
-    else return messageDate.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
-  };
-
-  const formatTime = (date) => {
-    return new Date(date).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
-  };
-
-  const formatLastSeen = (lastSeen) => {
-    if (!lastSeen) return '';
-    const date = new Date(lastSeen);
-    return `Last seen ${date.toLocaleDateString()} at ${formatTime(date)}`;
-  };
+  // Date Formatting
+  const formatChatListDate = (date) => new Date(date).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+  const formatDateHeader = (date) => new Date(date).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+  const formatTime = (date) => new Date(date).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+  const formatLastSeen = (lastSeen) => lastSeen ? `Last seen ${new Date(lastSeen).toLocaleString()}` : 'Offline';
 
   useEffect(() => {
     if (!userId || !token) return;
 
     socket.emit('join', userId);
-
-    const keepAlive = setInterval(() => {
-      socket.emit('ping', { userId });
-    }, 30000);
-
-    clearOldMessages(30).catch((error) => console.error('Error clearing old messages:', error));
+    const keepAlive = setInterval(() => socket.emit('ping', { userId }), 30000);
+    clearOldMessages(30);
 
     const fetchUsers = async () => {
       try {
-        const cachedUsers = JSON.parse(localStorage.getItem('cachedUsers')) || [];
-        if (cachedUsers.length > 0) setUsers(cachedUsers);
         const { data } = await axios.get('https://gapp-6yc3.onrender.com/auth/contacts', {
           headers: { Authorization: `Bearer ${token}` },
         });
-        const usersWithLatestMessage = await Promise.all(
-          data.map(async (user) => {
-            const { data: messagesData } = await axios.get('https://gapp-6yc3.onrender.com/social/messages', {
-              headers: { Authorization: `Bearer ${token}` },
-              params: { userId, recipientId: user.id, limit: 1, skip: 0 },
-            });
-            const latestMessage = messagesData.messages[0] || null;
-            const unreadCount = latestMessage && latestMessage.recipientId === userId && latestMessage.status !== 'read' ? 1 : 0;
-            return { ...user, latestMessage, unreadCount, status: user.status || 'offline', lastSeen: user.lastSeen || null };
-          })
-        );
-        usersWithLatestMessage.sort((a, b) => {
-          const dateA = a.latestMessage ? new Date(a.latestMessage.createdAt) : new Date(0);
-          const dateB = b.latestMessage ? new Date(b.latestMessage.createdAt) : new Date(0);
-          return dateB - dateA;
-        });
-        setUsers(usersWithLatestMessage);
-        localStorage.setItem('cachedUsers', JSON.stringify(usersWithLatestMessage));
-      } catch (error) {
-        console.error('Fetch users error:', error);
+        const usersWithData = await Promise.all(data.map(async (user) => {
+          const { data: msgData } = await axios.get('https://gapp-6yc3.onrender.com/social/messages', {
+            headers: { Authorization: `Bearer ${token}` },
+            params: { userId, recipientId: user.id, limit: 1, skip: 0 },
+          });
+          return {
+            ...user,
+            latestMessage: msgData.messages[0],
+            unreadCount: msgData.messages[0]?.recipientId === userId && msgData.messages[0]?.status !== 'read' ? 1 : 0,
+          };
+        }));
+        setUsers(usersWithData.sort((a, b) => new Date(b.latestMessage?.createdAt || 0) - new Date(a.latestMessage?.createdAt || 0)));
+        localStorage.setItem('cachedUsers', JSON.stringify(usersWithData));
+      } catch (err) {
         setError('Failed to load contacts');
       }
     };
     fetchUsers();
 
-    const fetchMessages = async (pageNum = 0, isInitialLoad = true) => {
-      if (!selectedChat || loading) return;
+    const fetchMessages = async (pageNum = 0, initial = true) => {
+      if (!selectedChat || loading || !hasMore) return;
       setLoading(true);
       try {
         const { data } = await axios.get('https://gapp-6yc3.onrender.com/social/messages', {
@@ -204,34 +120,23 @@ const ChatScreen = ({ token, userId, setAuth }) => {
           params: { userId, recipientId: selectedChat, limit: messagesPerPage, skip: pageNum * messagesPerPage },
         });
         const privateKeyPem = localStorage.getItem('privateKey');
-        if (!privateKeyPem) throw new Error('Private key not found');
-
-        const messages = await Promise.all(
-          data.messages.map(async (msg) => {
-            if (msg.contentType === 'text' && msg.recipientId === userId) {
-              return {
-                ...msg,
-                content: await decryptMessage(msg.content, privateKeyPem),
-              };
-            }
-            return msg;
-          })
-        );
+        const messages = await Promise.all(data.messages.map(async (msg) => {
+          if (msg.recipientId === userId && msg.contentType === 'text') {
+            msg.content = await decryptMessage(msg.content, privateKeyPem);
+          }
+          return msg;
+        }));
         setHasMore(data.hasMore);
-
-        if (isInitialLoad) {
-          dispatch(setMessages({ recipientId: selectedChat, messages }));
-          const unreadMessages = messages.filter((msg) => msg.recipientId === userId && msg.status !== 'read');
-          setUnreadCount(unreadMessages.length);
-          if (unreadMessages.length > 0) setFirstUnreadMessageId(unreadMessages[0]._id);
-          chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'auto' });
-        } else {
-          dispatch(setMessages({ recipientId: selectedChat, messages: [...messages, ...(chats[selectedChat] || [])] }));
+        dispatch(setMessages({ recipientId: selectedChat, messages: initial ? messages : [...messages, ...(chats[selectedChat] || [])] }));
+        if (initial) {
+          const unread = messages.filter((m) => m.recipientId === userId && m.status !== 'read');
+          setUnreadCount(unread.length);
+          if (unread.length) setFirstUnreadMessageId(unread[0]._id);
+          chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight });
         }
         await saveMessages(messages);
-      } catch (error) {
-        console.error('Fetch messages error:', error);
-        if (isInitialLoad) setError('Failed to load messages');
+      } catch (err) {
+        setError('Failed to load messages');
       } finally {
         setLoading(false);
       }
@@ -240,62 +145,21 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     if (selectedChat) {
       setPage(0);
       setHasMore(true);
-      fetchMessages(0, true);
-
-      const fetchUserStatus = async () => {
-        try {
-          const { data } = await axios.get(`https://gapp-6yc3.onrender.com/social/user-status/${selectedChat}`, {
-            headers: { Authorization: `Bearer ${token}` },
-          });
-          setUserStatus(data);
-        } catch (error) {
-          console.error('Fetch user status error:', error);
-        }
-      };
-      fetchUserStatus();
+      fetchMessages(0);
+      axios.get(`https://gapp-6yc3.onrender.com/social/user-status/${selectedChat}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      }).then(({ data }) => setUserStatus(data)).catch(() => setUserStatus({ status: 'offline', lastSeen: null }));
     }
 
-    socket.on('newContact', (contact) => {
-      setUsers((prev) => {
-        if (prev.some((u) => u.id === contact.userId)) return prev;
-        const updatedUsers = [...prev, { ...contact, unreadCount: 0, latestMessage: null }].sort((a, b) =>
-          (b.latestMessage?.createdAt || 0) - (a.latestMessage?.createdAt || 0)
-        );
-        localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
-        return updatedUsers;
-      });
-      dispatch(setSelectedChat(contact.userId));
-      setError('');
-    });
     socket.on('message', async (msg) => {
       const chatId = msg.senderId === userId ? msg.recipientId : msg.senderId;
       const privateKeyPem = localStorage.getItem('privateKey');
-      let content = msg.content;
-    
-      if (msg.contentType === 'text' && msg.recipientId === userId) {
-        if (!privateKeyPem) {
-          setError('Private key not found. Messages cannot be decrypted.');
-          console.warn('Private key missing from localStorage');
-        } else {
-          content = await decryptMessage(msg.content, privateKeyPem);
-        }
+      if (msg.recipientId === userId && msg.contentType === 'text') {
+        msg.content = await decryptMessage(msg.content, privateKeyPem);
       }
-    
-      const updatedMsg = { ...msg, content };
-      dispatch(addMessage({ recipientId: chatId, message: updatedMsg }));
-      await saveMessages([updatedMsg]);
-    
-      if (msg.recipientId === userId && !users.some((u) => u.id === msg.senderId)) {
-        setUsers((prev) => {
-          const updatedUsers = [
-            ...prev,
-            { id: msg.senderId, virtualNumber: msg.senderVirtualNumber, username: msg.senderUsername || 'Unsaved Number', photo: msg.senderPhoto || 'https://placehold.co/40x40', unreadCount: 0, latestMessage: null },
-          ];
-          localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
-          return updatedUsers;
-        });
-      }
-    
+      dispatch(addMessage({ recipientId: chatId, message: msg }));
+      await saveMessages([msg]);
+
       if (chatId === selectedChat) {
         if (msg.recipientId === userId) {
           socket.emit('messageStatus', { messageId: msg._id, status: 'delivered', recipientId: userId });
@@ -307,24 +171,10 @@ const ChatScreen = ({ token, userId, setAuth }) => {
             if (!firstUnreadMessageId) setFirstUnreadMessageId(msg._id);
             setShowJumpToBottom(true);
           }
-        } else if (isAtBottomRef.current) {
-          chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
-        } else {
-          setShowJumpToBottom(true);
         }
       } else if (msg.recipientId === userId) {
-        setNotifications((prev) => {
-          const updated = { ...prev, [msg.senderId]: (prev[msg.senderId] || 0) + 1 };
-          localStorage.setItem('chatNotifications', JSON.stringify(updated));
-          return updated;
-        });
-        setUsers((prev) => {
-          const updatedUsers = prev.map((user) =>
-            user.id === msg.senderId ? { ...user, latestMessage: updatedMsg, unreadCount: (user.unreadCount || 0) + 1 } : user
-          ).sort((a, b) => (b.latestMessage?.createdAt || 0) - (a.latestMessage?.createdAt || 0));
-          localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
-          return updatedUsers;
-        });
+        setNotifications((prev) => ({ ...prev, [msg.senderId]: (prev[msg.senderId] || 0) + 1 }));
+        setUsers((prev) => prev.map((u) => u.id === msg.senderId ? { ...u, unreadCount: (u.unreadCount || 0) + 1, latestMessage: msg } : u));
       }
     });
 
@@ -338,142 +188,87 @@ const ChatScreen = ({ token, userId, setAuth }) => {
 
     socket.on('messageStatus', ({ messageId, status }) => {
       dispatch(updateMessageStatus({ recipientId: selectedChat, messageId, status }));
-      if (status === 'read' && selectedChat) {
-        setUnreadCount(0);
-        setFirstUnreadMessageId(null);
-      }
+      if (status === 'read') setUnreadCount(0);
     });
 
     socket.on('onlineStatus', ({ userId: contactId, status, lastSeen }) => {
-      setUsers((prev) => prev.map((user) => (user.id === contactId ? { ...user, status, lastSeen } : user)));
+      setUsers((prev) => prev.map((u) => u.id === contactId ? { ...u, status, lastSeen } : u));
       if (contactId === selectedChat) setUserStatus({ status, lastSeen });
     });
 
     const handleScroll = () => {
-      if (chatRef.current) {
-        const { scrollTop, scrollHeight, clientHeight } = chatRef.current;
-        isAtBottomRef.current = scrollHeight - scrollTop - clientHeight < 50;
-        setShowJumpToBottom(!isAtBottomRef.current);
-
-        if (scrollTop < 50 && hasMore && !loading) setPage((prev) => prev + 1);
-
-        if (isAtBottomRef.current && selectedChat) {
-          const unreadMessages = (chats[selectedChat] || []).filter((msg) => msg.recipientId === userId && msg.status !== 'read');
-          unreadMessages.forEach((msg) => socket.emit('messageStatus', { messageId: msg._id, status: 'read', recipientId: userId }));
-          setUnreadCount(0);
-          setFirstUnreadMessageId(null);
-        }
+      const { scrollTop, scrollHeight, clientHeight } = chatRef.current;
+      isAtBottomRef.current = scrollHeight - scrollTop - clientHeight < 50;
+      setShowJumpToBottom(!isAtBottomRef.current);
+      if (scrollTop < 50 && hasMore && !loading) setPage((prev) => prev + 1);
+      if (isAtBottomRef.current) {
+        const unread = (chats[selectedChat] || []).filter((m) => m.recipientId === userId && m.status !== 'read');
+        unread.forEach((m) => socket.emit('messageStatus', { messageId: m._id, status: 'read', recipientId: userId }));
+        setUnreadCount(0);
       }
     };
     chatRef.current?.addEventListener('scroll', handleScroll);
-
     if (page > 0) fetchMessages(page, false);
 
-    const handleOnline = async () => {
-      if (pendingMessages.length > 0) {
-        for (const msg of pendingMessages) await sendMessage(msg);
-        setPendingMessages([]);
-      }
-    };
-    window.addEventListener('online', handleOnline);
-
     return () => {
-      socket.off('newContact');
       socket.off('message');
       socket.off('typing');
       socket.off('stopTyping');
       socket.off('messageStatus');
       socket.off('onlineStatus');
       chatRef.current?.removeEventListener('scroll', handleScroll);
-      window.removeEventListener('online', handleOnline);
       clearInterval(keepAlive);
     };
-  }, [token, userId, selectedChat, page, dispatch]);
-  
+  }, [token, userId, selectedChat, page, dispatch, getPublicKey]);
 
   const sendMessage = async () => {
-    if (!selectedChat) {
-      setError('Please select a chat first');
-      return;
-    }
-    if (!message && !file) {
-      setError('Please enter a message or attach a file');
-      return;
-    }
-  
+    if (!selectedChat || (!message && !file)) return;
     socket.emit('stopTyping', { userId, recipientId: selectedChat });
     setTyping(false);
-  
+
     const tempId = Date.now().toString();
-    const tempMsg = {
-      _id: tempId,
-      senderId: userId,
-      recipientId: selectedChat,
-      contentType,
-      content: file ? URL.createObjectURL(file) : message,
-      caption,
-      status: 'sending',
-      replyTo: replyTo?._id || null,
-      createdAt: new Date(),
-    };
-  
+    const tempMsg = { _id: tempId, senderId: userId, recipientId: selectedChat, contentType, content: file ? URL.createObjectURL(file) : message, caption, status: 'sending', replyTo: replyTo?._id, createdAt: new Date() };
     dispatch(addMessage({ recipientId: selectedChat, message: tempMsg }));
-    if (isAtBottomRef.current) chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
-  
-    let encryptedContent = message;
-    if (contentType === 'text' && !file) {
-      const recipientPublicKey = await getPublicKey(selectedChat);
-      if (!recipientPublicKey) {
-        setError('Failed to encrypt message: Public key unavailable');
-        return;
-      }
-      encryptedContent = await encryptMessage(message, recipientPublicKey);
-    }
-  
-    const formData = new FormData();
-    formData.append('senderId', userId);
-    formData.append('recipientId', selectedChat);
-    formData.append('contentType', contentType);
-    formData.append('content', file ? file : encryptedContent);
-    formData.append('caption', caption || '');
-    if (replyTo) formData.append('replyTo', replyTo._id);
-  
-    console.log('Sending formData:');
-    for (let [key, value] of formData.entries()) {
-      console.log(`${key}: ${value instanceof File ? `File: ${value.name}` : value}`);
-    }
-  
+    if (isAtBottomRef.current) chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight });
+
     try {
+      const recipientPublicKey = await getPublicKey(selectedChat);
+      let encryptedContent = message;
+      if (contentType === 'text' && !file) {
+        encryptedContent = await encryptMessage(message, recipientPublicKey);
+      } else if (file) {
+        encryptedContent = file.name; // Placeholder; actual content is uploaded to Cloudinary
+      }
+
+      const formData = new FormData();
+      formData.append('senderId', userId);
+      formData.append('recipientId', selectedChat);
+      formData.append('contentType', contentType);
+      formData.append('content', encryptedContent);
+      if (file) formData.append('content', file); // Cloudinary handles this
+      if (caption) formData.append('caption', caption);
+      if (replyTo) formData.append('replyTo', replyTo._id);
+
       const { data } = await axios.post('https://gapp-6yc3.onrender.com/social/message', formData, {
         headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
       });
       dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: tempId, status: 'sent' }));
       dispatch(addMessage({ recipientId: selectedChat, message: data }));
       await saveMessages([data]);
-    } catch (error) {
-      console.error('Send message error:', error.response?.data || error.message);
-      setError(`Failed to send message: ${error.response?.data?.error || error.message}`);
-      setPendingMessages((prev) => [...prev, { ...tempMsg, content: encryptedContent }]);
+    } catch (err) {
+      setError(`Send failed: ${err.message}`);
+      dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: tempId, status: 'failed' }));
+    } finally {
+      setMessage('');
+      setFile(null);
+      setCaption('');
+      setContentType('text');
+      setReplyTo(null);
+      setMediaPreview(null);
+      setShowPicker(false);
     }
-  
-    setMessage('');
-    setFile(null);
-    setCaption('');
-    setContentType('text');
-    setShowPicker(false);
-    setReplyTo(null);
-    setMediaPreview(null);
-  
-    setUsers((prev) => {
-      const updatedUsers = prev.map((user) =>
-        user.id === selectedChat ? { ...user, latestMessage: { ...tempMsg, content: message } } : user
-      ).sort((a, b) => (b.latestMessage?.createdAt || 0) - (a.latestMessage?.createdAt || 0));
-      localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
-      return updatedUsers;
-    });
   };
 
-  
   const handleTyping = (e) => {
     setMessage(e.target.value);
     if (!typing && e.target.value) {
@@ -488,108 +283,47 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   };
 
   const deleteMessages = async () => {
-    if (selectedMessages.length === 0) return;
     try {
-      await Promise.all(
-        selectedMessages.map((messageId) =>
-          axios.delete(`https://gapp-6yc3.onrender.com/social/message/${messageId}`, {
-            headers: { Authorization: `Bearer ${token}` },
-          })
-        )
-      );
-      dispatch(
-        setMessages({
-          recipientId: selectedChat,
-          messages: (chats[selectedChat] || []).filter((msg) => !selectedMessages.includes(msg._id)),
-        })
-      );
-      await saveMessages((chats[selectedChat] || []).filter((msg) => !selectedMessages.includes(msg._id)));
-      setSelectedMessages([]);
+      await Promise.all((chats[selectedChat] || [])
+        .filter((m) => m._id === showMessageMenu && m.senderId === userId)
+        .map((m) => axios.delete(`https://gapp-6yc3.onrender.com/social/message/${m._id}`, { headers: { Authorization: `Bearer ${token}` } }).then(() => deleteMessage(m._id))));
+      dispatch(setMessages({ recipientId: selectedChat, messages: (chats[selectedChat] || []).filter((m) => m._id !== showMessageMenu) }));
       setShowDeleteConfirm(false);
-    } catch (error) {
-      console.error('Delete message error:', error);
-      setError('Failed to delete messages');
+    } catch (err) {
+      setError('Failed to delete message');
+    } finally {
+      setShowMessageMenu(null);
     }
-  };
-
-  const viewMessage = (msg) => {
-    if (msg.senderId !== userId && msg.status !== 'read') {
-      socket.emit('messageStatus', { messageId: msg._id, status: 'read', recipientId: userId });
-    }
-    setViewMedia({ type: msg.contentType, url: msg.content });
   };
 
   const forwardMessage = async (msg) => {
-    const recipientVirtualNumber = prompt('Enter the virtual number of the user to forward to:');
-    if (!recipientVirtualNumber) return;
-    const contact = users.find((u) => u.virtualNumber === recipientVirtualNumber);
-    if (!contact) {
-      setError('User not found');
-      return;
-    }
-
-    const recipientPublicKey = await getPublicKey(contact.id);
-    let contentToForward = msg.content;
-    if (msg.contentType === 'text' && recipientPublicKey) {
-      contentToForward = await encryptMessage(msg.content, recipientPublicKey);
-    }
-
-    const formData = new FormData();
-    formData.append('senderId', userId);
-    formData.append('recipientId', contact.id);
-    formData.append('contentType', msg.contentType);
-    formData.append('caption', msg.caption || '');
-    formData.append('content', contentToForward);
-
+    const number = prompt('Enter virtual number to forward to:');
+    const contact = users.find((u) => u.virtualNumber === number);
+    if (!contact) return setError('User not found');
     try {
-      const { data } = await axios.post('https://gapp-6yc3.onrender.com/social/message', formData, {
-        headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
-      });
-      dispatch(addMessage({ recipientId: contact.id, message: data }));
-    } catch (error) {
+      const publicKey = await getPublicKey(contact.id);
+      const encryptedContent = await encryptMessage(msg.content, publicKey, ['image', 'video', 'audio', 'document'].includes(msg.contentType));
+      const formData = new FormData();
+      formData.append('senderId', userId);
+      formData.append('recipientId', contact.id);
+      formData.append('contentType', msg.contentType);
+      formData.append('content', encryptedContent);
+      if (msg.caption) formData.append('caption', msg.caption);
+      await axios.post('https://gapp-6yc3.onrender.com/social/message', formData, { headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` } });
+    } catch (err) {
       setError('Failed to forward message');
     }
   };
 
-  const copyMessage = (msg) => {
-    if (msg.contentType === 'text') {
-      navigator.clipboard.writeText(msg.content);
-      alert('Message copied to clipboard');
-    }
-  };
-
-  const shareMessage = (msg) => {
-    if (navigator.share) {
-      navigator.share({
-        title: 'Shared Message',
-        text: msg.contentType === 'text' ? msg.content : undefined,
-        url: msg.contentType !== 'text' ? msg.content : undefined,
-      });
-    }
-  };
-
   const addContact = async () => {
-    if (!newContactNumber) {
-      setError('Virtual number is required');
-      return;
-    }
-    if (!/^\+\d{10,15}$/.test(newContactNumber)) {
-      setError('Invalid virtual number format (e.g., +12025550123)');
-      return;
-    }
+    if (!newContactNumber) return setError('Virtual number required');
     try {
-      setError('Adding contact...');
-      await axios.post(
-        'https://gapp-6yc3.onrender.com/auth/add_contact',
-        { userId, virtualNumber: newContactNumber },
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
+      const { data } = await axios.post('https://gapp-6yc3.onrender.com/auth/add_contact', { userId, virtualNumber: newContactNumber }, { headers: { Authorization: `Bearer ${token}` } });
+      setUsers((prev) => [...prev, data]);
       setNewContactNumber('');
-      setNewContactName('');
       setMenuTab('');
-    } catch (error) {
-      console.error('Add contact error:', error);
-      setError(error.response?.data?.details || error.response?.data?.error || 'Failed to add contact');
+    } catch (err) {
+      setError('Failed to add contact');
     }
   };
 
@@ -598,7 +332,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     if (selectedFile) {
       setFile(selectedFile);
       setContentType(type);
-      setMediaPreview({ type, url: URL.createObjectURL(selectedFile), name: selectedFile.name });
+      setMediaPreview({ type, url: URL.createObjectURL(selectedFile) });
       setShowPicker(false);
     }
   };
@@ -608,9 +342,6 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     setShowJumpToBottom(false);
     isAtBottomRef.current = true;
     setUnreadCount(0);
-    setFirstUnreadMessageId(null);
-    const unreadMessages = (chats[selectedChat] || []).filter((msg) => msg.recipientId === userId && msg.status !== 'read');
-    unreadMessages.forEach((msg) => socket.emit('messageStatus', { messageId: msg._id, status: 'read', recipientId: userId }));
   };
 
   const handleLogout = () => {
@@ -623,377 +354,236 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     setShowMenu(false);
   };
 
-  // Animation variants for typing box (unchanged)
-  const typingBoxVariants = {
-    hidden: { y: 100, opacity: 0 },
-    visible: { y: 0, opacity: 1, transition: { type: 'spring', stiffness: 300, damping: 20 } },
-    expanded: { y: 0, opacity: 1, transition: { type: 'spring', stiffness: 300, damping: 20 } },
-  };
-
   return (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.3 }} className="flex h-screen bg-gray-100 dark:bg-gray-900">
-      <div className={`w-full md:w-1/3 bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 flex flex-col ${isSmallDevice && selectedChat ? 'hidden' : 'block'}`}>
-        <div className="p-4 flex justify-between items-center border-b border-gray-200 dark:border-gray-700">
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex h-screen bg-gray-100 dark:bg-gray-900">
+      <div className={`w-full md:w-1/3 bg-white dark:bg-gray-800 border-r ${isSmallDevice && selectedChat ? 'hidden' : 'block'} flex flex-col`}>
+        <div className="p-4 flex justify-between border-b dark:border-gray-700">
           <h2 className="text-xl font-bold text-primary dark:text-gray-100">Chats</h2>
-          <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
-            <FaEllipsisH onClick={() => setShowMenu(true)} className="text-2xl text-primary dark:text-gray-100 cursor-pointer hover:text-secondary" />
-          </motion.div>
+          <FaEllipsisH onClick={() => setShowMenu(true)} className="text-2xl text-primary dark:text-gray-100 cursor-pointer" />
         </div>
         <div className="flex-1 overflow-y-auto">
           {users.map((user) => (
             <motion.div
               key={user.id}
+              onClick={() => { dispatch(setSelectedChat(user.id)); setNotifications((prev) => ({ ...prev, [user.id]: 0 })); }}
+              className={`flex items-center p-3 border-b dark:border-gray-700 cursor-pointer ${selectedChat === user.id ? 'bg-gray-100 dark:bg-gray-700' : ''}`}
               whileHover={{ backgroundColor: '#f0f0f0' }}
-              onClick={() => {
-                dispatch(setSelectedChat(user.id));
-                setNotifications((prev) => {
-                  const updated = { ...prev, [user.id]: 0 };
-                  localStorage.setItem('chatNotifications', JSON.stringify(updated));
-                  return updated;
-                });
-              }}
-              className={`flex items-center p-3 border-b border-gray-200 dark:border-gray-700 cursor-pointer ${selectedChat === user.id ? 'bg-gray-100 dark:bg-gray-700' : ''}`}
             >
               <div className="relative">
                 <img src={user.photo || 'https://placehold.co/40x40'} alt="Profile" className="w-12 h-12 rounded-full mr-3" />
-                {user.status === 'online' && (
-                  <span className="absolute bottom-0 right-3 w-3 h-3 bg-green-500 border-2 border-white dark:border-gray-800 rounded-full"></span>
-                )}
+                {user.status === 'online' && <span className="absolute bottom-0 right-3 w-3 h-3 bg-green-500 rounded-full border-2 border-white dark:border-gray-800"></span>}
               </div>
               <div className="flex-1">
                 <div className="flex justify-between">
                   <span className="font-semibold dark:text-gray-100">{user.username || user.virtualNumber}</span>
-                  {user.latestMessage && (
-                    <span className="text-xs text-gray-500 dark:text-gray-400">{formatChatListDate(user.latestMessage.createdAt)}</span>
-                  )}
+                  {user.latestMessage && <span className="text-xs text-gray-500 dark:text-gray-400">{formatChatListDate(user.latestMessage.createdAt)}</span>}
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-sm text-gray-600 dark:text-gray-300 truncate max-w-[70%]">
-                    {user.latestMessage ? user.latestMessage.content : 'No messages yet'}
-                  </span>
+                  <span className="text-sm text-gray-600 dark:text-gray-300 truncate w-3/4">{user.latestMessage?.content || 'No messages'}</span>
                   {(user.unreadCount || notifications[user.id]) > 0 && (
-                    <span className="ml-2 bg-green-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
-                      {user.unreadCount || notifications[user.id]}
-                    </span>
+                    <span className="bg-green-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">{user.unreadCount || notifications[user.id]}</span>
                   )}
                 </div>
               </div>
             </motion.div>
           ))}
         </div>
-        {showMenu && (
-          <motion.div
-            initial={{ opacity: 0, y: 50 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 50 }}
-            className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
-          >
-            <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg w-full max-w-md">
-              <div className="flex items-center mb-4">
-                <FaArrowLeft onClick={() => setShowMenu(false)} className="text-2xl text-primary dark:text-gray-100 cursor-pointer hover:text-secondary mr-4" />
-                <h2 className="text-xl font-bold text-primary dark:text-gray-100">Menu</h2>
+        <AnimatePresence>
+          {showMenu && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
+            >
+              <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg w-full max-w-md">
+                <div className="flex items-center mb-4">
+                  <FaArrowLeft onClick={() => setShowMenu(false)} className="text-2xl text-primary dark:text-gray-100 cursor-pointer mr-4" />
+                  <h2 className="text-xl font-bold text-primary dark:text-gray-100">Menu</h2>
+                </div>
+                <div className="space-y-2">
+                  <motion.div onClick={() => setMenuTab('newNumber')} className={`flex items-center p-3 rounded-lg cursor-pointer ${menuTab === 'newNumber' ? 'bg-gray-200 dark:bg-gray-700' : ''}`} whileHover={{ backgroundColor: '#e5e7eb' }}>
+                    <FaUserPlus className="text-primary dark:text-gray-100 mr-3" />
+                    <span className="text-primary dark:text-gray-100">New Contact</span>
+                  </motion.div>
+                  <motion.div onClick={handleLogout} className="flex items-center p-3 rounded-lg cursor-pointer text-red-500" whileHover={{ backgroundColor: '#fee2e2' }}>
+                    <FaSignOutAlt className="text-red-500 mr-3" />
+                    <span>Logout</span>
+                  </motion.div>
+                </div>
+                {menuTab === 'newNumber' && (
+                  <motion.div initial={{ height: 0 }} animate={{ height: 'auto' }} className="mt-4">
+                    <input
+                      type="text"
+                      value={newContactNumber}
+                      onChange={(e) => setNewContactNumber(e.target.value)}
+                      className="w-full p-2 mb-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600"
+                      placeholder="Enter virtual number (e.g., +12025550123)"
+                    />
+                    <button onClick={addContact} className="w-full bg-primary text-white p-2 rounded-lg hover:bg-secondary">Save Contact</button>
+                    {error && <p className="text-red-500 text-sm mt-2">{error}</p>}
+                  </motion.div>
+                )}
               </div>
-              <div className="space-y-2">
-                <motion.div
-                  whileHover={{ scale: 1.05 }}
-                  onClick={() => setMenuTab('newNumber')}
-                  className={`flex items-center p-3 rounded-lg cursor-pointer ${menuTab === 'newNumber' ? 'bg-gray-200 dark:bg-gray-700' : ''}`}
-                >
-                  <FaUserPlus className="text-primary dark:text-gray-100 mr-3" />
-                  <span className="text-primary dark:text-gray-100">New Number</span>
-                </motion.div>
-                <motion.div whileHover={{ scale: 1.05 }} className="flex items-center p-3 rounded-lg cursor-pointer text-red-500" onClick={handleLogout}>
-                  <FaSignOutAlt className="text-red-500 mr-3" />
-                  <span>Logout</span>
-                </motion.div>
-              </div>
-              {menuTab === 'newNumber' && (
-                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="mt-4">
-                  <input
-                    type="text"
-                    value={newContactNumber}
-                    onChange={(e) => setNewContactNumber(e.target.value)}
-                    className="w-full p-2 mb-2 border rounded-lg dark:bg-gray-700 dark:text-white"
-                    placeholder="Enter virtual number (e.g., +12025550123)"
-                  />
-                  <input
-                    type="text"
-                    value={newContactName}
-                    onChange={(e) => setNewContactName(e.target.value)}
-                    className="w-full p-2 mb-2 border rounded-lg dark:bg-gray-700 dark:text-white"
-                    placeholder="Enter contact name (optional)"
-                  />
-                  <button onClick={addContact} className="w-full bg-primary text-white p-2 rounded-lg hover:bg-secondary">
-                    Save Contact
-                  </button>
-                  {error && <p className="text-red-500 text-sm mt-2">{error}</p>}
-                </motion.div>
-              )}
-            </div>
-          </motion.div>
-        )}
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
 
       <div className={`flex-1 flex flex-col ${isSmallDevice && !selectedChat ? 'hidden' : 'block'}`}>
         {selectedChat ? (
           <>
-            <div className="bg-white dark:bg-gray-800 p-3 flex items-center border-b border-gray-200 dark:border-gray-700 fixed top-0 md:left-[33.33%] md:w-2/3 left-0 right-0 z-10">
-              {isSmallDevice && (
-                <FaArrowLeft
-                  onClick={() => dispatch(setSelectedChat(null))}
-                  className="text-xl text-primary dark:text-gray-100 cursor-pointer mr-3 hover:text-secondary"
-                />
-              )}
-              <img
-                src={users.find((u) => u.id === selectedChat)?.photo || 'https://placehold.co/40x40'}
-                alt="Profile"
-                className="w-10 h-10 rounded-full mr-2"
-              />
+            <div className="bg-white dark:bg-gray-800 p-3 flex items-center border-b dark:border-gray-700 fixed top-0 md:left-[33.33%] md:w-2/3 left-0 right-0 z-10">
+              {isSmallDevice && <FaArrowLeft onClick={() => dispatch(setSelectedChat(null))} className="text-xl text-primary dark:text-gray-100 cursor-pointer mr-3" />}
+              <img src={users.find((u) => u.id === selectedChat)?.photo || 'https://placehold.co/40x40'} alt="Profile" className="w-10 h-10 rounded-full mr-2" />
               <div>
                 <span className="font-semibold dark:text-gray-100">{users.find((u) => u.id === selectedChat)?.username || 'Unknown'}</span>
                 <div className="text-sm text-gray-500 dark:text-gray-400">
-                  {isTyping[selectedChat] ? (
-                    <span className="text-green-500">Typing...</span>
-                  ) : userStatus.status === 'online' ? (
-                    <span className="text-green-500">Online</span>
-                  ) : (
-                    <span>{formatLastSeen(userStatus.lastSeen)}</span>
-                  )}
+                  {isTyping[selectedChat] ? <span className="text-green-500">Typing...</span> : userStatus.status === 'online' ? <span className="text-green-500">Online</span> : formatLastSeen(userStatus.lastSeen)}
                 </div>
               </div>
             </div>
-            <div
-              ref={chatRef}
-              className="flex-1 overflow-y-auto bg-gray-100 dark:bg-gray-900 p-2 pt-16"
-              style={{ paddingBottom: typingBoxRef.current ? `${typingBoxRef.current.offsetHeight}px` : '80px' }}
-            >
-              {(chats[selectedChat] || []).length === 0 ? (
-                <p className="text-center text-gray-500 dark:text-gray-400 mt-4">No messages yet</p>
-              ) : (
-                <>
-                  {(chats[selectedChat] || []).map((msg, index) => {
-                    const currentDate = new Date(msg.createdAt);
-                    const prevMsg = index > 0 ? chats[selectedChat][index - 1] : null;
-                    const showDateHeader = !prevMsg || currentDate.toDateString() !== new Date(prevMsg.createdAt).toDateString();
-
-                    return (
-                      <motion.div key={msg._id} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
-                        {showDateHeader && (
-                          <div className="text-center my-2">
-                            <span className="bg-gray-300 dark:bg-gray-700 text-gray-700 dark:text-gray-300 px-2 py-1 rounded-full text-sm">{formatDateHeader(msg.createdAt)}</span>
-                          </div>
-                        )}
-                        {firstUnreadMessageId === msg._id && unreadCount > 0 && (
-                          <div className="text-center my-2">
-                            <span className="bg-blue-500 text-white px-2 py-1 rounded-full text-sm">{unreadCount} Unread Messages</span>
-                          </div>
-                        )}
-                        <div
-                          className={`flex ${msg.senderId === userId ? 'justify-end' : 'justify-start'} px-2 py-1`}
-                          onContextMenu={(e) => {
-                            e.preventDefault();
-                            setShowMessageMenu(msg._id);
-                          }}
-                        >
-                          <div
-                            className={`max-w-[70%] p-2 rounded-lg shadow-sm ${
-                              msg.senderId === userId ? 'bg-green-500 text-white rounded-br-none' : 'bg-white dark:bg-gray-800 text-black dark:text-gray-100 rounded-bl-none'
-                            } ${selectedMessages.includes(msg._id) ? 'bg-opacity-50' : ''}`}
-                            onClick={() => {
-                              if (selectedMessages.length > 0) {
-                                setSelectedMessages((prev) =>
-                                  prev.includes(msg._id) ? prev.filter((id) => id !== msg._id) : [...prev, msg._id]
-                                );
-                              } else if (msg.contentType === 'video' || msg.contentType === 'image') {
-                                viewMessage(msg);
-                              }
-                            }}
-                          >
-                            {msg.replyTo && chats[selectedChat]?.find((m) => m._id === msg.replyTo) && (
-                              <div
-                                className="bg-gray-100 dark:bg-gray-700 p-1 rounded mb-1 text-xs italic text-gray-700 dark:text-gray-300 border-l-4 border-green-500 cursor-pointer"
-                                onClick={() => chatRef.current.scrollTo({ top: document.getElementById(`message-${msg.replyTo}`).offsetTop - 50, behavior: 'smooth' })}
-                              >
-                                <p>{chats[selectedChat].find((m) => m._id === msg.replyTo).content.slice(0, 20) + '...'}</p>
-                              </div>
-                            )}
-                            {msg.contentType === 'text' && <p className="text-sm break-words">{msg.content}</p>}
-                            {msg.contentType === 'image' && (
-                              <img src={msg.content} alt="Chat" className="max-w-[80%] max-h-64 object-contain rounded-lg" />
-                            )}
-                            {msg.contentType === 'video' && (
-                              <video src={msg.content} className="max-w-[80%] max-h-64 object-contain rounded-lg" controls />
-                            )}
-                            {msg.contentType === 'audio' && <audio src={msg.content} controls className="max-w-[80%] h-10" />}
-                            {msg.contentType === 'document' && (
-                              <div className="flex items-center bg-gray-100 dark:bg-gray-700 p-2 rounded-lg">
-                                <FaFileAlt className="text-blue-600 mr-2" />
-                                <span className="text-blue-600 truncate max-w-[200px]">{msg.content.split('/').pop()}</span>
-                                <a href={msg.content} download className="ml-2 text-blue-600">
-                                  <FaDownload />
-                                </a>
-                              </div>
-                            )}
-                            {msg.caption && <p className="text-xs italic mt-1">{msg.caption}</p>}
-                            <div className="flex justify-between items-center mt-1">
-                              {msg.senderId === userId && (
-                                <span className="text-xs">
-                                  {msg.status === 'pending' && '🕒'}
-                                  {msg.status === 'sent' && '✔'}
-                                  {msg.status === 'delivered' && '✔✔'}
-                                  {msg.status === 'read' && <span className="text-blue-300">✔✔</span>}
-                                </span>
-                              )}
-                              <span className="text-xs text-gray-500 dark:text-gray-400">{formatTime(msg.createdAt)}</span>
-                            </div>
-                          </div>
-                          {showMessageMenu === msg._id && (
-                            <motion.div
-                              initial={{ opacity: 0, scale: 0.8 }}
-                              animate={{ opacity: 1, scale: 1 }}
-                              className={`absolute ${msg.senderId === userId ? 'right-0' : 'left-0'} top-0 bg-white dark:bg-gray-800 p-2 rounded-lg shadow-lg z-20 flex space-x-2`}
-                              onClick={() => setShowMessageMenu(null)}
-                            >
-                              <FaReply onClick={() => setReplyTo(msg)} className="text-primary dark:text-gray-100 cursor-pointer" />
-                              <FaForward onClick={() => forwardMessage(msg)} className="text-primary dark:text-gray-100 cursor-pointer" />
-                              <FaCopy onClick={() => copyMessage(msg)} className="text-primary dark:text-gray-100 cursor-pointer" />
-                              <FaShare onClick={() => shareMessage(msg)} className="text-primary dark:text-gray-100 cursor-pointer" />
-                              {msg.senderId === userId && (
-                                <FaTrash
-                                  onClick={() => {
-                                    setSelectedMessages([msg._id]);
-                                    setShowDeleteConfirm(true);
-                                  }}
-                                  className="text-red-500 cursor-pointer"
-                                />
-                              )}
-                            </motion.div>
+            <div ref={chatRef} className="flex-1 overflow-y-auto bg-gray-100 dark:bg-gray-900 p-2 pt-16" style={{ paddingBottom: '80px' }}>
+              {loading && <div className="text-center text-gray-500 dark:text-gray-400">Loading...</div>}
+              {(chats[selectedChat] || []).map((msg, i) => {
+                const showDateHeader = i === 0 || new Date(msg.createdAt).toDateString() !== new Date(chats[selectedChat][i - 1].createdAt).toDateString();
+                return (
+                  <motion.div key={msg._id} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
+                    {showDateHeader && <div className="text-center my-2"><span className="bg-gray-300 dark:bg-gray-700 text-gray-700 dark:text-gray-300 px-2 py-1 rounded-full text-sm">{formatDateHeader(msg.createdAt)}</span></div>}
+                    {firstUnreadMessageId === msg._id && unreadCount > 0 && <div className="text-center my-2"><span className="bg-blue-500 text-white px-2 py-1 rounded-full text-sm">{unreadCount} Unread</span></div>}
+                    <div className={`flex ${msg.senderId === userId ? 'justify-end' : 'justify-start'} px-2 py-1`}>
+                      <div
+                        className={`max-w-[70%] p-2 rounded-lg shadow-sm ${msg.senderId === userId ? 'bg-green-500 text-white rounded-br-none' : 'bg-white dark:bg-gray-800 rounded-bl-none'}`}
+                        onClick={() => ['image', 'video'].includes(msg.contentType) && setViewMedia({ type: msg.contentType, url: msg.content })}
+                        onContextMenu={(e) => { e.preventDefault(); setShowMessageMenu(msg._id); }}
+                      >
+                        {msg.replyTo && <div className="bg-gray-100 dark:bg-gray-700 p-1 rounded mb-1 text-xs italic">{chats[selectedChat].find((m) => m._id === msg.replyTo)?.content.slice(0, 20)}...</div>}
+                        {msg.contentType === 'text' && <p className="text-sm break-words">{msg.content}</p>}
+                        {msg.contentType === 'image' && <img src={msg.content} alt="Chat" className="max-w-[80%] max-h-64 rounded-lg cursor-pointer" />}
+                        {msg.contentType === 'video' && <video src={msg.content} className="max-w-[80%] max-h-64 rounded-lg" controls />}
+                        {msg.contentType === 'audio' && <audio src={msg.content} controls className="max-w-[80%]" />}
+                        {msg.contentType === 'document' && <div className="flex items-center"><FaFileAlt className="text-blue-600 mr-2" /><a href={msg.content} download className="text-blue-600 truncate">{msg.content.split('/').pop()}</a></div>}
+                        {msg.caption && <p className="text-xs italic mt-1">{msg.caption}</p>}
+                        <div className="flex justify-between mt-1">
+                          {msg.senderId === userId && (
+                            <span className="text-xs">
+                              {msg.status === 'sending' ? '...' : msg.status === 'sent' ? '✔' : msg.status === 'delivered' ? '✔✔' : <span className="text-blue-300">✔✔</span>}
+                            </span>
                           )}
+                          <span className="text-xs text-gray-500">{formatTime(msg.createdAt)}</span>
                         </div>
-                      </motion.div>
-                    );
-                  })}
-                  {loading && page > 0 && <div className="text-center py-2 dark:text-gray-300">Loading more...</div>}
-                </>
-              )}
-            </div>
-            <motion.div
-              ref={typingBoxRef}
-              variants={typingBoxVariants}
-              initial="hidden"
-              animate={mediaPreview || replyTo ? 'expanded' : 'visible'}
-              className="bg-white dark:bg-gray-800 p-2 border-t border-gray-200 dark:border-gray-700 fixed md:left-[33.33%] md:w-2/3 left-0 right-0 z-30 shadow-lg rounded-t-lg"
-              style={{ bottom: '0px' }}
-            >
-              {mediaPreview && (
-                <div className="bg-gray-100 dark:bg-gray-700 p-2 mb-2 rounded w-full max-w-[80%] mx-auto">
-                  {mediaPreview.type === 'image' && <img src={mediaPreview.url} alt="Preview" className="max-w-full max-h-64 object-contain rounded-lg" />}
-                  {mediaPreview.type === 'video' && <video src={mediaPreview.url} className="max-w-full max-h-64 object-contain rounded-lg" controls />}
-                  {mediaPreview.type === 'audio' && <audio src={mediaPreview.url} controls className="w-full" />}
-                  {mediaPreview.type === 'document' && (
-                    <div className="flex items-center">
-                      <FaFileAlt className="text-blue-600 mr-2" />
-                      <span className="text-blue-600 truncate max-w-[200px]">{mediaPreview.name}</span>
+                      </div>
+                      <AnimatePresence>
+                        {showMessageMenu === msg._id && (
+                          <motion.div
+                            initial={{ opacity: 0, scale: 0.9 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            exit={{ opacity: 0, scale: 0.9 }}
+                            className={`absolute ${msg.senderId === userId ? 'right-0' : 'left-0'} top-0 bg-white dark:bg-gray-800 p-2 rounded-lg shadow-lg z-20 flex space-x-2`}
+                            onClick={() => setShowMessageMenu(null)}
+                          >
+                            <FaReply onClick={() => setReplyTo(msg)} className="text-primary dark:text-gray-100 cursor-pointer" />
+                            <FaForward onClick={() => forwardMessage(msg)} className="text-primary dark:text-gray-100 cursor-pointer" />
+                            {msg.senderId === userId && <FaTrash onClick={() => setShowDeleteConfirm(true)} className="text-red-500 cursor-pointer" />}
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
                     </div>
-                  )}
-                  <input
-                    type="text"
-                    value={caption}
-                    onChange={(e) => setCaption(e.target.value)}
-                    placeholder="Add a caption..."
-                    className="w-full p-1 mt-2 border rounded-lg dark:bg-gray-700 dark:text-white text-sm"
-                  />
-                  <button onClick={() => setMediaPreview(null)} className="absolute top-2 right-2 bg-red-500 text-white p-1 rounded-full">
-                    <FaTrash />
-                  </button>
+                  </motion.div>
+                );
+              })}
+            </div>
+            <motion.div className="bg-white dark:bg-gray-800 p-2 border-t dark:border-gray-700 fixed md:left-[33.33%] md:w-2/3 left-0 right-0 bottom-0 z-30">
+              {mediaPreview && (
+                <div className="bg-gray-100 dark:bg-gray-700 p-2 mb-2 rounded relative">
+                  {mediaPreview.type === 'image' && <img src={mediaPreview.url} alt="Preview" className="max-w-full max-h-64 rounded-lg" />}
+                  {mediaPreview.type === 'video' && <video src={mediaPreview.url} className="max-w-full max-h-64 rounded-lg" controls />}
+                  {mediaPreview.type === 'audio' && <audio src={mediaPreview.url} controls />}
+                  {mediaPreview.type === 'document' && <div className="flex"><FaFileAlt className="text-blue-600 mr-2" /><span className="text-blue-600 truncate">{file.name}</span></div>}
+                  <input type="text" value={caption} onChange={(e) => setCaption(e.target.value)} placeholder="Add a caption..." className="w-full p-1 mt-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600" />
+                  <button onClick={() => { setMediaPreview(null); setFile(null); }} className="absolute top-2 right-2 bg-red-500 text-white p-1 rounded-full"><FaTrash /></button>
                 </div>
               )}
               {replyTo && (
-                <div className="bg-gray-100 dark:bg-gray-700 p-2 mb-2 rounded w-full max-w-[80%] mx-auto flex justify-between items-center">
-                  <div>
-                    <p className="text-xs italic text-gray-700 dark:text-gray-300">Replying to:</p>
-                    <p className="text-sm">{replyTo.content.slice(0, 20) + '...'}</p>
-                  </div>
-                  <button onClick={() => setReplyTo(null)} className="text-red-500">
-                    <FaTrash />
-                  </button>
+                <div className="bg-gray-100 dark:bg-gray-700 p-2 mb-2 rounded flex justify-between">
+                  <div><p className="text-xs italic">Replying to:</p><p className="text-sm">{replyTo.content.slice(0, 20)}...</p></div>
+                  <button onClick={() => setReplyTo(null)} className="text-red-500"><FaTrash /></button>
                 </div>
               )}
               <div className="flex items-center">
-                <FaPaperclip onClick={() => setShowPicker(!showPicker)} className="text-xl text-primary dark:text-gray-100 cursor-pointer mr-2" />
-                {showPicker && (
-                  <motion.div
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    className="absolute bottom-12 left-2 bg-white dark:bg-gray-800 p-2 rounded-lg shadow-lg z-20 flex space-x-2"
-                  >
-                    <label><FaFileAlt className="text-blue-600" /><input type="file" accept=".pdf" onChange={(e) => handleFileChange(e, 'document')} className="hidden" /></label>
-                    <label><FaPlay className="text-green-500" /><input type="file" accept="audio/*" onChange={(e) => handleFileChange(e, 'audio')} className="hidden" /></label>
-                    <label><img src="https://placehold.co/20x20" alt="Image" /><input type="file" accept="image/*" onChange={(e) => handleFileChange(e, 'image')} className="hidden" /></label>
-                    <label><video width="20" height="20" /><input type="file" accept="video/*" onChange={(e) => handleFileChange(e, 'video')} className="hidden" /></label>
-                  </motion.div>
-                )}
+                <FaPaperclip onClick={() => setShowPicker((prev) => !prev)} className="text-xl text-primary dark:text-gray-100 cursor-pointer mr-2" />
+                <AnimatePresence>
+                  {showPicker && (
+                    <motion.div
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: 10 }}
+                      className="absolute bottom-12 left-2 bg-white dark:bg-gray-800 p-2 rounded-lg shadow-lg z-20 flex space-x-2"
+                    >
+                      <label><FaFileAlt className="text-blue-600 cursor-pointer" /><input type="file" accept=".pdf" onChange={(e) => handleFileChange(e, 'document')} className="hidden" /></label>
+                      <label><FaPlay className="text-green-500 cursor-pointer" /><input type="file" accept="audio/*" onChange={(e) => handleFileChange(e, 'audio')} className="hidden" /></label>
+                      <label><img src="https://placehold.co/20x20" alt="Image" className="cursor-pointer" /><input type="file" accept="image/*" onChange={(e) => handleFileChange(e, 'image')} className="hidden" /></label>
+                      <label><video width="20" height="20" className="cursor-pointer" /><input type="file" accept="video/*" onChange={(e) => handleFileChange(e, 'video')} className="hidden" /></label>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
                 <input
                   type="text"
                   value={message}
                   onChange={handleTyping}
                   onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
                   placeholder="Type a message..."
-                  className="flex-1 p-2 border rounded-lg mr-2 focus:outline-none focus:ring-2 focus:ring-primary dark:bg-gray-700 dark:text-white"
-                  disabled={file}
+                  className="flex-1 p-2 border rounded-lg mr-2 dark:bg-gray-700 dark:text-white dark:border-gray-600"
+                  disabled={file || loading}
                 />
-                <FaPaperPlane onClick={sendMessage} className="text-xl text-primary dark:text-gray-100 cursor-pointer hover:text-secondary" />
+                <FaPaperPlane onClick={sendMessage} className={`text-xl ${loading ? 'text-gray-400' : 'text-primary dark:text-gray-100'} cursor-pointer`} />
               </div>
-              {uploadProgress !== null && (
-                <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2 mt-2">
-                  <div className="bg-primary h-2 rounded-full" style={{ width: `${uploadProgress}%` }}></div>
-                </div>
-              )}
               {error && <p className="text-red-500 text-sm mt-2">{error}</p>}
             </motion.div>
-            {showJumpToBottom && (
-              <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="fixed bottom-20 md:left-[66%] left-1/2 transform -translate-x-1/2 bg-primary text-white p-2 rounded-full cursor-pointer z-40"
-                onClick={jumpToBottom}
-              >
-                <FaArrowDown /> {unreadCount > 0 && `(${unreadCount})`}
-              </motion.div>
-            )}
-            {showDeleteConfirm && (
-              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg">
-                  <p className="mb-4 dark:text-gray-100">Delete {selectedMessages.length} message(s)?</p>
-                  <div className="flex justify-end space-x-2">
-                    <button onClick={() => setShowDeleteConfirm(false)} className="bg-gray-300 dark:bg-gray-600 text-black dark:text-white p-2 rounded-lg">Cancel</button>
-                    <button onClick={deleteMessages} className="bg-red-500 text-white p-2 rounded-lg">Delete</button>
+            <AnimatePresence>
+              {showJumpToBottom && (
+                <motion.div
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="fixed bottom-20 md:left-[66%] left-1/2 transform -translate-x-1/2 bg-primary text-white p-2 rounded-full cursor-pointer z-40"
+                  onClick={jumpToBottom}
+                >
+                  <FaArrowDown /> {unreadCount > 0 && `(${unreadCount})`}
+                </motion.div>
+              )}
+              {showDeleteConfirm && (
+                <motion.div
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
+                >
+                  <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg">
+                    <p className="mb-4 dark:text-gray-100">Delete this message?</p>
+                    <div className="flex justify-end space-x-2">
+                      <button onClick={() => setShowDeleteConfirm(false)} className="bg-gray-300 dark:bg-gray-600 text-black dark:text-white p-2 rounded-lg">Cancel</button>
+                      <button onClick={deleteMessages} className="bg-red-500 text-white p-2 rounded-lg">Delete</button>
+                    </div>
                   </div>
-                </div>
-              </motion.div>
-            )}
-            {viewMedia && (
-              <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50"
-                onClick={() => setViewMedia(null)}
-              >
-                {viewMedia.type === 'image' && <img src={viewMedia.url} alt="Media" className="max-w-full max-h-full" />}
-                {viewMedia.type === 'video' && <video src={viewMedia.url} controls className="max-w-full max-h-full" />}
-                {viewMedia.type === 'audio' && <audio src={viewMedia.url} controls className="w-full max-w-md" />}
-                {viewMedia.type === 'document' && (
-                  <div className="bg-white dark:bg-gray-800 p-4 rounded-lg">
-                    <a href={viewMedia.url} download className="text-blue-600">Download Document</a>
-                  </div>
-                )}
-              </motion.div>
-            )}
+                </motion.div>
+              )}
+              {viewMedia && (
+                <motion.div
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50"
+                  onClick={() => setViewMedia(null)}
+                >
+                  {viewMedia.type === 'image' && <img src={viewMedia.url} alt="Media" className="max-w-full max-h-full" />}
+                  {viewMedia.type === 'video' && <video src={viewMedia.url} className="max-w-full max-h-full" controls autoPlay />}
+                </motion.div>
+              )}
+            </AnimatePresence>
           </>
         ) : (
-          <div className="flex-1 flex items-center justify-center">
-            <p className="text-gray-500 dark:text-gray-400">Select a chat to start messaging</p>
-          </div>
+          <div className="flex-1 flex items-center justify-center"><p className="text-gray-500 dark:text-gray-400">Select a chat to start messaging</p></div>
         )}
       </div>
     </motion.div>
