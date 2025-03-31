@@ -54,7 +54,6 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   const messagesPerPage = 50;
   const isSmallDevice = window.innerWidth < 768;
 
-  // RSA Encryption/Decryption
   const encryptMessage = useCallback(async (content, recipientPublicKey, isMedia = false) => {
     const publicKey = forge.pki.publicKeyFromPem(recipientPublicKey);
     const buffer = isMedia ? forge.util.createBuffer(content, 'raw') : forge.util.encodeUtf8(content);
@@ -62,9 +61,17 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   }, []);
 
   const decryptMessage = useCallback(async (encryptedContent, privateKeyPem, isMedia = false) => {
-    const privateKey = forge.pki.privateKeyFromPem(privateKeyPem);
-    const decrypted = privateKey.decrypt(forge.util.decode64(encryptedContent), 'RSA-OAEP', { md: forge.md.sha256.create() });
-    return isMedia ? decrypted : forge.util.decodeUtf8(decrypted);
+    try {
+      if (!privateKeyPem || !privateKeyPem.includes('-----BEGIN RSA PRIVATE KEY-----')) {
+        throw new Error('Invalid private key');
+      }
+      const privateKey = forge.pki.privateKeyFromPem(privateKeyPem);
+      const decrypted = privateKey.decrypt(forge.util.decode64(encryptedContent), 'RSA-OAEP', { md: forge.md.sha256.create() });
+      return isMedia ? decrypted : forge.util.decodeUtf8(decrypted);
+    } catch (err) {
+      console.error('Decryption error:', err.message);
+      return '[Decryption Failed]';
+    }
   }, []);
 
   const getPublicKey = useCallback(async (recipientId) => {
@@ -74,11 +81,25 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     return data.publicKey;
   }, [token]);
 
-  // Date Formatting
   const formatChatListDate = (date) => new Date(date).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
   const formatDateHeader = (date) => new Date(date).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
   const formatTime = (date) => new Date(date).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
-  const formatLastSeen = (lastSeen) => lastSeen ? `Last seen ${new Date(lastSeen).toLocaleString()}` : 'Offline';
+  const formatLastSeen = (lastSeen) => (lastSeen ? `Last seen ${new Date(lastSeen).toLocaleString()}` : 'Offline');
+
+  const retryRequest = async (url, config, retries = 3, delay = 1000) => {
+    for (let i = 0; i < retries; i++) {
+      try {
+        const response = await axios.get(url, config);
+        return response;
+      } catch (err) {
+        if (err.response?.status === 429 && i < retries - 1) {
+          await new Promise((resolve) => setTimeout(resolve, delay * (i + 1))); // Exponential backoff
+          continue;
+        }
+        throw err;
+      }
+    }
+  };
 
   useEffect(() => {
     if (!userId || !token) return;
@@ -89,11 +110,11 @@ const ChatScreen = ({ token, userId, setAuth }) => {
 
     const fetchUsers = async () => {
       try {
-        const { data } = await axios.get('https://gapp-6yc3.onrender.com/auth/contacts', {
+        const { data } = await retryRequest('https://gapp-6yc3.onrender.com/auth/contacts', {
           headers: { Authorization: `Bearer ${token}` },
         });
         const usersWithData = await Promise.all(data.map(async (user) => {
-          const { data: msgData } = await axios.get('https://gapp-6yc3.onrender.com/social/messages', {
+          const { data: msgData } = await retryRequest('https://gapp-6yc3.onrender.com/social/messages', {
             headers: { Authorization: `Bearer ${token}` },
             params: { userId, recipientId: user.id, limit: 1, skip: 0 },
           });
@@ -106,7 +127,8 @@ const ChatScreen = ({ token, userId, setAuth }) => {
         setUsers(usersWithData.sort((a, b) => new Date(b.latestMessage?.createdAt || 0) - new Date(a.latestMessage?.createdAt || 0)));
         localStorage.setItem('cachedUsers', JSON.stringify(usersWithData));
       } catch (err) {
-        setError('Failed to load contacts');
+        setError(`Failed to load contacts: ${err.message}`);
+        console.error('Fetch users error:', err);
       }
     };
     fetchUsers();
@@ -115,7 +137,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       if (!selectedChat || loading || !hasMore) return;
       setLoading(true);
       try {
-        const { data } = await axios.get('https://gapp-6yc3.onrender.com/social/messages', {
+        const { data } = await retryRequest('https://gapp-6yc3.onrender.com/social/messages', {
           headers: { Authorization: `Bearer ${token}` },
           params: { userId, recipientId: selectedChat, limit: messagesPerPage, skip: pageNum * messagesPerPage },
         });
@@ -136,7 +158,8 @@ const ChatScreen = ({ token, userId, setAuth }) => {
         }
         await saveMessages(messages);
       } catch (err) {
-        setError('Failed to load messages');
+        setError(`Failed to load messages: ${err.message}`);
+        console.error('Fetch messages error:', err);
       } finally {
         setLoading(false);
       }
@@ -146,7 +169,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       setPage(0);
       setHasMore(true);
       fetchMessages(0);
-      axios.get(`https://gapp-6yc3.onrender.com/social/user-status/${selectedChat}`, {
+      retryRequest(`https://gapp-6yc3.onrender.com/social/user-status/${selectedChat}`, {
         headers: { Authorization: `Bearer ${token}` },
       }).then(({ data }) => setUserStatus(data)).catch(() => setUserStatus({ status: 'offline', lastSeen: null }));
     }
@@ -219,7 +242,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       chatRef.current?.removeEventListener('scroll', handleScroll);
       clearInterval(keepAlive);
     };
-  }, [token, userId, selectedChat, page, dispatch, getPublicKey]);
+  }, [token, userId, selectedChat, page, dispatch, getPublicKey, decryptMessage]);
 
   const sendMessage = async () => {
     if (!selectedChat || (!message && !file)) return;
@@ -257,6 +280,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       await saveMessages([data]);
     } catch (err) {
       setError(`Send failed: ${err.message}`);
+      console.error('Send message error:', err);
       dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: tempId, status: 'failed' }));
     } finally {
       setMessage('');
@@ -290,7 +314,8 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       dispatch(setMessages({ recipientId: selectedChat, messages: (chats[selectedChat] || []).filter((m) => m._id !== showMessageMenu) }));
       setShowDeleteConfirm(false);
     } catch (err) {
-      setError('Failed to delete message');
+      setError(`Failed to delete message: ${err.message}`);
+      console.error('Delete message error:', err);
     } finally {
       setShowMessageMenu(null);
     }
@@ -311,7 +336,8 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       if (msg.caption) formData.append('caption', msg.caption);
       await axios.post('https://gapp-6yc3.onrender.com/social/message', formData, { headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` } });
     } catch (err) {
-      setError('Failed to forward message');
+      setError(`Failed to forward message: ${err.message}`);
+      console.error('Forward message error:', err);
     }
   };
 
@@ -323,7 +349,8 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       setNewContactNumber('');
       setMenuTab('');
     } catch (err) {
-      setError('Failed to add contact');
+      setError(`Failed to add contact: ${err.message}`);
+      console.error('Add contact error:', err);
     }
   };
 

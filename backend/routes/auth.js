@@ -7,6 +7,7 @@ const cloudinary = require('cloudinary').v2;
 const { getCountryCallingCode, parsePhoneNumberFromString } = require('libphonenumber-js');
 const Joi = require('joi');
 const winston = require('winston');
+const rateLimit = require('express-rate-limit'); // Add this
 const User = require('../models/User');
 const redis = require('../redis');
 
@@ -40,6 +41,13 @@ const upload = multer({
   },
 });
 
+// Rate limiting for auth routes
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // 100 requests per IP
+  message: { error: 'Too many requests, please try again later.' },
+});
+
 const authMiddleware = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -57,7 +65,7 @@ const authMiddleware = async (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
-    await redis.setex(sessionKey, 24 * 60 * 60, JSON.stringify(decoded)); // Changed setEx to setex
+    await redis.setex(sessionKey, 24 * 60 * 60, JSON.stringify(decoded));
     req.user = decoded;
     next();
   } catch (error) {
@@ -96,7 +104,7 @@ const generateVirtualNumber = (countryCode, userId) => {
   }
 };
 
-router.post('/register', upload.single('photo'), async (req, res) => {
+router.post('/register', authLimiter, upload.single('photo'), async (req, res) => {
   try {
     const { error } = registerSchema.validate(req.body);
     if (error) return res.status(400).json({ error: error.details[0].message });
@@ -109,6 +117,11 @@ router.post('/register', upload.single('photo'), async (req, res) => {
     const { publicKey, privateKey } = forge.pki.rsa.generateKeyPair({ bits: 2048 });
     const publicKeyPem = forge.pki.publicKeyToPem(publicKey);
     const privateKeyPem = forge.pki.privateKeyToPem(privateKey);
+
+    if (!privateKeyPem.includes('-----BEGIN RSA PRIVATE KEY-----')) {
+      logger.error('Generated invalid private key', { email });
+      return res.status(500).json({ error: 'Failed to generate private key' });
+    }
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const virtualNumber = generateVirtualNumber(country, forge.util.bytesToHex(forge.random.getBytesSync(16)));
@@ -147,7 +160,7 @@ router.post('/register', upload.single('photo'), async (req, res) => {
   }
 });
 
-router.post('/login', async (req, res) => {
+router.post('/login', authLimiter, async (req, res) => {
   try {
     const { error } = loginSchema.validate(req.body);
     if (error) return res.status(400).json({ error: error.details[0].message });
@@ -155,6 +168,11 @@ router.post('/login', async (req, res) => {
     const { email, password } = req.body;
     const user = await User.findOne({ email });
     if (!user || !(await bcrypt.compare(password, user.password))) return res.status(401).json({ error: 'Invalid credentials' });
+
+    if (!user.privateKey || !user.privateKey.includes('-----BEGIN RSA PRIVATE KEY-----')) {
+      logger.error('Invalid private key in database', { userId: user._id });
+      return res.status(500).json({ error: 'Server returned invalid private key' });
+    }
 
     const token = jwt.sign({ id: user._id, email, virtualNumber: user.virtualNumber, role: user.role }, process.env.JWT_SECRET, { expiresIn: '24h' });
 
@@ -311,7 +329,7 @@ router.get('/contacts', authMiddleware, async (req, res) => {
       lastSeen: contact.lastSeen,
     }));
 
-    await redis.setex(cacheKey, 300, JSON.stringify(contacts)); // Changed setEx to setex
+    await redis.setex(cacheKey, 300, JSON.stringify(contacts));
     logger.info('Contacts fetched', { userId: req.user.id });
     res.json(contacts);
   } catch (error) {
@@ -331,7 +349,7 @@ router.get('/public_key/:userId', authMiddleware, async (req, res) => {
     const user = await User.findById(req.params.userId).select('publicKey');
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    await redis.setex(cacheKey, 3600, user.publicKey); // Changed setEx to setex
+    await redis.setex(cacheKey, 3600, user.publicKey);
     logger.info('Public key fetched', { requesterId: req.user.id, targetUserId: req.params.userId });
     res.json({ publicKey: user.publicKey });
   } catch (error) {
@@ -344,6 +362,11 @@ router.post('/refresh', authMiddleware, async (req, res) => {
   try {
     const user = await User.findById(req.user.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
+
+    if (!user.privateKey || !user.privateKey.includes('-----BEGIN RSA PRIVATE KEY-----')) {
+      logger.error('Invalid private key in database during refresh', { userId: user._id });
+      return res.status(500).json({ error: 'Server returned invalid private key' });
+    }
 
     const newToken = jwt.sign(
       { id: user._id, email: user.email, virtualNumber: user.virtualNumber, role: user.role },

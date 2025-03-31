@@ -4,15 +4,12 @@ const DB_NAME = 'ChatDB';
 const STORE_NAME = 'messages';
 const VERSION = 2;
 
-// Open or create the IndexedDB database
 const dbPromise = openDB(DB_NAME, VERSION, {
   upgrade(db, oldVersion, newVersion, transaction) {
     if (oldVersion < 1) {
-      // Initial setup for version 1
       db.createObjectStore(STORE_NAME, { keyPath: '_id' });
     }
     if (oldVersion < 2) {
-      // Upgrade to version 2: recreate store with improved indexes
       if (db.objectStoreNames.contains(STORE_NAME)) {
         db.deleteObjectStore(STORE_NAME);
       }
@@ -29,7 +26,6 @@ const dbPromise = openDB(DB_NAME, VERSION, {
   },
 });
 
-// Save messages to IndexedDB
 export const saveMessages = async (messages) => {
   try {
     const db = await dbPromise;
@@ -41,11 +37,10 @@ export const saveMessages = async (messages) => {
     console.log(`Saved ${messages.length} messages to IndexedDB`);
   } catch (error) {
     console.error('Error saving messages to IndexedDB:', error);
-    throw error; // Re-throw to allow caller handling
+    throw error;
   }
 };
 
-// Retrieve messages from IndexedDB
 export const getMessages = async (recipientId = null) => {
   try {
     const db = await dbPromise;
@@ -55,7 +50,7 @@ export const getMessages = async (recipientId = null) => {
     if (recipientId) {
       const index = store.index('byRecipientId');
       const messages = await index.getAll(recipientId);
-      return messages.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt)); // Ensure chronological order
+      return messages.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
     }
 
     const allMessages = await store.getAll();
@@ -66,7 +61,6 @@ export const getMessages = async (recipientId = null) => {
   }
 };
 
-// Delete a specific message by ID
 export const deleteMessage = async (messageId) => {
   try {
     const db = await dbPromise;
@@ -82,7 +76,6 @@ export const deleteMessage = async (messageId) => {
   }
 };
 
-// Clear messages older than a specified number of days
 export const clearOldMessages = async (daysToKeep = 30) => {
   try {
     const db = await dbPromise;
@@ -91,22 +84,23 @@ export const clearOldMessages = async (daysToKeep = 30) => {
     const index = store.index('byCreatedAt');
     const cutoff = new Date(Date.now() - daysToKeep * 24 * 60 * 60 * 1000);
 
-    const allMessages = await index.getAll();
-    const deletes = allMessages
-      .filter((msg) => new Date(msg.createdAt) < cutoff)
-      .map((msg) => store.delete(msg._id));
+    const cursor = await index.openCursor(IDBKeyRange.upperBound(cutoff));
+    let count = 0;
+    while (cursor) {
+      await cursor.delete();
+      count++;
+      cursor = await cursor.continue();
+    }
 
-    await Promise.all(deletes);
     await tx.done;
-    console.log(`Cleared ${deletes.length} old messages from IndexedDB`);
-    return deletes.length;
+    console.log(`Cleared ${count} old messages from IndexedDB`);
+    return count;
   } catch (error) {
     console.error('Error clearing old messages from IndexedDB:', error);
     return 0;
   }
 };
 
-// Clear all messages (for logout or reset)
 export const clearAllMessages = async () => {
   try {
     const db = await dbPromise;

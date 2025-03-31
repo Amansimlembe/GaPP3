@@ -6,7 +6,7 @@ import { getCountries } from 'libphonenumber-js';
 const LoginScreen = ({ setAuth }) => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [role, setRole] = useState('0'); // Default to Job Seeker
+  const [role, setRole] = useState('0');
   const [username, setUsername] = useState('');
   const [photo, setPhoto] = useState(null);
   const [isLogin, setIsLogin] = useState(true);
@@ -21,7 +21,7 @@ const LoginScreen = ({ setAuth }) => {
   }));
 
   const filteredCountries = countries.filter((c) =>
-    c.name.toLowerCase().includes(search.toLowerCase()) || c.code.toLowerCase().includes(search.toLowerCase())
+    (c.name.toLowerCase().includes(search.toLowerCase()) || c.code.toLowerCase().includes(search.toLowerCase()))
   );
 
   const validateForm = () => {
@@ -54,6 +54,24 @@ const LoginScreen = ({ setAuth }) => {
     setLoading(true);
     const url = `https://gapp-6yc3.onrender.com/auth/${isLogin ? 'login' : 'register'}`;
 
+    const retryRequest = async (data, config, retries = 3, delay = 1000) => {
+      for (let i = 0; i < retries; i++) {
+        try {
+          const { data: response } = await axios.post(url, data, config);
+          if (!response.privateKey || !response.privateKey.includes('-----BEGIN RSA PRIVATE KEY-----')) {
+            throw new Error('Received invalid private key from server');
+          }
+          return response;
+        } catch (err) {
+          if (err.response?.status === 429 && i < retries - 1) {
+            await new Promise((resolve) => setTimeout(resolve, delay * (i + 1))); // Exponential backoff
+            continue;
+          }
+          throw err;
+        }
+      }
+    };
+
     try {
       const data = isLogin
         ? { email, password }
@@ -69,11 +87,7 @@ const LoginScreen = ({ setAuth }) => {
           })();
 
       const config = !isLogin ? { headers: { 'Content-Type': 'multipart/form-data' } } : {};
-      const { data: response } = await axios.post(url, data, config);
-
-      if (!response.privateKey || !response.privateKey.includes('-----BEGIN RSA PRIVATE KEY-----')) {
-        throw new Error('Received invalid private key from server');
-      }
+      const response = await retryRequest(data, config);
 
       setAuth(response.token, response.userId, response.role, response.photo, response.virtualNumber, response.username);
       localStorage.setItem('token', response.token);
@@ -84,7 +98,7 @@ const LoginScreen = ({ setAuth }) => {
       localStorage.setItem('username', response.username);
       localStorage.setItem('privateKey', response.privateKey);
     } catch (error) {
-      console.error(`${isLogin ? 'Login' : 'Register'} error:`, error);
+      console.error(`${isLogin ? 'Login' : 'Register'} error:`, error.message);
       setError(error.response?.data?.error || error.message || `${isLogin ? 'Login' : 'Registration'} failed`);
     } finally {
       setLoading(false);

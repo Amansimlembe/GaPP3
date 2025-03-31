@@ -27,6 +27,21 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(null);
   const [darkMode, setDarkMode] = useState(localStorage.getItem('darkMode') === 'true');
 
+  const retryRequest = async (url, config, retries = 3, delay = 1000) => {
+    for (let i = 0; i < retries; i++) {
+      try {
+        const response = await axios.get(url, config);
+        return response;
+      } catch (err) {
+        if (err.response?.status === 429 && i < retries - 1) {
+          await new Promise((resolve) => setTimeout(resolve, delay * (i + 1))); // Exponential backoff
+          continue;
+        }
+        throw err;
+      }
+    }
+  };
+
   useEffect(() => {
     if (!token || !userId) {
       setError('Authentication required. Please log in again.');
@@ -37,13 +52,14 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
 
     const fetchMyPosts = async () => {
       try {
-        const { data } = await axios.get(`https://gapp-6yc3.onrender.com/social/my-posts/${userId}`, {
+        const { data } = await retryRequest(`https://gapp-6yc3.onrender.com/social/my-posts/${userId}`, {
           headers: { Authorization: `Bearer ${token}` },
         });
-        setMyPosts(data);
+        setMyPosts(data || []); // Ensure empty array if no posts
+        setError(''); // Clear error on success
       } catch (error) {
-        console.error('Fetch my posts error:', error);
-        setError('Failed to load posts. Please try again.');
+        console.error('Fetch my posts error:', error.response?.data || error.message);
+        setError(`Failed to load posts: ${error.response?.data?.error || error.message}`);
       }
     };
 
@@ -85,7 +101,7 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
       setError('');
       alert('CV uploaded successfully');
     } catch (error) {
-      console.error('CV upload error:', error);
+      console.error('CV upload error:', error.response?.data || error.message);
       setError(error.response?.data?.error || 'Failed to upload CV');
     }
   };
@@ -108,7 +124,7 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
       setError('');
       alert('Photo uploaded successfully');
     } catch (error) {
-      console.error('Photo upload error:', error);
+      console.error('Photo upload error:', error.response?.data || error.message);
       setError(error.response?.data?.error || 'Failed to upload photo');
     }
   };
@@ -128,7 +144,7 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
       setError('');
       alert('Username updated successfully');
     } catch (error) {
-      console.error('Username update error:', error);
+      console.error('Username update error:', error.response?.data || error.message);
       setError(error.response?.data?.error || 'Failed to update username');
     }
   };
@@ -146,7 +162,7 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
         setError('');
       }
     } catch (error) {
-      console.error('Delete post error:', error);
+      console.error('Delete post error:', error.response?.data || error.message);
       setError(error.response?.data?.error || 'Failed to delete post');
     }
   };

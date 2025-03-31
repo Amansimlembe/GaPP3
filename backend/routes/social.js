@@ -11,7 +11,6 @@ const winston = require('winston');
 const rateLimit = require('express-rate-limit');
 const Joi = require('joi');
 
-// Logger setup
 const logger = winston.createLogger({
   level: 'info',
   format: winston.format.combine(winston.format.timestamp(), winston.format.json()),
@@ -22,11 +21,18 @@ const logger = winston.createLogger({
   ],
 });
 
-// Rate limiters
-const socialLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 200, message: { error: 'Too many requests, please try again later.' } });
-const messageLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100, message: { error: 'Too many messages sent, please try again later.' } });
+// Rate limiters (increased max to reduce 429 errors)
+const socialLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 500, // Increased from 200
+  message: { error: 'Too many requests, please try again later.' },
+});
+const messageLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 200, // Increased from 100
+  message: { error: 'Too many messages sent, please try again later.' },
+});
 
-// Multer setup for file uploads
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 50 * 1024 * 1024 },
@@ -37,14 +43,12 @@ const upload = multer({
   },
 });
 
-// Joi schemas
 const postSchema = Joi.object({ contentType: Joi.string().valid('image', 'video', 'audio', 'raw', 'text').required(), caption: Joi.string().max(500).allow('').optional() });
 const messageSchema = Joi.object({ senderId: Joi.string().required(), recipientId: Joi.string().required(), contentType: Joi.string().valid('text', 'image', 'video', 'audio', 'document').required(), caption: Joi.string().max(500).allow('').optional(), replyTo: Joi.string().optional() });
 const messageStatusSchema = Joi.object({ messageId: Joi.string().required(), status: Joi.string().valid('sent', 'delivered', 'read').required(), recipientId: Joi.string().required() });
 const likeSchema = Joi.object({ postId: Joi.string().required(), userId: Joi.string().required() });
 const commentSchema = Joi.object({ postId: Joi.string().required(), comment: Joi.string().max(500).required(), userId: Joi.string().required() });
 
-// Cloudinary configuration
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
@@ -92,8 +96,14 @@ module.exports = (io) => {
       }
     });
 
+    // Debounce ping to reduce online status spam
+    let lastPing = {};
     socket.on('ping', async ({ userId }) => {
       try {
+        const now = Date.now();
+        if (lastPing[userId] && now - lastPing[userId] < 5000) return; // 5-second debounce
+        lastPing[userId] = now;
+
         const user = await User.findById(userId);
         if (!user) return;
         if (user.status !== 'online') {
@@ -193,7 +203,8 @@ module.exports = (io) => {
         return res.json(JSON.parse(cachedPosts));
       }
       const posts = await Post.find({ userId: req.params.userId }).sort({ createdAt: -1 }).lean();
-      await redis.setex(cacheKey, 60, JSON.stringify(posts));
+      if (!posts.length) logger.info('No posts found', { userId: req.params.userId });
+      await redis.setex(cacheKey, 300, JSON.stringify(posts)); // Increased cache duration to 5 minutes
       res.json(posts);
     } catch (error) {
       logger.error('My posts fetch error', { error: error.message, userId: req.params.userId });
@@ -440,7 +451,6 @@ module.exports = (io) => {
   return router;
 };
 
-// Cleanup on server shutdown
 process.on('SIGTERM', async () => {
   logger.info('SIGTERM received, closing Redis connection');
   await redis.quit();
