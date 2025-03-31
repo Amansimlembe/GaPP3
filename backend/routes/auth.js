@@ -43,7 +43,7 @@ const upload = multer({
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // 100 requests per IP
+  max: 100,
   message: { error: 'Too many requests, please try again later.' },
 });
 
@@ -103,8 +103,6 @@ const generateVirtualNumber = (countryCode, userId) => {
   }
 };
 
-
-
 router.post('/register', authLimiter, upload.single('photo'), async (req, res) => {
   try {
     const { error } = registerSchema.validate(req.body);
@@ -163,13 +161,20 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
         }
       }
     }
-  
+
     await user.save();
-    logger.info('User saved with photo', { userId: user._id, photo: user.photo });
     const token = jwt.sign({ id: user._id, email, virtualNumber, role: user.role }, process.env.JWT_SECRET, { expiresIn: '24h' });
 
     logger.info('User registered', { userId: user._id, email });
-    res.status(201).json({ token, userId: user._id, virtualNumber, username, photo: user.photo, role: user.role, privateKey: privateKeyPem });
+    res.status(201).json({
+      token,
+      userId: user._id,
+      virtualNumber,
+      username,
+      photo: user.photo,
+      role: user.role,
+      privateKey: privateKeyPem,
+    });
   } catch (error) {
     logger.error('Register error:', { error: error.message, stack: error.stack, body: req.body });
     if (error.code === 11000) return res.status(400).json({ error: 'Duplicate email, username, or virtual number' });
@@ -177,48 +182,46 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
   }
 });
 
-
-router.post('/login', async (req, res) => {
-  const { email, password } = req.body;
-  if (!email || !password) {
-    logger.info('Login failed: Missing credentials', { email });
-    return res.status(400).json({ error: 'Email and password are required' });
-  }
+router.post('/login', authLimiter, async (req, res) => {
   try {
-    logger.info('Attempting login', { email });
-    const user = await User.findOne({ email }).exec();
-    if (!user) {
-      logger.info('Login failed: User not found', { email });
-      return res.status(401).json({ error: 'Invalid email or password' });
-    }
+    const { error } = loginSchema.validate(req.body);
+    if (error) return res.status(400).json({ error: error.details[0].message });
 
-    logger.info('Comparing password', { userId: user._id });
+    const { email, password } = req.body;
+
+    const user = await User.findOne({ email }).select('+privateKey'); // Include privateKey
+    if (!user) return res.status(401).json({ error: 'Invalid email or password' });
+
     const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
-      logger.info('Login failed: Password mismatch', { email });
-      return res.status(401).json({ error: 'Invalid email or password' });
+    if (!isMatch) return res.status(401).json({ error: 'Invalid email or password' });
+
+    // Validate private key
+    if (!user.privateKey || !user.privateKey.includes('-----BEGIN RSA PRIVATE KEY-----')) {
+      logger.error('Invalid private key in database during login', { userId: user._id, email });
+      return res.status(500).json({ error: 'Server returned invalid private key' });
     }
 
-    const token = jwt.sign({ id: user._id, email, virtualNumber: user.virtualNumber, role: user.role }, process.env.JWT_SECRET, { expiresIn: '7d' });
-    try {
-      await redis.setex(`token:${user._id}`, 7 * 24 * 60 * 60, token);
-      logger.info('Login successful, token cached', { userId: user._id });
-    } catch (redisErr) {
-      logger.error('Redis setex error during login', { error: redisErr.message, stack: redisErr.stack, userId: user._id });
-    }
+    const token = jwt.sign(
+      { id: user._id, email, virtualNumber: user.virtualNumber, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
 
-    logger.info('Login response prepared', { userId: user._id });
+    await redis.setex(`token:${user._id}`, 7 * 24 * 60 * 60, token);
+
+    logger.info('Login successful', { userId: user._id, email });
     res.json({
       token,
       userId: user._id,
       role: user.role,
       username: user.username,
       virtualNumber: user.virtualNumber || '',
-      photo: user.photo || '',
+      photo: user.photo || 'https://placehold.co/40x40',
+      privateKey: user.privateKey, // Return private key on login
     });
-  } catch (err) {
-    logger.error('Login error', { error: err.message, stack: err.stack, email });
-    res.status(500).json({ error: err.message || 'Internal server error' });
+  } catch (error) {
+    logger.error('Login error', { error: error.message, stack: error.stack, email });
+    res.status(500).json({ error: error.message || 'Internal server error' });
   }
 });
 
@@ -228,12 +231,7 @@ router.post('/add_contact', authMiddleware, async (req, res) => {
     if (error) return res.status(400).json({ error: error.details[0].message });
 
     const { userId, virtualNumber } = req.body;
-    logger.info('Adding contact attempt', { userId, virtualNumber, tokenUserId: req.user.id });
-
-    if (userId !== req.user.id) {
-      logger.warn('Unauthorized add contact attempt', { userId, tokenUserId: req.user.id });
-      return res.status(403).json({ error: 'Not authorized' });
-    }
+    if (userId !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
 
     const contact = await User.findOne({ virtualNumber });
     if (!contact) return res.status(404).json({ error: 'Contact not found' });
@@ -244,8 +242,6 @@ router.post('/add_contact', authMiddleware, async (req, res) => {
       user.contacts.push(contact._id);
       await user.save();
       logger.info('Contact saved to MongoDB', { userId, contactId: contact._id });
-    } else {
-      logger.info('Contact already exists', { userId, contactId: contact._id });
     }
 
     const contactData = {
@@ -265,7 +261,6 @@ router.post('/add_contact', authMiddleware, async (req, res) => {
     res.status(500).json({ error: error.message || 'Failed to add contact' });
   }
 });
-
 
 router.post('/update_country', authMiddleware, async (req, res) => {
   try {
@@ -348,28 +343,18 @@ router.post('/update_username', authMiddleware, async (req, res) => {
 
 router.get('/contacts', authMiddleware, async (req, res) => {
   try {
-    logger.info('Fetching contacts', { userId: req.user.id });
     const cacheKey = `contacts:${req.user.id}`;
-    let cachedContacts;
-    try {
-      cachedContacts = await redis.get(cacheKey); // Fixed redis.client.get to redis.get
-    } catch (redisErr) {
-      logger.error('Redis get error in contacts', { error: redisErr.message, stack: redisErr.stack, userId: req.user.id });
-    }
+    const cachedContacts = await redis.get(cacheKey);
     if (cachedContacts) {
       logger.info('Contacts cache hit', { userId: req.user.id });
       return res.json(JSON.parse(cachedContacts));
     }
 
-    logger.info('Querying MongoDB for user', { userId: req.user.id });
     const user = await User.findById(req.user.id).populate('contacts', 'username virtualNumber photo status lastSeen');
-    if (!user) {
-      logger.info('User not found', { userId: req.user.id });
-      return res.status(404).json({ error: 'User not found' });
-    }
+    if (!user) return res.status(404).json({ error: 'User not found' });
 
     const contacts = user.contacts.map((contact) => ({
-      id: contact._id, // Changed userId to id
+      id: contact._id,
       username: contact.username,
       virtualNumber: contact.virtualNumber,
       photo: contact.photo || 'https://placehold.co/40x40',
@@ -377,13 +362,7 @@ router.get('/contacts', authMiddleware, async (req, res) => {
       lastSeen: contact.lastSeen,
     }));
 
-    try {
-      await redis.setex(cacheKey, 300, JSON.stringify(contacts)); // Fixed redis.client.setEx to redis.setex
-      logger.info('Contacts cached', { userId: req.user.id });
-    } catch (redisErr) {
-      logger.error('Redis setex error in contacts', { error: redisErr.message, stack: redisErr.stack, userId: req.user.id });
-    }
-
+    await redis.setex(cacheKey, 300, JSON.stringify(contacts));
     logger.info('Contacts fetched successfully', { userId: req.user.id });
     res.json(contacts);
   } catch (error) {
@@ -403,6 +382,11 @@ router.get('/public_key/:userId', authMiddleware, async (req, res) => {
     const user = await User.findById(req.params.userId).select('publicKey');
     if (!user) return res.status(404).json({ error: 'User not found' });
 
+    if (!user.publicKey || !user.publicKey.includes('-----BEGIN PUBLIC KEY-----')) {
+      logger.error('Invalid public key in database', { userId: req.params.userId });
+      return res.status(500).json({ error: 'Server returned invalid public key' });
+    }
+
     await redis.setex(cacheKey, 3600, user.publicKey);
     logger.info('Public key fetched', { requesterId: req.user.id, targetUserId: req.params.userId });
     res.json({ publicKey: user.publicKey });
@@ -411,6 +395,7 @@ router.get('/public_key/:userId', authMiddleware, async (req, res) => {
     res.status(500).json({ error: error.message || 'Failed to fetch public key' });
   }
 });
+
 router.post('/refresh', authMiddleware, async (req, res) => {
   try {
     if (!req.user.id) {
@@ -418,7 +403,7 @@ router.post('/refresh', authMiddleware, async (req, res) => {
       return res.status(401).json({ error: 'Invalid token: No user ID' });
     }
 
-    const user = await User.findById(req.user.id).select('+privateKey'); // Explicitly select privateKey
+    const user = await User.findById(req.user.id).select('+privateKey');
     if (!user) {
       logger.warn('User not found during refresh', { userId: req.user.id });
       return res.status(404).json({ error: 'User not found' });
@@ -434,6 +419,8 @@ router.post('/refresh', authMiddleware, async (req, res) => {
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
+
+    await redis.setex(`token:${user._id}`, 24 * 60 * 60, newToken);
 
     logger.info('Token refreshed', { userId: user._id });
     res.json({

@@ -9,7 +9,7 @@ import {
 } from 'react-icons/fa';
 import { useDispatch, useSelector } from 'react-redux';
 import { setMessages, addMessage, updateMessageStatus, setSelectedChat, resetState } from '../store';
-import { saveMessages, getMessages, clearOldMessages, deleteMessage, checkIndexes } from '../db'; // Added checkIndexes
+import { saveMessages, getMessages, clearOldMessages, deleteMessage, checkIndexes } from '../db';
 
 const socket = io('https://gapp-6yc3.onrender.com', {
   reconnection: true,
@@ -63,7 +63,14 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   const decryptMessage = useCallback(async (encryptedContent, privateKeyPem, isMedia = false) => {
     try {
       if (!privateKeyPem || !privateKeyPem.includes('-----BEGIN RSA PRIVATE KEY-----')) {
-        throw new Error('Invalid private key');
+        console.error('Invalid private key detected, attempting refresh', { privateKeyPem });
+        const { data } = await axios.post('https://gapp-6yc3.onrender.com/auth/refresh', {}, { headers: { Authorization: `Bearer ${token}` } });
+        localStorage.setItem('privateKey', data.privateKey);
+        localStorage.setItem('token', data.token);
+        privateKeyPem = data.privateKey;
+        if (!privateKeyPem.includes('-----BEGIN RSA PRIVATE KEY-----')) {
+          throw new Error('Invalid private key after refresh');
+        }
       }
       const privateKey = forge.pki.privateKeyFromPem(privateKeyPem);
       const decrypted = privateKey.decrypt(forge.util.decode64(encryptedContent), 'RSA-OAEP', { md: forge.md.sha256.create() });
@@ -72,7 +79,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       console.error('Decryption error:', err.message);
       return '[Decryption Failed]';
     }
-  }, []);
+  }, [token]);
 
   const getPublicKey = useCallback(async (recipientId) => {
     try {
@@ -109,10 +116,25 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   useEffect(() => {
     if (!userId || !token) return;
 
-    socket.emit('join', userId);
-    const keepAlive = setInterval(() => socket.emit('ping', { userId }), 30000);
+    const initialize = async () => {
+      try {
+        let privateKeyPem = localStorage.getItem('privateKey');
+        if (!privateKeyPem || !privateKeyPem.includes('-----BEGIN RSA PRIVATE KEY-----')) {
+          const { data } = await axios.post('https://gapp-6yc3.onrender.com/auth/refresh', {}, { headers: { Authorization: `Bearer ${token}` } });
+          localStorage.setItem('privateKey', data.privateKey);
+          localStorage.setItem('token', data.token);
+        }
+        socket.emit('join', userId);
+        await fetchUsers();
+        if (selectedChat) await fetchMessages(0);
+      } catch (err) {
+        console.error('Initialization error:', err.response?.data || err);
+        handleLogout();
+      }
+    };
+    initialize();
 
-    // Check IndexedDB indexes and clear old messages
+    const keepAlive = setInterval(() => socket.emit('ping', { userId }), 30000);
     clearOldMessages(30).then(() => checkIndexes()).catch((err) => console.error('IndexedDB setup error:', err));
 
     const fetchUsers = async () => {
@@ -122,7 +144,6 @@ const ChatScreen = ({ token, userId, setAuth }) => {
           console.error('Missing token or userId:', { token, userId });
           return;
         }
-        console.log('Fetching contacts with token:', token);
         const { data } = await retryRequest('https://gapp-6yc3.onrender.com/auth/contacts', {
           headers: { Authorization: `Bearer ${token}` },
         });
@@ -137,8 +158,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
             unreadCount: msgData.messages[0]?.recipientId === userId && msgData.messages[0]?.status !== 'read' ? 1 : 0,
           };
         }));
-        // Fetch current user's updated profile
-        const { data: currentUser } = await axios.get('https://gapp-6yc3.onrender.com/auth/refresh', { headers: { Authorization: `Bearer ${token}` } });
+        const { data: currentUser } = await axios.post('https://gapp-6yc3.onrender.com/auth/refresh', { headers: { Authorization: `Bearer ${token}` } });
         setUsers((prev) => {
           const updatedUsers = usersWithData.map((u) => (u.id === userId ? { ...u, photo: currentUser.photo } : u)).sort((a, b) => new Date(b.latestMessage?.createdAt || 0) - new Date(a.latestMessage?.createdAt || 0));
           localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
@@ -147,10 +167,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       } catch (err) {
         setError(`Failed to load contacts: ${err.response?.data?.error || err.message}`);
         console.error('Fetch users error:', err.response?.data || err);
-        if (err.response?.status === 401 || err.response?.status === 404) {
-          console.log('Token or user invalid, logging out');
-          handleLogout();
-        }
+        if (err.response?.status === 401 || err.response?.status === 404) handleLogout();
       }
     };
 
@@ -162,7 +179,13 @@ const ChatScreen = ({ token, userId, setAuth }) => {
           headers: { Authorization: `Bearer ${token}` },
           params: { userId, recipientId: selectedChat, limit: messagesPerPage, skip: pageNum * messagesPerPage },
         });
-        const privateKeyPem = localStorage.getItem('privateKey');
+        let privateKeyPem = localStorage.getItem('privateKey');
+        if (!privateKeyPem || !privateKeyPem.includes('-----BEGIN RSA PRIVATE KEY-----')) {
+          const { data: refreshData } = await axios.post('https://gapp-6yc3.onrender.com/auth/refresh', {}, { headers: { Authorization: `Bearer ${token}` } });
+          localStorage.setItem('privateKey', refreshData.privateKey);
+          localStorage.setItem('token', refreshData.token);
+          privateKeyPem = refreshData.privateKey;
+        }
         const messages = await Promise.all(data.messages.map(async (msg) => {
           if (msg.recipientId === userId && msg.contentType === 'text') {
             msg.content = await decryptMessage(msg.content, privateKeyPem);
@@ -197,7 +220,13 @@ const ChatScreen = ({ token, userId, setAuth }) => {
 
     socket.on('message', async (msg) => {
       const chatId = msg.senderId === userId ? msg.recipientId : msg.senderId;
-      const privateKeyPem = localStorage.getItem('privateKey');
+      let privateKeyPem = localStorage.getItem('privateKey');
+      if (!privateKeyPem || !privateKeyPem.includes('-----BEGIN RSA PRIVATE KEY-----')) {
+        const { data } = await axios.post('https://gapp-6yc3.onrender.com/auth/refresh', {}, { headers: { Authorization: `Bearer ${token}` } });
+        localStorage.setItem('privateKey', data.privateKey);
+        localStorage.setItem('token', data.token);
+        privateKeyPem = data.privateKey;
+      }
       if (msg.recipientId === userId && msg.contentType === 'text') {
         msg.content = await decryptMessage(msg.content, privateKeyPem);
       }
@@ -265,17 +294,16 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     };
   }, [token, userId, selectedChat, page, dispatch, getPublicKey, decryptMessage]);
 
-
   const sendMessage = async () => {
     if (!selectedChat || (!message && !file)) return;
     socket.emit('stopTyping', { userId, recipientId: selectedChat });
     setTyping(false);
-  
+
     const tempId = Date.now().toString();
     const tempMsg = { _id: tempId, senderId: userId, recipientId: selectedChat, contentType, content: file ? URL.createObjectURL(file) : message, caption, status: 'sending', replyTo: replyTo?._id, createdAt: new Date() };
     dispatch(addMessage({ recipientId: selectedChat, message: tempMsg }));
     if (isAtBottomRef.current) chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight });
-  
+
     try {
       const formData = new FormData();
       formData.append('senderId', userId);
@@ -285,11 +313,11 @@ const ChatScreen = ({ token, userId, setAuth }) => {
         const recipientPublicKey = await getPublicKey(selectedChat);
         formData.append('content', await encryptMessage(message, recipientPublicKey));
       } else if (file) {
-        formData.append('content', file); // Server will upload this to Cloudinary
+        formData.append('content', file);
       }
       if (caption) formData.append('caption', caption);
       if (replyTo) formData.append('replyTo', replyTo._id);
-  
+
       const { data } = await axios.post('https://gapp-6yc3.onrender.com/social/message', formData, {
         headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
       });
@@ -359,11 +387,9 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     }
   };
 
-
   const addContact = async () => {
     if (!newContactNumber) return setError('Virtual number required');
     try {
-      console.log('Adding contact with:', { userId, virtualNumber: newContactNumber, token });
       const { data } = await axios.post('https://gapp-6yc3.onrender.com/auth/add_contact', { userId, virtualNumber: newContactNumber }, { headers: { Authorization: `Bearer ${token}` } });
       setUsers((prev) => {
         const updatedUsers = prev.some((u) => u.id === data.id) ? prev : [...prev, data];
@@ -407,6 +433,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     setShowMenu(false);
   };
 
+  
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex h-screen bg-gray-100 dark:bg-gray-900">
       <div className={`w-full md:w-1/3 bg-white dark:bg-gray-800 border-r ${isSmallDevice && selectedChat ? 'hidden' : 'block'} flex flex-col`}>

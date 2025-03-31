@@ -21,15 +21,15 @@ const logger = winston.createLogger({
   ],
 });
 
-// Rate limiters (increased max to reduce 429 errors)
 const socialLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 500, // Increased from 200
+  max: 500,
   message: { error: 'Too many requests, please try again later.' },
 });
+
 const messageLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 200, // Increased from 100
+  max: 200,
   message: { error: 'Too many messages sent, please try again later.' },
 });
 
@@ -43,11 +43,36 @@ const upload = multer({
   },
 });
 
-const postSchema = Joi.object({ contentType: Joi.string().valid('image', 'video', 'audio', 'raw', 'text').required(), caption: Joi.string().max(500).allow('').optional() });
-const messageSchema = Joi.object({ senderId: Joi.string().required(), recipientId: Joi.string().required(), contentType: Joi.string().valid('text', 'image', 'video', 'audio', 'document').required(), caption: Joi.string().max(500).allow('').optional(), replyTo: Joi.string().optional() });
-const messageStatusSchema = Joi.object({ messageId: Joi.string().required(), status: Joi.string().valid('sent', 'delivered', 'read').required(), recipientId: Joi.string().required() });
-const likeSchema = Joi.object({ postId: Joi.string().required(), userId: Joi.string().required() });
-const commentSchema = Joi.object({ postId: Joi.string().required(), comment: Joi.string().max(500).required(), userId: Joi.string().required() });
+const postSchema = Joi.object({
+  contentType: Joi.string().valid('image', 'video', 'audio', 'raw', 'text').required(),
+  caption: Joi.string().max(500).allow('').optional(),
+});
+
+const messageSchema = Joi.object({
+  senderId: Joi.string().required(),
+  recipientId: Joi.string().required(),
+  contentType: Joi.string().valid('text', 'image', 'video', 'audio', 'document').required(),
+  content: Joi.string().when('contentType', { is: 'text', then: Joi.required(), otherwise: Joi.optional() }),
+  caption: Joi.string().max(500).allow('').optional(),
+  replyTo: Joi.string().optional(),
+});
+
+const messageStatusSchema = Joi.object({
+  messageId: Joi.string().required(),
+  status: Joi.string().valid('sent', 'delivered', 'read').required(),
+  recipientId: Joi.string().required(),
+});
+
+const likeSchema = Joi.object({
+  postId: Joi.string().required(),
+  userId: Joi.string().required(),
+});
+
+const commentSchema = Joi.object({
+  postId: Joi.string().required(),
+  comment: Joi.string().max(500).required(),
+  userId: Joi.string().required(),
+});
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -96,12 +121,11 @@ module.exports = (io) => {
       }
     });
 
-    // Debounce ping to reduce online status spam
     let lastPing = {};
     socket.on('ping', async ({ userId }) => {
       try {
         const now = Date.now();
-        if (lastPing[userId] && now - lastPing[userId] < 5000) return; // 5-second debounce
+        if (lastPing[userId] && now - lastPing[userId] < 5000) return;
         lastPing[userId] = now;
 
         const user = await User.findById(userId);
@@ -204,7 +228,7 @@ module.exports = (io) => {
       }
       const posts = await Post.find({ userId: req.params.userId }).sort({ createdAt: -1 }).lean();
       if (!posts.length) logger.info('No posts found', { userId: req.params.userId });
-      await redis.setex(cacheKey, 300, JSON.stringify(posts)); // Increased cache duration to 5 minutes
+      await redis.setex(cacheKey, 300, JSON.stringify(posts));
       res.json(posts);
     } catch (error) {
       logger.error('My posts fetch error', { error: error.message, userId: req.params.userId });
@@ -332,16 +356,6 @@ module.exports = (io) => {
     }
   });
 
-
-  const messageSchema = Joi.object({
-    senderId: Joi.string().required(),
-    recipientId: Joi.string().required(),
-    contentType: Joi.string().valid('text', 'image', 'video', 'audio', 'document').required(),
-    content: Joi.string().when('contentType', { is: 'text', then: Joi.required(), otherwise: Joi.optional() }), // Allow content for text
-    caption: Joi.string().max(500).allow('').optional(),
-    replyTo: Joi.string().optional(),
-  });
-  
   router.post('/message', authMiddleware, messageLimiter, upload.single('content'), async (req, res) => {
     try {
       const { error } = messageSchema.validate(req.body);
@@ -349,14 +363,14 @@ module.exports = (io) => {
         logger.warn('Message validation failed', { error: error.details[0].message, body: req.body });
         return res.status(400).json({ error: error.details[0].message });
       }
-  
+
       const { senderId, recipientId, contentType, caption, replyTo } = req.body;
       if (senderId !== req.user.id) return res.status(403).json({ error: 'Unauthorized' });
-  
+
       const sender = await User.findById(senderId);
       const recipient = await User.findById(recipientId);
       if (!sender || !recipient) return res.status(404).json({ error: 'Sender or recipient not found' });
-  
+
       let contentUrl = req.body.content;
       if (['image', 'video', 'audio', 'document'].includes(contentType)) {
         if (!req.file) {
@@ -381,16 +395,30 @@ module.exports = (io) => {
         logger.warn('No content provided for text message', { senderId });
         return res.status(400).json({ error: 'Text content is required' });
       }
-  
-      const message = new Message({ senderId, recipientId, contentType, content: contentUrl, caption, status: 'sent', replyTo: replyTo || undefined });
+
+      const message = new Message({
+        senderId,
+        recipientId,
+        contentType,
+        content: contentUrl,
+        caption,
+        status: 'sent',
+        replyTo: replyTo || undefined,
+      });
       await message.save();
-  
-      const messageData = { ...message.toObject(), senderVirtualNumber: sender.virtualNumber, senderUsername: sender.username, senderPhoto: sender.photo };
-  
+
+      const messageData = {
+        ...message.toObject(),
+        senderVirtualNumber: sender.virtualNumber,
+        senderUsername: sender.username,
+        senderPhoto: sender.photo,
+      };
+
       const recipientOnline = io.sockets.adapter.rooms.has(recipientId);
       if (recipientOnline) io.to(recipientId).emit('message', messageData);
       else await redis.lpush(`undelivered:${recipientId}`, JSON.stringify(messageData));
       io.to(senderId).emit('message', messageData);
+
       logger.info('Message sent', { messageId: message._id, senderId, recipientId });
       res.json(message.toObject());
     } catch (error) {
@@ -412,8 +440,12 @@ module.exports = (io) => {
         return res.json(JSON.parse(cachedMessages));
       }
 
-      const total = await Message.countDocuments({ $or: [{ senderId: userId, recipientId }, { senderId: recipientId, recipientId: userId }] });
-      const messages = await Message.find({ $or: [{ senderId: userId, recipientId }, { senderId: recipientId, recipientId: userId }] })
+      const total = await Message.countDocuments({
+        $or: [{ senderId: userId, recipientId }, { senderId: recipientId, recipientId: userId }],
+      });
+      const messages = await Message.find({
+        $or: [{ senderId: userId, recipientId }, { senderId: recipientId, recipientId: userId }],
+      })
         .sort({ createdAt: -1 })
         .skip(parseInt(skip))
         .limit(parseInt(limit))
