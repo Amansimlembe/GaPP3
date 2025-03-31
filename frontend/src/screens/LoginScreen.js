@@ -46,32 +46,39 @@ const LoginScreen = ({ setAuth }) => {
     return true;
   };
 
+  const retryRequest = async (data, config, retries = 3, delay = 1000) => {
+    for (let i = 0; i < retries; i++) {
+      try {
+        const { data: response } = await axios.post(
+          `https://gapp-6yc3.onrender.com/auth/${isLogin ? 'login' : 'register'}`,
+          data,
+          config
+        );
+        if (!isLogin && (!response.privateKey || !response.privateKey.includes('-----BEGIN RSA PRIVATE KEY-----'))) {
+          throw new Error('Received invalid private key from server');
+        }
+        return response;
+      } catch (err) {
+        console.log(`Attempt ${i + 1} failed:`, {
+          status: err.response?.status,
+          data: err.response?.data,
+          message: err.message,
+        });
+        if ((err.response?.status === 429 || err.response?.status >= 500) && i < retries - 1) {
+          await new Promise((resolve) => setTimeout(resolve, delay * (i + 1)));
+          continue;
+        }
+        throw err;
+      }
+    }
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
     if (!validateForm()) return;
 
     setLoading(true);
-    const url = `https://gapp-6yc3.onrender.com/auth/${isLogin ? 'login' : 'register'}`;
-
-    const retryRequest = async (data, config, retries = 3, delay = 1000) => {
-      for (let i = 0; i < retries; i++) {
-        try {
-          const { data: response } = await axios.post(url, data, config);
-          if (!response.privateKey || !response.privateKey.includes('-----BEGIN RSA PRIVATE KEY-----')) {
-            throw new Error('Received invalid private key from server');
-          }
-          return response;
-        } catch (err) {
-          if (err.response?.status === 429 && i < retries - 1) {
-            await new Promise((resolve) => setTimeout(resolve, delay * (i + 1))); // Exponential backoff
-            continue;
-          }
-          throw err;
-        }
-      }
-    };
-
     try {
       const data = isLogin
         ? { email, password }
@@ -86,19 +93,23 @@ const LoginScreen = ({ setAuth }) => {
             return formData;
           })();
 
-      const config = !isLogin ? { headers: { 'Content-Type': 'multipart/form-data' } } : {};
+      const config = isLogin
+        ? { headers: { 'Content-Type': 'application/json' } }
+        : { headers: { 'Content-Type': 'multipart/form-data' } };
+
       const response = await retryRequest(data, config);
 
-      setAuth(response.token, response.userId, response.role, response.photo, response.virtualNumber, response.username);
+      // Align with ProfileScreen.js setAuth parameters: token, userId, username, virtualNumber, photo
+      setAuth(response.token, response.userId, response.username, response.virtualNumber, response.photo, response.role);
       localStorage.setItem('token', response.token);
       localStorage.setItem('userId', response.userId);
       localStorage.setItem('role', response.role);
       localStorage.setItem('photo', response.photo || 'https://placehold.co/40x40');
-      localStorage.setItem('virtualNumber', response.virtualNumber);
+      localStorage.setItem('virtualNumber', response.virtualNumber || '');
       localStorage.setItem('username', response.username);
-      localStorage.setItem('privateKey', response.privateKey);
+      if (response.privateKey) localStorage.setItem('privateKey', response.privateKey);
     } catch (error) {
-      console.error(`${isLogin ? 'Login' : 'Register'} error:`, error.message);
+      console.error(`${isLogin ? 'Login' : 'Register'} error:`, error.response?.data || error.message);
       setError(error.response?.data?.error || error.message || `${isLogin ? 'Login' : 'Registration'} failed`);
     } finally {
       setLoading(false);

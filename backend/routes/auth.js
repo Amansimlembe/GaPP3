@@ -160,39 +160,49 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
   }
 });
 
-router.post('/login', authLimiter, async (req, res) => {
+
+router.post('/login', async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) {
+    logger.info('Login failed: Missing credentials', { email });
+    return res.status(400).json({ error: 'Email and password are required' });
+  }
   try {
-    const { error } = loginSchema.validate(req.body);
-    if (error) return res.status(400).json({ error: error.details[0].message });
-
-    const { email, password } = req.body;
-    const user = await User.findOne({ email });
-    if (!user || !(await bcrypt.compare(password, user.password))) return res.status(401).json({ error: 'Invalid credentials' });
-
-    if (!user.privateKey || !user.privateKey.includes('-----BEGIN RSA PRIVATE KEY-----')) {
-      logger.error('Invalid private key in database', { userId: user._id });
-      return res.status(500).json({ error: 'Server returned invalid private key' });
+    logger.info('Attempting login', { email });
+    const user = await User.findOne({ email }).exec();
+    if (!user) {
+      logger.info('Login failed: User not found', { email });
+      return res.status(401).json({ error: 'Invalid email or password' });
     }
 
-    const token = jwt.sign({ id: user._id, email, virtualNumber: user.virtualNumber, role: user.role }, process.env.JWT_SECRET, { expiresIn: '24h' });
+    logger.info('Comparing password', { userId: user._id });
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) {
+      logger.info('Login failed: Password mismatch', { email });
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
 
-    user.status = 'online';
-    user.lastSeen = new Date();
-    await user.save();
+    const token = jwt.sign({ userId: user._id, role: user.role }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    try {
+      await redis.client.setEx(`token:${user._id}`, 7 * 24 * 60 * 60, token); // Use redis.client
+      logger.info('Login successful, token cached', { userId: user._id });
+    } catch (redisErr) {
+      logger.error('Redis setex error during login', { error: redisErr.message, stack: redisErr.stack, userId: user._id });
+      // Continue despite Redis failure
+    }
 
-    logger.info('User logged in', { userId: user._id, email });
+    logger.info('Login response prepared', { userId: user._id });
     res.json({
       token,
       userId: user._id,
-      virtualNumber: user.virtualNumber,
-      username: user.username,
-      photo: user.photo || 'https://placehold.co/40x40',
       role: user.role,
-      privateKey: user.privateKey,
+      username: user.username,
+      virtualNumber: user.virtualNumber || '',
+      photo: user.photo || '',
     });
-  } catch (error) {
-    logger.error('Login error:', { error: error.message });
-    res.status(500).json({ error: 'Failed to login' });
+  } catch (err) {
+    logger.error('Login error', { error: err.message, stack: err.stack, email });
+    res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
 
