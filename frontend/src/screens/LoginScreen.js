@@ -77,7 +77,7 @@ const LoginScreen = ({ setAuth }) => {
     e.preventDefault();
     setError('');
     if (!validateForm()) return;
-
+  
     setLoading(true);
     try {
       const data = isLogin
@@ -92,14 +92,13 @@ const LoginScreen = ({ setAuth }) => {
             if (photo) formData.append('photo', photo);
             return formData;
           })();
-
+  
       const config = isLogin
         ? { headers: { 'Content-Type': 'application/json' } }
         : { headers: { 'Content-Type': 'multipart/form-data' } };
-
+  
       const response = await retryRequest(data, config);
-
-      // Align with ProfileScreen.js setAuth parameters: token, userId, username, virtualNumber, photo
+  
       setAuth(response.token, response.userId, response.username, response.virtualNumber, response.photo, response.role);
       localStorage.setItem('token', response.token);
       localStorage.setItem('userId', response.userId);
@@ -111,6 +110,9 @@ const LoginScreen = ({ setAuth }) => {
     } catch (error) {
       console.error(`${isLogin ? 'Login' : 'Register'} error:`, error.response?.data || error.message);
       setError(error.response?.data?.error || error.message || `${isLogin ? 'Login' : 'Registration'} failed`);
+      if (error.response?.status === 500 && error.response?.data?.error === 'Failed to upload photo') {
+        setError('Photo upload failed, but registration may have succeeded. Try logging in.');
+      }
     } finally {
       setLoading(false);
     }

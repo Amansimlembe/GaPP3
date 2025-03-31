@@ -7,7 +7,7 @@ const cloudinary = require('cloudinary').v2;
 const { getCountryCallingCode, parsePhoneNumberFromString } = require('libphonenumber-js');
 const Joi = require('joi');
 const winston = require('winston');
-const rateLimit = require('express-rate-limit'); // Add this
+const rateLimit = require('express-rate-limit');
 const User = require('../models/User');
 const redis = require('../redis');
 
@@ -41,7 +41,6 @@ const upload = multer({
   },
 });
 
-// Rate limiting for auth routes
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 100, // 100 requests per IP
@@ -69,7 +68,7 @@ const authMiddleware = async (req, res, next) => {
     req.user = decoded;
     next();
   } catch (error) {
-    logger.error('Auth middleware error:', { error: error.message });
+    logger.error('Auth middleware error:', { error: error.message, stack: error.stack });
     res.status(401).json({ error: 'Invalid token' });
   }
 };
@@ -104,6 +103,8 @@ const generateVirtualNumber = (countryCode, userId) => {
   }
 };
 
+
+
 router.post('/register', authLimiter, upload.single('photo'), async (req, res) => {
   try {
     const { error } = registerSchema.validate(req.body);
@@ -124,7 +125,13 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
-    const virtualNumber = generateVirtualNumber(country, forge.util.bytesToHex(forge.random.getBytesSync(16)));
+    let virtualNumber;
+    try {
+      virtualNumber = generateVirtualNumber(country, forge.util.bytesToHex(forge.random.getBytesSync(16)));
+    } catch (err) {
+      logger.error('Virtual number generation failed', { error: err.message, country });
+      return res.status(500).json({ error: 'Failed to generate virtual number' });
+    }
 
     const user = new User({
       email,
@@ -139,13 +146,22 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
     });
 
     if (req.file) {
-      const result = await new Promise((resolve, reject) => {
-        cloudinary.uploader.upload_stream(
-          { resource_type: 'image', folder: 'gapp_profile_photos' },
-          (error, result) => (error ? reject(error) : resolve(result))
-        ).end(req.file.buffer);
-      });
-      user.photo = result.secure_url;
+      if (!process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET || !process.env.CLOUDINARY_CLOUD_NAME) {
+        logger.warn('Cloudinary config missing, skipping photo upload', { email });
+      } else {
+        try {
+          const result = await new Promise((resolve, reject) => {
+            cloudinary.uploader.upload_stream(
+              { resource_type: 'image', folder: 'gapp_profile_photos' },
+              (error, result) => (error ? reject(error) : resolve(result))
+            ).end(req.file.buffer);
+          });
+          user.photo = result.secure_url;
+        } catch (uploadErr) {
+          logger.error('Cloudinary upload failed', { error: uploadErr.message, email });
+          // Skip photo upload instead of failing registration
+        }
+      }
     }
 
     await user.save();
@@ -154,9 +170,9 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
     logger.info('User registered', { userId: user._id, email });
     res.status(201).json({ token, userId: user._id, virtualNumber, username, photo: user.photo, role: user.role, privateKey: privateKeyPem });
   } catch (error) {
-    logger.error('Register error:', { error: error.message });
+    logger.error('Register error:', { error: error.message, stack: error.stack, body: req.body });
     if (error.code === 11000) return res.status(400).json({ error: 'Duplicate email, username, or virtual number' });
-    res.status(500).json({ error: 'Failed to register' });
+    res.status(500).json({ error: error.message || 'Failed to register' });
   }
 });
 
@@ -182,13 +198,12 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
 
-    const token = jwt.sign({ userId: user._id, role: user.role }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign({ id: user._id, email, virtualNumber: user.virtualNumber, role: user.role }, process.env.JWT_SECRET, { expiresIn: '7d' });
     try {
-      await redis.client.setEx(`token:${user._id}`, 7 * 24 * 60 * 60, token); // Use redis.client
+      await redis.setex(`token:${user._id}`, 7 * 24 * 60 * 60, token);
       logger.info('Login successful, token cached', { userId: user._id });
     } catch (redisErr) {
       logger.error('Redis setex error during login', { error: redisErr.message, stack: redisErr.stack, userId: user._id });
-      // Continue despite Redis failure
     }
 
     logger.info('Login response prepared', { userId: user._id });
@@ -212,7 +227,12 @@ router.post('/add_contact', authMiddleware, async (req, res) => {
     if (error) return res.status(400).json({ error: error.details[0].message });
 
     const { userId, virtualNumber } = req.body;
-    if (userId !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
+    logger.info('Adding contact attempt', { userId, virtualNumber, tokenUserId: req.user.id });
+
+    if (userId !== req.user.id) {
+      logger.warn('Unauthorized add contact attempt', { userId, tokenUserId: req.user.id });
+      return res.status(403).json({ error: 'Not authorized' });
+    }
 
     const contact = await User.findOne({ virtualNumber });
     if (!contact) return res.status(404).json({ error: 'Contact not found' });
@@ -225,7 +245,7 @@ router.post('/add_contact', authMiddleware, async (req, res) => {
     }
 
     const contactData = {
-      userId: contact._id,
+      id: contact._id,
       virtualNumber: contact.virtualNumber,
       username: contact.username,
       photo: contact.photo || 'https://placehold.co/40x40',
@@ -237,11 +257,10 @@ router.post('/add_contact', authMiddleware, async (req, res) => {
     req.app.get('io').to(userId).emit('newContact', contactData);
     res.json(contactData);
   } catch (error) {
-    logger.error('Add contact error:', { error: error.message });
-    res.status(500).json({ error: 'Failed to add contact' });
+    logger.error('Add contact error:', { error: error.message, stack: error.stack, body: req.body });
+    res.status(500).json({ error: error.message || 'Failed to add contact' });
   }
 });
-
 router.post('/update_country', authMiddleware, async (req, res) => {
   try {
     const updateCountrySchema = Joi.object({
@@ -264,8 +283,8 @@ router.post('/update_country', authMiddleware, async (req, res) => {
     logger.info('Country updated', { userId, country });
     res.json({ virtualNumber: user.virtualNumber });
   } catch (error) {
-    logger.error('Update country error:', { error: error.message });
-    res.status(500).json({ error: 'Failed to update country' });
+    logger.error('Update country error:', { error: error.message, stack: error.stack });
+    res.status(500).json({ error: error.message || 'Failed to update country' });
   }
 });
 
@@ -289,8 +308,8 @@ router.post('/update_photo', authMiddleware, upload.single('photo'), async (req,
     logger.info('Photo updated', { userId });
     res.json({ photo: user.photo });
   } catch (error) {
-    logger.error('Update photo error:', { error: error.message });
-    res.status(500).json({ error: 'Failed to update photo' });
+    logger.error('Update photo error:', { error: error.message, stack: error.stack });
+    res.status(500).json({ error: error.message || 'Failed to update photo' });
   }
 });
 
@@ -316,22 +335,35 @@ router.post('/update_username', authMiddleware, async (req, res) => {
     logger.info('Username updated', { userId, username });
     res.json({ username: user.username });
   } catch (error) {
-    logger.error('Update username error:', { error: error.message });
-    res.status(500).json({ error: 'Failed to update username' });
+    logger.error('Update username error:', { error: error.message, stack: error.stack });
+    res.status(500).json({ error: error.message || 'Failed to update username' });
   }
 });
 
 router.get('/contacts', authMiddleware, async (req, res) => {
   try {
+    logger.info('Fetching contacts', { userId: req.user.id });
     const cacheKey = `contacts:${req.user.id}`;
-    const cachedContacts = await redis.get(cacheKey);
+    let cachedContacts;
+    try {
+      cachedContacts = await redis.get(cacheKey); // Fixed redis.client.get to redis.get
+    } catch (redisErr) {
+      logger.error('Redis get error in contacts', { error: redisErr.message, stack: redisErr.stack, userId: req.user.id });
+    }
     if (cachedContacts) {
+      logger.info('Contacts cache hit', { userId: req.user.id });
       return res.json(JSON.parse(cachedContacts));
     }
 
+    logger.info('Querying MongoDB for user', { userId: req.user.id });
     const user = await User.findById(req.user.id).populate('contacts', 'username virtualNumber photo status lastSeen');
+    if (!user) {
+      logger.info('User not found', { userId: req.user.id });
+      return res.status(404).json({ error: 'User not found' });
+    }
+
     const contacts = user.contacts.map((contact) => ({
-      id: contact._id,
+      id: contact._id, // Changed userId to id
       username: contact.username,
       virtualNumber: contact.virtualNumber,
       photo: contact.photo || 'https://placehold.co/40x40',
@@ -339,12 +371,18 @@ router.get('/contacts', authMiddleware, async (req, res) => {
       lastSeen: contact.lastSeen,
     }));
 
-    await redis.setex(cacheKey, 300, JSON.stringify(contacts));
-    logger.info('Contacts fetched', { userId: req.user.id });
+    try {
+      await redis.setex(cacheKey, 300, JSON.stringify(contacts)); // Fixed redis.client.setEx to redis.setex
+      logger.info('Contacts cached', { userId: req.user.id });
+    } catch (redisErr) {
+      logger.error('Redis setex error in contacts', { error: redisErr.message, stack: redisErr.stack, userId: req.user.id });
+    }
+
+    logger.info('Contacts fetched successfully', { userId: req.user.id });
     res.json(contacts);
   } catch (error) {
-    logger.error('Fetch contacts error:', { error: error.message });
-    res.status(500).json({ error: 'Failed to fetch contacts' });
+    logger.error('Fetch contacts error', { error: error.message, stack: error.stack, userId: req.user.id });
+    res.status(500).json({ error: error.message || 'Failed to fetch contacts' });
   }
 });
 
@@ -363,8 +401,8 @@ router.get('/public_key/:userId', authMiddleware, async (req, res) => {
     logger.info('Public key fetched', { requesterId: req.user.id, targetUserId: req.params.userId });
     res.json({ publicKey: user.publicKey });
   } catch (error) {
-    logger.error('Fetch public key error:', { error: error.message });
-    res.status(500).json({ error: 'Failed to fetch public key' });
+    logger.error('Fetch public key error:', { error: error.message, stack: error.stack });
+    res.status(500).json({ error: error.message || 'Failed to fetch public key' });
   }
 });
 
@@ -395,8 +433,8 @@ router.post('/refresh', authMiddleware, async (req, res) => {
       privateKey: user.privateKey,
     });
   } catch (error) {
-    logger.error('Refresh token error:', { error: error.message });
-    res.status(500).json({ error: 'Failed to refresh token' });
+    logger.error('Refresh token error:', { error: error.message, stack: error.stack });
+    res.status(500).json({ error: error.message || 'Failed to refresh token' });
   }
 });
 

@@ -9,7 +9,7 @@ import {
 } from 'react-icons/fa';
 import { useDispatch, useSelector } from 'react-redux';
 import { setMessages, addMessage, updateMessageStatus, setSelectedChat, resetState } from '../store';
-import { saveMessages, getMessages, clearOldMessages, deleteMessage } from '../db';
+import { saveMessages, getMessages, clearOldMessages, deleteMessage, checkIndexes } from '../db'; // Added checkIndexes
 
 const socket = io('https://gapp-6yc3.onrender.com', {
   reconnection: true,
@@ -75,10 +75,15 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   }, []);
 
   const getPublicKey = useCallback(async (recipientId) => {
-    const { data } = await axios.get(`https://gapp-6yc3.onrender.com/auth/public_key/${recipientId}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    return data.publicKey;
+    try {
+      const { data } = await axios.get(`https://gapp-6yc3.onrender.com/auth/public_key/${recipientId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      return data.publicKey;
+    } catch (err) {
+      console.error('Get public key error:', err.response?.data || err);
+      throw err;
+    }
   }, [token]);
 
   const formatChatListDate = (date) => new Date(date).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
@@ -93,7 +98,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
         return response;
       } catch (err) {
         if (err.response?.status === 429 && i < retries - 1) {
-          await new Promise((resolve) => setTimeout(resolve, delay * (i + 1))); // Exponential backoff
+          await new Promise((resolve) => setTimeout(resolve, delay * (i + 1)));
           continue;
         }
         throw err;
@@ -106,10 +111,18 @@ const ChatScreen = ({ token, userId, setAuth }) => {
 
     socket.emit('join', userId);
     const keepAlive = setInterval(() => socket.emit('ping', { userId }), 30000);
-    clearOldMessages(30);
+
+    // Check IndexedDB indexes and clear old messages
+    clearOldMessages(30).then(() => checkIndexes()).catch((err) => console.error('IndexedDB setup error:', err));
 
     const fetchUsers = async () => {
       try {
+        if (!token || !userId) {
+          setError('Missing token or userId');
+          console.error('Missing token or userId:', { token, userId });
+          return;
+        }
+        console.log('Fetching contacts with token:', token);
         const { data } = await retryRequest('https://gapp-6yc3.onrender.com/auth/contacts', {
           headers: { Authorization: `Bearer ${token}` },
         });
@@ -127,11 +140,14 @@ const ChatScreen = ({ token, userId, setAuth }) => {
         setUsers(usersWithData.sort((a, b) => new Date(b.latestMessage?.createdAt || 0) - new Date(a.latestMessage?.createdAt || 0)));
         localStorage.setItem('cachedUsers', JSON.stringify(usersWithData));
       } catch (err) {
-        setError(`Failed to load contacts: ${err.message}`);
-        console.error('Fetch users error:', err);
+        setError(`Failed to load contacts: ${err.response?.data?.error || err.message}`);
+        console.error('Fetch users error:', err.response?.data || err);
+        if (err.response?.status === 401 || err.response?.status === 404) {
+          console.log('Token or user invalid, logging out');
+          handleLogout();
+        }
       }
     };
-    fetchUsers();
 
     const fetchMessages = async (pageNum = 0, initial = true) => {
       if (!selectedChat || loading || !hasMore) return;
@@ -158,8 +174,8 @@ const ChatScreen = ({ token, userId, setAuth }) => {
         }
         await saveMessages(messages);
       } catch (err) {
-        setError(`Failed to load messages: ${err.message}`);
-        console.error('Fetch messages error:', err);
+        setError(`Failed to load messages: ${err.response?.data?.error || err.message}`);
+        console.error('Fetch messages error:', err.response?.data || err);
       } finally {
         setLoading(false);
       }
@@ -260,7 +276,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       if (contentType === 'text' && !file) {
         encryptedContent = await encryptMessage(message, recipientPublicKey);
       } else if (file) {
-        encryptedContent = file.name; // Placeholder; actual content is uploaded to Cloudinary
+        encryptedContent = file.name; // Placeholder; actual content uploaded to Cloudinary
       }
 
       const formData = new FormData();
@@ -268,7 +284,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       formData.append('recipientId', selectedChat);
       formData.append('contentType', contentType);
       formData.append('content', encryptedContent);
-      if (file) formData.append('content', file); // Cloudinary handles this
+      if (file) formData.append('content', file);
       if (caption) formData.append('caption', caption);
       if (replyTo) formData.append('replyTo', replyTo._id);
 
@@ -279,8 +295,8 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       dispatch(addMessage({ recipientId: selectedChat, message: data }));
       await saveMessages([data]);
     } catch (err) {
-      setError(`Send failed: ${err.message}`);
-      console.error('Send message error:', err);
+      setError(`Send failed: ${err.response?.data?.error || err.message}`);
+      console.error('Send message error:', err.response?.data || err);
       dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: tempId, status: 'failed' }));
     } finally {
       setMessage('');
@@ -314,8 +330,8 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       dispatch(setMessages({ recipientId: selectedChat, messages: (chats[selectedChat] || []).filter((m) => m._id !== showMessageMenu) }));
       setShowDeleteConfirm(false);
     } catch (err) {
-      setError(`Failed to delete message: ${err.message}`);
-      console.error('Delete message error:', err);
+      setError(`Failed to delete message: ${err.response?.data?.error || err.message}`);
+      console.error('Delete message error:', err.response?.data || err);
     } finally {
       setShowMessageMenu(null);
     }
@@ -336,21 +352,24 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       if (msg.caption) formData.append('caption', msg.caption);
       await axios.post('https://gapp-6yc3.onrender.com/social/message', formData, { headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` } });
     } catch (err) {
-      setError(`Failed to forward message: ${err.message}`);
-      console.error('Forward message error:', err);
+      setError(`Failed to forward message: ${err.response?.data?.error || err.message}`);
+      console.error('Forward message error:', err.response?.data || err);
     }
   };
 
   const addContact = async () => {
     if (!newContactNumber) return setError('Virtual number required');
     try {
+      console.log('Adding contact with:', { userId, virtualNumber: newContactNumber, token }); // Debug log
       const { data } = await axios.post('https://gapp-6yc3.onrender.com/auth/add_contact', { userId, virtualNumber: newContactNumber }, { headers: { Authorization: `Bearer ${token}` } });
       setUsers((prev) => [...prev, data]);
       setNewContactNumber('');
       setMenuTab('');
+      setError(''); // Clear error on success
     } catch (err) {
-      setError(`Failed to add contact: ${err.message}`);
-      console.error('Add contact error:', err);
+      const errMsg = err.response?.data?.error || err.message || 'Failed to add contact';
+      setError(errMsg);
+      console.error('Add contact error:', err.response?.data || err);
     }
   };
 
