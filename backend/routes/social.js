@@ -105,12 +105,15 @@ module.exports = (io) => {
         logger.error('Join event error', { error: error.message, userId });
       }
     });
-
     socket.on('leave', async (userId) => {
       try {
+        if (!userId || typeof userId !== 'string' || userId.trim() === '') {
+          logger.warn('Invalid userId on leave event', { userId });
+          return;
+        }
         const user = await User.findById(userId);
         if (!user) return logger.warn('User not found on leave', { userId });
-
+    
         user.status = 'offline';
         user.lastSeen = new Date();
         await user.save();
@@ -356,6 +359,7 @@ module.exports = (io) => {
     }
   });
 
+
   router.post('/message', authMiddleware, messageLimiter, upload.single('content'), async (req, res) => {
     try {
       const { error } = messageSchema.validate(req.body);
@@ -363,39 +367,28 @@ module.exports = (io) => {
         logger.warn('Message validation failed', { error: error.details[0].message, body: req.body });
         return res.status(400).json({ error: error.details[0].message });
       }
-
+  
       const { senderId, recipientId, contentType, caption, replyTo } = req.body;
       if (senderId !== req.user.id) return res.status(403).json({ error: 'Unauthorized' });
-
+  
       const sender = await User.findById(senderId);
       const recipient = await User.findById(recipientId);
       if (!sender || !recipient) return res.status(404).json({ error: 'Sender or recipient not found' });
-
+  
       let contentUrl = req.body.content;
+      let originalFilename = req.body.originalFilename;
+  
       if (['image', 'video', 'audio', 'document'].includes(contentType)) {
-        if (!req.file) {
-          logger.warn('No file provided for media message', { senderId, contentType });
-          return res.status(400).json({ error: 'File required for media message' });
+        if (!contentUrl) {
+          logger.warn('No encrypted content provided for media message', { senderId, contentType });
+          return res.status(400).json({ error: 'Encrypted content required for media message' });
         }
-        const resourceType = { image: 'image', video: 'video', audio: 'video', document: 'raw' }[contentType];
-        try {
-          const result = await new Promise((resolve, reject) => {
-            cloudinary.uploader.upload_stream(
-              { resource_type: resourceType, folder: `gapp_chat_${contentType}s`, public_id: `${contentType}_${senderId}_${Date.now()}` },
-              (error, result) => error ? reject(error) : resolve(result)
-            ).end(req.file.buffer);
-          });
-          contentUrl = result.secure_url;
-          logger.info('Media uploaded to Cloudinary', { senderId, contentUrl });
-        } catch (uploadErr) {
-          logger.error('Cloudinary upload failed', { error: uploadErr.message, senderId });
-          return res.status(500).json({ error: 'Failed to upload media' });
-        }
+        // Store encrypted content as-is (no Cloudinary upload for encrypted data)
       } else if (contentType === 'text' && !contentUrl) {
         logger.warn('No content provided for text message', { senderId });
         return res.status(400).json({ error: 'Text content is required' });
       }
-
+  
       const message = new Message({
         senderId,
         recipientId,
@@ -404,21 +397,22 @@ module.exports = (io) => {
         caption,
         status: 'sent',
         replyTo: replyTo || undefined,
+        originalFilename: originalFilename || undefined, // Store original filename for media
       });
       await message.save();
-
+  
       const messageData = {
         ...message.toObject(),
         senderVirtualNumber: sender.virtualNumber,
         senderUsername: sender.username,
         senderPhoto: sender.photo,
       };
-
+  
       const recipientOnline = io.sockets.adapter.rooms.has(recipientId);
       if (recipientOnline) io.to(recipientId).emit('message', messageData);
       else await redis.lpush(`undelivered:${recipientId}`, JSON.stringify(messageData));
       io.to(senderId).emit('message', messageData);
-
+  
       logger.info('Message sent', { messageId: message._id, senderId, recipientId });
       res.json(message.toObject());
     } catch (error) {
@@ -427,6 +421,7 @@ module.exports = (io) => {
     }
   });
 
+  
   router.get('/messages', authMiddleware, socialLimiter, async (req, res) => {
     try {
       const { userId, recipientId, limit = 50, skip = 0 } = req.query;

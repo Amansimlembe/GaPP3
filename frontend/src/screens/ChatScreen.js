@@ -116,28 +116,39 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   useEffect(() => {
     if (!userId || !token) return;
 
-  const initialize = async () => {
-    try {
-      let privateKeyPem = localStorage.getItem('privateKey');
-      if (!privateKeyPem || !privateKeyPem.includes('-----BEGIN RSA PRIVATE KEY-----')) {
-        const response = await axios.post(
-          'https://gapp-6yc3.onrender.com/auth/refresh',
-          {},
-          { headers: { Authorization: `Bearer ${token}` } }
-        );
-        const { data } = response; // Ensure data is destructured after the request
-        localStorage.setItem('privateKey', data.privateKey);
-        localStorage.setItem('token', data.token);
-        privateKeyPem = data.privateKey; // Update variable after refresh
+    const initialize = async () => {
+      try {
+        let privateKeyPem = localStorage.getItem('privateKey');
+        if (!privateKeyPem || !privateKeyPem.includes('-----BEGIN RSA PRIVATE KEY-----')) {
+          for (let i = 0; i < 3; i++) {
+            try {
+              const response = await axios.post(
+                'https://gapp-6yc3.onrender.com/auth/refresh',
+                {},
+                { headers: { Authorization: `Bearer ${token}` }, timeout: 5000 }
+              );
+              const { data } = response;
+              localStorage.setItem('privateKey', data.privateKey);
+              localStorage.setItem('token', data.token);
+              privateKeyPem = data.privateKey;
+              break;
+            } catch (err) {
+              if (err.response?.status === 401 && i < 2) {
+                await new Promise((resolve) => setTimeout(resolve, 1000 * (i + 1)));
+                continue;
+              }
+              throw err;
+            }
+          }
+        }
+        socket.emit('join', userId);
+        await fetchUsers();
+        if (selectedChat) await fetchMessages(0);
+      } catch (err) {
+        console.error('Initialization error:', err.response?.data || err);
+        handleLogout();
       }
-      socket.emit('join', userId);
-      await fetchUsers(); // Defined below
-      if (selectedChat) await fetchMessages(0); // Defined below
-    } catch (err) {
-      console.error('Initialization error:', err.response?.data || err);
-      handleLogout();
-    }
-  };
+    };
 
   initialize();
 
@@ -194,8 +205,14 @@ const ChatScreen = ({ token, userId, setAuth }) => {
           privateKeyPem = refreshData.privateKey;
         }
         const messages = await Promise.all(data.messages.map(async (msg) => {
-          if (msg.recipientId === userId && msg.contentType === 'text') {
-            msg.content = await decryptMessage(msg.content, privateKeyPem);
+          if (msg.recipientId === userId) {
+            if (msg.contentType === 'text') {
+              msg.content = await decryptMessage(msg.content, privateKeyPem);
+            } else if (['image', 'video', 'audio', 'document'].includes(msg.contentType)) {
+              const decryptedContent = await decryptMessage(msg.content, privateKeyPem, true);
+              msg.content = URL.createObjectURL(new Blob([decryptedContent], { type: msg.contentType === 'document' ? 'application/pdf' : msg.contentType }));
+              msg.originalFilename = msg.originalFilename || 'file';
+            }
           }
           return msg;
         }));
@@ -234,8 +251,14 @@ const ChatScreen = ({ token, userId, setAuth }) => {
         localStorage.setItem('token', data.token);
         privateKeyPem = data.privateKey;
       }
-      if (msg.recipientId === userId && msg.contentType === 'text') {
-        msg.content = await decryptMessage(msg.content, privateKeyPem);
+      if (msg.recipientId === userId) {
+        if (msg.contentType === 'text') {
+          msg.content = await decryptMessage(msg.content, privateKeyPem);
+        } else if (['image', 'video', 'audio', 'document'].includes(msg.contentType)) {
+          const decryptedContent = await decryptMessage(msg.content, privateKeyPem, true);
+          msg.content = URL.createObjectURL(new Blob([decryptedContent], { type: msg.contentType === 'document' ? 'application/pdf' : msg.contentType }));
+          msg.originalFilename = msg.originalFilename || 'file';
+        }
       }
       dispatch(addMessage({ recipientId: chatId, message: msg }));
       await saveMessages([msg]);
@@ -305,26 +328,45 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     if (!selectedChat || (!message && !file)) return;
     socket.emit('stopTyping', { userId, recipientId: selectedChat });
     setTyping(false);
-
+  
     const tempId = Date.now().toString();
-    const tempMsg = { _id: tempId, senderId: userId, recipientId: selectedChat, contentType, content: file ? URL.createObjectURL(file) : message, caption, status: 'sending', replyTo: replyTo?._id, createdAt: new Date() };
+    const tempMsg = {
+      _id: tempId,
+      senderId: userId,
+      recipientId: selectedChat,
+      contentType,
+      content: file ? URL.createObjectURL(file) : message,
+      caption,
+      status: 'sending',
+      replyTo: replyTo?._id,
+      createdAt: new Date(),
+    };
     dispatch(addMessage({ recipientId: selectedChat, message: tempMsg }));
     if (isAtBottomRef.current) chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight });
-
+  
     try {
       const formData = new FormData();
       formData.append('senderId', userId);
       formData.append('recipientId', selectedChat);
       formData.append('contentType', contentType);
+      const recipientPublicKey = await getPublicKey(selectedChat);
+  
       if (contentType === 'text' && !file) {
-        const recipientPublicKey = await getPublicKey(selectedChat);
         formData.append('content', await encryptMessage(message, recipientPublicKey));
       } else if (file) {
-        formData.append('content', file);
+        // Read file as binary string
+        const fileReader = new FileReader();
+        const fileContent = await new Promise((resolve) => {
+          fileReader.onload = () => resolve(fileReader.result);
+          fileReader.readAsBinaryString(file);
+        });
+        const encryptedContent = await encryptMessage(fileContent, recipientPublicKey, true);
+        formData.append('content', encryptedContent);
+        formData.append('originalFilename', file.name); // Send original filename for reference
       }
       if (caption) formData.append('caption', caption);
       if (replyTo) formData.append('replyTo', replyTo._id);
-
+  
       const { data } = await axios.post('https://gapp-6yc3.onrender.com/social/message', formData, {
         headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
       });

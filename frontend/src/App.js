@@ -89,7 +89,7 @@ const App = () => {
       const response = await axios.post(
         'https://gapp-6yc3.onrender.com/auth/refresh',
         {},
-        { headers: { Authorization: `Bearer ${token}` } }
+        { headers: { Authorization: `Bearer ${token}` }, timeout: 5000 }
       );
       const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername, privateKey } = response.data;
       setAuth(newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername);
@@ -101,9 +101,10 @@ const App = () => {
         status: error.response?.status,
         data: error.response?.data,
         message: error.message,
-        token: token.substring(0, 10) + '...',
       });
-      setAuth('', '', '', '', '', '');
+      if (error.response?.status === 401) {
+        setAuth('', '', '', '', '', ''); // Logout on unrecoverable 401
+      }
       return null;
     }
   };
@@ -126,25 +127,25 @@ const App = () => {
     );
     return () => axios.interceptors.response.eject(interceptor);
   }, [token]);
-
   useEffect(() => {
     if (!token || !userId) return;
-
+  
     const checkTokenExpiration = async () => {
       const expTime = getTokenExpiration(token);
       const now = Date.now();
-      const oneDay = 24 * 60 * 60 * 1000;
-
-      if (expTime && expTime - now < oneDay) {
+      const bufferTime = 5 * 60 * 1000; // Refresh 5 minutes before expiration
+  
+      if (expTime && expTime - now < bufferTime) {
         await refreshToken();
       }
     };
-
+  
     checkTokenExpiration();
-    const interval = setInterval(checkTokenExpiration, 60 * 60 * 1000); // Check hourly
+    const interval = setInterval(checkTokenExpiration, 60 * 1000); // Check every minute
     return () => clearInterval(interval);
   }, [token, userId]);
 
+  
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark');
     localStorage.setItem('theme', theme);
