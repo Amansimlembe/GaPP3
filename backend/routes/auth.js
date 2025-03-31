@@ -103,8 +103,6 @@ const generateVirtualNumber = (countryCode, userId) => {
   }
 };
 
-
-
 router.post('/register', authLimiter, upload.single('photo'), async (req, res) => {
   try {
     const { error } = registerSchema.validate(req.body);
@@ -146,7 +144,7 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
     });
 
     if (req.file) {
-      if (!process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET || !process.env.CLOUDINARY_CLOUD_NAME) {
+      if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) {
         logger.warn('Cloudinary config missing, skipping photo upload', { email });
       } else {
         try {
@@ -157,6 +155,7 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
             ).end(req.file.buffer);
           });
           user.photo = result.secure_url;
+          logger.info('Photo uploaded to Cloudinary', { email, photoUrl: user.photo });
         } catch (uploadErr) {
           logger.error('Cloudinary upload failed', { error: uploadErr.message, email });
           // Skip photo upload instead of failing registration
@@ -165,6 +164,8 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
     }
 
     await user.save();
+    logger.info('User saved with photo', { userId: user._id, photo: user.photo });
+
     const token = jwt.sign({ id: user._id, email, virtualNumber, role: user.role }, process.env.JWT_SECRET, { expiresIn: '24h' });
 
     logger.info('User registered', { userId: user._id, email });
@@ -175,7 +176,6 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
     res.status(500).json({ error: error.message || 'Failed to register' });
   }
 });
-
 
 router.post('/login', async (req, res) => {
   const { email, password } = req.body;

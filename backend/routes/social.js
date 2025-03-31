@@ -331,21 +331,27 @@ module.exports = (io) => {
       res.status(500).json({ error: 'Failed to comment' });
     }
   });
-
   router.post('/message', authMiddleware, messageLimiter, upload.single('content'), async (req, res) => {
     try {
       const { error } = messageSchema.validate(req.body);
-      if (error) return res.status(400).json({ error: error.details[0].message });
-
+      if (error) {
+        logger.warn('Message validation failed', { error: error.details[0].message, body: req.body });
+        return res.status(400).json({ error: error.details[0].message });
+      }
+  
       const { senderId, recipientId, contentType, caption, replyTo } = req.body;
       if (senderId !== req.user.id) return res.status(403).json({ error: 'Unauthorized' });
-
+  
       const sender = await User.findById(senderId);
       const recipient = await User.findById(recipientId);
       if (!sender || !recipient) return res.status(404).json({ error: 'Sender or recipient not found' });
-
+  
       let contentUrl = req.body.content;
-      if (['image', 'video', 'audio', 'document'].includes(contentType) && req.file) {
+      if (['image', 'video', 'audio', 'document'].includes(contentType)) {
+        if (!req.file) {
+          logger.warn('No file provided for media message', { senderId, contentType });
+          return res.status(400).json({ error: 'File required for media message' });
+        }
         const resourceType = { image: 'image', video: 'video', audio: 'video', document: 'raw' }[contentType];
         const result = await new Promise((resolve, reject) => {
           cloudinary.uploader.upload_stream(
@@ -354,22 +360,25 @@ module.exports = (io) => {
           ).end(req.file.buffer);
         });
         contentUrl = result.secure_url;
+        logger.info('Media uploaded to Cloudinary', { senderId, contentUrl });
       } else if (contentType === 'text' && !contentUrl) {
+        logger.warn('No content provided for text message', { senderId });
         return res.status(400).json({ error: 'Text content is required' });
       }
-
+  
       const message = new Message({ senderId, recipientId, contentType, content: contentUrl, caption, status: 'sent', replyTo: replyTo || undefined });
       await message.save();
-
+  
       const messageData = { ...message.toObject(), senderVirtualNumber: sender.virtualNumber, senderUsername: sender.username, senderPhoto: sender.photo };
-
+  
       const recipientOnline = io.sockets.adapter.rooms.has(recipientId);
       if (recipientOnline) io.to(recipientId).emit('message', messageData);
       else await redis.lpush(`undelivered:${recipientId}`, JSON.stringify(messageData));
       io.to(senderId).emit('message', messageData);
+      logger.info('Message sent', { messageId: message._id, senderId, recipientId });
       res.json(message.toObject());
     } catch (error) {
-      logger.error('Message send error', { error: error.message, senderId: req.user.id });
+      logger.error('Message send error', { error: error.message, senderId: req.user.id, stack: error.stack });
       res.status(500).json({ error: 'Failed to send message' });
     }
   });

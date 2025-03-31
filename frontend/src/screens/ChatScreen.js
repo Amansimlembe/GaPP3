@@ -260,34 +260,31 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     };
   }, [token, userId, selectedChat, page, dispatch, getPublicKey, decryptMessage]);
 
+
   const sendMessage = async () => {
     if (!selectedChat || (!message && !file)) return;
     socket.emit('stopTyping', { userId, recipientId: selectedChat });
     setTyping(false);
-
+  
     const tempId = Date.now().toString();
     const tempMsg = { _id: tempId, senderId: userId, recipientId: selectedChat, contentType, content: file ? URL.createObjectURL(file) : message, caption, status: 'sending', replyTo: replyTo?._id, createdAt: new Date() };
     dispatch(addMessage({ recipientId: selectedChat, message: tempMsg }));
     if (isAtBottomRef.current) chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight });
-
+  
     try {
-      const recipientPublicKey = await getPublicKey(selectedChat);
-      let encryptedContent = message;
-      if (contentType === 'text' && !file) {
-        encryptedContent = await encryptMessage(message, recipientPublicKey);
-      } else if (file) {
-        encryptedContent = file.name; // Placeholder; actual content uploaded to Cloudinary
-      }
-
       const formData = new FormData();
       formData.append('senderId', userId);
       formData.append('recipientId', selectedChat);
       formData.append('contentType', contentType);
-      formData.append('content', encryptedContent);
-      if (file) formData.append('content', file);
+      if (contentType === 'text' && !file) {
+        const recipientPublicKey = await getPublicKey(selectedChat);
+        formData.append('content', await encryptMessage(message, recipientPublicKey));
+      } else if (file) {
+        formData.append('content', file); // Server will upload this to Cloudinary
+      }
       if (caption) formData.append('caption', caption);
       if (replyTo) formData.append('replyTo', replyTo._id);
-
+  
       const { data } = await axios.post('https://gapp-6yc3.onrender.com/social/message', formData, {
         headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
       });
