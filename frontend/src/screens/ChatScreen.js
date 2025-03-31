@@ -86,8 +86,6 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     }
   }, []);
 
-
-
   const getPublicKey = useCallback(async (recipientId) => {
     const { data } = await axios.get(`https://gapp-6yc3.onrender.com/auth/public_key/${recipientId}`, {
       headers: { Authorization: `Bearer ${token}` },
@@ -122,8 +120,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       setError(`Failed to load contacts: ${err.response?.data?.error || err.message}`);
       if (err.response?.status === 401) handleLogout();
     }
-  }, [token, userId, setError, handleLogout]);
-
+  }, [token, userId, handleLogout]);
 
   const fetchMessages = useCallback(async (pageNum = 0, initial = true) => {
     if (!selectedChat || loading || !hasMore) return;
@@ -153,8 +150,6 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       setLoading(false);
     }
   }, [selectedChat, token, userId, dispatch, decryptMessage, loading, hasMore]);
-
-
 
   useEffect(() => {
     if (!userId || !token) return;
@@ -198,6 +193,14 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       if (status === 'read') setUnreadCount(0);
     });
 
+    socket.on('typing', ({ userId: senderId }) => {
+      if (senderId === selectedChat) setIsTyping((prev) => ({ ...prev, [senderId]: true }));
+    });
+
+    socket.on('stopTyping', ({ userId: senderId }) => {
+      if (senderId === selectedChat) setIsTyping((prev) => ({ ...prev, [senderId]: false }));
+    });
+
     socket.on('onlineStatus', ({ userId: contactId, status, lastSeen }) => {
       setUsers((prev) => prev.map((u) => u.id === contactId ? { ...u, status, lastSeen } : u));
       if (contactId === selectedChat) setUserStatus({ status, lastSeen });
@@ -220,6 +223,8 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     return () => {
       socket.off('message');
       socket.off('messageStatus');
+      socket.off('typing');
+      socket.off('stopTyping');
       socket.off('onlineStatus');
       chatRef.current?.removeEventListener('scroll', handleScroll);
       clearInterval(keepAlive);
@@ -287,6 +292,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       setShowPicker(false);
     }
   };
+
   const handleTyping = (e) => {
     setMessage(e.target.value);
     if (!typing && e.target.value) {
@@ -380,8 +386,6 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     setUnreadCount(0);
   };
 
-
-
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex h-screen bg-gray-100 dark:bg-gray-900">
       <div className={`w-full md:w-1/3 bg-white dark:bg-gray-800 border-r ${isSmallDevice && selectedChat ? 'hidden' : 'block'} flex flex-col`}>
@@ -471,7 +475,6 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                 </div>
               </div>
             </div>
-            
             <div ref={chatRef} className="flex-1 overflow-y-auto bg-gray-100 dark:bg-gray-900 p-2 pt-16" style={{ paddingBottom: '80px' }}>
               {loading && <div className="text-center text-gray-500 dark:text-gray-400">Loading...</div>}
               {(chats[selectedChat] || []).map((msg, i) => {
@@ -481,24 +484,24 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                     {showDateHeader && <div className="text-center my-2"><span className="bg-gray-300 dark:bg-gray-700 text-gray-700 dark:text-gray-300 px-2 py-1 rounded-full text-sm">{formatDateHeader(msg.createdAt)}</span></div>}
                     {firstUnreadMessageId === msg._id && unreadCount > 0 && <div className="text-center my-2"><span className="bg-blue-500 text-white px-2 py-1 rounded-full text-sm">{unreadCount} Unread</span></div>}
                     <div className={`flex ${msg.senderId === userId ? 'justify-end' : 'justify-start'} px-2 py-1`}>
-                    <div
-                      className={`max-w-[70%] p-2 rounded-lg shadow-sm ${msg.senderId === userId ? 'bg-green-500 text-white rounded-br-none' : 'bg-white dark:bg-gray-800 rounded-bl-none'}`}
-                      onClick={() => ['image', 'video'].includes(msg.contentType) && setViewMedia({ type: msg.contentType, url: msg.content })}
-                      onContextMenu={(e) => { e.preventDefault(); setShowMessageMenu(msg._id); }}
-                    >
-                      {msg.replyTo && <div className="bg-gray-100 dark:bg-gray-700 p-1 rounded mb-1 text-xs italic">{chats[selectedChat].find((m) => m._id === msg.replyTo)?.content.slice(0, 20)}...</div>}
-                      {msg.contentType === 'text' && <p className="text-sm break-words">{msg.content}</p>}
-                      {msg.contentType === 'image' && <img src={msg.content} alt="Chat" className="max-w-[80%] max-h-64 rounded-lg cursor-pointer" />}
-                      {msg.contentType === 'video' && <video src={msg.content} className="max-w-[80%] max-h-64 rounded-lg" controls />}
-                      {msg.contentType === 'audio' && <audio src={msg.content} controls className="max-w-[80%]" />}
-                      {msg.contentType === 'document' && <div className="flex items-center"><FaFileAlt className="text-blue-600 mr-2" /><a href={msg.content} download className="text-blue-600 truncate">{msg.originalFilename || 'file'}</a></div>}
-                      {msg.caption && <p className="text-xs italic mt-1">{msg.caption}</p>}
-                      <div className="flex justify-between mt-1">
-                        {msg.senderId === userId && (
-                          <span className="text-xs">
-                            {msg.status === 'sending' ? '...' : msg.status === 'sent' ? '✔' : msg.status === 'delivered' ? '✔✔' : <span className="text-blue-300">✔✔</span>}
-                          </span>
-                        )}
+                      <div
+                        className={`max-w-[70%] p-2 rounded-lg shadow-sm ${msg.senderId === userId ? 'bg-green-500 text-white rounded-br-none' : 'bg-white dark:bg-gray-800 rounded-bl-none'}`}
+                        onClick={() => ['image', 'video'].includes(msg.contentType) && setViewMedia({ type: msg.contentType, url: msg.content })}
+                        onContextMenu={(e) => { e.preventDefault(); setShowMessageMenu(msg._id); }}
+                      >
+                        {msg.replyTo && <div className="bg-gray-100 dark:bg-gray-700 p-1 rounded mb-1 text-xs italic">{chats[selectedChat].find((m) => m._id === msg.replyTo)?.content.slice(0, 20)}...</div>}
+                        {msg.contentType === 'text' && <p className="text-sm break-words">{msg.content}</p>}
+                        {msg.contentType === 'image' && <img src={msg.content} alt="Chat" className="max-w-[80%] max-h-64 rounded-lg cursor-pointer" />}
+                        {msg.contentType === 'video' && <video src={msg.content} className="max-w-[80%] max-h-64 rounded-lg" controls />}
+                        {msg.contentType === 'audio' && <audio src={msg.content} controls className="max-w-[80%]" />}
+                        {msg.contentType === 'document' && <div className="flex items-center"><FaFileAlt className="text-blue-600 mr-2" /><a href={msg.content} download className="text-blue-600 truncate">{msg.originalFilename || 'file'}</a></div>}
+                        {msg.caption && <p className="text-xs italic mt-1">{msg.caption}</p>}
+                        <div className="flex justify-between mt-1">
+                          {msg.senderId === userId && (
+                            <span className="text-xs">
+                              {msg.status === 'sending' ? '...' : msg.status === 'sent' ? '✔' : msg.status === 'delivered' ? '✔✔' : <span className="text-blue-300">✔✔</span>}
+                            </span>
+                          )}
                           <span className="text-xs text-gray-500">{formatTime(msg.createdAt)}</span>
                         </div>
                       </div>

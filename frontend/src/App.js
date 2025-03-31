@@ -77,6 +77,7 @@ const App = () => {
       localStorage.setItem('virtualNumber', virtualNumber);
       localStorage.setItem('username', username);
       setIsAuthenticated(true);
+      if (!socket.connected) socket.connect(); // Ensure socket connects on auth
     } else {
       localStorage.clear();
       socket.emit('leave', userId);
@@ -90,7 +91,7 @@ const App = () => {
     try {
       const response = await axios.post(
         'https://gapp-6yc3.onrender.com/auth/refresh',
-        { userId }, // Send userId in body to align with auth middleware
+        { userId },
         { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 5000 }
       );
       const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername, privateKey } = response.data;
@@ -137,10 +138,6 @@ const App = () => {
       return;
     }
 
-    if (!socket.connected) {
-      socket.connect();
-    }
-
     const checkTokenExpiration = async () => {
       const expTime = getTokenExpiration(token);
       const now = Date.now();
@@ -177,14 +174,26 @@ const App = () => {
 
     socket.on('connect_error', (error) => {
       console.error('Socket connection error:', error);
+      if (error.message.includes('xhr poll error') && isAuthenticated) {
+        socket.disconnect();
+        socket.connect(); // Force reconnect on persistent error
+      }
+    });
+
+    socket.on('disconnect', (reason) => {
+      console.log('Socket disconnected:', reason);
+      if (reason === 'io server disconnect' && isAuthenticated) {
+        socket.connect(); // Reconnect if server disconnected us
+      }
     });
 
     return () => {
       socket.off('connect');
       socket.off('message');
       socket.off('connect_error');
+      socket.off('disconnect');
     };
-  }, [userId, token, selectedChat]);
+  }, [userId, token, selectedChat, isAuthenticated]);
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
