@@ -2,31 +2,18 @@ import { openDB } from 'idb';
 
 const DB_NAME = 'ChatDB';
 const STORE_NAME = 'messages';
-const VERSION = 3; // Bumped to 3 to force re-creation of store with indexes
+const VERSION = 3;
 
 const dbPromise = openDB(DB_NAME, VERSION, {
-  upgrade(db, oldVersion, newVersion, transaction) {
+  upgrade(db, oldVersion, newVersion) {
     console.log(`Upgrading database from version ${oldVersion} to ${newVersion}`);
-    if (oldVersion < 1) {
-      db.createObjectStore(STORE_NAME, { keyPath: '_id' });
+    // Simplify upgrade logic: only latest schema is needed since we force reset
+    if (db.objectStoreNames.contains(STORE_NAME)) {
+      db.deleteObjectStore(STORE_NAME);
     }
-    if (oldVersion < 2) {
-      if (db.objectStoreNames.contains(STORE_NAME)) {
-        db.deleteObjectStore(STORE_NAME);
-      }
-      const messageStore = db.createObjectStore(STORE_NAME, { keyPath: '_id' });
-      messageStore.createIndex('byRecipientId', 'recipientId', { multiEntry: false });
-      messageStore.createIndex('byCreatedAt', 'createdAt', { multiEntry: false });
-    }
-    if (oldVersion < 3) {
-      // Force reset to ensure indexes are applied correctly
-      if (db.objectStoreNames.contains(STORE_NAME)) {
-        db.deleteObjectStore(STORE_NAME);
-      }
-      const messageStore = db.createObjectStore(STORE_NAME, { keyPath: '_id' });
-      messageStore.createIndex('byRecipientId', 'recipientId', { multiEntry: false });
-      messageStore.createIndex('byCreatedAt', 'createdAt', { multiEntry: false });
-    }
+    const messageStore = db.createObjectStore(STORE_NAME, { keyPath: '_id' });
+    messageStore.createIndex('byRecipientId', 'recipientId', { multiEntry: false });
+    messageStore.createIndex('byCreatedAt', 'createdAt', { multiEntry: false });
   },
   blocked() {
     console.error('Database upgrade blocked by an open connection');
@@ -89,7 +76,6 @@ export const deleteMessage = async (messageId) => {
 export const clearOldMessages = async (daysToKeep = 30) => {
   try {
     const db = await dbPromise;
-    console.log(`Current database version: ${db.version}`);
     const tx = db.transaction(STORE_NAME, 'readwrite');
     const store = tx.objectStore(STORE_NAME);
 
@@ -105,12 +91,12 @@ export const clearOldMessages = async (daysToKeep = 30) => {
 
     const index = store.index('byCreatedAt');
     const cutoff = new Date(Date.now() - daysToKeep * 24 * 60 * 60 * 1000);
-    const cursor = await index.openCursor(IDBKeyRange.upperBound(cutoff));
     let count = 0;
+    const cursor = await index.openCursor(IDBKeyRange.upperBound(cutoff));
     while (cursor) {
       await cursor.delete();
       count++;
-      await cursor.continue(); // Ensure await here to avoid cursor issues
+      await cursor.continue();
     }
 
     await tx.done;

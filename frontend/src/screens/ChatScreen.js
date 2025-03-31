@@ -20,7 +20,7 @@ const socket = io('https://gapp-6yc3.onrender.com', {
   withCredentials: true,
 });
 
-const ChatScreen = ({ token, userId, setAuth }) => {
+const ChatScreen = ({ token, userId, setAuth, socket }) => {
   const dispatch = useDispatch();
   const { chats, selectedChat } = useSelector((state) => state.messages);
   const [users, setUsers] = useState(() => JSON.parse(localStorage.getItem('cachedUsers')) || []);
@@ -53,6 +53,16 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   const isAtBottomRef = useRef(true);
   const messagesPerPage = 50;
   const isSmallDevice = window.innerWidth < 768;
+
+  // Define handleLogout first to ensure it’s available for fetchUsers
+  const handleLogout = useCallback(() => {
+    socket.emit('leave', userId);
+    dispatch(resetState());
+    localStorage.clear();
+    setUsers([]);
+    setNotifications({});
+    setAuth('', '', '', '', '');
+  }, [dispatch, setAuth, userId]);
 
   const encryptMessage = useCallback(async (content, recipientPublicKey, isMedia = false) => {
     const aesKey = forge.random.getBytesSync(32);
@@ -154,57 +164,63 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   useEffect(() => {
     if (!userId || !token) return;
 
-    socket.emit('join', userId);
-    fetchUsers();
-    if (selectedChat) fetchMessages(0);
+    const initializeChat = async () => {
+      socket.emit('join', userId);
+      await fetchUsers();
+      if (selectedChat) await fetchMessages(0);
 
-    const keepAlive = setInterval(() => socket.emit('ping', { userId }), 30000);
-    clearOldMessages(30).then(() => checkIndexes()).catch((err) => console.error('IndexedDB setup error:', err));
+      const keepAlive = setInterval(() => socket.emit('ping', { userId }), 30000);
+      clearOldMessages(30).then(() => checkIndexes()).catch((err) => console.error('IndexedDB setup error:', err));
 
-    socket.on('message', async (msg) => {
-      const chatId = msg.senderId === userId ? msg.recipientId : msg.senderId;
-      const privateKeyPem = localStorage.getItem('privateKey');
-      if (msg.recipientId === userId && msg.contentType === 'text') {
-        msg.content = await decryptMessage(msg.content, privateKeyPem);
-      } else if (msg.recipientId === userId && ['image', 'video', 'audio', 'document'].includes(msg.contentType)) {
-        const decryptedContent = await decryptMessage(msg.content, privateKeyPem, true);
-        msg.content = URL.createObjectURL(new Blob([decryptedContent], { type: msg.contentType === 'document' ? 'application/pdf' : msg.contentType }));
-      }
-      dispatch(addMessage({ recipientId: chatId, message: msg }));
-      await saveMessages([msg]);
-      if (chatId === selectedChat) {
-        socket.emit('messageStatus', { messageId: msg._id, status: 'delivered', recipientId: userId });
-        if (isAtBottomRef.current) {
-          socket.emit('messageStatus', { messageId: msg._id, status: 'read', recipientId: userId });
-          chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
-        } else {
-          setUnreadCount((prev) => prev + 1);
-          if (!firstUnreadMessageId) setFirstUnreadMessageId(msg._id);
-          setShowJumpToBottom(true);
+      return () => clearInterval(keepAlive);
+    };
+
+    const setupSocketListeners = () => {
+      socket.on('message', async (msg) => {
+        const chatId = msg.senderId === userId ? msg.recipientId : msg.senderId;
+        const privateKeyPem = localStorage.getItem('privateKey');
+        if (msg.recipientId === userId && msg.contentType === 'text') {
+          msg.content = await decryptMessage(msg.content, privateKeyPem);
+        } else if (msg.recipientId === userId && ['image', 'video', 'audio', 'document'].includes(msg.contentType)) {
+          const decryptedContent = await decryptMessage(msg.content, privateKeyPem, true);
+          msg.content = URL.createObjectURL(new Blob([decryptedContent], { type: msg.contentType === 'document' ? 'application/pdf' : msg.contentType }));
         }
-      } else if (msg.recipientId === userId) {
-        setNotifications((prev) => ({ ...prev, [msg.senderId]: (prev[msg.senderId] || 0) + 1 }));
-        setUsers((prev) => prev.map((u) => u.id === msg.senderId ? { ...u, unreadCount: (u.unreadCount || 0) + 1, latestMessage: msg } : u));
-      }
-    });
+        dispatch(addMessage({ recipientId: chatId, message: msg }));
+        await saveMessages([msg]);
+        if (chatId === selectedChat) {
+          socket.emit('messageStatus', { messageId: msg._id, status: 'delivered', recipientId: userId });
+          if (isAtBottomRef.current) {
+            socket.emit('messageStatus', { messageId: msg._id, status: 'read', recipientId: userId });
+            chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
+          } else {
+            setUnreadCount((prev) => prev + 1);
+            if (!firstUnreadMessageId) setFirstUnreadMessageId(msg._id);
+            setShowJumpToBottom(true);
+          }
+        } else if (msg.recipientId === userId) {
+          setNotifications((prev) => ({ ...prev, [msg.senderId]: (prev[msg.senderId] || 0) + 1 }));
+          setUsers((prev) => prev.map((u) => u.id === msg.senderId ? { ...u, unreadCount: (u.unreadCount || 0) + 1, latestMessage: msg } : u));
+        }
+      });
 
-    socket.on('messageStatus', ({ messageId, status }) => {
-      dispatch(updateMessageStatus({ recipientId: selectedChat, messageId, status }));
-      if (status === 'read') setUnreadCount(0);
-    });
+      socket.on('messageStatus', ({ messageId, status }) => {
+        dispatch(updateMessageStatus({ recipientId: selectedChat, messageId, status }));
+        if (status === 'read') setUnreadCount(0);
+      });
 
-    socket.on('typing', ({ userId: senderId }) => {
-      if (senderId === selectedChat) setIsTyping((prev) => ({ ...prev, [senderId]: true }));
-    });
+      socket.on('typing', ({ userId: senderId }) => {
+        if (senderId === selectedChat) setIsTyping((prev) => ({ ...prev, [senderId]: true }));
+      });
 
-    socket.on('stopTyping', ({ userId: senderId }) => {
-      if (senderId === selectedChat) setIsTyping((prev) => ({ ...prev, [senderId]: false }));
-    });
+      socket.on('stopTyping', ({ userId: senderId }) => {
+        if (senderId === selectedChat) setIsTyping((prev) => ({ ...prev, [senderId]: false }));
+      });
 
-    socket.on('onlineStatus', ({ userId: contactId, status, lastSeen }) => {
-      setUsers((prev) => prev.map((u) => u.id === contactId ? { ...u, status, lastSeen } : u));
-      if (contactId === selectedChat) setUserStatus({ status, lastSeen });
-    });
+      socket.on('onlineStatus', ({ userId: contactId, status, lastSeen }) => {
+        setUsers((prev) => prev.map((u) => u.id === contactId ? { ...u, status, lastSeen } : u));
+        if (contactId === selectedChat) setUserStatus({ status, lastSeen });
+      });
+    };
 
     const handleScroll = () => {
       const { scrollTop, scrollHeight, clientHeight } = chatRef.current;
@@ -217,8 +233,12 @@ const ChatScreen = ({ token, userId, setAuth }) => {
         setUnreadCount(0);
       }
     };
-    chatRef.current?.addEventListener('scroll', handleScroll);
-    if (page > 0) fetchMessages(page, false);
+
+    initializeChat().then(() => {
+      setupSocketListeners();
+      chatRef.current?.addEventListener('scroll', handleScroll);
+      if (page > 0) fetchMessages(page, false);
+    });
 
     return () => {
       socket.off('message');
@@ -227,7 +247,6 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       socket.off('stopTyping');
       socket.off('onlineStatus');
       chatRef.current?.removeEventListener('scroll', handleScroll);
-      clearInterval(keepAlive);
     };
   }, [token, userId, selectedChat, page, dispatch, fetchUsers, fetchMessages]);
 
@@ -275,7 +294,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       const { data } = await axios.post('https://gapp-6yc3.onrender.com/social/message', formData, {
         headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
       });
-      const updatedMsg = { ...data, content: file ? URL.createObjectURL(file) : message }; // Show plaintext or file URL for sender
+      const updatedMsg = { ...data, content: file ? URL.createObjectURL(file) : message };
       dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: tempId, status: 'sent' }));
       dispatch(addMessage({ recipientId: selectedChat, message: updatedMsg }));
       await saveMessages([updatedMsg]);
@@ -305,15 +324,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       setTyping(false);
     }, 2000);
   };
-
-  const handleLogout = () => {
-    socket.emit('leave', userId);
-    dispatch(resetState());
-    localStorage.clear();
-    setUsers([]);
-    setNotifications({});
-    setAuth('', '', '', '', '');
-  };
+  
 
   const deleteMessages = async () => {
     try {
@@ -385,7 +396,6 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     isAtBottomRef.current = true;
     setUnreadCount(0);
   };
-
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex h-screen bg-gray-100 dark:bg-gray-900">
       <div className={`w-full md:w-1/3 bg-white dark:bg-gray-800 border-r ${isSmallDevice && selectedChat ? 'hidden' : 'block'} flex flex-col`}>

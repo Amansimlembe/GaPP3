@@ -35,11 +35,15 @@ const messageSlice = createSlice({
       chats: {},
       selectedChat: null,
     }),
+    // Add a reducer for initial state loading
+    setInitialState: (state, action) => {
+      return { ...state, ...action.payload };
+    },
   },
 });
 
 // Export actions
-export const { setMessages, addMessage, updateMessageStatus, setSelectedChat, resetState } = messageSlice.actions;
+export const { setMessages, addMessage, updateMessageStatus, setSelectedChat, resetState, setInitialState } = messageSlice.actions;
 
 // Custom middleware for persisting state to localStorage
 const persistenceMiddleware = (store) => (next) => (action) => {
@@ -50,49 +54,52 @@ const persistenceMiddleware = (store) => (next) => (action) => {
     updateMessageStatus.type,
     setSelectedChat.type,
     resetState.type,
+    setInitialState.type,
   ];
 
   if (actionsToPersist.includes(action.type)) {
-    // Use setTimeout to avoid blocking the main thread
-    setTimeout(() => {
+    // Use requestAnimationFrame to defer persistence and avoid blocking renders
+    requestAnimationFrame(() => {
       const state = store.getState().messages;
-      localStorage.setItem('reduxState', JSON.stringify(state));
-    }, 0);
+      try {
+        localStorage.setItem('reduxState', JSON.stringify(state));
+      } catch (error) {
+        console.error('Failed to persist state:', error);
+      }
+    });
   }
   return result;
 };
 
-// Configure the store
+// Load persisted state safely
+const loadPersistedState = () => {
+  const persistedState = localStorage.getItem('reduxState');
+  if (persistedState) {
+    try {
+      return JSON.parse(persistedState);
+    } catch (error) {
+      console.error('Failed to parse persisted state:', error);
+      localStorage.removeItem('reduxState'); // Clear invalid state
+      return undefined;
+    }
+  }
+  return undefined;
+};
+
+// Configure the store with preloaded state
 export const store = configureStore({
   reducer: {
     messages: messageSlice.reducer,
   },
+  preloadedState: {
+    messages: loadPersistedState() || messageSlice.getInitialState(),
+  },
   middleware: (getDefaultMiddleware) =>
     getDefaultMiddleware({
-      serializableCheck: false, // Disable serializability check since we handle persistence manually
+      serializableCheck: {
+        // Ignore specific actions that might contain non-serializable data (e.g., Blobs)
+        ignoredActions: [addMessage.type],
+        ignoredPaths: ['messages.chats'],
+      },
     }).concat(persistenceMiddleware),
 });
-
-// Load persisted state on initialization
-const persistedState = localStorage.getItem('reduxState');
-if (persistedState) {
-  try {
-    const parsedState = JSON.parse(persistedState);
-    store.dispatch({
-      type: 'messages/setInitialState',
-      payload: parsedState,
-    });
-  } catch (error) {
-    console.error('Failed to load persisted state:', error);
-    localStorage.removeItem('reduxState'); // Clear invalid state
-  }
-}
-
-// Handle custom action for setting initial state
-const originalReducer = messageSlice.reducer;
-messageSlice.reducer = (state = messageSlice.getInitialState(), action) => {
-  if (action.type === 'messages/setInitialState') {
-    return { ...state, ...action.payload };
-  }
-  return originalReducer(state, action);
-};

@@ -20,7 +20,7 @@ const socket = io('https://gapp-6yc3.onrender.com', {
   reconnectionDelayMax: 5000,
   randomizationFactor: 0.5,
   withCredentials: true,
-  autoConnect: false, // Prevent auto-connect until authenticated
+  autoConnect: false,
 });
 
 const getTokenExpiration = (token) => {
@@ -49,8 +49,9 @@ const App = () => {
   const [virtualNumber, setVirtualNumber] = useState(localStorage.getItem('virtualNumber') || '');
   const [username, setUsername] = useState(localStorage.getItem('username') || '');
   const [chatNotifications, setChatNotifications] = useState(0);
-  const [isAuthenticated, setIsAuthenticated] = useState(!!localStorage.getItem('token') && !!localStorage.getItem('userId'));
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
+  const [isLoadingAuth, setIsLoadingAuth] = useState(true); // New state to delay rendering
   const { selectedChat } = useSelector((state) => state.messages);
   const isSmallDevice = window.innerWidth < 768;
 
@@ -77,7 +78,7 @@ const App = () => {
       localStorage.setItem('virtualNumber', virtualNumber);
       localStorage.setItem('username', username);
       setIsAuthenticated(true);
-      if (!socket.connected) socket.connect(); // Ensure socket connects on auth
+      if (!socket.connected) socket.connect();
     } else {
       localStorage.clear();
       socket.emit('leave', userId);
@@ -100,17 +101,52 @@ const App = () => {
       console.log('Token refreshed successfully', { userId: newUserId });
       return newToken;
     } catch (error) {
-      console.error('Token refresh failed:', {
-        status: error.response?.status,
-        data: error.response?.data,
-        message: error.message,
-      });
-      if (error.response?.status === 401 || error.response?.status === 404) {
-        setAuth('', '', '', '', '', '');
-      }
+      console.error('Token refresh failed:', error.response?.data || error.message);
+      setAuth('', '', '', '', '', '');
       return null;
     }
   };
+
+  useEffect(() => {
+    const initializeAuth = async () => {
+      const storedToken = localStorage.getItem('token');
+      const storedUserId = localStorage.getItem('userId');
+      const storedRole = localStorage.getItem('role');
+      const storedPhoto = localStorage.getItem('photo');
+      const storedVirtualNumber = localStorage.getItem('virtualNumber');
+      const storedUsername = localStorage.getItem('username');
+
+      if (storedToken && storedUserId) {
+        const expTime = getTokenExpiration(storedToken);
+        if (expTime && expTime < Date.now()) {
+          await refreshToken();
+        } else {
+          setAuth(storedToken, storedUserId, storedRole, storedPhoto, storedVirtualNumber, storedUsername);
+        }
+      }
+      setIsLoadingAuth(false);
+    };
+
+    initializeAuth();
+  }, []);
+
+  useEffect(() => {
+    if (!isAuthenticated || !token || !userId) return;
+
+    const checkTokenExpiration = async () => {
+      const expTime = getTokenExpiration(token);
+      const now = Date.now();
+      const bufferTime = 5 * 60 * 1000;
+
+      if (expTime && expTime - now < bufferTime) {
+        await refreshToken();
+      }
+    };
+
+    checkTokenExpiration();
+    const interval = setInterval(checkTokenExpiration, 60 * 1000);
+    return () => clearInterval(interval);
+  }, [isAuthenticated, token, userId]);
 
   useEffect(() => {
     const interceptor = axios.interceptors.response.use(
@@ -132,34 +168,12 @@ const App = () => {
   }, [token]);
 
   useEffect(() => {
-    if (!token || !userId) {
-      setIsAuthenticated(false);
-      socket.disconnect();
-      return;
-    }
-
-    const checkTokenExpiration = async () => {
-      const expTime = getTokenExpiration(token);
-      const now = Date.now();
-      const bufferTime = 5 * 60 * 1000;
-
-      if (expTime && expTime - now < bufferTime) {
-        await refreshToken();
-      }
-    };
-
-    checkTokenExpiration();
-    const interval = setInterval(checkTokenExpiration, 60 * 1000);
-    return () => clearInterval(interval);
-  }, [token, userId]);
-
-  useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark');
     localStorage.setItem('theme', theme);
   }, [theme]);
 
   useEffect(() => {
-    if (!token || !userId) return;
+    if (!isAuthenticated || !token || !userId) return;
 
     socket.on('connect', () => {
       socket.emit('join', userId);
@@ -176,14 +190,14 @@ const App = () => {
       console.error('Socket connection error:', error);
       if (error.message.includes('xhr poll error') && isAuthenticated) {
         socket.disconnect();
-        socket.connect(); // Force reconnect on persistent error
+        socket.connect();
       }
     });
 
     socket.on('disconnect', (reason) => {
       console.log('Socket disconnected:', reason);
       if (reason === 'io server disconnect' && isAuthenticated) {
-        socket.connect(); // Reconnect if server disconnected us
+        socket.connect();
       }
     });
 
@@ -193,22 +207,7 @@ const App = () => {
       socket.off('connect_error');
       socket.off('disconnect');
     };
-  }, [userId, token, selectedChat, isAuthenticated]);
-
-  useEffect(() => {
-    const storedToken = localStorage.getItem('token');
-    const storedUserId = localStorage.getItem('userId');
-    const storedRole = localStorage.getItem('role');
-    const storedPhoto = localStorage.getItem('photo');
-    const storedVirtualNumber = localStorage.getItem('virtualNumber');
-    const storedUsername = localStorage.getItem('username');
-
-    if (storedToken && storedUserId) {
-      setAuth(storedToken, storedUserId, storedRole, storedPhoto, storedVirtualNumber, storedUsername);
-    } else {
-      setIsAuthenticated(false);
-    }
-  }, []);
+  }, [isAuthenticated, userId, token, selectedChat]);
 
   const toggleTheme = () => {
     setTheme((prevTheme) => (prevTheme === 'light' ? 'dark' : 'light'));
@@ -217,6 +216,10 @@ const App = () => {
   const handleChatNavigation = () => {
     setChatNotifications(0);
   };
+
+  if (isLoadingAuth) {
+    return <div className="min-h-screen flex items-center justify-center bg-gray-100 dark:bg-gray-900">Loading...</div>;
+  }
 
   if (!isAuthenticated) {
     return (
@@ -244,7 +247,7 @@ const App = () => {
               element={role === 0 ? <JobSeekerScreen token={token} userId={userId} /> : <EmployerScreen token={token} userId={userId} />}
             />
             <Route path="/feed" element={<FeedScreen token={token} userId={userId} />} />
-            <Route path="/chat" element={<ChatScreen token={token} userId={userId} setAuth={setAuth} />} />
+            <Route path="/chat" element={<ChatScreen token={token} userId={userId} setAuth={setAuth} socket={socket} />} />
             <Route
               path="/profile"
               element={
