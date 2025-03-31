@@ -11,6 +11,7 @@ const winston = require('winston');
 const rateLimit = require('express-rate-limit');
 const Joi = require('joi');
 
+
 const logger = winston.createLogger({
   level: 'info',
   format: winston.format.combine(winston.format.timestamp(), winston.format.json()),
@@ -22,13 +23,13 @@ const logger = winston.createLogger({
 });
 
 const socialLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
+  windowMs: 15 * 60 * 1000,
   max: 500,
   message: { error: 'Too many requests, please try again later.' },
 });
 
 const messageLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
+  windowMs: 15 * 60 * 1000,
   max: 200,
   message: { error: 'Too many messages sent, please try again later.' },
 });
@@ -43,19 +44,21 @@ const upload = multer({
   },
 });
 
+const messageSchema = Joi.object({
+  senderId: Joi.string().required(),
+  recipientId: Joi.string().required(),
+  contentType: Joi.string().valid('text', 'image', 'video', 'audio', 'document').required(),
+  content: Joi.string().required(),
+  caption: Joi.string().max(500).allow('').optional(),
+  replyTo: Joi.string().optional(),
+  originalFilename: Joi.string().optional(),
+});
+
 const postSchema = Joi.object({
   contentType: Joi.string().valid('image', 'video', 'audio', 'raw', 'text').required(),
   caption: Joi.string().max(500).allow('').optional(),
 });
 
-const messageSchema = Joi.object({
-  senderId: Joi.string().required(),
-  recipientId: Joi.string().required(),
-  contentType: Joi.string().valid('text', 'image', 'video', 'audio', 'document').required(),
-  content: Joi.string().when('contentType', { is: 'text', then: Joi.required(), otherwise: Joi.optional() }),
-  caption: Joi.string().max(500).allow('').optional(),
-  replyTo: Joi.string().optional(),
-});
 
 const messageStatusSchema = Joi.object({
   messageId: Joi.string().required(),
@@ -85,43 +88,30 @@ module.exports = (io) => {
     logger.info('User connected', { socketId: socket.id });
 
     socket.on('join', async (userId) => {
-      try {
-        socket.join(userId);
-        const user = await User.findById(userId);
-        if (!user) return logger.warn('User not found on join', { userId });
+      socket.join(userId);
+      const user = await User.findById(userId);
+      if (!user) return logger.warn('User not found on join', { userId });
+      user.status = 'online';
+      user.lastSeen = new Date();
+      await user.save();
+      io.emit('onlineStatus', { userId, status: 'online', lastSeen: user.lastSeen });
 
-        user.status = 'online';
-        user.lastSeen = new Date();
-        await user.save();
-        io.emit('onlineStatus', { userId, status: 'online', lastSeen: user.lastSeen });
-
-        const undelivered = await redis.lrange(`undelivered:${userId}`, 0, -1);
-        if (undelivered.length) {
-          undelivered.forEach((msg) => io.to(userId).emit('message', JSON.parse(msg)));
-          await redis.del(`undelivered:${userId}`);
-        }
-        logger.info('User joined', { userId });
-      } catch (error) {
-        logger.error('Join event error', { error: error.message, userId });
+      const undelivered = await redis.lrange(`undelivered:${userId}`, 0, -1);
+      if (undelivered.length) {
+        undelivered.forEach((msg) => io.to(userId).emit('message', JSON.parse(msg)));
+        await redis.del(`undelivered:${userId}`);
       }
+      logger.info('User joined', { userId });
     });
+
     socket.on('leave', async (userId) => {
-      try {
-        if (!userId || typeof userId !== 'string' || userId.trim() === '') {
-          logger.warn('Invalid userId on leave event', { userId });
-          return;
-        }
-        const user = await User.findById(userId);
-        if (!user) return logger.warn('User not found on leave', { userId });
-    
-        user.status = 'offline';
-        user.lastSeen = new Date();
-        await user.save();
-        io.emit('onlineStatus', { userId, status: 'offline', lastSeen: user.lastSeen });
-        logger.info('User left', { userId });
-      } catch (error) {
-        logger.error('Leave event error', { error: error.message, userId });
-      }
+      const user = await User.findById(userId);
+      if (!user) return logger.warn('User not found on leave', { userId });
+      user.status = 'offline';
+      user.lastSeen = new Date();
+      await user.save();
+      io.emit('onlineStatus', { userId, status: 'offline', lastSeen: user.lastSeen });
+      logger.info('User left', { userId });
     });
 
     let lastPing = {};
@@ -145,49 +135,38 @@ module.exports = (io) => {
     });
 
     socket.on('message', async (msg) => {
-      try {
-        const recipientOnline = io.sockets.adapter.rooms.has(msg.recipientId);
-        if (recipientOnline) io.to(msg.recipientId).emit('message', msg);
-        else await redis.lpush(`undelivered:${msg.recipientId}`, JSON.stringify(msg));
-        io.to(msg.senderId).emit('message', msg);
-        logger.info('Message broadcast', { messageId: msg._id });
-      } catch (error) {
-        logger.error('Message broadcast error', { error: error.message, messageId: msg._id });
-      }
+      const recipientOnline = io.sockets.adapter.rooms.has(msg.recipientId);
+      if (recipientOnline) io.to(msg.recipientId).emit('message', msg);
+      else await redis.lpush(`undelivered:${msg.recipientId}`, JSON.stringify(msg));
+      io.to(msg.senderId).emit('message', msg);
+      logger.info('Message broadcast', { messageId: msg._id });
     });
 
-    socket.on('messageStatus', async ({ messageId, status, recipientId }) => {
-      try {
-        const message = await Message.findById(messageId);
-        if (!message || message.recipientId.toString() !== recipientId) return;
-        message.status = status;
-        await message.save();
-        io.to(message.senderId).emit('messageStatus', { messageId, status });
-        io.to(recipientId).emit('messageStatus', { messageId, status });
-        logger.info('Message status updated', { messageId, status });
-      } catch (error) {
-        logger.error('Message status update error', { error: error.message, messageId });
-      }
+  socket.on('messageStatus', async ({ messageId, status, recipientId }) => {
+      const message = await Message.findById(messageId);
+      if (!message || message.recipientId.toString() !== recipientId) return;
+      message.status = status;
+      await message.save();
+      io.to(message.senderId).emit('messageStatus', { messageId, status });
+      io.to(recipientId).emit('messageStatus', { messageId, status });
+      logger.info('Message status updated', { messageId, status });
     });
 
     socket.on('typing', ({ userId, recipientId }) => io.to(recipientId).emit('typing', { userId, recipientId }));
     socket.on('stopTyping', ({ userId, recipientId }) => io.to(recipientId).emit('stopTyping', { userId, recipientId }));
 
+
     socket.on('disconnect', async () => {
-      try {
-        const userId = Array.from(socket.rooms).find((room) => room !== socket.id);
-        if (userId) {
-          const user = await User.findById(userId);
-          if (user) {
-            user.status = 'offline';
-            user.lastSeen = new Date();
-            await user.save();
-            io.emit('onlineStatus', { userId, status: 'offline', lastSeen: user.lastSeen });
-          }
-          logger.info('User disconnected', { userId, socketId: socket.id });
+      const userId = Array.from(socket.rooms).find((room) => room !== socket.id);
+      if (userId) {
+        const user = await User.findById(userId);
+        if (user) {
+          user.status = 'offline';
+          user.lastSeen = new Date();
+          await user.save();
+          io.emit('onlineStatus', { userId, status: 'offline', lastSeen: user.lastSeen });
         }
-      } catch (error) {
-        logger.error('Disconnect event error', { error: error.message });
+        logger.info('User disconnected', { userId, socketId: socket.id });
       }
     });
   });
@@ -362,78 +341,56 @@ module.exports = (io) => {
 
   router.post('/message', authMiddleware, messageLimiter, upload.single('content'), async (req, res) => {
     try {
-      const { error } = messageSchema.validate(req.body);
+      const { senderId, recipientId, contentType, content, caption, replyTo, originalFilename } = req.body;
+      const { error } = messageSchema.validate({ senderId, recipientId, contentType, content, caption, replyTo, originalFilename });
       if (error) {
         logger.warn('Message validation failed', { error: error.details[0].message, body: req.body });
         return res.status(400).json({ error: error.details[0].message });
       }
-  
-      const { senderId, recipientId, contentType, caption, replyTo } = req.body;
+
       if (senderId !== req.user.id) return res.status(403).json({ error: 'Unauthorized' });
-  
+
       const sender = await User.findById(senderId);
       const recipient = await User.findById(recipientId);
       if (!sender || !recipient) return res.status(404).json({ error: 'Sender or recipient not found' });
-  
-      let contentUrl = req.body.content;
-      let originalFilename = req.body.originalFilename;
-  
-      if (['image', 'video', 'audio', 'document'].includes(contentType)) {
-        if (!contentUrl) {
-          logger.warn('No encrypted content provided for media message', { senderId, contentType });
-          return res.status(400).json({ error: 'Encrypted content required for media message' });
-        }
-        // Store encrypted content as-is (no Cloudinary upload for encrypted data)
-      } else if (contentType === 'text' && !contentUrl) {
-        logger.warn('No content provided for text message', { senderId });
-        return res.status(400).json({ error: 'Text content is required' });
-      }
-  
+
       const message = new Message({
         senderId,
         recipientId,
         contentType,
-        content: contentUrl,
+        content,
         caption,
         status: 'sent',
         replyTo: replyTo || undefined,
-        originalFilename: originalFilename || undefined, // Store original filename for media
+        originalFilename: originalFilename || undefined,
       });
       await message.save();
-  
+
       const messageData = {
         ...message.toObject(),
         senderVirtualNumber: sender.virtualNumber,
         senderUsername: sender.username,
         senderPhoto: sender.photo,
       };
-  
+
       const recipientOnline = io.sockets.adapter.rooms.has(recipientId);
       if (recipientOnline) io.to(recipientId).emit('message', messageData);
       else await redis.lpush(`undelivered:${recipientId}`, JSON.stringify(messageData));
       io.to(senderId).emit('message', messageData);
-  
+
       logger.info('Message sent', { messageId: message._id, senderId, recipientId });
-      res.json(message.toObject());
+      res.json(messageData);
     } catch (error) {
       logger.error('Message send error', { error: error.message, senderId: req.user.id, stack: error.stack });
       res.status(500).json({ error: 'Failed to send message' });
     }
   });
 
-  
   router.get('/messages', authMiddleware, socialLimiter, async (req, res) => {
     try {
       const { userId, recipientId, limit = 50, skip = 0 } = req.query;
       if (!userId || !recipientId) return res.status(400).json({ error: 'User ID and Recipient ID required' });
       if (req.user.id !== userId) return res.status(403).json({ error: 'Unauthorized' });
-
-      const cacheKey = `messages:${userId}:${recipientId}:${skip}:${limit}`;
-      const cachedMessages = await redis.get(cacheKey);
-      if (cachedMessages) {
-        logger.info('Messages cache hit', { cacheKey });
-        return res.json(JSON.parse(cachedMessages));
-      }
 
       const total = await Message.countDocuments({
         $or: [{ senderId: userId, recipientId }, { senderId: recipientId, recipientId: userId }],
@@ -447,7 +404,6 @@ module.exports = (io) => {
         .lean();
 
       const response = { messages: messages.reverse(), hasMore: parseInt(skip) + messages.length < total };
-      await redis.setex(cacheKey, 300, JSON.stringify(response));
       res.json(response);
     } catch (error) {
       logger.error('Messages fetch error', { error: error.message, userId: req.query.userId });

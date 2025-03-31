@@ -55,28 +55,25 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   const isSmallDevice = window.innerWidth < 768;
 
   const encryptMessage = useCallback(async (content, recipientPublicKey, isMedia = false) => {
-    const aesKey = forge.random.getBytesSync(32); // 256-bit AES key
-    const iv = forge.random.getBytesSync(16); // 128-bit IV
+    const aesKey = forge.random.getBytesSync(32);
+    const iv = forge.random.getBytesSync(16);
     const cipher = forge.cipher.createCipher('AES-CBC', aesKey);
     cipher.start({ iv });
     cipher.update(forge.util.createBuffer(isMedia ? content : forge.util.encodeUtf8(content)));
     cipher.finish();
     const encryptedContent = cipher.output.getBytes();
-  
     const publicKey = forge.pki.publicKeyFromPem(recipientPublicKey);
     const encryptedAesKey = forge.util.encode64(
       publicKey.encrypt(aesKey, 'RSA-OAEP', { md: forge.md.sha256.create() })
     );
-  
-    return forge.util.encode64(encryptedContent) + '|' + forge.util.encode64(iv) + '|' + encryptedAesKey;
+    return `${forge.util.encode64(encryptedContent)}|${forge.util.encode64(iv)}|${encryptedAesKey}`;
   }, []);
-  
+
   const decryptMessage = useCallback(async (encryptedContent, privateKeyPem, isMedia = false) => {
     try {
       const [encryptedData, iv, encryptedAesKey] = encryptedContent.split('|').map(forge.util.decode64);
       const privateKey = forge.pki.privateKeyFromPem(privateKeyPem);
       const aesKey = privateKey.decrypt(encryptedAesKey, 'RSA-OAEP', { md: forge.md.sha256.create() });
-  
       const decipher = forge.cipher.createDecipher('AES-CBC', aesKey);
       decipher.start({ iv });
       decipher.update(forge.util.createBuffer(encryptedData));
@@ -89,16 +86,13 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     }
   }, []);
 
+
+
   const getPublicKey = useCallback(async (recipientId) => {
-    try {
-      const { data } = await axios.get(`https://gapp-6yc3.onrender.com/auth/public_key/${recipientId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      return data.publicKey;
-    } catch (err) {
-      console.error('Get public key error:', err.response?.data || err);
-      throw err;
-    }
+    const { data } = await axios.get(`https://gapp-6yc3.onrender.com/auth/public_key/${recipientId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    return data.publicKey;
   }, [token]);
 
   const formatChatListDate = (date) => new Date(date).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
@@ -106,172 +100,84 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   const formatTime = (date) => new Date(date).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
   const formatLastSeen = (lastSeen) => (lastSeen ? `Last seen ${new Date(lastSeen).toLocaleString()}` : 'Offline');
 
-  const retryRequest = async (url, config, retries = 3, delay = 1000) => {
-    for (let i = 0; i < retries; i++) {
-      try {
-        const response = await axios.get(url, config);
-        return response;
-      } catch (err) {
-        if (err.response?.status === 429 && i < retries - 1) {
-          await new Promise((resolve) => setTimeout(resolve, delay * (i + 1)));
-          continue;
-        }
-        throw err;
-      }
+  const fetchUsers = useCallback(async () => {
+    try {
+      const { data } = await axios.get('https://gapp-6yc3.onrender.com/auth/contacts', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const usersWithData = await Promise.all(data.map(async (user) => {
+        const { data: msgData } = await axios.get('https://gapp-6yc3.onrender.com/social/messages', {
+          headers: { Authorization: `Bearer ${token}` },
+          params: { userId, recipientId: user.id, limit: 1, skip: 0 },
+        });
+        return {
+          ...user,
+          latestMessage: msgData.messages[0],
+          unreadCount: msgData.messages[0]?.recipientId === userId && msgData.messages[0]?.status !== 'read' ? 1 : 0,
+        };
+      }));
+      setUsers(usersWithData.sort((a, b) => new Date(b.latestMessage?.createdAt || 0) - new Date(a.latestMessage?.createdAt || 0)));
+      localStorage.setItem('cachedUsers', JSON.stringify(usersWithData));
+    } catch (err) {
+      setError(`Failed to load contacts: ${err.response?.data?.error || err.message}`);
+      if (err.response?.status === 401) handleLogout();
     }
-  };
+  }, [token, userId, setError, handleLogout]);
+
+
+  const fetchMessages = useCallback(async (pageNum = 0, initial = true) => {
+    if (!selectedChat || loading || !hasMore) return;
+    setLoading(true);
+    try {
+      const { data } = await axios.get('https://gapp-6yc3.onrender.com/social/messages', {
+        headers: { Authorization: `Bearer ${token}` },
+        params: { userId, recipientId: selectedChat, limit: messagesPerPage, skip: pageNum * messagesPerPage },
+      });
+      const privateKeyPem = localStorage.getItem('privateKey');
+      const messages = await Promise.all(data.messages.map(async (msg) => {
+        if (msg.recipientId === userId && msg.contentType === 'text') {
+          msg.content = await decryptMessage(msg.content, privateKeyPem);
+        } else if (msg.recipientId === userId && ['image', 'video', 'audio', 'document'].includes(msg.contentType)) {
+          const decryptedContent = await decryptMessage(msg.content, privateKeyPem, true);
+          msg.content = URL.createObjectURL(new Blob([decryptedContent], { type: msg.contentType === 'document' ? 'application/pdf' : msg.contentType }));
+        }
+        return msg;
+      }));
+      setHasMore(data.hasMore);
+      dispatch(setMessages({ recipientId: selectedChat, messages: initial ? messages : [...messages, ...(chats[selectedChat] || [])] }));
+      if (initial) chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight });
+      await saveMessages(messages);
+    } catch (err) {
+      setError(`Failed to load messages: ${err.response?.data?.error || err.message}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [selectedChat, token, userId, dispatch, decryptMessage, loading, hasMore]);
+
+
 
   useEffect(() => {
     if (!userId || !token) return;
-   
 
-    const initialize = async () => {
-      try {
-        let privateKeyPem = localStorage.getItem('privateKey');
-        if (!privateKeyPem || !privateKeyPem.includes('-----BEGIN RSA PRIVATE KEY-----')) {
-          const response = await retryRequest('https://gapp-6yc3.onrender.com/auth/refresh', {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${token}` },
-            timeout: 5000,
-          });
-          const { data } = response;
-          localStorage.setItem('privateKey', data.privateKey);
-          localStorage.setItem('token', data.token);
-          localStorage.setItem('userId', data.userId);
-          setAuth(data.token, data.userId, data.role, data.photo, data.virtualNumber, data.username);
-          privateKeyPem = data.privateKey;
-        }
-        socket.emit('join', userId);
-        await fetchUsers();
-        if (selectedChat) await fetchMessages(0);
-      } catch (err) {
-        console.error('Initialization error:', err.response?.data || err.message);
-        if (err.response?.status === 401 || err.response?.status === 404) {
-          handleLogout(); // Only logout on unrecoverable auth errors
-        } else {
-          setError(`Initialization failed: ${err.response?.data?.error || err.message}`);
-        }
-      }
-    };
-
-
-
-    const retryRequest = async (url, config, retries = 3, delay = 1000) => {
-      for (let i = 0; i < retries; i++) {
-        try {
-          const response = await axios.request({ url, ...config });
-          return response;
-        } catch (err) {
-          if ((err.response?.status === 401 || err.response?.status === 429) && i < retries - 1) {
-            await new Promise((resolve) => setTimeout(resolve, delay * (i + 1)));
-            continue;
-          }
-          throw err;
-        }
-      }
-    };
-
+    socket.emit('join', userId);
+    fetchUsers();
+    if (selectedChat) fetchMessages(0);
 
     const keepAlive = setInterval(() => socket.emit('ping', { userId }), 30000);
     clearOldMessages(30).then(() => checkIndexes()).catch((err) => console.error('IndexedDB setup error:', err));
 
-    const fetchUsers = async () => {
-
-
-      try {
-        if (!token || !userId) {
-          setError('Missing token or userId');
-          console.error('Missing token or userId:', { token, userId });
-          return;
-        }
-        const { data } = await retryRequest('https://gapp-6yc3.onrender.com/auth/contacts', {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        const usersWithData = await Promise.all(data.map(async (user) => {
-          const { data: msgData } = await retryRequest('https://gapp-6yc3.onrender.com/social/messages', {
-            headers: { Authorization: `Bearer ${token}` },
-            params: { userId, recipientId: user.id, limit: 1, skip: 0 },
-          });
-          return {
-            ...user,
-            latestMessage: msgData.messages[0],
-            unreadCount: msgData.messages[0]?.recipientId === userId && msgData.messages[0]?.status !== 'read' ? 1 : 0,
-          };
-        }));
-        const { data: currentUser } = await axios.post('https://gapp-6yc3.onrender.com/auth/refresh', { headers: { Authorization: `Bearer ${token}` } });
-        setUsers((prev) => {
-          const updatedUsers = usersWithData.map((u) => (u.id === userId ? { ...u, photo: currentUser.photo } : u)).sort((a, b) => new Date(b.latestMessage?.createdAt || 0) - new Date(a.latestMessage?.createdAt || 0));
-          localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
-          return updatedUsers;
-        });
-      } catch (err) {
-        setError(`Failed to load contacts: ${err.response?.data?.error || err.message}`);
-        console.error('Fetch users error:', err.response?.data || err);
-        if (err.response?.status === 401 || err.response?.status === 404) handleLogout();
-      }
-    };
-    const fetchMessages = async (pageNum = 0, initial = true) => {
-      if (!selectedChat || loading || !hasMore) return;
-      setLoading(true);
-      try {
-        const { data } = await retryRequest('https://gapp-6yc3.onrender.com/social/messages', {
-          headers: { Authorization: `Bearer ${token}` },
-          params: { userId, recipientId: selectedChat, limit: messagesPerPage, skip: pageNum * messagesPerPage },
-        });
-        const privateKeyPem = localStorage.getItem('privateKey');
-        const messages = await Promise.all(data.messages.map(async (msg) => {
-          if (msg.recipientId === userId) {
-            if (msg.contentType === 'text') {
-              msg.content = await decryptMessage(msg.content, privateKeyPem);
-            } else if (['image', 'video', 'audio', 'document'].includes(msg.contentType)) {
-              const decryptedContent = await decryptMessage(msg.content, privateKeyPem, true);
-              msg.content = URL.createObjectURL(new Blob([decryptedContent], { type: msg.contentType === 'document' ? 'application/pdf' : msg.contentType }));
-              msg.originalFilename = msg.originalFilename || 'file';
-            }
-          }
-          return msg;
-        }));
-        setHasMore(data.hasMore);
-        dispatch(setMessages({ recipientId: selectedChat, messages: initial ? messages : [...messages, ...(chats[selectedChat] || [])] }));
-        if (initial) {
-          const unread = messages.filter((m) => m.recipientId === userId && m.status !== 'read');
-          setUnreadCount(unread.length);
-          if (unread.length) setFirstUnreadMessageId(unread[0]._id);
-          chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight });
-        }
-        await saveMessages(messages);
-      } catch (err) {
-        setError(`Failed to load messages: ${err.response?.data?.error || err.message}`);
-        console.error('Fetch messages error:', err.response?.data || err);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    if (selectedChat) {
-      setPage(0);
-      setHasMore(true);
-      fetchMessages(0);
-      retryRequest(`https://gapp-6yc3.onrender.com/social/user-status/${selectedChat}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      }).then(({ data }) => setUserStatus(data)).catch(() => setUserStatus({ status: 'offline', lastSeen: null }));
-    }
-
     socket.on('message', async (msg) => {
       const chatId = msg.senderId === userId ? msg.recipientId : msg.senderId;
       const privateKeyPem = localStorage.getItem('privateKey');
-      if (msg.recipientId === userId) {
-        if (msg.contentType === 'text') {
-          msg.content = await decryptMessage(msg.content, privateKeyPem);
-        } else if (['image', 'video', 'audio', 'document'].includes(msg.contentType)) {
-          const decryptedContent = await decryptMessage(msg.content, privateKeyPem, true);
-          msg.content = URL.createObjectURL(new Blob([decryptedContent], { type: msg.contentType === 'document' ? 'application/pdf' : msg.contentType }));
-          msg.originalFilename = msg.originalFilename || 'file';
-        }
+      if (msg.recipientId === userId && msg.contentType === 'text') {
+        msg.content = await decryptMessage(msg.content, privateKeyPem);
+      } else if (msg.recipientId === userId && ['image', 'video', 'audio', 'document'].includes(msg.contentType)) {
+        const decryptedContent = await decryptMessage(msg.content, privateKeyPem, true);
+        msg.content = URL.createObjectURL(new Blob([decryptedContent], { type: msg.contentType === 'document' ? 'application/pdf' : msg.contentType }));
       }
       dispatch(addMessage({ recipientId: chatId, message: msg }));
       await saveMessages([msg]);
-      if (chatId === selectedChat && msg.recipientId === userId) {
+      if (chatId === selectedChat) {
         socket.emit('messageStatus', { messageId: msg._id, status: 'delivered', recipientId: userId });
         if (isAtBottomRef.current) {
           socket.emit('messageStatus', { messageId: msg._id, status: 'read', recipientId: userId });
@@ -285,14 +191,6 @@ const ChatScreen = ({ token, userId, setAuth }) => {
         setNotifications((prev) => ({ ...prev, [msg.senderId]: (prev[msg.senderId] || 0) + 1 }));
         setUsers((prev) => prev.map((u) => u.id === msg.senderId ? { ...u, unreadCount: (u.unreadCount || 0) + 1, latestMessage: msg } : u));
       }
-    });
-
-    socket.on('typing', ({ userId: typer, recipientId }) => {
-      if (recipientId === userId && typer === selectedChat) setIsTyping((prev) => ({ ...prev, [typer]: true }));
-    });
-
-    socket.on('stopTyping', ({ userId: typer, recipientId }) => {
-      if (recipientId === userId && typer === selectedChat) setIsTyping((prev) => ({ ...prev, [typer]: false }));
     });
 
     socket.on('messageStatus', ({ messageId, status }) => {
@@ -321,20 +219,18 @@ const ChatScreen = ({ token, userId, setAuth }) => {
 
     return () => {
       socket.off('message');
-      socket.off('typing');
-      socket.off('stopTyping');
       socket.off('messageStatus');
       socket.off('onlineStatus');
       chatRef.current?.removeEventListener('scroll', handleScroll);
       clearInterval(keepAlive);
     };
-  }, [token, userId, selectedChat, page, dispatch, getPublicKey, decryptMessage]);
+  }, [token, userId, selectedChat, page, dispatch, fetchUsers, fetchMessages]);
 
   const sendMessage = async () => {
     if (!selectedChat || (!message && !file)) return;
     socket.emit('stopTyping', { userId, recipientId: selectedChat });
     setTyping(false);
-  
+
     const tempId = Date.now().toString();
     const tempMsg = {
       _id: tempId,
@@ -349,14 +245,14 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     };
     dispatch(addMessage({ recipientId: selectedChat, message: tempMsg }));
     if (isAtBottomRef.current) chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight });
-  
+
     try {
+      const recipientPublicKey = await getPublicKey(selectedChat);
       const formData = new FormData();
       formData.append('senderId', userId);
       formData.append('recipientId', selectedChat);
       formData.append('contentType', contentType);
-      const recipientPublicKey = await getPublicKey(selectedChat);
-  
+
       if (contentType === 'text' && !file) {
         formData.append('content', await encryptMessage(message, recipientPublicKey));
       } else if (file) {
@@ -370,16 +266,16 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       }
       if (caption) formData.append('caption', caption);
       if (replyTo) formData.append('replyTo', replyTo._id);
-  
+
       const { data } = await axios.post('https://gapp-6yc3.onrender.com/social/message', formData, {
         headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
       });
+      const updatedMsg = { ...data, content: file ? URL.createObjectURL(file) : message }; // Show plaintext or file URL for sender
       dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: tempId, status: 'sent' }));
-      dispatch(addMessage({ recipientId: selectedChat, message: data }));
-      await saveMessages([data]);
+      dispatch(addMessage({ recipientId: selectedChat, message: updatedMsg }));
+      await saveMessages([updatedMsg]);
     } catch (err) {
       setError(`Send failed: ${err.response?.data?.error || err.message}`);
-      console.error('Send message error:', err.response?.data || err);
       dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: tempId, status: 'failed' }));
     } finally {
       setMessage('');
@@ -391,7 +287,6 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       setShowPicker(false);
     }
   };
-
   const handleTyping = (e) => {
     setMessage(e.target.value);
     if (!typing && e.target.value) {
@@ -403,6 +298,15 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       socket.emit('stopTyping', { userId, recipientId: selectedChat });
       setTyping(false);
     }, 2000);
+  };
+
+  const handleLogout = () => {
+    socket.emit('leave', userId);
+    dispatch(resetState());
+    localStorage.clear();
+    setUsers([]);
+    setNotifications({});
+    setAuth('', '', '', '', '');
   };
 
   const deleteMessages = async () => {
@@ -476,15 +380,6 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     setUnreadCount(0);
   };
 
-  const handleLogout = () => {
-    socket.emit('leave', userId);
-    dispatch(resetState());
-    localStorage.clear();
-    setUsers([]);
-    setNotifications({});
-    setAuth('', '', '', '', '');
-    setShowMenu(false);
-  };
 
 
   return (
@@ -576,6 +471,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                 </div>
               </div>
             </div>
+            
             <div ref={chatRef} className="flex-1 overflow-y-auto bg-gray-100 dark:bg-gray-900 p-2 pt-16" style={{ paddingBottom: '80px' }}>
               {loading && <div className="text-center text-gray-500 dark:text-gray-400">Loading...</div>}
               {(chats[selectedChat] || []).map((msg, i) => {
@@ -585,24 +481,24 @@ const ChatScreen = ({ token, userId, setAuth }) => {
                     {showDateHeader && <div className="text-center my-2"><span className="bg-gray-300 dark:bg-gray-700 text-gray-700 dark:text-gray-300 px-2 py-1 rounded-full text-sm">{formatDateHeader(msg.createdAt)}</span></div>}
                     {firstUnreadMessageId === msg._id && unreadCount > 0 && <div className="text-center my-2"><span className="bg-blue-500 text-white px-2 py-1 rounded-full text-sm">{unreadCount} Unread</span></div>}
                     <div className={`flex ${msg.senderId === userId ? 'justify-end' : 'justify-start'} px-2 py-1`}>
-                      <div
-                        className={`max-w-[70%] p-2 rounded-lg shadow-sm ${msg.senderId === userId ? 'bg-green-500 text-white rounded-br-none' : 'bg-white dark:bg-gray-800 rounded-bl-none'}`}
-                        onClick={() => ['image', 'video'].includes(msg.contentType) && setViewMedia({ type: msg.contentType, url: msg.content })}
-                        onContextMenu={(e) => { e.preventDefault(); setShowMessageMenu(msg._id); }}
-                      >
-                        {msg.replyTo && <div className="bg-gray-100 dark:bg-gray-700 p-1 rounded mb-1 text-xs italic">{chats[selectedChat].find((m) => m._id === msg.replyTo)?.content.slice(0, 20)}...</div>}
-                        {msg.contentType === 'text' && <p className="text-sm break-words">{msg.content}</p>}
-                        {msg.contentType === 'image' && <img src={msg.content} alt="Chat" className="max-w-[80%] max-h-64 rounded-lg cursor-pointer" />}
-                        {msg.contentType === 'video' && <video src={msg.content} className="max-w-[80%] max-h-64 rounded-lg" controls />}
-                        {msg.contentType === 'audio' && <audio src={msg.content} controls className="max-w-[80%]" />}
-                        {msg.contentType === 'document' && <div className="flex items-center"><FaFileAlt className="text-blue-600 mr-2" /><a href={msg.content} download className="text-blue-600 truncate">{msg.content.split('/').pop()}</a></div>}
-                        {msg.caption && <p className="text-xs italic mt-1">{msg.caption}</p>}
-                        <div className="flex justify-between mt-1">
-                          {msg.senderId === userId && (
-                            <span className="text-xs">
-                              {msg.status === 'sending' ? '...' : msg.status === 'sent' ? '✔' : msg.status === 'delivered' ? '✔✔' : <span className="text-blue-300">✔✔</span>}
-                            </span>
-                          )}
+                    <div
+                      className={`max-w-[70%] p-2 rounded-lg shadow-sm ${msg.senderId === userId ? 'bg-green-500 text-white rounded-br-none' : 'bg-white dark:bg-gray-800 rounded-bl-none'}`}
+                      onClick={() => ['image', 'video'].includes(msg.contentType) && setViewMedia({ type: msg.contentType, url: msg.content })}
+                      onContextMenu={(e) => { e.preventDefault(); setShowMessageMenu(msg._id); }}
+                    >
+                      {msg.replyTo && <div className="bg-gray-100 dark:bg-gray-700 p-1 rounded mb-1 text-xs italic">{chats[selectedChat].find((m) => m._id === msg.replyTo)?.content.slice(0, 20)}...</div>}
+                      {msg.contentType === 'text' && <p className="text-sm break-words">{msg.content}</p>}
+                      {msg.contentType === 'image' && <img src={msg.content} alt="Chat" className="max-w-[80%] max-h-64 rounded-lg cursor-pointer" />}
+                      {msg.contentType === 'video' && <video src={msg.content} className="max-w-[80%] max-h-64 rounded-lg" controls />}
+                      {msg.contentType === 'audio' && <audio src={msg.content} controls className="max-w-[80%]" />}
+                      {msg.contentType === 'document' && <div className="flex items-center"><FaFileAlt className="text-blue-600 mr-2" /><a href={msg.content} download className="text-blue-600 truncate">{msg.originalFilename || 'file'}</a></div>}
+                      {msg.caption && <p className="text-xs italic mt-1">{msg.caption}</p>}
+                      <div className="flex justify-between mt-1">
+                        {msg.senderId === userId && (
+                          <span className="text-xs">
+                            {msg.status === 'sending' ? '...' : msg.status === 'sent' ? '✔' : msg.status === 'delivered' ? '✔✔' : <span className="text-blue-300">✔✔</span>}
+                          </span>
+                        )}
                           <span className="text-xs text-gray-500">{formatTime(msg.createdAt)}</span>
                         </div>
                       </div>
