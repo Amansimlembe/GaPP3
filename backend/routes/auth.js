@@ -405,11 +405,18 @@ router.get('/public_key/:userId', authMiddleware, async (req, res) => {
     res.status(500).json({ error: error.message || 'Failed to fetch public key' });
   }
 });
-
 router.post('/refresh', authMiddleware, async (req, res) => {
   try {
-    const user = await User.findById(req.user.id);
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (!req.user.id) {
+      logger.error('No user ID in token during refresh', { token: req.headers.authorization });
+      return res.status(401).json({ error: 'Invalid token: No user ID' });
+    }
+
+    const user = await User.findById(req.user.id).select('+privateKey'); // Explicitly select privateKey
+    if (!user) {
+      logger.warn('User not found during refresh', { userId: req.user.id });
+      return res.status(404).json({ error: 'User not found' });
+    }
 
     if (!user.privateKey || !user.privateKey.includes('-----BEGIN RSA PRIVATE KEY-----')) {
       logger.error('Invalid private key in database during refresh', { userId: user._id });
@@ -433,7 +440,7 @@ router.post('/refresh', authMiddleware, async (req, res) => {
       privateKey: user.privateKey,
     });
   } catch (error) {
-    logger.error('Refresh token error:', { error: error.message, stack: error.stack });
+    logger.error('Refresh token error:', { error: error.message, stack: error.stack, userId: req.user?.id });
     res.status(500).json({ error: error.message || 'Failed to refresh token' });
   }
 });

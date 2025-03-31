@@ -82,26 +82,29 @@ const App = () => {
       localStorage.removeItem('privateKey');
       setChatNotifications(0);
     }
-  };
-
-  const refreshToken = async () => {
+  };const refreshToken = async () => {
     try {
       const response = await axios.post(
         'https://gapp-6yc3.onrender.com/auth/refresh',
-        { userId },
+        {}, // Remove userId payload
         { headers: { Authorization: `Bearer ${token}` } }
       );
       const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername, privateKey } = response.data;
       setAuth(newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername);
       localStorage.setItem('privateKey', privateKey);
+      console.log('Token refreshed successfully', { userId: newUserId });
       return newToken;
     } catch (error) {
-      console.error('Token refresh failed:', error);
+      console.error('Token refresh failed:', {
+        status: error.response?.status,
+        data: error.response?.data,
+        message: error.message,
+        token: token.substring(0, 10) + '...', // Partial token for debug
+      });
       setAuth('', '', '', '', '', '');
       return null;
     }
   };
-
   useEffect(() => {
     const interceptor = axios.interceptors.response.use(
       (response) => response,
