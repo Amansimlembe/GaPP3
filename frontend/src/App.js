@@ -51,7 +51,7 @@ const App = () => {
   const [chatNotifications, setChatNotifications] = useState(0);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
-  const [isLoadingAuth, setIsLoadingAuth] = useState(true); // New state to delay rendering
+  const [isLoadingAuth, setIsLoadingAuth] = useState(true);
   const { selectedChat } = useSelector((state) => state.messages);
   const isSmallDevice = window.innerWidth < 768;
 

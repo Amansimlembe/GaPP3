@@ -142,13 +142,14 @@ const ChatScreen = ({ token, userId, setAuth, socket }) => {
       });
       const privateKeyPem = localStorage.getItem('privateKey');
       const messages = await Promise.all(data.messages.map(async (msg) => {
+        const newMsg = { ...msg }; // Clone the message object
         if (msg.recipientId === userId && msg.contentType === 'text') {
-          msg.content = await decryptMessage(msg.content, privateKeyPem);
+          newMsg.content = await decryptMessage(msg.content, privateKeyPem);
         } else if (msg.recipientId === userId && ['image', 'video', 'audio', 'document'].includes(msg.contentType)) {
           const decryptedContent = await decryptMessage(msg.content, privateKeyPem, true);
-          msg.content = URL.createObjectURL(new Blob([decryptedContent], { type: msg.contentType === 'document' ? 'application/pdf' : msg.contentType }));
+          newMsg.content = URL.createObjectURL(new Blob([decryptedContent], { type: msg.contentType === 'document' ? 'application/pdf' : msg.contentType }));
         }
-        return msg;
+        return newMsg;
       }));
       setHasMore(data.hasMore);
       dispatch(setMessages({ recipientId: selectedChat, messages: initial ? messages : [...messages, ...(chats[selectedChat] || [])] }));
@@ -161,6 +162,8 @@ const ChatScreen = ({ token, userId, setAuth, socket }) => {
     }
   }, [selectedChat, token, userId, dispatch, decryptMessage, loading, hasMore]);
 
+
+  
   useEffect(() => {
     if (!userId || !token) return;
 
@@ -176,6 +179,7 @@ const ChatScreen = ({ token, userId, setAuth, socket }) => {
     };
 
     const setupSocketListeners = () => {
+      
       socket.on('message', async (msg) => {
         const chatId = msg.senderId === userId ? msg.recipientId : msg.senderId;
         const privateKeyPem = localStorage.getItem('privateKey');
@@ -254,7 +258,7 @@ const ChatScreen = ({ token, userId, setAuth, socket }) => {
     if (!selectedChat || (!message && !file)) return;
     socket.emit('stopTyping', { userId, recipientId: selectedChat });
     setTyping(false);
-
+  
     const tempId = Date.now().toString();
     const tempMsg = {
       _id: tempId,
@@ -269,32 +273,39 @@ const ChatScreen = ({ token, userId, setAuth, socket }) => {
     };
     dispatch(addMessage({ recipientId: selectedChat, message: tempMsg }));
     if (isAtBottomRef.current) chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight });
-
+  
     try {
       const recipientPublicKey = await getPublicKey(selectedChat);
       const formData = new FormData();
       formData.append('senderId', userId);
       formData.append('recipientId', selectedChat);
       formData.append('contentType', contentType);
-
+  
+      let encryptedContent;
       if (contentType === 'text' && !file) {
-        formData.append('content', await encryptMessage(message, recipientPublicKey));
+        encryptedContent = await encryptMessage(message, recipientPublicKey);
+        formData.append('content', encryptedContent);
       } else if (file) {
         const fileReader = new FileReader();
         const fileContent = await new Promise((resolve) => {
           fileReader.onload = () => resolve(fileReader.result);
           fileReader.readAsBinaryString(file);
         });
-        formData.append('content', await encryptMessage(fileContent, recipientPublicKey, true));
+        encryptedContent = await encryptMessage(fileContent, recipientPublicKey, true);
+        formData.append('content', encryptedContent);
         formData.append('originalFilename', file.name);
       }
       if (caption) formData.append('caption', caption);
       if (replyTo) formData.append('replyTo', replyTo._id);
-
+  
       const { data } = await axios.post('https://gapp-6yc3.onrender.com/social/message', formData, {
         headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
       });
-      const updatedMsg = { ...data, content: file ? URL.createObjectURL(file) : message };
+      const updatedMsg = {
+        ...data,
+        content: file ? URL.createObjectURL(file) : message, // Keep original content for sender
+        encryptedContent: encryptedContent, // Store encrypted content separately
+      };
       dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: tempId, status: 'sent' }));
       dispatch(addMessage({ recipientId: selectedChat, message: updatedMsg }));
       await saveMessages([updatedMsg]);

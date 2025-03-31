@@ -34,6 +34,11 @@ const messageSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Message',
   },
+  originalFilename: {
+    type: String,
+    trim: true,
+    maxlength: 255, // Reasonable limit for filenames
+  },
   createdAt: {
     type: Date,
     default: Date.now,

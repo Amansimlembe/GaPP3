@@ -5,12 +5,11 @@ const Message = require('../models/Message');
 const User = require('../models/User');
 const cloudinary = require('cloudinary').v2;
 const multer = require('multer');
-const { authMiddleware } = require('../routes/auth');
+const { authMiddleware } = require('./auth');
 const redis = require('../redis');
 const winston = require('winston');
 const rateLimit = require('express-rate-limit');
 const Joi = require('joi');
-
 
 const logger = winston.createLogger({
   level: 'info',
@@ -59,22 +58,10 @@ const postSchema = Joi.object({
   caption: Joi.string().max(500).allow('').optional(),
 });
 
-
 const messageStatusSchema = Joi.object({
   messageId: Joi.string().required(),
   status: Joi.string().valid('sent', 'delivered', 'read').required(),
   recipientId: Joi.string().required(),
-});
-
-const likeSchema = Joi.object({
-  postId: Joi.string().required(),
-  userId: Joi.string().required(),
-});
-
-const commentSchema = Joi.object({
-  postId: Joi.string().required(),
-  comment: Joi.string().max(500).required(),
-  userId: Joi.string().required(),
 });
 
 cloudinary.config({
@@ -142,7 +129,7 @@ module.exports = (io) => {
       logger.info('Message broadcast', { messageId: msg._id });
     });
 
-  socket.on('messageStatus', async ({ messageId, status, recipientId }) => {
+    socket.on('messageStatus', async ({ messageId, status, recipientId }) => {
       const message = await Message.findById(messageId);
       if (!message || message.recipientId.toString() !== recipientId) return;
       message.status = status;
@@ -152,9 +139,8 @@ module.exports = (io) => {
       logger.info('Message status updated', { messageId, status });
     });
 
-    socket.on('typing', ({ userId, recipientId }) => io.to(recipientId).emit('typing', { userId, recipientId }));
-    socket.on('stopTyping', ({ userId, recipientId }) => io.to(recipientId).emit('stopTyping', { userId, recipientId }));
-
+    socket.on('typing', ({ userId, recipientId }) => io.to(recipientId).emit('typing', { userId }));
+    socket.on('stopTyping', ({ userId, recipientId }) => io.to(recipientId).emit('stopTyping', { userId }));
 
     socket.on('disconnect', async () => {
       const userId = Array.from(socket.rooms).find((room) => room !== socket.id);
@@ -338,7 +324,6 @@ module.exports = (io) => {
     }
   });
 
-
   router.post('/message', authMiddleware, messageLimiter, upload.single('content'), async (req, res) => {
     try {
       const { senderId, recipientId, contentType, content, caption, replyTo, originalFilename } = req.body;
@@ -403,7 +388,17 @@ module.exports = (io) => {
         .limit(parseInt(limit))
         .lean();
 
-      const response = { messages: messages.reverse(), hasMore: parseInt(skip) + messages.length < total };
+      const enrichedMessages = await Promise.all(messages.map(async (msg) => {
+        const sender = await User.findById(msg.senderId).select('virtualNumber username photo');
+        return {
+          ...msg,
+          senderVirtualNumber: sender?.virtualNumber || 'Unknown',
+          senderUsername: sender?.username,
+          senderPhoto: sender?.photo,
+        };
+      }));
+
+      const response = { messages: enrichedMessages.reverse(), hasMore: parseInt(skip) + enrichedMessages.length < total };
       res.json(response);
     } catch (error) {
       logger.error('Messages fetch error', { error: error.message, userId: req.query.userId });
