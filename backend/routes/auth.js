@@ -103,6 +103,8 @@ const generateVirtualNumber = (countryCode, userId) => {
   }
 };
 
+
+
 router.post('/register', authLimiter, upload.single('photo'), async (req, res) => {
   try {
     const { error } = registerSchema.validate(req.body);
@@ -158,14 +160,12 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
           logger.info('Photo uploaded to Cloudinary', { email, photoUrl: user.photo });
         } catch (uploadErr) {
           logger.error('Cloudinary upload failed', { error: uploadErr.message, email });
-          // Skip photo upload instead of failing registration
         }
       }
     }
-
+  
     await user.save();
     logger.info('User saved with photo', { userId: user._id, photo: user.photo });
-
     const token = jwt.sign({ id: user._id, email, virtualNumber, role: user.role }, process.env.JWT_SECRET, { expiresIn: '24h' });
 
     logger.info('User registered', { userId: user._id, email });
@@ -176,6 +176,7 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
     res.status(500).json({ error: error.message || 'Failed to register' });
   }
 });
+
 
 router.post('/login', async (req, res) => {
   const { email, password } = req.body;
@@ -242,6 +243,9 @@ router.post('/add_contact', authMiddleware, async (req, res) => {
     if (!user.contacts.includes(contact._id)) {
       user.contacts.push(contact._id);
       await user.save();
+      logger.info('Contact saved to MongoDB', { userId, contactId: contact._id });
+    } else {
+      logger.info('Contact already exists', { userId, contactId: contact._id });
     }
 
     const contactData = {
@@ -261,6 +265,8 @@ router.post('/add_contact', authMiddleware, async (req, res) => {
     res.status(500).json({ error: error.message || 'Failed to add contact' });
   }
 });
+
+
 router.post('/update_country', authMiddleware, async (req, res) => {
   try {
     const updateCountrySchema = Joi.object({

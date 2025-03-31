@@ -331,6 +331,17 @@ module.exports = (io) => {
       res.status(500).json({ error: 'Failed to comment' });
     }
   });
+
+
+  const messageSchema = Joi.object({
+    senderId: Joi.string().required(),
+    recipientId: Joi.string().required(),
+    contentType: Joi.string().valid('text', 'image', 'video', 'audio', 'document').required(),
+    content: Joi.string().when('contentType', { is: 'text', then: Joi.required(), otherwise: Joi.optional() }), // Allow content for text
+    caption: Joi.string().max(500).allow('').optional(),
+    replyTo: Joi.string().optional(),
+  });
+  
   router.post('/message', authMiddleware, messageLimiter, upload.single('content'), async (req, res) => {
     try {
       const { error } = messageSchema.validate(req.body);
@@ -353,14 +364,19 @@ module.exports = (io) => {
           return res.status(400).json({ error: 'File required for media message' });
         }
         const resourceType = { image: 'image', video: 'video', audio: 'video', document: 'raw' }[contentType];
-        const result = await new Promise((resolve, reject) => {
-          cloudinary.uploader.upload_stream(
-            { resource_type: resourceType, folder: `gapp_chat_${contentType}s`, public_id: `${contentType}_${senderId}_${Date.now()}` },
-            (error, result) => error ? reject(error) : resolve(result)
-          ).end(req.file.buffer);
-        });
-        contentUrl = result.secure_url;
-        logger.info('Media uploaded to Cloudinary', { senderId, contentUrl });
+        try {
+          const result = await new Promise((resolve, reject) => {
+            cloudinary.uploader.upload_stream(
+              { resource_type: resourceType, folder: `gapp_chat_${contentType}s`, public_id: `${contentType}_${senderId}_${Date.now()}` },
+              (error, result) => error ? reject(error) : resolve(result)
+            ).end(req.file.buffer);
+          });
+          contentUrl = result.secure_url;
+          logger.info('Media uploaded to Cloudinary', { senderId, contentUrl });
+        } catch (uploadErr) {
+          logger.error('Cloudinary upload failed', { error: uploadErr.message, senderId });
+          return res.status(500).json({ error: 'Failed to upload media' });
+        }
       } else if (contentType === 'text' && !contentUrl) {
         logger.warn('No content provided for text message', { senderId });
         return res.status(400).json({ error: 'Text content is required' });

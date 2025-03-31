@@ -137,8 +137,13 @@ const ChatScreen = ({ token, userId, setAuth }) => {
             unreadCount: msgData.messages[0]?.recipientId === userId && msgData.messages[0]?.status !== 'read' ? 1 : 0,
           };
         }));
-        setUsers(usersWithData.sort((a, b) => new Date(b.latestMessage?.createdAt || 0) - new Date(a.latestMessage?.createdAt || 0)));
-        localStorage.setItem('cachedUsers', JSON.stringify(usersWithData));
+        // Fetch current user's updated profile
+        const { data: currentUser } = await axios.get('https://gapp-6yc3.onrender.com/auth/refresh', { headers: { Authorization: `Bearer ${token}` } });
+        setUsers((prev) => {
+          const updatedUsers = usersWithData.map((u) => (u.id === userId ? { ...u, photo: currentUser.photo } : u)).sort((a, b) => new Date(b.latestMessage?.createdAt || 0) - new Date(a.latestMessage?.createdAt || 0));
+          localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
+          return updatedUsers;
+        });
       } catch (err) {
         setError(`Failed to load contacts: ${err.response?.data?.error || err.message}`);
         console.error('Fetch users error:', err.response?.data || err);
@@ -354,15 +359,20 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     }
   };
 
+
   const addContact = async () => {
     if (!newContactNumber) return setError('Virtual number required');
     try {
-      console.log('Adding contact with:', { userId, virtualNumber: newContactNumber, token }); // Debug log
+      console.log('Adding contact with:', { userId, virtualNumber: newContactNumber, token });
       const { data } = await axios.post('https://gapp-6yc3.onrender.com/auth/add_contact', { userId, virtualNumber: newContactNumber }, { headers: { Authorization: `Bearer ${token}` } });
-      setUsers((prev) => [...prev, data]);
+      setUsers((prev) => {
+        const updatedUsers = prev.some((u) => u.id === data.id) ? prev : [...prev, data];
+        localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
+        return updatedUsers;
+      });
       setNewContactNumber('');
       setMenuTab('');
-      setError(''); // Clear error on success
+      setError('');
     } catch (err) {
       const errMsg = err.response?.data?.error || err.message || 'Failed to add contact';
       setError(errMsg);
