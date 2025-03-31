@@ -55,31 +55,39 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   const isSmallDevice = window.innerWidth < 768;
 
   const encryptMessage = useCallback(async (content, recipientPublicKey, isMedia = false) => {
+    const aesKey = forge.random.getBytesSync(32); // 256-bit AES key
+    const iv = forge.random.getBytesSync(16); // 128-bit IV
+    const cipher = forge.cipher.createCipher('AES-CBC', aesKey);
+    cipher.start({ iv });
+    cipher.update(forge.util.createBuffer(isMedia ? content : forge.util.encodeUtf8(content)));
+    cipher.finish();
+    const encryptedContent = cipher.output.getBytes();
+  
     const publicKey = forge.pki.publicKeyFromPem(recipientPublicKey);
-    const buffer = isMedia ? forge.util.createBuffer(content, 'raw') : forge.util.encodeUtf8(content);
-    return forge.util.encode64(publicKey.encrypt(buffer, 'RSA-OAEP', { md: forge.md.sha256.create() }));
+    const encryptedAesKey = forge.util.encode64(
+      publicKey.encrypt(aesKey, 'RSA-OAEP', { md: forge.md.sha256.create() })
+    );
+  
+    return forge.util.encode64(encryptedContent) + '|' + forge.util.encode64(iv) + '|' + encryptedAesKey;
   }, []);
-
+  
   const decryptMessage = useCallback(async (encryptedContent, privateKeyPem, isMedia = false) => {
     try {
-      if (!privateKeyPem || !privateKeyPem.includes('-----BEGIN RSA PRIVATE KEY-----')) {
-        console.error('Invalid private key detected, attempting refresh', { privateKeyPem });
-        const { data } = await axios.post('https://gapp-6yc3.onrender.com/auth/refresh', {}, { headers: { Authorization: `Bearer ${token}` } });
-        localStorage.setItem('privateKey', data.privateKey);
-        localStorage.setItem('token', data.token);
-        privateKeyPem = data.privateKey;
-        if (!privateKeyPem.includes('-----BEGIN RSA PRIVATE KEY-----')) {
-          throw new Error('Invalid private key after refresh');
-        }
-      }
+      const [encryptedData, iv, encryptedAesKey] = encryptedContent.split('|').map(forge.util.decode64);
       const privateKey = forge.pki.privateKeyFromPem(privateKeyPem);
-      const decrypted = privateKey.decrypt(forge.util.decode64(encryptedContent), 'RSA-OAEP', { md: forge.md.sha256.create() });
+      const aesKey = privateKey.decrypt(encryptedAesKey, 'RSA-OAEP', { md: forge.md.sha256.create() });
+  
+      const decipher = forge.cipher.createDecipher('AES-CBC', aesKey);
+      decipher.start({ iv });
+      decipher.update(forge.util.createBuffer(encryptedData));
+      decipher.finish();
+      const decrypted = decipher.output.getBytes();
       return isMedia ? decrypted : forge.util.decodeUtf8(decrypted);
     } catch (err) {
       console.error('Decryption error:', err.message);
       return '[Decryption Failed]';
     }
-  }, [token]);
+  }, []);
 
   const getPublicKey = useCallback(async (recipientId) => {
     try {
@@ -115,47 +123,61 @@ const ChatScreen = ({ token, userId, setAuth }) => {
 
   useEffect(() => {
     if (!userId || !token) return;
+   
 
     const initialize = async () => {
       try {
         let privateKeyPem = localStorage.getItem('privateKey');
         if (!privateKeyPem || !privateKeyPem.includes('-----BEGIN RSA PRIVATE KEY-----')) {
-          for (let i = 0; i < 3; i++) {
-            try {
-              const response = await axios.post(
-                'https://gapp-6yc3.onrender.com/auth/refresh',
-                {},
-                { headers: { Authorization: `Bearer ${token}` }, timeout: 5000 }
-              );
-              const { data } = response;
-              localStorage.setItem('privateKey', data.privateKey);
-              localStorage.setItem('token', data.token);
-              privateKeyPem = data.privateKey;
-              break;
-            } catch (err) {
-              if (err.response?.status === 401 && i < 2) {
-                await new Promise((resolve) => setTimeout(resolve, 1000 * (i + 1)));
-                continue;
-              }
-              throw err;
-            }
-          }
+          const response = await retryRequest('https://gapp-6yc3.onrender.com/auth/refresh', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}` },
+            timeout: 5000,
+          });
+          const { data } = response;
+          localStorage.setItem('privateKey', data.privateKey);
+          localStorage.setItem('token', data.token);
+          localStorage.setItem('userId', data.userId);
+          setAuth(data.token, data.userId, data.role, data.photo, data.virtualNumber, data.username);
+          privateKeyPem = data.privateKey;
         }
         socket.emit('join', userId);
         await fetchUsers();
         if (selectedChat) await fetchMessages(0);
       } catch (err) {
-        console.error('Initialization error:', err.response?.data || err);
-        handleLogout();
+        console.error('Initialization error:', err.response?.data || err.message);
+        if (err.response?.status === 401 || err.response?.status === 404) {
+          handleLogout(); // Only logout on unrecoverable auth errors
+        } else {
+          setError(`Initialization failed: ${err.response?.data?.error || err.message}`);
+        }
       }
     };
 
-  initialize();
+
+
+    const retryRequest = async (url, config, retries = 3, delay = 1000) => {
+      for (let i = 0; i < retries; i++) {
+        try {
+          const response = await axios.request({ url, ...config });
+          return response;
+        } catch (err) {
+          if ((err.response?.status === 401 || err.response?.status === 429) && i < retries - 1) {
+            await new Promise((resolve) => setTimeout(resolve, delay * (i + 1)));
+            continue;
+          }
+          throw err;
+        }
+      }
+    };
+
 
     const keepAlive = setInterval(() => socket.emit('ping', { userId }), 30000);
     clearOldMessages(30).then(() => checkIndexes()).catch((err) => console.error('IndexedDB setup error:', err));
 
     const fetchUsers = async () => {
+
+
       try {
         if (!token || !userId) {
           setError('Missing token or userId');
@@ -188,7 +210,6 @@ const ChatScreen = ({ token, userId, setAuth }) => {
         if (err.response?.status === 401 || err.response?.status === 404) handleLogout();
       }
     };
-
     const fetchMessages = async (pageNum = 0, initial = true) => {
       if (!selectedChat || loading || !hasMore) return;
       setLoading(true);
@@ -197,13 +218,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
           headers: { Authorization: `Bearer ${token}` },
           params: { userId, recipientId: selectedChat, limit: messagesPerPage, skip: pageNum * messagesPerPage },
         });
-        let privateKeyPem = localStorage.getItem('privateKey');
-        if (!privateKeyPem || !privateKeyPem.includes('-----BEGIN RSA PRIVATE KEY-----')) {
-          const { data: refreshData } = await axios.post('https://gapp-6yc3.onrender.com/auth/refresh', {}, { headers: { Authorization: `Bearer ${token}` } });
-          localStorage.setItem('privateKey', refreshData.privateKey);
-          localStorage.setItem('token', refreshData.token);
-          privateKeyPem = refreshData.privateKey;
-        }
+        const privateKeyPem = localStorage.getItem('privateKey');
         const messages = await Promise.all(data.messages.map(async (msg) => {
           if (msg.recipientId === userId) {
             if (msg.contentType === 'text') {
@@ -244,13 +259,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
 
     socket.on('message', async (msg) => {
       const chatId = msg.senderId === userId ? msg.recipientId : msg.senderId;
-      let privateKeyPem = localStorage.getItem('privateKey');
-      if (!privateKeyPem || !privateKeyPem.includes('-----BEGIN RSA PRIVATE KEY-----')) {
-        const { data } = await axios.post('https://gapp-6yc3.onrender.com/auth/refresh', {}, { headers: { Authorization: `Bearer ${token}` } });
-        localStorage.setItem('privateKey', data.privateKey);
-        localStorage.setItem('token', data.token);
-        privateKeyPem = data.privateKey;
-      }
+      const privateKeyPem = localStorage.getItem('privateKey');
       if (msg.recipientId === userId) {
         if (msg.contentType === 'text') {
           msg.content = await decryptMessage(msg.content, privateKeyPem);
@@ -262,18 +271,15 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       }
       dispatch(addMessage({ recipientId: chatId, message: msg }));
       await saveMessages([msg]);
-
-      if (chatId === selectedChat) {
-        if (msg.recipientId === userId) {
-          socket.emit('messageStatus', { messageId: msg._id, status: 'delivered', recipientId: userId });
-          if (isAtBottomRef.current) {
-            socket.emit('messageStatus', { messageId: msg._id, status: 'read', recipientId: userId });
-            chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
-          } else {
-            setUnreadCount((prev) => prev + 1);
-            if (!firstUnreadMessageId) setFirstUnreadMessageId(msg._id);
-            setShowJumpToBottom(true);
-          }
+      if (chatId === selectedChat && msg.recipientId === userId) {
+        socket.emit('messageStatus', { messageId: msg._id, status: 'delivered', recipientId: userId });
+        if (isAtBottomRef.current) {
+          socket.emit('messageStatus', { messageId: msg._id, status: 'read', recipientId: userId });
+          chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
+        } else {
+          setUnreadCount((prev) => prev + 1);
+          if (!firstUnreadMessageId) setFirstUnreadMessageId(msg._id);
+          setShowJumpToBottom(true);
         }
       } else if (msg.recipientId === userId) {
         setNotifications((prev) => ({ ...prev, [msg.senderId]: (prev[msg.senderId] || 0) + 1 }));
@@ -354,15 +360,13 @@ const ChatScreen = ({ token, userId, setAuth }) => {
       if (contentType === 'text' && !file) {
         formData.append('content', await encryptMessage(message, recipientPublicKey));
       } else if (file) {
-        // Read file as binary string
         const fileReader = new FileReader();
         const fileContent = await new Promise((resolve) => {
           fileReader.onload = () => resolve(fileReader.result);
           fileReader.readAsBinaryString(file);
         });
-        const encryptedContent = await encryptMessage(fileContent, recipientPublicKey, true);
-        formData.append('content', encryptedContent);
-        formData.append('originalFilename', file.name); // Send original filename for reference
+        formData.append('content', await encryptMessage(fileContent, recipientPublicKey, true));
+        formData.append('originalFilename', file.name);
       }
       if (caption) formData.append('caption', caption);
       if (replyTo) formData.append('replyTo', replyTo._id);

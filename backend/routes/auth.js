@@ -398,19 +398,11 @@ router.get('/public_key/:userId', authMiddleware, async (req, res) => {
 
 router.post('/refresh', authMiddleware, async (req, res) => {
   try {
-    if (!req.user.id) {
-      logger.error('No user ID in token during refresh', { token: req.headers.authorization });
-      return res.status(401).json({ error: 'Invalid token: No user ID' });
-    }
-
     const user = await User.findById(req.user.id).select('+privateKey');
-    if (!user) {
-      logger.warn('User not found during refresh', { userId: req.user.id });
-      return res.status(404).json({ error: 'User not found' });
-    }
+    if (!user) return res.status(404).json({ error: 'User not found' });
 
     if (!user.privateKey || !user.privateKey.includes('-----BEGIN RSA PRIVATE KEY-----')) {
-      logger.error('Invalid private key in database during refresh', { userId: user._id });
+      logger.error('Invalid private key in database during refresh', { userId: req.user.id });
       return res.status(500).json({ error: 'Server returned invalid private key' });
     }
 
@@ -434,7 +426,7 @@ router.post('/refresh', authMiddleware, async (req, res) => {
     });
   } catch (error) {
     logger.error('Refresh token error:', { error: error.message, stack: error.stack, userId: req.user?.id });
-    res.status(500).json({ error: error.message || 'Failed to refresh token' });
+    res.status(500).json({ error: 'Failed to refresh token' });
   }
 });
 

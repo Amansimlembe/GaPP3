@@ -73,11 +73,12 @@ const LoginScreen = ({ setAuth }) => {
     }
   };
 
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
     if (!validateForm()) return;
-
+  
     setLoading(true);
     try {
       const data = isLogin
@@ -92,36 +93,28 @@ const LoginScreen = ({ setAuth }) => {
             if (photo) formData.append('photo', photo);
             return formData;
           })();
-
+  
       const config = isLogin
         ? { headers: { 'Content-Type': 'application/json' } }
         : { headers: { 'Content-Type': 'multipart/form-data' } };
-
-      const response = await retryRequest(data, config);
-
-      setAuth(response.token, response.userId, response.username, response.virtualNumber, response.photo, response.role);
+  
+      const response = await retryRequest(
+        `https://gapp-6yc3.onrender.com/auth/${isLogin ? 'login' : 'register'}`,
+        { method: 'POST', data, ...config }
+      );
+  
       localStorage.setItem('token', response.token);
       localStorage.setItem('userId', response.userId);
       localStorage.setItem('role', response.role);
       localStorage.setItem('photo', response.photo || 'https://placehold.co/40x40');
       localStorage.setItem('virtualNumber', response.virtualNumber || '');
       localStorage.setItem('username', response.username);
-      if (!isLogin && response.privateKey) {
-        localStorage.setItem('privateKey', response.privateKey);
-      } else if (isLogin) {
-        // Fetch private key on login via /refresh
-        const { data: refreshData } = await axios.post('https://gapp-6yc3.onrender.com/auth/refresh', {}, {
-          headers: { Authorization: `Bearer ${response.token}` },
-        });
-        localStorage.setItem('privateKey', refreshData.privateKey);
-        localStorage.setItem('token', refreshData.token);
-      }
+      localStorage.setItem('privateKey', response.privateKey);
+  
+      setAuth(response.token, response.userId, response.role, response.photo, response.virtualNumber, response.username);
     } catch (error) {
       console.error(`${isLogin ? 'Login' : 'Register'} error:`, error.response?.data || error.message);
       setError(error.response?.data?.error || error.message || `${isLogin ? 'Login' : 'Registration'} failed`);
-      if (error.response?.status === 500 && error.response?.data?.error === 'Failed to upload photo') {
-        setError('Photo upload failed, but registration may have succeeded. Try logging in.');
-      }
     } finally {
       setLoading(false);
     }

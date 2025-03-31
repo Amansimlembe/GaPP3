@@ -48,7 +48,7 @@ const App = () => {
   const [virtualNumber, setVirtualNumber] = useState(localStorage.getItem('virtualNumber') || '');
   const [username, setUsername] = useState(localStorage.getItem('username') || '');
   const [chatNotifications, setChatNotifications] = useState(0);
-  const [isAuthenticated, setIsAuthenticated] = useState(!!token && !!userId);
+  const [isAuthenticated, setIsAuthenticated] = useState(!!localStorage.getItem('token') && !!localStorage.getItem('userId'));
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
   const { selectedChat } = useSelector((state) => state.messages);
   const isSmallDevice = window.innerWidth < 768;
@@ -68,18 +68,24 @@ const App = () => {
     setVirtualNumber(virtualNumber);
     setUsername(username);
 
-    localStorage.setItem('token', token);
-    localStorage.setItem('userId', userId);
-    localStorage.setItem('role', String(role));
-    localStorage.setItem('photo', photo);
-    localStorage.setItem('virtualNumber', virtualNumber);
-    localStorage.setItem('username', username);
-
-    const authenticated = !!token && !!userId;
-    setIsAuthenticated(authenticated);
-    if (!authenticated) {
-      socket.emit('leave', userId);
+    if (token && userId) {
+      localStorage.setItem('token', token);
+      localStorage.setItem('userId', userId);
+      localStorage.setItem('role', String(role));
+      localStorage.setItem('photo', photo);
+      localStorage.setItem('virtualNumber', virtualNumber);
+      localStorage.setItem('username', username);
+      setIsAuthenticated(true);
+    } else {
+      localStorage.removeItem('token');
+      localStorage.removeItem('userId');
+      localStorage.removeItem('role');
+      localStorage.removeItem('photo');
+      localStorage.removeItem('virtualNumber');
+      localStorage.removeItem('username');
       localStorage.removeItem('privateKey');
+      socket.emit('leave', userId);
+      setIsAuthenticated(false);
       setChatNotifications(0);
     }
   };
@@ -102,8 +108,8 @@ const App = () => {
         data: error.response?.data,
         message: error.message,
       });
-      if (error.response?.status === 401) {
-        setAuth('', '', '', '', '', ''); // Logout on unrecoverable 401
+      if (error.response?.status === 401 || error.response?.status === 404) {
+        setAuth('', '', '', '', '', ''); // Logout only on unrecoverable errors
       }
       return null;
     }
@@ -127,32 +133,35 @@ const App = () => {
     );
     return () => axios.interceptors.response.eject(interceptor);
   }, [token]);
+
   useEffect(() => {
-    if (!token || !userId) return;
-  
+    if (!token || !userId) {
+      setIsAuthenticated(false);
+      return;
+    }
+
     const checkTokenExpiration = async () => {
       const expTime = getTokenExpiration(token);
       const now = Date.now();
       const bufferTime = 5 * 60 * 1000; // Refresh 5 minutes before expiration
-  
+
       if (expTime && expTime - now < bufferTime) {
         await refreshToken();
       }
     };
-  
+
     checkTokenExpiration();
     const interval = setInterval(checkTokenExpiration, 60 * 1000); // Check every minute
     return () => clearInterval(interval);
   }, [token, userId]);
 
-  
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark');
     localStorage.setItem('theme', theme);
   }, [theme]);
 
   useEffect(() => {
-    if (!userId || !token) {
+    if (!token || !userId) {
       setIsAuthenticated(false);
       return;
     }
@@ -169,13 +178,27 @@ const App = () => {
       console.error('Socket connection error:', error);
     });
 
-    setIsAuthenticated(true);
-
     return () => {
       socket.off('message');
       socket.off('connect_error');
     };
   }, [userId, token, selectedChat]);
+
+  // Persist auth state on mount
+  useEffect(() => {
+    const storedToken = localStorage.getItem('token');
+    const storedUserId = localStorage.getItem('userId');
+    const storedRole = localStorage.getItem('role');
+    const storedPhoto = localStorage.getItem('photo');
+    const storedVirtualNumber = localStorage.getItem('virtualNumber');
+    const storedUsername = localStorage.getItem('username');
+
+    if (storedToken && storedUserId) {
+      setAuth(storedToken, storedUserId, storedRole, storedPhoto, storedVirtualNumber, storedUsername);
+    } else {
+      setIsAuthenticated(false);
+    }
+  }, []);
 
   const toggleTheme = () => {
     setTheme((prevTheme) => (prevTheme === 'light' ? 'dark' : 'light'));
