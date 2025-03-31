@@ -309,4 +309,3 @@ const App = () => {
 };
 
 export default App;
-app.set('trust proxy', true); // Add this after app creation
