@@ -50,6 +50,7 @@ const authLimiter = rateLimit({
 const authMiddleware = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    logger.warn('No token provided', { method: req.method, url: req.url });
     return res.status(401).json({ error: 'No token provided' });
   }
 
@@ -68,7 +69,7 @@ const authMiddleware = async (req, res, next) => {
     req.user = decoded;
     next();
   } catch (error) {
-    logger.error('Auth middleware error:', { error: error.message, stack: error.stack });
+    logger.error('Auth middleware error:', { error: error.message, stack: error.stack, token });
     res.status(401).json({ error: 'Invalid token' });
   }
 };
@@ -105,10 +106,10 @@ const generateVirtualNumber = (countryCode, userId) => {
 
 router.post('/register', authLimiter, upload.single('photo'), async (req, res) => {
   try {
-    const { error } = registerSchema.validate(req.body);
-    if (error) return res.status(400).json({ error: error.details[0].message });
-
+    // Handle multipart/form-data
     const { email, password, username, country, role } = req.body;
+    const { error } = registerSchema.validate({ email, password, username, country, role });
+    if (error) return res.status(400).json({ error: error.details[0].message });
 
     const existingUser = await User.findOne({ $or: [{ email }, { username }] });
     if (existingUser) return res.status(400).json({ error: 'Email or username already exists' });
@@ -185,17 +186,25 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
 router.post('/login', authLimiter, async (req, res) => {
   try {
     const { error } = loginSchema.validate(req.body);
-    if (error) return res.status(400).json({ error: error.details[0].message });
+    if (error) {
+      logger.warn('Login validation failed', { error: error.details[0].message, body: req.body });
+      return res.status(400).json({ error: error.details[0].message });
+    }
 
     const { email, password } = req.body;
 
-    const user = await User.findOne({ email }).select('+privateKey'); // Include privateKey
-    if (!user) return res.status(401).json({ error: 'Invalid email or password' });
+    const user = await User.findOne({ email }).select('+privateKey');
+    if (!user) {
+      logger.warn('User not found during login', { email });
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
 
     const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) return res.status(401).json({ error: 'Invalid email or password' });
+    if (!isMatch) {
+      logger.warn('Password mismatch during login', { email });
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
 
-    // Validate private key
     if (!user.privateKey || !user.privateKey.includes('-----BEGIN RSA PRIVATE KEY-----')) {
       logger.error('Invalid private key in database during login', { userId: user._id, email });
       return res.status(500).json({ error: 'Server returned invalid private key' });
@@ -217,10 +226,10 @@ router.post('/login', authLimiter, async (req, res) => {
       username: user.username,
       virtualNumber: user.virtualNumber || '',
       photo: user.photo || 'https://placehold.co/40x40',
-      privateKey: user.privateKey, // Return private key on login
+      privateKey: user.privateKey,
     });
   } catch (error) {
-    logger.error('Login error', { error: error.message, stack: error.stack, email });
+    logger.error('Login error', { error: error.message, stack: error.stack, body: req.body });
     res.status(500).json({ error: error.message || 'Internal server error' });
   }
 });
@@ -292,7 +301,7 @@ router.post('/update_country', authMiddleware, async (req, res) => {
 router.post('/update_photo', authMiddleware, upload.single('photo'), async (req, res) => {
   try {
     const { userId } = req.body;
-    if (userId !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
+    if (userId !== req-more.user.id) return res.status(403).json({ error: 'Not authorized' });
     if (!req.file) return res.status(400).json({ error: 'No photo provided' });
 
     const user = await User.findById(userId);
@@ -398,6 +407,12 @@ router.get('/public_key/:userId', authMiddleware, async (req, res) => {
 
 router.post('/refresh', authMiddleware, async (req, res) => {
   try {
+    const { userId } = req.body;
+    if (userId && userId !== req.user.id) {
+      logger.warn('User ID mismatch in refresh request', { providedUserId: userId, tokenUserId: req.user.id });
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+
     const user = await User.findById(req.user.id).select('+privateKey');
     if (!user) return res.status(404).json({ error: 'User not found' });
 
