@@ -82,11 +82,13 @@ const App = () => {
       localStorage.removeItem('privateKey');
       setChatNotifications(0);
     }
-  };const refreshToken = async () => {
+  };
+
+  const refreshToken = async () => {
     try {
       const response = await axios.post(
         'https://gapp-6yc3.onrender.com/auth/refresh',
-        {}, // Remove userId payload
+        {},
         { headers: { Authorization: `Bearer ${token}` } }
       );
       const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername, privateKey } = response.data;
@@ -99,12 +101,13 @@ const App = () => {
         status: error.response?.status,
         data: error.response?.data,
         message: error.message,
-        token: token.substring(0, 10) + '...', // Partial token for debug
+        token: token.substring(0, 10) + '...',
       });
       setAuth('', '', '', '', '', '');
       return null;
     }
   };
+
   useEffect(() => {
     const interceptor = axios.interceptors.response.use(
       (response) => response,
@@ -117,13 +120,12 @@ const App = () => {
             originalRequest.headers['Authorization'] = `Bearer ${newToken}`;
             return axios(originalRequest);
           }
-          return Promise.reject(error);
         }
         return Promise.reject(error);
       }
     );
     return () => axios.interceptors.response.eject(interceptor);
-  }, [token, userId]);
+  }, [token]);
 
   useEffect(() => {
     if (!token || !userId) return;

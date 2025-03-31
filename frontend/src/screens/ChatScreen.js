@@ -116,23 +116,30 @@ const ChatScreen = ({ token, userId, setAuth }) => {
   useEffect(() => {
     if (!userId || !token) return;
 
-    const initialize = async () => {
-      try {
-        let privateKeyPem = localStorage.getItem('privateKey');
-        if (!privateKeyPem || !privateKeyPem.includes('-----BEGIN RSA PRIVATE KEY-----')) {
-          const { data } = await axios.post('https://gapp-6yc3.onrender.com/auth/refresh', {}, { headers: { Authorization: `Bearer ${token}` } });
-          localStorage.setItem('privateKey', data.privateKey);
-          localStorage.setItem('token', data.token);
-        }
-        socket.emit('join', userId);
-        await fetchUsers();
-        if (selectedChat) await fetchMessages(0);
-      } catch (err) {
-        console.error('Initialization error:', err.response?.data || err);
-        handleLogout();
+  const initialize = async () => {
+    try {
+      let privateKeyPem = localStorage.getItem('privateKey');
+      if (!privateKeyPem || !privateKeyPem.includes('-----BEGIN RSA PRIVATE KEY-----')) {
+        const response = await axios.post(
+          'https://gapp-6yc3.onrender.com/auth/refresh',
+          {},
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        const { data } = response; // Ensure data is destructured after the request
+        localStorage.setItem('privateKey', data.privateKey);
+        localStorage.setItem('token', data.token);
+        privateKeyPem = data.privateKey; // Update variable after refresh
       }
-    };
-    initialize();
+      socket.emit('join', userId);
+      await fetchUsers(); // Defined below
+      if (selectedChat) await fetchMessages(0); // Defined below
+    } catch (err) {
+      console.error('Initialization error:', err.response?.data || err);
+      handleLogout();
+    }
+  };
+
+  initialize();
 
     const keepAlive = setInterval(() => socket.emit('ping', { userId }), 30000);
     clearOldMessages(30).then(() => checkIndexes()).catch((err) => console.error('IndexedDB setup error:', err));
@@ -433,7 +440,7 @@ const ChatScreen = ({ token, userId, setAuth }) => {
     setShowMenu(false);
   };
 
-  
+
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex h-screen bg-gray-100 dark:bg-gray-900">
       <div className={`w-full md:w-1/3 bg-white dark:bg-gray-800 border-r ${isSmallDevice && selectedChat ? 'hidden' : 'block'} flex flex-col`}>
