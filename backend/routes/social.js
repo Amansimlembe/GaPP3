@@ -1,3 +1,6 @@
+
+
+
 const express = require('express');
 const router = express.Router();
 const Post = require('../models/Post');
@@ -47,7 +50,8 @@ const messageSchema = Joi.object({
   senderId: Joi.string().required(),
   recipientId: Joi.string().required(),
   contentType: Joi.string().valid('text', 'image', 'video', 'audio', 'document').required(),
-  content: Joi.string().required(),
+  content: Joi.string().required(), // Encrypted content
+  plaintextContent: Joi.string().optional(), // Add plaintext for sender display
   caption: Joi.string().max(500).allow('').optional(),
   replyTo: Joi.string().optional(),
   originalFilename: Joi.string().optional(),
@@ -157,6 +161,7 @@ module.exports = (io) => {
     });
   });
 
+
   router.get('/user-status/:userId', authMiddleware, async (req, res) => {
     try {
       const user = await User.findById(req.params.userId).select('status lastSeen');
@@ -167,6 +172,9 @@ module.exports = (io) => {
       res.status(500).json({ error: 'Failed to fetch user status' });
     }
   });
+
+
+
 
   router.get('/feed', socialLimiter, async (req, res) => {
     try {
@@ -323,11 +331,10 @@ module.exports = (io) => {
       res.status(500).json({ error: 'Failed to comment' });
     }
   });
-
   router.post('/message', authMiddleware, messageLimiter, upload.single('content'), async (req, res) => {
     try {
-      const { senderId, recipientId, contentType, content, caption, replyTo, originalFilename } = req.body;
-      const { error } = messageSchema.validate({ senderId, recipientId, contentType, content, caption, replyTo, originalFilename });
+      const { senderId, recipientId, contentType, content, plaintextContent, caption, replyTo, originalFilename } = req.body;
+      const { error } = messageSchema.validate({ senderId, recipientId, contentType, content, plaintextContent, caption, replyTo, originalFilename });
       if (error) {
         logger.warn('Message validation failed', { error: error.details[0].message, body: req.body });
         return res.status(400).json({ error: error.details[0].message });
@@ -343,7 +350,7 @@ module.exports = (io) => {
         senderId,
         recipientId,
         contentType,
-        content,
+        content, // Encrypted content stored in DB
         caption,
         status: 'sent',
         replyTo: replyTo || undefined,
@@ -351,26 +358,38 @@ module.exports = (io) => {
       });
       await message.save();
 
-      const messageData = {
+      // Message data for recipient (encrypted content only)
+      const recipientMessageData = {
         ...message.toObject(),
         senderVirtualNumber: sender.virtualNumber,
         senderUsername: sender.username,
         senderPhoto: sender.photo,
       };
 
+      // Message data for sender (includes plaintext for immediate display)
+      const senderMessageData = {
+        ...message.toObject(),
+        senderVirtualNumber: sender.virtualNumber,
+        senderUsername: sender.username,
+        senderPhoto: sender.photo,
+        plaintextContent: plaintextContent || (contentType === 'text' ? content : undefined), // Include plaintext for text messages
+      };
+
       const recipientOnline = io.sockets.adapter.rooms.has(recipientId);
-      if (recipientOnline) io.to(recipientId).emit('message', messageData);
-      else await redis.lpush(`undelivered:${recipientId}`, JSON.stringify(messageData));
-      io.to(senderId).emit('message', messageData);
+      if (recipientOnline) io.to(recipientId).emit('message', recipientMessageData);
+      else await redis.lpush(`undelivered:${recipientId}`, JSON.stringify(recipientMessageData));
+      io.to(senderId).emit('message', senderMessageData);
 
       logger.info('Message sent', { messageId: message._id, senderId, recipientId });
-      res.json(messageData);
+      res.json(senderMessageData); // Return sender-specific data with plaintext
     } catch (error) {
       logger.error('Message send error', { error: error.message, senderId: req.user.id, stack: error.stack });
       res.status(500).json({ error: 'Failed to send message' });
     }
   });
 
+  
+  
   router.get('/messages', authMiddleware, socialLimiter, async (req, res) => {
     try {
       const { userId, recipientId, limit = 50, skip = 0 } = req.query;
@@ -395,6 +414,7 @@ module.exports = (io) => {
           senderVirtualNumber: sender?.virtualNumber || 'Unknown',
           senderUsername: sender?.username,
           senderPhoto: sender?.photo,
+          // For sender's own messages, plaintext isn't stored; client will decrypt or use temp plaintext
         };
       }));
 
@@ -405,6 +425,7 @@ module.exports = (io) => {
       res.status(500).json({ error: 'Failed to fetch messages' });
     }
   });
+
 
   router.delete('/message/:messageId', authMiddleware, socialLimiter, async (req, res) => {
     try {

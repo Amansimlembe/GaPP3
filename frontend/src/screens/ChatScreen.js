@@ -179,7 +179,7 @@ const ChatScreen = ({ token, userId, setAuth, socket }) => {
     };
 
     const setupSocketListeners = () => {
-      
+
       socket.on('message', async (msg) => {
         const chatId = msg.senderId === userId ? msg.recipientId : msg.senderId;
         const privateKeyPem = localStorage.getItem('privateKey');
@@ -258,33 +258,40 @@ const ChatScreen = ({ token, userId, setAuth, socket }) => {
     if (!selectedChat || (!message && !file)) return;
     socket.emit('stopTyping', { userId, recipientId: selectedChat });
     setTyping(false);
-  
+
+    // Immediately display the plaintext message for the sender
     const tempId = Date.now().toString();
+    const plaintextContent = file ? URL.createObjectURL(file) : message;
     const tempMsg = {
       _id: tempId,
       senderId: userId,
       recipientId: selectedChat,
       contentType,
-      content: file ? URL.createObjectURL(file) : message,
+      content: plaintextContent, // Display plaintext or file URL immediately
       caption,
-      status: 'sending',
+      status: 'sent', // Start as 'sent' to avoid "sending" delay
       replyTo: replyTo?._id,
       createdAt: new Date(),
+      originalFilename: file?.name,
     };
     dispatch(addMessage({ recipientId: selectedChat, message: tempMsg }));
-    if (isAtBottomRef.current) chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight });
-  
+    if (isAtBottomRef.current) chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'instant' });
+
+    // Reset input fields immediately for a seamless UX
+    setMessage('');
+    setFile(null);
+    setCaption('');
+    setContentType('text');
+    setReplyTo(null);
+    setMediaPreview(null);
+    setShowPicker(false);
+
+    // Perform encryption and sending in the background
     try {
       const recipientPublicKey = await getPublicKey(selectedChat);
-      const formData = new FormData();
-      formData.append('senderId', userId);
-      formData.append('recipientId', selectedChat);
-      formData.append('contentType', contentType);
-  
       let encryptedContent;
       if (contentType === 'text' && !file) {
         encryptedContent = await encryptMessage(message, recipientPublicKey);
-        formData.append('content', encryptedContent);
       } else if (file) {
         const fileReader = new FileReader();
         const fileContent = await new Promise((resolve) => {
@@ -292,34 +299,32 @@ const ChatScreen = ({ token, userId, setAuth, socket }) => {
           fileReader.readAsBinaryString(file);
         });
         encryptedContent = await encryptMessage(fileContent, recipientPublicKey, true);
-        formData.append('content', encryptedContent);
-        formData.append('originalFilename', file.name);
       }
+
+      const formData = new FormData();
+      formData.append('senderId', userId);
+      formData.append('recipientId', selectedChat);
+      formData.append('contentType', contentType);
+      formData.append('content', encryptedContent);
       if (caption) formData.append('caption', caption);
       if (replyTo) formData.append('replyTo', replyTo._id);
-  
+      if (file) formData.append('originalFilename', file.name);
+
+      // Send via HTTP and update status via socket
       const { data } = await axios.post('https://gapp-6yc3.onrender.com/social/message', formData, {
         headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
       });
       const updatedMsg = {
         ...data,
-        content: file ? URL.createObjectURL(file) : message, // Keep original content for sender
-        encryptedContent: encryptedContent, // Store encrypted content separately
+        content: plaintextContent, // Retain plaintext for sender display
+        encryptedContent, // Store encrypted content for reference
       };
-      dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: tempId, status: 'sent' }));
       dispatch(addMessage({ recipientId: selectedChat, message: updatedMsg }));
+      dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: tempId, status: 'sent' }));
       await saveMessages([updatedMsg]);
     } catch (err) {
       setError(`Send failed: ${err.response?.data?.error || err.message}`);
       dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: tempId, status: 'failed' }));
-    } finally {
-      setMessage('');
-      setFile(null);
-      setCaption('');
-      setContentType('text');
-      setReplyTo(null);
-      setMediaPreview(null);
-      setShowPicker(false);
     }
   };
 
@@ -546,53 +551,57 @@ const ChatScreen = ({ token, userId, setAuth, socket }) => {
                 );
               })}
             </div>
+           
+
             <motion.div className="bg-white dark:bg-gray-800 p-2 border-t dark:border-gray-700 fixed md:left-[33.33%] md:w-2/3 left-0 right-0 bottom-0 z-30">
-              {mediaPreview && (
-                <div className="bg-gray-100 dark:bg-gray-700 p-2 mb-2 rounded relative">
-                  {mediaPreview.type === 'image' && <img src={mediaPreview.url} alt="Preview" className="max-w-full max-h-64 rounded-lg" />}
-                  {mediaPreview.type === 'video' && <video src={mediaPreview.url} className="max-w-full max-h-64 rounded-lg" controls />}
-                  {mediaPreview.type === 'audio' && <audio src={mediaPreview.url} controls />}
-                  {mediaPreview.type === 'document' && <div className="flex"><FaFileAlt className="text-blue-600 mr-2" /><span className="text-blue-600 truncate">{file.name}</span></div>}
-                  <input type="text" value={caption} onChange={(e) => setCaption(e.target.value)} placeholder="Add a caption..." className="w-full p-1 mt-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600" />
-                  <button onClick={() => { setMediaPreview(null); setFile(null); }} className="absolute top-2 right-2 bg-red-500 text-white p-1 rounded-full"><FaTrash /></button>
-                </div>
-              )}
-              {replyTo && (
-                <div className="bg-gray-100 dark:bg-gray-700 p-2 mb-2 rounded flex justify-between">
-                  <div><p className="text-xs italic">Replying to:</p><p className="text-sm">{replyTo.content.slice(0, 20)}...</p></div>
-                  <button onClick={() => setReplyTo(null)} className="text-red-500"><FaTrash /></button>
-                </div>
-              )}
-              <div className="flex items-center">
-                <FaPaperclip onClick={() => setShowPicker((prev) => !prev)} className="text-xl text-primary dark:text-gray-100 cursor-pointer mr-2" />
-                <AnimatePresence>
-                  {showPicker && (
-                    <motion.div
-                      initial={{ opacity: 0, y: 10 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0, y: 10 }}
-                      className="absolute bottom-12 left-2 bg-white dark:bg-gray-800 p-2 rounded-lg shadow-lg z-20 flex space-x-2"
-                    >
-                      <label><FaFileAlt className="text-blue-600 cursor-pointer" /><input type="file" accept=".pdf" onChange={(e) => handleFileChange(e, 'document')} className="hidden" /></label>
-                      <label><FaPlay className="text-green-500 cursor-pointer" /><input type="file" accept="audio/*" onChange={(e) => handleFileChange(e, 'audio')} className="hidden" /></label>
-                      <label><img src="https://placehold.co/20x20" alt="Image" className="cursor-pointer" /><input type="file" accept="image/*" onChange={(e) => handleFileChange(e, 'image')} className="hidden" /></label>
-                      <label><video width="20" height="20" className="cursor-pointer" /><input type="file" accept="video/*" onChange={(e) => handleFileChange(e, 'video')} className="hidden" /></label>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-                <input
-                  type="text"
-                  value={message}
-                  onChange={handleTyping}
-                  onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
-                  placeholder="Type a message..."
-                  className="flex-1 p-2 border rounded-lg mr-2 dark:bg-gray-700 dark:text-white dark:border-gray-600"
-                  disabled={file || loading}
-                />
-                <FaPaperPlane onClick={sendMessage} className={`text-xl ${loading ? 'text-gray-400' : 'text-primary dark:text-gray-100'} cursor-pointer`} />
-              </div>
-              {error && <p className="text-red-500 text-sm mt-2">{error}</p>}
-            </motion.div>
+        {mediaPreview && (
+          <div className="bg-gray-100 dark:bg-gray-700 p-2 mb-2 rounded relative">
+            {mediaPreview.type === 'image' && <img src={mediaPreview.url} alt="Preview" className="max-w-full max-h-64 rounded-lg" />}
+            {mediaPreview.type === 'video' && <video src={mediaPreview.url} className="max-w-full max-h-64 rounded-lg" controls />}
+            {mediaPreview.type === 'audio' && <audio src={mediaPreview.url} controls />}
+            {mediaPreview.type === 'document' && <div className="flex"><FaFileAlt className="text-blue-600 mr-2" /><span className="text-blue-600 truncate">{file.name}</span></div>}
+            <input type="text" value={caption} onChange={(e) => setCaption(e.target.value)} placeholder="Add a caption..." className="w-full p-1 mt-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600" />
+            <button onClick={() => { setMediaPreview(null); setFile(null); }} className="absolute top-2 right-2 bg-red-500 text-white p-1 rounded-full"><FaTrash /></button>
+          </div>
+        )}
+        {replyTo && (
+          <div className="bg-gray-100 dark:bg-gray-700 p-2 mb-2 rounded flex justify-between">
+            <div><p className="text-xs italic">Replying to:</p><p className="text-sm">{replyTo.content.slice(0, 20)}...</p></div>
+            <button onClick={() => setReplyTo(null)} className="text-red-500"><FaTrash /></button>
+          </div>
+        )}
+        <div className="flex items-center">
+          <FaPaperclip onClick={() => setShowPicker((prev) => !prev)} className="text-xl text-primary dark:text-gray-100 cursor-pointer mr-2" />
+          <AnimatePresence>
+            {showPicker && (
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 10 }}
+                className="absolute bottom-12 left-2 bg-white dark:bg-gray-800 p-2 rounded-lg shadow-lg z-20 flex space-x-2"
+              >
+                <label><FaFileAlt className="text-blue-600 cursor-pointer" /><input type="file" accept=".pdf" onChange={(e) => handleFileChange(e, 'document')} className="hidden" /></label>
+                <label><FaPlay className="text-green-500 cursor-pointer" /><input type="file" accept="audio/*" onChange={(e) => handleFileChange(e, 'audio')} className="hidden" /></label>
+                <label><img src="https://placehold.co/20x20" alt="Image" className="cursor-pointer" /><input type="file" accept="image/*" onChange={(e) => handleFileChange(e, 'image')} className="hidden" /></label>
+                <label><video width="20" height="20" className="cursor-pointer" /><input type="file" accept="video/*" onChange={(e) => handleFileChange(e, 'video')} className="hidden" /></label>
+              </motion.div>
+            )}
+          </AnimatePresence>
+          <input
+            type="text"
+            value={message}
+            onChange={handleTyping}
+            onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
+            placeholder="Type a message..."
+            className="flex-1 p-2 border rounded-lg mr-2 dark:bg-gray-700 dark:text-white dark:border-gray-600"
+            disabled={loading} // Only disable if fetching messages, not sending
+          />
+          <FaPaperPlane onClick={sendMessage} className="text-xl text-primary dark:text-gray-100 cursor-pointer" />
+        </div>
+        {error && <p className="text-red-500 text-sm mt-2">{error}</p>}
+      </motion.div>
+
+      
             <AnimatePresence>
               {showJumpToBottom && (
                 <motion.div
