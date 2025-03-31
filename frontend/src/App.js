@@ -20,6 +20,7 @@ const socket = io('https://gapp-6yc3.onrender.com', {
   reconnectionDelayMax: 5000,
   randomizationFactor: 0.5,
   withCredentials: true,
+  autoConnect: false, // Prevent auto-connect until authenticated
 });
 
 const getTokenExpiration = (token) => {
@@ -33,7 +34,7 @@ const getTokenExpiration = (token) => {
         .join('')
     );
     const decoded = JSON.parse(jsonPayload);
-    return decoded.exp * 1000; // Convert to milliseconds
+    return decoded.exp * 1000;
   } catch (error) {
     console.error('Error decoding token:', error);
     return null;
@@ -77,14 +78,9 @@ const App = () => {
       localStorage.setItem('username', username);
       setIsAuthenticated(true);
     } else {
-      localStorage.removeItem('token');
-      localStorage.removeItem('userId');
-      localStorage.removeItem('role');
-      localStorage.removeItem('photo');
-      localStorage.removeItem('virtualNumber');
-      localStorage.removeItem('username');
-      localStorage.removeItem('privateKey');
+      localStorage.clear();
       socket.emit('leave', userId);
+      socket.disconnect();
       setIsAuthenticated(false);
       setChatNotifications(0);
     }
@@ -94,8 +90,8 @@ const App = () => {
     try {
       const response = await axios.post(
         'https://gapp-6yc3.onrender.com/auth/refresh',
-        {},
-        { headers: { Authorization: `Bearer ${token}` }, timeout: 5000 }
+        { userId }, // Send userId in body to align with auth middleware
+        { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 5000 }
       );
       const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername, privateKey } = response.data;
       setAuth(newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername);
@@ -109,7 +105,7 @@ const App = () => {
         message: error.message,
       });
       if (error.response?.status === 401 || error.response?.status === 404) {
-        setAuth('', '', '', '', '', ''); // Logout only on unrecoverable errors
+        setAuth('', '', '', '', '', '');
       }
       return null;
     }
@@ -137,13 +133,18 @@ const App = () => {
   useEffect(() => {
     if (!token || !userId) {
       setIsAuthenticated(false);
+      socket.disconnect();
       return;
+    }
+
+    if (!socket.connected) {
+      socket.connect();
     }
 
     const checkTokenExpiration = async () => {
       const expTime = getTokenExpiration(token);
       const now = Date.now();
-      const bufferTime = 5 * 60 * 1000; // Refresh 5 minutes before expiration
+      const bufferTime = 5 * 60 * 1000;
 
       if (expTime && expTime - now < bufferTime) {
         await refreshToken();
@@ -151,7 +152,7 @@ const App = () => {
     };
 
     checkTokenExpiration();
-    const interval = setInterval(checkTokenExpiration, 60 * 1000); // Check every minute
+    const interval = setInterval(checkTokenExpiration, 60 * 1000);
     return () => clearInterval(interval);
   }, [token, userId]);
 
@@ -161,12 +162,12 @@ const App = () => {
   }, [theme]);
 
   useEffect(() => {
-    if (!token || !userId) {
-      setIsAuthenticated(false);
-      return;
-    }
+    if (!token || !userId) return;
 
-    socket.emit('join', userId);
+    socket.on('connect', () => {
+      socket.emit('join', userId);
+      console.log('Socket connected:', socket.id);
+    });
 
     socket.on('message', (msg) => {
       if (msg.recipientId === userId && (!selectedChat || selectedChat !== msg.senderId)) {
@@ -179,12 +180,12 @@ const App = () => {
     });
 
     return () => {
+      socket.off('connect');
       socket.off('message');
       socket.off('connect_error');
     };
   }, [userId, token, selectedChat]);
 
-  // Persist auth state on mount
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
     const storedUserId = localStorage.getItem('userId');

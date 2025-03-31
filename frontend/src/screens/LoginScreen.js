@@ -98,20 +98,21 @@ const LoginScreen = ({ setAuth }) => {
         ? { headers: { 'Content-Type': 'application/json' } }
         : { headers: { 'Content-Type': 'multipart/form-data' } };
   
-      const response = await retryRequest(
+      const response = await axios.post(
         `https://gapp-6yc3.onrender.com/auth/${isLogin ? 'login' : 'register'}`,
-        { method: 'POST', data, ...config }
+        data,
+        config
       );
   
-      localStorage.setItem('token', response.token);
-      localStorage.setItem('userId', response.userId);
-      localStorage.setItem('role', response.role);
-      localStorage.setItem('photo', response.photo || 'https://placehold.co/40x40');
-      localStorage.setItem('virtualNumber', response.virtualNumber || '');
-      localStorage.setItem('username', response.username);
-      localStorage.setItem('privateKey', response.privateKey);
+      localStorage.setItem('token', response.data.token);
+      localStorage.setItem('userId', response.data.userId);
+      localStorage.setItem('role', response.data.role);
+      localStorage.setItem('photo', response.data.photo || 'https://placehold.co/40x40');
+      localStorage.setItem('virtualNumber', response.data.virtualNumber || '');
+      localStorage.setItem('username', response.data.username);
+      localStorage.setItem('privateKey', response.data.privateKey);
   
-      setAuth(response.token, response.userId, response.role, response.photo, response.virtualNumber, response.username);
+      setAuth(response.data.token, response.data.userId, response.data.role, response.data.photo, response.data.virtualNumber, response.data.username);
     } catch (error) {
       console.error(`${isLogin ? 'Login' : 'Register'} error:`, error.response?.data || error.message);
       setError(error.response?.data?.error || error.message || `${isLogin ? 'Login' : 'Registration'} failed`);

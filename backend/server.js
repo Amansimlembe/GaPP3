@@ -5,7 +5,7 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 const path = require('path');
 const mongoose = require('mongoose');
-const redis = require('./redis'); // Use redis.js
+const redis = require('./redis');
 const winston = require('winston');
 const { router: authRoutes, authMiddleware } = require('./routes/auth');
 const socialRoutes = require('./routes/social');
@@ -34,6 +34,20 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, '../frontend/build')));
 
+// Middleware to log and handle malformed JSON
+app.use((err, req, res, next) => {
+  if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+    logger.error('Invalid JSON payload', {
+      method: req.method,
+      url: req.url,
+      body: req.body,
+      error: err.message,
+    });
+    return res.status(400).json({ error: 'Invalid JSON payload' });
+  }
+  next(err);
+});
+
 const connectDB = async () => {
   try {
     await mongoose.connect(process.env.MONGO_URI, {
@@ -54,8 +68,16 @@ app.use('/employer', employerRoutes);
 app.use('/social', socialRoutes(io));
 
 io.on('connection', (socket) => {
-  socket.on('join', (userId) => socket.join(userId));
-  socket.on('disconnect', () => logger.info('User disconnected', { socketId: socket.id }));
+  logger.info('User connected', { socketId: socket.id });
+
+  socket.on('join', (userId) => {
+    socket.join(userId);
+    logger.info('User joined room', { userId, socketId: socket.id });
+  });
+
+  socket.on('disconnect', () => {
+    logger.info('User disconnected', { socketId: socket.id });
+  });
 });
 
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, '../frontend/build', 'index.html')));
@@ -65,7 +87,7 @@ server.listen(PORT, '0.0.0.0', () => logger.info(`Server running on port ${PORT}
 
 const shutdown = async () => {
   logger.info('Shutting down server');
-  await redis.quit(); // Use redis.js quit
+  await redis.quit();
   await mongoose.connection.close();
   server.close(() => {
     logger.info('Server closed');
