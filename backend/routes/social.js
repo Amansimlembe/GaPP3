@@ -1,13 +1,7 @@
-
-
-
 const express = require('express');
 const router = express.Router();
-const Post = require('../models/Post');
 const Message = require('../models/Message');
 const User = require('../models/User');
-const cloudinary = require('cloudinary').v2;
-const multer = require('multer');
 const { authMiddleware } = require('./auth');
 const redis = require('../redis');
 const winston = require('winston');
@@ -28,50 +22,31 @@ const socialLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 500,
   message: { error: 'Too many requests, please try again later.' },
+  keyGenerator: (req) => req.ip,
 });
 
 const messageLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 200,
   message: { error: 'Too many messages sent, please try again later.' },
-});
-
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 50 * 1024 * 1024 },
-  fileFilter: (req, file, cb) => {
-    const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'video/mp4', 'audio/mpeg', 'application/pdf'];
-    if (!allowedTypes.includes(file.mimetype)) return cb(new Error('Invalid file type. Only JPEG, PNG, GIF, MP4, MP3, and PDF allowed.'));
-    cb(null, true);
-  },
+  keyGenerator: (req) => req.ip,
 });
 
 const messageSchema = Joi.object({
   senderId: Joi.string().required(),
   recipientId: Joi.string().required(),
   contentType: Joi.string().valid('text', 'image', 'video', 'audio', 'document').required(),
-  content: Joi.string().required(), // Encrypted content
-  plaintextContent: Joi.string().optional(), // Add plaintext for sender display
+  content: Joi.string().required(),
+  plaintextContent: Joi.string().optional(),
   caption: Joi.string().max(500).allow('').optional(),
   replyTo: Joi.string().optional(),
   originalFilename: Joi.string().optional(),
+  clientMessageId: Joi.string().optional(), // Add this
 });
-
-const postSchema = Joi.object({
-  contentType: Joi.string().valid('image', 'video', 'audio', 'raw', 'text').required(),
-  caption: Joi.string().max(500).allow('').optional(),
-});
-
 const messageStatusSchema = Joi.object({
   messageId: Joi.string().required(),
   status: Joi.string().valid('sent', 'delivered', 'read').required(),
   recipientId: Joi.string().required(),
-});
-
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
 module.exports = (io) => {
@@ -105,32 +80,15 @@ module.exports = (io) => {
       logger.info('User left', { userId });
     });
 
-    let lastPing = {};
     socket.on('ping', async ({ userId }) => {
-      try {
-        const now = Date.now();
-        if (lastPing[userId] && now - lastPing[userId] < 5000) return;
-        lastPing[userId] = now;
-
-        const user = await User.findById(userId);
-        if (!user) return;
-        if (user.status !== 'online') {
-          user.status = 'online';
-          user.lastSeen = new Date();
-          await user.save();
-          io.emit('onlineStatus', { userId, status: 'online', lastSeen: user.lastSeen });
-        }
-      } catch (error) {
-        logger.error('Ping event error', { error: error.message, userId });
+      const user = await User.findById(userId);
+      if (!user) return;
+      if (user.status !== 'online') {
+        user.status = 'online';
+        user.lastSeen = new Date();
+        await user.save();
+        io.emit('onlineStatus', { userId, status: 'online', lastSeen: user.lastSeen });
       }
-    });
-
-    socket.on('message', async (msg) => {
-      const recipientOnline = io.sockets.adapter.rooms.has(msg.recipientId);
-      if (recipientOnline) io.to(msg.recipientId).emit('message', msg);
-      else await redis.lpush(`undelivered:${msg.recipientId}`, JSON.stringify(msg));
-      io.to(msg.senderId).emit('message', msg);
-      logger.info('Message broadcast', { messageId: msg._id });
     });
 
     socket.on('messageStatus', async ({ messageId, status, recipientId }) => {
@@ -160,287 +118,141 @@ module.exports = (io) => {
       }
     });
   });
-
-
-  router.get('/user-status/:userId', authMiddleware, async (req, res) => {
-    try {
-      const user = await User.findById(req.params.userId).select('status lastSeen');
-      if (!user) return res.status(404).json({ error: 'User not found' });
-      res.json({ status: user.status || 'offline', lastSeen: user.lastSeen });
-    } catch (error) {
-      logger.error('User status fetch error', { error: error.message, userId: req.params.userId });
-      res.status(500).json({ error: 'Failed to fetch user status' });
-    }
-  });
-
-
-
-
-  router.get('/feed', socialLimiter, async (req, res) => {
-    try {
-      const cacheKey = 'feed';
-      const cachedFeed = await redis.get(cacheKey);
-      if (cachedFeed) {
-        logger.info('Feed cache hit', { cacheKey });
-        return res.json(JSON.parse(cachedFeed));
-      }
-      const posts = await Post.find().sort({ createdAt: -1 }).lean();
-      await redis.setex(cacheKey, 60, JSON.stringify(posts));
-      res.json(posts);
-    } catch (error) {
-      logger.error('Feed fetch error', { error: error.message });
-      res.status(500).json({ error: 'Failed to fetch feed' });
-    }
-  });
-
-  router.get('/my-posts/:userId', authMiddleware, socialLimiter, async (req, res) => {
-    try {
-      if (req.user.id !== req.params.userId) return res.status(403).json({ error: 'Unauthorized' });
-      const cacheKey = `my-posts:${req.params.userId}`;
-      const cachedPosts = await redis.get(cacheKey);
-      if (cachedPosts) {
-        logger.info('Posts cache hit', { cacheKey });
-        return res.json(JSON.parse(cachedPosts));
-      }
-      const posts = await Post.find({ userId: req.params.userId }).sort({ createdAt: -1 }).lean();
-      if (!posts.length) logger.info('No posts found', { userId: req.params.userId });
-      await redis.setex(cacheKey, 300, JSON.stringify(posts));
-      res.json(posts);
-    } catch (error) {
-      logger.error('My posts fetch error', { error: error.message, userId: req.params.userId });
-      res.status(500).json({ error: 'Failed to fetch posts' });
-    }
-  });
-
-  router.post('/post', authMiddleware, socialLimiter, upload.single('content'), async (req, res) => {
-    try {
-      const { error } = postSchema.validate(req.body);
-      if (error) return res.status(400).json({ error: error.details[0].message });
-
-      const { id: userId } = req.user;
-      const { contentType, caption } = req.body;
-      let contentUrl = contentType === 'text' ? req.body.content || caption : '';
-      if (req.file) {
-        const resourceType = { image: 'image', video: 'video', audio: 'video', raw: 'raw' }[contentType] || 'raw';
-        const result = await new Promise((resolve, reject) => {
-          cloudinary.uploader.upload_stream(
-            { resource_type: resourceType, folder: `gapp_${contentType}s`, public_id: `${contentType}_${userId}_${Date.now()}` },
-            (error, result) => error ? reject(error) : resolve(result)
-          ).end(req.file.buffer);
-        });
-        contentUrl = result.secure_url;
-      }
-      if (!contentUrl) return res.status(400).json({ error: 'Content is required' });
-
-      const user = await User.findById(userId);
-      if (!user) return res.status(404).json({ error: 'User not found' });
-
-      const post = new Post({ userId, contentType, content: contentUrl, caption, username: user.username, photo: user.photo, likedBy: [] });
-      await post.save();
-      await redis.del('feed');
-      res.json(post.toObject());
-    } catch (error) {
-      logger.error('Post creation error', { error: error.message, userId: req.user.id });
-      res.status(500).json({ error: 'Failed to create post' });
-    }
-  });
-
-  router.delete('/post/:postId', authMiddleware, socialLimiter, async (req, res) => {
-    try {
-      const post = await Post.findById(req.params.postId);
-      if (!post) return res.status(404).json({ error: 'Post not found' });
-      if (post.userId.toString() !== req.user.id) return res.status(403).json({ error: 'Unauthorized' });
-
-      await Post.deleteOne({ _id: req.params.postId });
-      await redis.del('feed');
-      res.json({ success: true });
-    } catch (error) {
-      logger.error('Post deletion error', { error: error.message, postId: req.params.postId });
-      res.status(500).json({ error: 'Failed to delete post' });
-    }
-  });
-
-  router.post('/like', authMiddleware, socialLimiter, async (req, res) => {
-    try {
-      const { error } = likeSchema.validate(req.body);
-      if (error) return res.status(400).json({ error: error.details[0].message });
-
-      const { postId, userId } = req.body;
-      if (userId !== req.user.id) return res.status(403).json({ error: 'Unauthorized' });
-
-      const post = await Post.findById(postId);
-      if (!post) return res.status(404).json({ error: 'Post not found' });
-
-      if (!post.likedBy.includes(userId)) {
-        post.likedBy.push(userId);
-        post.likes = (post.likes || 0) + 1;
-        await post.save();
-        await redis.del('feed');
-      }
-      res.json(post.toObject());
-    } catch (error) {
-      logger.error('Like error', { error: error.message, postId: req.body.postId });
-      res.status(500).json({ error: 'Failed to like post' });
-    }
-  });
-
-  router.post('/unlike', authMiddleware, socialLimiter, async (req, res) => {
-    try {
-      const { error } = likeSchema.validate(req.body);
-      if (error) return res.status(400).json({ error: error.details[0].message });
-
-      const { postId, userId } = req.body;
-      if (userId !== req.user.id) return res.status(403).json({ error: 'Unauthorized' });
-
-      const post = await Post.findById(postId);
-      if (!post) return res.status(404).json({ error: 'Post not found' });
-      if (!post.likedBy.includes(userId)) return res.status(400).json({ error: 'Not liked yet' });
-
-      post.likes = (post.likes || 0) - 1;
-      post.likedBy = post.likedBy.filter((id) => id.toString() !== userId);
-      await post.save();
-      await redis.del('feed');
-      res.json(post.toObject());
-    } catch (error) {
-      logger.error('Unlike error', { error: error.message, postId: req.body.postId });
-      res.status(500).json({ error: 'Failed to unlike post' });
-    }
-  });
-
-  router.post('/comment', authMiddleware, socialLimiter, async (req, res) => {
-    try {
-      const { error } = commentSchema.validate(req.body);
-      if (error) return res.status(400).json({ error: error.details[0].message });
-
-      const { postId, comment, userId } = req.body;
-      if (userId !== req.user.id) return res.status(403).json({ error: 'Unauthorized' });
-
-      const user = await User.findById(userId);
-      if (!user) return res.status(404).json({ error: 'User not found' });
-
-      const post = await Post.findById(postId);
-      if (!post) return res.status(404).json({ error: 'Post not found' });
-
-      const commentData = { userId, username: user.username, photo: user.photo, comment, createdAt: new Date() };
-      post.comments = [...(post.comments || []), commentData];
-      await post.save();
-      await redis.del('feed');
-      res.json(commentData);
-    } catch (error) {
-      logger.error('Comment error', { error: error.message, postId: req.body.postId });
-      res.status(500).json({ error: 'Failed to comment' });
-    }
-  });
-  router.post('/message', authMiddleware, messageLimiter, upload.single('content'), async (req, res) => {
+  router.post('/message', authMiddleware, socialLimiter, async (req, res) => {
     try {
       const { senderId, recipientId, contentType, content, plaintextContent, caption, replyTo, originalFilename } = req.body;
-      const { error } = messageSchema.validate({ senderId, recipientId, contentType, content, plaintextContent, caption, replyTo, originalFilename });
-      if (error) {
-        logger.warn('Message validation failed', { error: error.details[0].message, body: req.body });
-        return res.status(400).json({ error: error.details[0].message });
+      if (!senderId || !recipientId || !contentType || !content) {
+        return res.status(400).json({ error: 'Missing required fields' });
       }
-
-      if (senderId !== req.user.id) return res.status(403).json({ error: 'Unauthorized' });
-
-      const sender = await User.findById(senderId);
-      const recipient = await User.findById(recipientId);
-      if (!sender || !recipient) return res.status(404).json({ error: 'Sender or recipient not found' });
-
+  
       const message = new Message({
         senderId,
         recipientId,
         contentType,
-        content, // Encrypted content stored in DB
+        content,
+        plaintextContent: plaintextContent || '',
         caption,
+        replyTo,
+        originalFilename,
         status: 'sent',
-        replyTo: replyTo || undefined,
-        originalFilename: originalFilename || undefined,
+        senderVirtualNumber: req.user.virtualNumber,
+        senderUsername: req.user.username,
+        senderPhoto: req.user.photo,
+        clientMessageId, // Store this
       });
+  
       await message.save();
-
-      // Message data for recipient (encrypted content only)
-      const recipientMessageData = {
-        ...message.toObject(),
-        senderVirtualNumber: sender.virtualNumber,
-        senderUsername: sender.username,
-        senderPhoto: sender.photo,
-      };
-
-      // Message data for sender (includes plaintext for immediate display)
-      const senderMessageData = {
-        ...message.toObject(),
-        senderVirtualNumber: sender.virtualNumber,
-        senderUsername: sender.username,
-        senderPhoto: sender.photo,
-        plaintextContent: plaintextContent || (contentType === 'text' ? content : undefined), // Include plaintext for text messages
-      };
-
-      const recipientOnline = io.sockets.adapter.rooms.has(recipientId);
-      if (recipientOnline) io.to(recipientId).emit('message', recipientMessageData);
-      else await redis.lpush(`undelivered:${recipientId}`, JSON.stringify(recipientMessageData));
-      io.to(senderId).emit('message', senderMessageData);
-
-      logger.info('Message sent', { messageId: message._id, senderId, recipientId });
-      res.json(senderMessageData); // Return sender-specific data with plaintext
+      io.to(recipientId).emit('message', message.toObject());
+      io.to(senderId).emit('message', message.toObject());
+  
+      res.json(message.toObject());
     } catch (error) {
-      logger.error('Message send error', { error: error.message, senderId: req.user.id, stack: error.stack });
+      logger.error('Message send error', { error: error.message, stack: error.stack, body: req.body });
       res.status(500).json({ error: 'Failed to send message' });
     }
   });
 
-  
-  
   router.get('/messages', authMiddleware, socialLimiter, async (req, res) => {
     try {
       const { userId, recipientId, limit = 50, skip = 0 } = req.query;
-      if (!userId || !recipientId) return res.status(400).json({ error: 'User ID and Recipient ID required' });
-      if (req.user.id !== userId) return res.status(403).json({ error: 'Unauthorized' });
-
-      const total = await Message.countDocuments({
-        $or: [{ senderId: userId, recipientId }, { senderId: recipientId, recipientId: userId }],
-      });
+      if (!userId || !recipientId || req.user.id !== userId) {
+        return res.status(403).json({ error: 'Unauthorized' });
+      }
+  
       const messages = await Message.find({
-        $or: [{ senderId: userId, recipientId }, { senderId: recipientId, recipientId: userId }],
+        $or: [
+          { senderId: userId, recipientId },
+          { senderId: recipientId, recipientId: userId },
+        ],
       })
         .sort({ createdAt: -1 })
         .skip(parseInt(skip))
         .limit(parseInt(limit))
         .lean();
-
-      const enrichedMessages = await Promise.all(messages.map(async (msg) => {
-        const sender = await User.findById(msg.senderId).select('virtualNumber username photo');
-        return {
-          ...msg,
-          senderVirtualNumber: sender?.virtualNumber || 'Unknown',
-          senderUsername: sender?.username,
-          senderPhoto: sender?.photo,
-          // For sender's own messages, plaintext isn't stored; client will decrypt or use temp plaintext
-        };
-      }));
-
-      const response = { messages: enrichedMessages.reverse(), hasMore: parseInt(skip) + enrichedMessages.length < total };
-      res.json(response);
+  
+      const total = await Message.countDocuments({
+        $or: [
+          { senderId: userId, recipientId },
+          { senderId: recipientId, recipientId: userId },
+        ],
+      });
+  
+      res.json({ messages: messages.reverse(), hasMore: total > skip + limit });
     } catch (error) {
-      logger.error('Messages fetch error', { error: error.message, userId: req.query.userId });
+      logger.error('Messages fetch error', { error: error.message, stack: error.stack, query: req.query });
       res.status(500).json({ error: 'Failed to fetch messages' });
     }
   });
+
+router.get('/chat-list', authMiddleware, socialLimiter, async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId || req.user.id !== userId) return res.status(403).json({ error: 'Unauthorized' });
+
+    // Get saved contacts
+    const savedContacts = await User.findById(userId).select('contacts').lean() || { contacts: [] };
+    const contactIds = savedContacts.contacts || [];
+
+    // Get users who have messaged or been messaged by userId
+    const messageParticipants = await Message.aggregate([
+      { $match: { $or: [{ senderId: userId }, { recipientId: userId }] } },
+      { $group: { _id: { $cond: [{ $eq: ['$senderId', userId] }, '$recipientId', '$senderId'] } } },
+    ]).catch(() => []); // Fallback to empty array if aggregation fails
+    const participantIds = messageParticipants.map((p) => p._id) || [];
+
+    // Combine unique IDs
+    const allIds = [...new Set([...contactIds, ...participantIds])];
+
+    // Fetch user details
+    const users = await User.find({ _id: { $in: allIds } })
+      .select('virtualNumber username photo status lastSeen')
+      .lean()
+      .catch(() => []); // Fallback to empty array if query fails
+
+    const usersWithData = await Promise.all(users.map(async (user) => {
+      const latestMessageResult = await Message.find({
+        $or: [{ senderId: userId, recipientId: user._id }, { senderId: user._id, recipientId: userId }],
+      })
+        .sort({ createdAt: -1 })
+        .limit(1)
+        .lean()
+        .catch(() => []); // Fallback to empty array if query fails
+      const latestMessage = latestMessageResult[0] || null;
+
+      const unreadCountResult = await Message.countDocuments({
+        senderId: user._id,
+        recipientId: userId,
+        status: { $ne: 'read' },
+      }).catch(() => 0); // Fallback to 0 if count fails
+
+      return {
+        id: user._id.toString(),
+        virtualNumber: user.virtualNumber || 'Unknown',
+        username: user.username || '',
+        photo: user.photo || 'https://placehold.co/40x40',
+        status: user.status || 'offline',
+        lastSeen: user.lastSeen || null,
+        latestMessage,
+        unreadCount: unreadCountResult,
+        isSaved: contactIds.map(String).includes(user._id.toString()),
+      };
+    }));
+
+    const sortedUsers = usersWithData.sort((a, b) => new Date(b.latestMessage?.createdAt || 0) - new Date(a.latestMessage?.createdAt || 0));
+    res.json(sortedUsers);
+  } catch (error) {
+    logger.error('Chat list fetch error', { error: error.message, stack: error.stack, userId: req.query.userId });
+    res.status(500).json({ error: 'Failed to fetch chat list' });
+  }
+});
+
 
 
   router.delete('/message/:messageId', authMiddleware, socialLimiter, async (req, res) => {
     try {
       const message = await Message.findById(req.params.messageId);
-      if (!message) return res.status(404).json({ error: 'Message not found' });
-      if (message.senderId.toString() !== req.user.id) return res.status(403).json({ error: 'Unauthorized' });
-
+      if (!message || message.senderId.toString() !== req.user.id) return res.status(403).json({ error: 'Unauthorized' });
       await Message.deleteOne({ _id: req.params.messageId });
-      const undeliveredKey = `undelivered:${message.recipientId}`;
-      const undelivered = await redis.lrange(undeliveredKey, 0, -1);
-      if (undelivered.length) {
-        const updated = undelivered.filter((msg) => JSON.parse(msg)._id !== req.params.messageId);
-        await redis.del(undeliveredKey);
-        if (updated.length) await redis.lpush(undeliveredKey, updated);
-      }
       io.to(message.recipientId).emit('messageDeleted', req.params.messageId);
       io.to(message.senderId).emit('messageDeleted', req.params.messageId);
       res.json({ success: true });
@@ -474,9 +286,3 @@ module.exports = (io) => {
 
   return router;
 };
-
-process.on('SIGTERM', async () => {
-  logger.info('SIGTERM received, closing Redis connection');
-  await redis.quit();
-  process.exit(0);
-});

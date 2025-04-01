@@ -20,6 +20,10 @@ const messageSchema = new mongoose.Schema({
     type: String,
     required: true, // Stores RSA-encrypted content or Cloudinary URL
   },
+  plaintextContent: {
+    type: String,
+    default: '', // Stores the original plaintext for text messages, empty for media
+  },
   caption: {
     type: String,
     trim: true,
@@ -39,6 +43,23 @@ const messageSchema = new mongoose.Schema({
     trim: true,
     maxlength: 255, // Reasonable limit for filenames
   },
+  senderVirtualNumber: {
+    type: String,
+    trim: true,
+  },
+  senderUsername: {
+    type: String,
+    trim: true,
+  },
+  senderPhoto: {
+    type: String,
+    trim: true,
+  },
+  clientMessageId: {
+    type: String,
+    trim: true,
+    index: true, // Index for quick lookup to prevent duplicates
+  },
   createdAt: {
     type: Date,
     default: Date.now,
@@ -48,8 +69,9 @@ const messageSchema = new mongoose.Schema({
 });
 
 // Indexes for performance
-messageSchema.index({ senderId: 1, recipientId: 1, createdAt: -1 });
-messageSchema.index({ recipientId: 1, createdAt: -1 });
-messageSchema.index({ status: 1 });
+messageSchema.index({ senderId: 1, recipientId: 1, createdAt: -1 }); // For fetching messages by sender/recipient
+messageSchema.index({ recipientId: 1, createdAt: -1 }); // For recipient message lists
+messageSchema.index({ status: 1 }); // For filtering unread messages
+messageSchema.index({ clientMessageId: 1 }, { unique: true, sparse: true }); // Prevent duplicates, sparse allows null values
 
 module.exports = mongoose.model('Message', messageSchema);

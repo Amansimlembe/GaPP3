@@ -13,6 +13,7 @@ import ChatScreen from './screens/ChatScreen';
 import ProfileScreen from './screens/ProfileScreen';
 import CountrySelector from './components/CountrySelector';
 
+// Initialize Socket.io with explicit connection options
 const socket = io('https://gapp-6yc3.onrender.com', {
   reconnection: true,
   reconnectionAttempts: Infinity,
@@ -20,7 +21,7 @@ const socket = io('https://gapp-6yc3.onrender.com', {
   reconnectionDelayMax: 5000,
   randomizationFactor: 0.5,
   withCredentials: true,
-  autoConnect: false,
+  autoConnect: false, // Connect manually based on auth state
 });
 
 const getTokenExpiration = (token) => {
@@ -78,7 +79,9 @@ const App = () => {
       localStorage.setItem('virtualNumber', virtualNumber);
       localStorage.setItem('username', username);
       setIsAuthenticated(true);
-      if (!socket.connected) socket.connect();
+      if (!socket.connected) {
+        socket.connect(); // Ensure socket connects when authenticated
+      }
     } else {
       localStorage.clear();
       socket.emit('leave', userId);
@@ -173,7 +176,10 @@ const App = () => {
   }, [theme]);
 
   useEffect(() => {
-    if (!isAuthenticated || !token || !userId) return;
+    if (!isAuthenticated || !token || !userId) {
+      if (socket.connected) socket.disconnect();
+      return;
+    }
 
     socket.on('connect', () => {
       socket.emit('join', userId);
@@ -184,6 +190,11 @@ const App = () => {
       if (msg.recipientId === userId && (!selectedChat || selectedChat !== msg.senderId)) {
         setChatNotifications((prev) => prev + 1);
       }
+    });
+
+    socket.on('newContact', (contactData) => {
+      console.log('New contact added via socket:', contactData);
+      // Optionally update app-level state if needed, but ChatScreen will handle its own list
     });
 
     socket.on('connect_error', (error) => {
@@ -204,6 +215,7 @@ const App = () => {
     return () => {
       socket.off('connect');
       socket.off('message');
+      socket.off('newContact');
       socket.off('connect_error');
       socket.off('disconnect');
     };

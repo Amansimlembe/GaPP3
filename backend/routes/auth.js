@@ -106,7 +106,6 @@ const generateVirtualNumber = (countryCode, userId) => {
 
 router.post('/register', authLimiter, upload.single('photo'), async (req, res) => {
   try {
-    // Handle multipart/form-data
     const { email, password, username, country, role } = req.body;
     const { error } = registerSchema.validate({ email, password, username, country, role });
     if (error) return res.status(400).json({ error: error.details[0].message });
@@ -263,7 +262,11 @@ router.post('/add_contact', authMiddleware, async (req, res) => {
     };
 
     logger.info('Contact added', { userId, contactId: contact._id });
-    req.app.get('io').to(userId).emit('newContact', contactData);
+    if (req.app.get('io')) {
+      req.app.get('io').to(userId).emit('newContact', contactData);
+    } else {
+      logger.warn('Socket.io not initialized in app', { userId });
+    }
     res.json(contactData);
   } catch (error) {
     logger.error('Add contact error:', { error: error.message, stack: error.stack, body: req.body });
@@ -301,7 +304,7 @@ router.post('/update_country', authMiddleware, async (req, res) => {
 router.post('/update_photo', authMiddleware, upload.single('photo'), async (req, res) => {
   try {
     const { userId } = req.body;
-    if (userId !== req-more.user.id) return res.status(403).json({ error: 'Not authorized' });
+    if (userId !== req.user.id) return res.status(403).json({ error: 'Not authorized' }); // Fixed typo: req-more.user.id -> req.user.id
     if (!req.file) return res.status(400).json({ error: 'No photo provided' });
 
     const user = await User.findById(userId);

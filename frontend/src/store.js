@@ -1,11 +1,10 @@
 import { configureStore, createSlice } from '@reduxjs/toolkit';
 
-// Define the message slice
 const messageSlice = createSlice({
   name: 'messages',
   initialState: {
-    chats: {}, // Object with recipientId as keys and message arrays as values
-    selectedChat: null, // Currently selected chat (recipientId)
+    chats: {},
+    selectedChat: null,
   },
   reducers: {
     setMessages: (state, action) => {
@@ -15,7 +14,26 @@ const messageSlice = createSlice({
     addMessage: (state, action) => {
       const { recipientId, message } = action.payload;
       state.chats[recipientId] = state.chats[recipientId] || [];
+      // Only add if the message doesn't already exist
       if (!state.chats[recipientId].some((msg) => msg._id === message._id)) {
+        state.chats[recipientId].push(message);
+      }
+    },
+    replaceMessage: (state, action) => {
+      if (!action.payload || typeof action.payload !== 'object') {
+        console.error('Invalid payload for replaceMessage:', action.payload);
+        return state; // Prevent destructuring error
+      }
+      const { recipientId, message, replaceId } = action.payload;
+      if (!recipientId || !message || !replaceId) {
+        console.error('Missing required fields in replaceMessage payload:', { recipientId, message, replaceId });
+        return state;
+      }
+      state.chats[recipientId] = state.chats[recipientId] || [];
+      const index = state.chats[recipientId].findIndex((msg) => msg._id === replaceId);
+      if (index !== -1) {
+        state.chats[recipientId][index] = { ...message };
+      } else if (!state.chats[recipientId].some((msg) => msg._id === message._id)) {
         state.chats[recipientId].push(message);
       }
     },
@@ -35,22 +53,31 @@ const messageSlice = createSlice({
       chats: {},
       selectedChat: null,
     }),
-    // Add a reducer for initial state loading
     setInitialState: (state, action) => {
       return { ...state, ...action.payload };
     },
   },
 });
 
-// Export actions
-export const { setMessages, addMessage, updateMessageStatus, setSelectedChat, resetState, setInitialState } = messageSlice.actions;
+console.log('store.js loaded, exporting actions');
 
-// Custom middleware for persisting state to localStorage
+export const {
+  setMessages,
+  addMessage,
+  replaceMessage,
+  updateMessageStatus,
+  setSelectedChat,
+  resetState,
+  setInitialState,
+} = messageSlice.actions;
+
+console.log('Exported replaceMessage:', replaceMessage);
 const persistenceMiddleware = (store) => (next) => (action) => {
   const result = next(action);
   const actionsToPersist = [
     setMessages.type,
     addMessage.type,
+    replaceMessage.type,
     updateMessageStatus.type,
     setSelectedChat.type,
     resetState.type,
@@ -58,11 +85,23 @@ const persistenceMiddleware = (store) => (next) => (action) => {
   ];
 
   if (actionsToPersist.includes(action.type)) {
-    // Use requestAnimationFrame to defer persistence and avoid blocking renders
     requestAnimationFrame(() => {
       const state = store.getState().messages;
       try {
-        localStorage.setItem('reduxState', JSON.stringify(state));
+        const serializableState = {
+          ...state,
+          chats: Object.fromEntries(
+            Object.entries(state.chats).map(([key, messages]) => [
+              key,
+              messages.map((msg) => ({
+                ...msg,
+                // Handle non-serializable content (e.g., Blob URLs from media)
+                content: typeof msg.content === 'string' ? msg.content : '[Media Content]',
+              })),
+            ])
+          ),
+        };
+        localStorage.setItem('reduxState', JSON.stringify(serializableState));
       } catch (error) {
         console.error('Failed to persist state:', error);
       }
@@ -71,22 +110,25 @@ const persistenceMiddleware = (store) => (next) => (action) => {
   return result;
 };
 
-// Load persisted state safely
 const loadPersistedState = () => {
   const persistedState = localStorage.getItem('reduxState');
   if (persistedState) {
     try {
-      return JSON.parse(persistedState);
+      const parsedState = JSON.parse(persistedState);
+      // Ensure chats is an object and not corrupted
+      if (parsedState && typeof parsedState.chats === 'object' && parsedState.chats !== null) {
+        return parsedState;
+      }
+      throw new Error('Invalid persisted state format');
     } catch (error) {
       console.error('Failed to parse persisted state:', error);
-      localStorage.removeItem('reduxState'); // Clear invalid state
+      localStorage.removeItem('reduxState');
       return undefined;
     }
   }
   return undefined;
 };
 
-// Configure the store with preloaded state
 export const store = configureStore({
   reducer: {
     messages: messageSlice.reducer,
@@ -97,8 +139,7 @@ export const store = configureStore({
   middleware: (getDefaultMiddleware) =>
     getDefaultMiddleware({
       serializableCheck: {
-        // Ignore specific actions that might contain non-serializable data (e.g., Blobs)
-        ignoredActions: [addMessage.type],
+        ignoredActions: [addMessage.type, replaceMessage.type],
         ignoredPaths: ['messages.chats'],
       },
     }).concat(persistenceMiddleware),

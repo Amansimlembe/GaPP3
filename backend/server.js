@@ -12,6 +12,13 @@ const socialRoutes = require('./routes/social');
 const jobseekerRoutes = require('./routes/jobseeker');
 const employerRoutes = require('./routes/employer');
 
+// Initialize Express app
+const app = express();
+
+// Set trust proxy after app is defined
+app.set('trust proxy', 1); // Trust Render's proxy
+
+// Logger configuration
 const logger = winston.createLogger({
   level: 'info',
   format: winston.format.combine(winston.format.timestamp(), winston.format.json()),
@@ -21,7 +28,7 @@ const logger = winston.createLogger({
   ],
 });
 
-const app = express();
+// Create HTTP server and Socket.IO instance
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: '*' },
@@ -30,6 +37,7 @@ const io = new Server(server, {
 });
 app.set('io', io);
 
+// Middleware setup
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, '../frontend/build')));
@@ -48,6 +56,7 @@ app.use((err, req, res, next) => {
   next(err);
 });
 
+// MongoDB connection
 const connectDB = async () => {
   try {
     await mongoose.connect(process.env.MONGO_URI, {
@@ -62,11 +71,13 @@ const connectDB = async () => {
 };
 connectDB();
 
+// Routes
 app.use('/auth', authRoutes);
 app.use('/jobseeker', jobseekerRoutes);
 app.use('/employer', employerRoutes);
 app.use('/social', socialRoutes(io));
 
+// Socket.IO connection handler
 io.on('connection', (socket) => {
   logger.info('User connected', { socketId: socket.id });
 
@@ -80,11 +91,14 @@ io.on('connection', (socket) => {
   });
 });
 
+// Serve frontend
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, '../frontend/build', 'index.html')));
 
+// Start server
 const PORT = process.env.PORT || 8000;
 server.listen(PORT, '0.0.0.0', () => logger.info(`Server running on port ${PORT}`));
 
+// Graceful shutdown
 const shutdown = async () => {
   logger.info('Shutting down server');
   await redis.quit();
