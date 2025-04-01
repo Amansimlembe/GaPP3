@@ -1,19 +1,28 @@
 import { openDB } from 'idb';
 
 const DB_NAME = 'ChatDB';
-const STORE_NAME = 'messages';
-const VERSION = 3;
+const MESSAGE_STORE_NAME = 'messages';
+const PENDING_STORE_NAME = 'pendingMessages'; // New store for pending messages
+const VERSION = 4; // Increment version to accommodate new store
 
 const dbPromise = openDB(DB_NAME, VERSION, {
   upgrade(db, oldVersion, newVersion) {
     console.log(`Upgrading database from version ${oldVersion} to ${newVersion}`);
-    // Simplify upgrade logic: only latest schema is needed since we force reset
-    if (db.objectStoreNames.contains(STORE_NAME)) {
-      db.deleteObjectStore(STORE_NAME);
+
+    // Handle messages store
+    if (db.objectStoreNames.contains(MESSAGE_STORE_NAME)) {
+      db.deleteObjectStore(MESSAGE_STORE_NAME);
     }
-    const messageStore = db.createObjectStore(STORE_NAME, { keyPath: '_id' });
+    const messageStore = db.createObjectStore(MESSAGE_STORE_NAME, { keyPath: '_id' });
     messageStore.createIndex('byRecipientId', 'recipientId', { multiEntry: false });
     messageStore.createIndex('byCreatedAt', 'createdAt', { multiEntry: false });
+
+    // Handle pendingMessages store
+    if (!db.objectStoreNames.contains(PENDING_STORE_NAME)) {
+      // Only create if it doesn’t exist to avoid errors on upgrades from earlier versions
+      const pendingStore = db.createObjectStore(PENDING_STORE_NAME, { keyPath: 'tempId' });
+      pendingStore.createIndex('byRecipientId', 'recipientId', { multiEntry: false });
+    }
   },
   blocked() {
     console.error('Database upgrade blocked by an open connection');
@@ -26,8 +35,8 @@ const dbPromise = openDB(DB_NAME, VERSION, {
 export const saveMessages = async (messages) => {
   try {
     const db = await dbPromise;
-    const tx = db.transaction(STORE_NAME, 'readwrite');
-    const store = tx.objectStore(STORE_NAME);
+    const tx = db.transaction(MESSAGE_STORE_NAME, 'readwrite');
+    const store = tx.objectStore(MESSAGE_STORE_NAME);
 
     await Promise.all(messages.map((msg) => store.put(msg)));
     await tx.done;
@@ -41,8 +50,8 @@ export const saveMessages = async (messages) => {
 export const getMessages = async (recipientId = null) => {
   try {
     const db = await dbPromise;
-    const tx = db.transaction(STORE_NAME, 'readonly');
-    const store = tx.objectStore(STORE_NAME);
+    const tx = db.transaction(MESSAGE_STORE_NAME, 'readonly');
+    const store = tx.objectStore(MESSAGE_STORE_NAME);
 
     if (recipientId) {
       const index = store.index('byRecipientId');
@@ -61,8 +70,8 @@ export const getMessages = async (recipientId = null) => {
 export const deleteMessage = async (messageId) => {
   try {
     const db = await dbPromise;
-    const tx = db.transaction(STORE_NAME, 'readwrite');
-    const store = tx.objectStore(STORE_NAME);
+    const tx = db.transaction(MESSAGE_STORE_NAME, 'readwrite');
+    const store = tx.objectStore(MESSAGE_STORE_NAME);
 
     await store.delete(messageId);
     await tx.done;
@@ -76,8 +85,8 @@ export const deleteMessage = async (messageId) => {
 export const clearOldMessages = async (daysToKeep = 30) => {
   try {
     const db = await dbPromise;
-    const tx = db.transaction(STORE_NAME, 'readwrite');
-    const store = tx.objectStore(STORE_NAME);
+    const tx = db.transaction(MESSAGE_STORE_NAME, 'readwrite');
+    const store = tx.objectStore(MESSAGE_STORE_NAME);
 
     if (!store.indexNames.contains('byCreatedAt')) {
       console.warn('byCreatedAt index not found; falling back to full scan');
@@ -111,8 +120,8 @@ export const clearOldMessages = async (daysToKeep = 30) => {
 export const clearAllMessages = async () => {
   try {
     const db = await dbPromise;
-    const tx = db.transaction(STORE_NAME, 'readwrite');
-    const store = tx.objectStore(STORE_NAME);
+    const tx = db.transaction(MESSAGE_STORE_NAME, 'readwrite');
+    const store = tx.objectStore(MESSAGE_STORE_NAME);
 
     await store.clear();
     await tx.done;
@@ -126,14 +135,62 @@ export const clearAllMessages = async () => {
 export const checkIndexes = async () => {
   try {
     const db = await dbPromise;
-    const tx = db.transaction(STORE_NAME, 'readonly');
-    const store = tx.objectStore(STORE_NAME);
+    const tx = db.transaction(MESSAGE_STORE_NAME, 'readonly');
+    const store = tx.objectStore(MESSAGE_STORE_NAME);
     const indexes = Array.from(store.indexNames);
     console.log('Indexes available:', indexes);
     return indexes;
   } catch (error) {
     console.error('Error checking indexes in IndexedDB:', error);
     return [];
+  }
+};
+
+// New functions for pending messages
+export const savePendingMessages = async (pendingMessages) => {
+  try {
+    const db = await dbPromise;
+    const tx = db.transaction(PENDING_STORE_NAME, 'readwrite');
+    const store = tx.objectStore(PENDING_STORE_NAME);
+
+    // Clear existing pending messages and save new ones
+    await store.clear();
+    await Promise.all(pendingMessages.map((msg) => store.put(msg)));
+    await tx.done;
+    console.log(`Saved ${pendingMessages.length} pending messages to IndexedDB`);
+  } catch (error) {
+    console.error('Error saving pending messages to IndexedDB:', error);
+    throw error;
+  }
+};
+
+export const loadPendingMessages = async () => {
+  try {
+    const db = await dbPromise;
+    const tx = db.transaction(PENDING_STORE_NAME, 'readonly');
+    const store = tx.objectStore(PENDING_STORE_NAME);
+
+    const pendingMessages = await store.getAll();
+    console.log(`Loaded ${pendingMessages.length} pending messages from IndexedDB`);
+    return pendingMessages;
+  } catch (error) {
+    console.error('Error loading pending messages from IndexedDB:', error);
+    return [];
+  }
+};
+
+export const clearPendingMessages = async () => {
+  try {
+    const db = await dbPromise;
+    const tx = db.transaction(PENDING_STORE_NAME, 'readwrite');
+    const store = tx.objectStore(PENDING_STORE_NAME);
+
+    await store.clear();
+    await tx.done;
+    console.log('Cleared all pending messages from IndexedDB');
+  } catch (error) {
+    console.error('Error clearing pending messages from IndexedDB:', error);
+    throw error;
   }
 };
 

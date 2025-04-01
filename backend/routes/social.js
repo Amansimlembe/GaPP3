@@ -119,59 +119,25 @@ module.exports = (io) => {
     });
   });
 
-
   router.post('/message', authMiddleware, socialLimiter, async (req, res) => {
     try {
       const { senderId, recipientId, contentType, content, plaintextContent, caption, replyTo, originalFilename, clientMessageId } = req.body;
+      if (!senderId || !recipientId || !contentType || !content) return res.status(400).json({ error: 'Missing required fields' });
   
-      // Validate required fields
-      if (!senderId || !recipientId || !contentType || !content) {
-        logger.warn('Missing required fields', { body: req.body });
-        return res.status(400).json({ error: 'Missing required fields' });
-      }
+      if (clientMessageId && await Message.findOne({ clientMessageId })) return res.status(200).json(await Message.findOne({ clientMessageId }).lean());
   
-      // Check for duplicate clientMessageId
-      if (clientMessageId) {
-        const existingMessage = await Message.findOne({ clientMessageId });
-        if (existingMessage) {
-          logger.info('Duplicate message detected', { clientMessageId });
-          return res.status(200).json(existingMessage.toObject());
-        }
-      }
-  
-      const message = new Message({
-        senderId,
-        recipientId,
-        contentType,
-        content,
-        plaintextContent: plaintextContent || '',
-        caption,
-        replyTo,
-        originalFilename,
-        status: 'sent',
-        senderVirtualNumber: req.user.virtualNumber,
-        senderUsername: req.user.username,
-        senderPhoto: req.user.photo,
-        clientMessageId,
-      });
-  
+      const message = new Message({ senderId, recipientId, contentType, content, plaintextContent: plaintextContent || '', caption, replyTo, originalFilename, status: 'sent', senderVirtualNumber: req.user.virtualNumber, senderUsername: req.user.username, senderPhoto: req.user.photo, clientMessageId });
       await message.save();
-      logger.info('Message saved', { messageId: message._id });
       io.to(recipientId).emit('message', message.toObject());
       io.to(senderId).emit('message', message.toObject());
-  
       res.json(message.toObject());
     } catch (error) {
-      logger.error('Message send error', {
-        error: error.message,
-        stack: error.stack,
-        body: req.body,
-      });
-      res.status(500).json({ error: 'Failed to send message', details: error.message });
+      logger.error('Message send error:', error);
+      res.status(500).json({ error: 'Failed to send message' });
     }
   });
 
-  
+
   router.get('/messages', authMiddleware, socialLimiter, async (req, res) => {
     try {
       const { userId, recipientId, limit = 50, skip = 0 } = req.query;

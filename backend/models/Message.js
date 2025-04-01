@@ -60,6 +60,11 @@ const messageSchema = new mongoose.Schema({
     trim: true,
     index: true, // Index for quick lookup to prevent duplicates
   },
+  forwardCount: {
+    type: Number,
+    default: 0,
+  },
+  
   createdAt: {
     type: Date,
     default: Date.now,
