@@ -106,13 +106,30 @@ const ChatScreen = ({ token, userId, setAuth, socket }) => {
         headers: { Authorization: `Bearer ${token}` },
         params: { userId },
       });
-      setUsers(data);
-      localStorage.setItem('cachedUsers', JSON.stringify(data));
+      const privateKeyPem = localStorage.getItem('privateKey');
+      const processedUsers = await Promise.all(
+        data.map(async (user) => {
+          if (user.latestMessage) {
+            if (user.latestMessage.senderId === userId) {
+              user.latestMessage.content = user.latestMessage.plaintextContent || '[Missing Plaintext]';
+            } else if (user.latestMessage.recipientId === userId && user.latestMessage.contentType === 'text') {
+              user.latestMessage.content = await decryptMessage(user.latestMessage.content, privateKeyPem);
+            } else if (user.latestMessage.recipientId === userId) {
+              user.latestMessage.content = `[${user.latestMessage.contentType} Content]`;
+            }
+          }
+          return user;
+        })
+      );
+      setUsers(processedUsers);
+      localStorage.setItem('cachedUsers', JSON.stringify(processedUsers));
     } catch (err) {
       setError(`Failed to load chat list: ${err.response?.data?.error || err.message}`);
       if (err.response?.status === 401) handleLogout();
     }
-  }, [token, userId, handleLogout]);
+  }, [token, userId, handleLogout, decryptMessage]);
+  
+ 
 
   const fetchMessages = useCallback(async (pageNum = 0, initial = true) => {
     if (!selectedChat || loading || !hasMore) return;
@@ -315,7 +332,7 @@ const ChatScreen = ({ token, userId, setAuth, socket }) => {
     if (!selectedChat || (!message.trim() && !file)) return;
     socket.emit('stopTyping', { userId, recipientId: selectedChat });
     setTyping(false);
-
+  
     const tempId = `${userId}-${Date.now()}`;
     const plaintextContent = file ? URL.createObjectURL(file) : message;
     const tempMsg = {
@@ -333,7 +350,7 @@ const ChatScreen = ({ token, userId, setAuth, socket }) => {
     };
     dispatch(addMessage({ recipientId: selectedChat, message: tempMsg }));
     if (isAtBottomRef.current) chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'instant' });
-
+  
     setMessage('');
     setFile(null);
     setCaption('');
@@ -341,7 +358,7 @@ const ChatScreen = ({ token, userId, setAuth, socket }) => {
     setReplyTo(null);
     setMediaPreview(null);
     setShowPicker(false);
-
+  
     try {
       const recipientPublicKey = await getPublicKey(selectedChat);
       let encryptedContent;
@@ -355,7 +372,7 @@ const ChatScreen = ({ token, userId, setAuth, socket }) => {
         });
         encryptedContent = await encryptMessage(fileContent, recipientPublicKey, true);
       }
-
+  
       const messageData = {
         senderId: userId,
         recipientId: selectedChat,
@@ -367,14 +384,15 @@ const ChatScreen = ({ token, userId, setAuth, socket }) => {
         originalFilename: file?.name || undefined,
         clientMessageId: tempId,
       };
-
+  
+      console.log('Sending messageData:', messageData);
       const response = await axios.post(`${BASE_URL}/social/message`, messageData, {
         headers: { Authorization: `Bearer ${token}` },
       });
-
+  
       const { data } = response;
       if (!data || !data._id) throw new Error('Invalid server response: missing message data');
-
+  
       const updatedMessage = {
         ...data,
         content: data.plaintextContent || (data.contentType === 'text' ? '[Missing Plaintext]' : '[Media Content]'),

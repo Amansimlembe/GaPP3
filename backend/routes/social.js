@@ -118,11 +118,25 @@ module.exports = (io) => {
       }
     });
   });
+
+
   router.post('/message', authMiddleware, socialLimiter, async (req, res) => {
     try {
-      const { senderId, recipientId, contentType, content, plaintextContent, caption, replyTo, originalFilename } = req.body;
+      const { senderId, recipientId, contentType, content, plaintextContent, caption, replyTo, originalFilename, clientMessageId } = req.body;
+  
+      // Validate required fields
       if (!senderId || !recipientId || !contentType || !content) {
+        logger.warn('Missing required fields', { body: req.body });
         return res.status(400).json({ error: 'Missing required fields' });
+      }
+  
+      // Check for duplicate clientMessageId
+      if (clientMessageId) {
+        const existingMessage = await Message.findOne({ clientMessageId });
+        if (existingMessage) {
+          logger.info('Duplicate message detected', { clientMessageId });
+          return res.status(200).json(existingMessage.toObject());
+        }
       }
   
       const message = new Message({
@@ -138,20 +152,26 @@ module.exports = (io) => {
         senderVirtualNumber: req.user.virtualNumber,
         senderUsername: req.user.username,
         senderPhoto: req.user.photo,
-        clientMessageId, // Store this
+        clientMessageId,
       });
   
       await message.save();
+      logger.info('Message saved', { messageId: message._id });
       io.to(recipientId).emit('message', message.toObject());
       io.to(senderId).emit('message', message.toObject());
   
       res.json(message.toObject());
     } catch (error) {
-      logger.error('Message send error', { error: error.message, stack: error.stack, body: req.body });
-      res.status(500).json({ error: 'Failed to send message' });
+      logger.error('Message send error', {
+        error: error.message,
+        stack: error.stack,
+        body: req.body,
+      });
+      res.status(500).json({ error: 'Failed to send message', details: error.message });
     }
   });
 
+  
   router.get('/messages', authMiddleware, socialLimiter, async (req, res) => {
     try {
       const { userId, recipientId, limit = 50, skip = 0 } = req.query;
