@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import forge from 'node-forge';
@@ -8,7 +8,7 @@ import {
 } from 'react-icons/fa';
 import { useDispatch, useSelector } from 'react-redux';
 import { setMessages, addMessage, updateMessageStatus, setSelectedChat, resetState, replaceMessage } from '../store';
-import { saveMessages, clearOldMessages, deleteMessage, checkIndexes, savePendingMessages, loadPendingMessages } from '../db';
+import { saveMessages, getMessages, clearOldMessages, deleteMessage, savePendingMessages, loadPendingMessages } from '../db';
 
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
 
@@ -44,6 +44,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
   const chatRef = useRef(null);
   const typingTimeoutRef = useRef(null);
   const isAtBottomRef = useRef(true);
+  const lastFetchedAtRef = useRef(null);
   const messagesPerPage = 50;
   const isSmallDevice = window.innerWidth < 768;
 
@@ -123,14 +124,25 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
     }
   }, [token, userId, handleLogout, decryptMessage]);
 
-  const fetchMessages = useCallback(async (pageNum = 0, initial = true) => {
-    if (!selectedChat || loading || !hasMore) return;
+  const fetchMessages = useCallback(async (recipientId, pageNum = 0, syncOnly = false) => {
+    if (!recipientId || loading || (!hasMore && !syncOnly)) return;
     setLoading(true);
     try {
-      const { data } = await axios.get(`${BASE_URL}/social/messages`, {
-        headers: { Authorization: `Bearer ${token}` },
-        params: { userId, recipientId: selectedChat, limit: messagesPerPage, skip: pageNum * messagesPerPage },
-      });
+      const localMessages = await getMessages(recipientId);
+      if (!syncOnly && localMessages.length && pageNum === 0) {
+        dispatch(setMessages({ recipientId, messages: localMessages }));
+        lastFetchedAtRef.current = localMessages[localMessages.length - 1]?.createdAt || null;
+        chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight });
+      }
+
+      const params = {
+        userId,
+        recipientId,
+        limit: messagesPerPage,
+        skip: pageNum * messagesPerPage,
+        since: syncOnly && lastFetchedAtRef.current ? new Date(lastFetchedAtRef.current).toISOString() : undefined,
+      };
+      const { data } = await axios.get(`${BASE_URL}/social/messages`, { headers: { Authorization: `Bearer ${token}` }, params });
       const privateKeyPem = localStorage.getItem('privateKey');
       const messages = await Promise.all(data.messages.map(async (msg) => {
         const newMsg = { ...msg };
@@ -143,16 +155,25 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
         }
         return newMsg;
       }));
+
+      if (syncOnly) {
+        messages.forEach((msg) => {
+          if (!chats[recipientId]?.some((m) => m._id === msg._id)) {
+            dispatch(addMessage({ recipientId, message: msg }));
+          }
+        });
+      } else {
+        dispatch(setMessages({ recipientId, messages: [...(chats[recipientId] || []).filter((m) => !messages.some((nm) => nm._id === m._id)), ...messages] }));
+      }
       setHasMore(data.hasMore);
-      dispatch(setMessages({ recipientId: selectedChat, messages: initial ? messages : [...(chats[selectedChat] || []), ...messages] }));
-      if (initial) chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight });
       await saveMessages(messages);
+      lastFetchedAtRef.current = messages[messages.length - 1]?.createdAt || lastFetchedAtRef.current;
     } catch (err) {
       setError(`Failed to load messages: ${err.message}`);
     } finally {
       setLoading(false);
     }
-  }, [selectedChat, token, userId, dispatch, decryptMessage, loading, hasMore, chats]);
+  }, [token, userId, dispatch, decryptMessage, loading, hasMore, chats]);
 
   const sendPendingMessages = useCallback(async () => {
     if (!navigator.onLine || !pendingMessages.length) return;
@@ -175,11 +196,15 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
 
     const initializeChat = async () => {
       await fetchChatList();
-      if (selectedChat) await fetchMessages(0);
       const pending = await loadPendingMessages();
       setPendingMessages(pending);
       const keepAlive = setInterval(() => socket.emit('ping', { userId }), 3000);
       clearOldMessages(30).catch((err) => console.error('IndexedDB error:', err));
+
+      if (selectedChat) {
+        await fetchMessages(selectedChat, 0);
+        fetchMessages(selectedChat, 0, true); // Initial sync for new messages
+      }
 
       const onlineHandler = () => sendPendingMessages();
       window.addEventListener('online', onlineHandler);
@@ -205,7 +230,6 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
     const setupSocketListeners = () => {
       socket.on('connect', () => {
         socket.emit('join', userId);
-        console.log('Socket connected:', socket.id);
         sendPendingMessages();
       });
 
@@ -223,22 +247,17 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
         await saveMessages([newMsg]);
 
         setUsers((prev) => {
-          const updated = prev.map((u) => u.id === chatId ? { ...u, latestMessage: { ...newMsg, content: msg.senderId === userId ? `You: ${msg.plaintextContent || `[${msg.contentType}]`}` : content }, unreadCount: msg.recipientId === userId && chatId !== selectedChat ? u.unreadCount + 1 : u.unreadCount } : u);
+          const updated = prev.map((u) => u.id === chatId ? { ...u, latestMessage: { ...newMsg, content: msg.senderId === userId ? `You: ${msg.plaintextContent || `[${msg.contentType}]`}` : content }, unreadCount: msg.recipientId === userId && chatId !== selectedChat ? (u.unreadCount || 0) + 1 : u.unreadCount } : u);
           const sorted = updated.sort((a, b) => new Date(b.latestMessage?.createdAt || 0) - new Date(a.latestMessage?.createdAt || 0));
           localStorage.setItem('cachedUsers', JSON.stringify(sorted));
           return sorted;
         });
 
-        if (chatId === selectedChat) {
-          socket.emit('messageStatus', { messageId: msg._id, status: 'delivered', recipientId: userId });
-          if (isAtBottomRef.current) {
-            socket.emit('messageStatus', { messageId: msg._id, status: 'read', recipientId: userId });
-            chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
-          } else {
-            setUnreadCount((prev) => prev + 1);
-            if (!firstUnreadMessageId) setFirstUnreadMessageId(msg._id);
-            setShowJumpToBottom(true);
-          }
+        if (chatId === selectedChat && isAtBottomRef.current) {
+          chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
+        } else if (chatId === selectedChat) {
+          setUnreadCount((prev) => prev + 1);
+          if (!firstUnreadMessageId) setFirstUnreadMessageId(msg._id);
         }
       });
 
@@ -263,11 +282,8 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
       });
     };
 
-    initializeChat().then(() => {
-      setupSocketListeners();
-      chatRef.current?.addEventListener('scroll', handleScroll);
-      if (page > 0) fetchMessages(page, false);
-    });
+    initializeChat().then(setupSocketListeners);
+    chatRef.current?.addEventListener('scroll', handleScroll);
 
     return () => {
       socket.off('connect');
@@ -278,7 +294,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
       socket.off('onlineStatus');
       chatRef.current?.removeEventListener('scroll', handleScroll);
     };
-  }, [token, userId, selectedChat, page, dispatch, fetchChatList, fetchMessages, chats, decryptMessage, hasMore, loading, socket, sendPendingMessages]);
+  }, [token, userId, selectedChat, dispatch, fetchChatList, fetchMessages, chats, decryptMessage, socket, sendPendingMessages, hasMore, loading]);
 
   const sendMessage = async () => {
     if (!selectedChat || (!message.trim() && !file)) return;
@@ -345,9 +361,37 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
     }
   };
 
+  const messagesList = useMemo(() => (
+    (chats[selectedChat] || []).map((msg, i) => {
+      const showDateHeader = i === 0 || new Date(msg.createdAt).toDateString() !== new Date(chats[selectedChat][i - 1].createdAt).toDateString();
+      return (
+        <motion.div key={msg._id} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
+          {showDateHeader && <div className="text-center my-2"><span className="bg-gray-300 dark:bg-gray-700 text-gray-700 dark:text-gray-300 px-2 py-1 rounded-full text-sm">{formatDateHeader(msg.createdAt)}</span></div>}
+          {firstUnreadMessageId === msg._id && unreadCount > 0 && <div className="text-center my-2"><span className="bg-blue-500 text-white px-2 py-1 rounded-full text-sm">{unreadCount} New Messages</span></div>}
+          <div className={`flex ${msg.senderId === userId ? 'justify-end' : 'justify-start'} px-2 py-1`}>
+            <div className={`max-w-[70%] p-2 rounded-lg shadow-sm ${msg.senderId === userId ? 'bg-green-500 text-white rounded-br-none' : 'bg-white dark:bg-gray-800 rounded-bl-none'}`}>
+              {msg.replyTo && <div className="text-xs italic mb-1 bg-gray-200 dark:bg-gray-700 p-1 rounded">{chats[selectedChat].find((m) => m._id === msg.replyTo)?.content || 'Original message not found'}</div>}
+              {msg.contentType === 'text' && <p className="text-sm break-words">{msg.content}</p>}
+              {msg.contentType === 'image' && <img src={msg.content} alt="Chat" className="max-w-[80%] max-h-64 rounded-lg cursor-pointer" onClick={() => setViewMedia({ type: 'image', url: msg.content })} />}
+              {msg.contentType === 'video' && <video src={msg.content} className="max-w-[80%] max-h-64 rounded-lg" controls />}
+              {msg.contentType === 'audio' && <audio src={msg.content} controls className="max-w-[80%]" />}
+              {msg.contentType === 'document' && <div className="flex items-center"><FaFileAlt className="text-blue-600 mr-2" /><a href={msg.content} download={msg.originalFilename} className="text-blue-600 truncate">{msg.originalFilename || 'file'}</a></div>}
+              {msg.caption && <p className="text-xs italic mt-1">{msg.caption}</p>}
+              <div className="flex justify-between mt-1">
+                {msg.senderId === userId && (
+                  <span className="text-xs">{msg.status === 'pending' ? <FaClock /> : msg.status === 'sent' ? '✔' : msg.status === 'delivered' ? '✔✔' : <span className="text-blue-300">✔✔</span>}</span>
+                )}
+                <span className="text-xs text-gray-500">{formatTime(msg.createdAt)}</span>
+              </div>
+            </div>
+          </div>
+        </motion.div>
+      );
+    })
+  ), [chats, selectedChat, userId, unreadCount, firstUnreadMessageId]);
+
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex h-screen bg-gray-100 dark:bg-gray-900">
-      {/* Chat List */}
       <div className={`w-full md:w-1/3 bg-white dark:bg-gray-800 border-r ${isSmallDevice && selectedChat ? 'hidden' : 'block'} flex flex-col`}>
         <div className="p-4 flex justify-between border-b dark:border-gray-700">
           <h2 className="text-xl font-bold text-primary dark:text-gray-100">Chats</h2>
@@ -380,7 +424,6 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
         </div>
       </div>
 
-      {/* Chat Area */}
       <div className={`flex-1 flex flex-col ${isSmallDevice && !selectedChat ? 'hidden' : 'block'}`}>
         {selectedChat ? (
           <>
@@ -395,34 +438,21 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
               </div>
             </div>
             <div ref={chatRef} className="flex-1 overflow-y-auto bg-gray-100 dark:bg-gray-900 p-2 pt-16" style={{ paddingBottom: '80px' }}>
-              {(chats[selectedChat] || []).map((msg, i) => {
-                const showDateHeader = i === 0 || new Date(msg.createdAt).toDateString() !== new Date(chats[selectedChat][i - 1].createdAt).toDateString();
-                return (
-                  <motion.div key={msg._id} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
-                    {showDateHeader && <div className="text-center my-2"><span className="bg-gray-300 dark:bg-gray-700 text-gray-700 dark:text-gray-300 px-2 py-1 rounded-full text-sm">{formatDateHeader(msg.createdAt)}</span></div>}
-                    {firstUnreadMessageId === msg._id && unreadCount > 0 && <div className="text-center my-2"><span className="bg-blue-500 text-white px-2 py-1 rounded-full text-sm">{unreadCount} New Messages</span></div>}
-                    <div className={`flex ${msg.senderId === userId ? 'justify-end' : 'justify-start'} px-2 py-1`}>
-                      <div className={`max-w-[70%] p-2 rounded-lg shadow-sm ${msg.senderId === userId ? 'bg-green-500 text-white rounded-br-none' : 'bg-white dark:bg-gray-800 rounded-bl-none'}`}>
-                        {msg.contentType === 'text' && <p className="text-sm break-words">{msg.content}</p>}
-                        {msg.contentType === 'image' && <img src={msg.content} alt="Chat" className="max-w-[80%] max-h-64 rounded-lg cursor-pointer" onClick={() => setViewMedia({ type: 'image', url: msg.content })} />}
-                        {msg.contentType === 'video' && <video src={msg.content} className="max-w-[80%] max-h-64 rounded-lg" controls />}
-                        {msg.contentType === 'audio' && <audio src={msg.content} controls className="max-w-[80%]" />}
-                        {msg.contentType === 'document' && <div className="flex items-center"><FaFileAlt className="text-blue-600 mr-2" /><a href={msg.content} download={msg.originalFilename} className="text-blue-600 truncate">{msg.originalFilename || 'file'}</a></div>}
-                        {msg.caption && <p className="text-xs italic mt-1">{msg.caption}</p>}
-                        <div className="flex justify-between mt-1">
-                          {msg.senderId === userId && (
-                            <span className="text-xs">{msg.status === 'pending' ? <FaClock /> : msg.status === 'sent' ? '✔' : msg.status === 'delivered' ? '✔✔' : <span className="text-blue-300">✔✔</span>}</span>
-                          )}
-                          <span className="text-xs text-gray-500">{formatTime(msg.createdAt)}</span>
-                        </div>
-                      </div>
-                    </div>
-                  </motion.div>
-                );
-              })}
+              {messagesList}
+              {showJumpToBottom && (
+                <button onClick={() => chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' })} className="fixed bottom-20 right-4 bg-primary text-white p-2 rounded-full">
+                  <FaArrowDown />
+                </button>
+              )}
             </div>
 
             <motion.div className="bg-white dark:bg-gray-800 p-2 border-t dark:border-gray-700 fixed md:left-[33.33%] md:w-2/3 left-0 right-0 bottom-0 z-30">
+              {replyTo && (
+                <div className="bg-gray-100 dark:bg-gray-700 p-2 mb-2 rounded relative">
+                  <p className="text-sm">Replying to: {replyTo.content}</p>
+                  <button onClick={() => setReplyTo(null)} className="absolute top-2 right-2 bg-red-500 text-white p-1 rounded-full"><FaTrash /></button>
+                </div>
+              )}
               {mediaPreview && (
                 <div className="bg-gray-100 dark:bg-gray-700 p-2 mb-2 rounded relative">
                   {mediaPreview.type === 'image' && <img src={mediaPreview.url} alt="Preview" className="max-w-full max-h-64 rounded-lg" />}

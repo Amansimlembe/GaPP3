@@ -14,26 +14,17 @@ const messageSlice = createSlice({
     addMessage: (state, action) => {
       const { recipientId, message } = action.payload;
       state.chats[recipientId] = state.chats[recipientId] || [];
-      // Only add if the message doesn't already exist
-      if (!state.chats[recipientId].some((msg) => msg._id === message._id)) {
+      if (!state.chats[recipientId].some((msg) => msg._id === message._id || msg.clientMessageId === message.clientMessageId)) {
         state.chats[recipientId].push(message);
       }
     },
     replaceMessage: (state, action) => {
-      if (!action.payload || typeof action.payload !== 'object') {
-        console.error('Invalid payload for replaceMessage:', action.payload);
-        return state; // Prevent destructuring error
-      }
       const { recipientId, message, replaceId } = action.payload;
-      if (!recipientId || !message || !replaceId) {
-        console.error('Missing required fields in replaceMessage payload:', { recipientId, message, replaceId });
-        return state;
-      }
       state.chats[recipientId] = state.chats[recipientId] || [];
-      const index = state.chats[recipientId].findIndex((msg) => msg._id === replaceId);
+      const index = state.chats[recipientId].findIndex((msg) => msg._id === replaceId || msg.clientMessageId === replaceId);
       if (index !== -1) {
         state.chats[recipientId][index] = { ...message };
-      } else if (!state.chats[recipientId].some((msg) => msg._id === message._id)) {
+      } else if (!state.chats[recipientId].some((msg) => msg._id === message._id || msg.clientMessageId === message.clientMessageId)) {
         state.chats[recipientId].push(message);
       }
     },
@@ -53,13 +44,8 @@ const messageSlice = createSlice({
       chats: {},
       selectedChat: null,
     }),
-    setInitialState: (state, action) => {
-      return { ...state, ...action.payload };
-    },
   },
 });
-
-console.log('store.js loaded, exporting actions');
 
 export const {
   setMessages,
@@ -68,10 +54,8 @@ export const {
   updateMessageStatus,
   setSelectedChat,
   resetState,
-  setInitialState,
 } = messageSlice.actions;
 
-console.log('Exported replaceMessage:', replaceMessage);
 const persistenceMiddleware = (store) => (next) => (action) => {
   const result = next(action);
   const actionsToPersist = [
@@ -81,7 +65,6 @@ const persistenceMiddleware = (store) => (next) => (action) => {
     updateMessageStatus.type,
     setSelectedChat.type,
     resetState.type,
-    setInitialState.type,
   ];
 
   if (actionsToPersist.includes(action.type)) {
@@ -95,7 +78,6 @@ const persistenceMiddleware = (store) => (next) => (action) => {
               key,
               messages.map((msg) => ({
                 ...msg,
-                // Handle non-serializable content (e.g., Blob URLs from media)
                 content: typeof msg.content === 'string' ? msg.content : '[Media Content]',
               })),
             ])
@@ -115,7 +97,6 @@ const loadPersistedState = () => {
   if (persistedState) {
     try {
       const parsedState = JSON.parse(persistedState);
-      // Ensure chats is an object and not corrupted
       if (parsedState && typeof parsedState.chats === 'object' && parsedState.chats !== null) {
         return parsedState;
       }

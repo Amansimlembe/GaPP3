@@ -7,15 +7,13 @@ const path = require('path');
 const mongoose = require('mongoose');
 const redis = require('./redis');
 const winston = require('winston');
-const { router: authRoutes, authMiddleware } = require('./routes/auth');
+const { router: authRoutes } = require('./routes/auth');
 const socialRoutes = require('./routes/social');
 const jobseekerRoutes = require('./routes/jobseeker');
 const employerRoutes = require('./routes/employer');
 
 // Initialize Express app
 const app = express();
-
-// Set trust proxy after app is defined
 app.set('trust proxy', 1); // Trust Render's proxy
 
 // Logger configuration
@@ -75,16 +73,11 @@ connectDB();
 app.use('/auth', authRoutes);
 app.use('/jobseeker', jobseekerRoutes);
 app.use('/employer', employerRoutes);
-app.use('/social', socialRoutes(io));
+app.use('/social', socialRoutes(io)); // Pass io to social routes
 
-// Socket.IO connection handler
+// Basic Socket.IO connection handler (minimal, as detailed logic is in socialRoutes)
 io.on('connection', (socket) => {
   logger.info('User connected', { socketId: socket.id });
-
-  socket.on('join', (userId) => {
-    socket.join(userId);
-    logger.info('User joined room', { userId, socketId: socket.id });
-  });
 
   socket.on('disconnect', () => {
     logger.info('User disconnected', { socketId: socket.id });
@@ -101,12 +94,17 @@ server.listen(PORT, '0.0.0.0', () => logger.info(`Server running on port ${PORT}
 // Graceful shutdown
 const shutdown = async () => {
   logger.info('Shutting down server');
-  await redis.quit();
-  await mongoose.connection.close();
-  server.close(() => {
-    logger.info('Server closed');
-    process.exit(0);
-  });
+  try {
+    await redis.quit();
+    await mongoose.connection.close();
+    server.close(() => {
+      logger.info('Server closed');
+      process.exit(0);
+    });
+  } catch (err) {
+    logger.error('Error during shutdown', { error: err.message });
+    process.exit(1);
+  }
 };
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);

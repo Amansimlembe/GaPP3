@@ -62,6 +62,7 @@ const userSchema = new mongoose.Schema({
   },
   lastSeen: {
     type: Date,
+    default: null,
   },
 }, {
   timestamps: true, // Adds createdAt and updatedAt fields
@@ -71,7 +72,7 @@ const userSchema = new mongoose.Schema({
 userSchema.index({ virtualNumber: 1 });
 userSchema.index({ username: 1 });
 userSchema.index({ email: 1 });
-userSchema.index({ status: 1, lastSeen: -1 });
+userSchema.index({ status: 1, lastSeen: -1 }); // For online status queries
 
 // Pre-save hook to ensure uniqueness of virtualNumber
 userSchema.pre('save', async function (next) {

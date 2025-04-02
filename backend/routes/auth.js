@@ -31,7 +31,7 @@ const logger = winston.createLogger({
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 },
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
   fileFilter: (req, file, cb) => {
     const allowedTypes = ['image/jpeg', 'image/png', 'image/gif'];
     if (!allowedTypes.includes(file.mimetype)) {
@@ -65,7 +65,7 @@ const authMiddleware = async (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
-    await redis.setex(sessionKey, 24 * 60 * 60, JSON.stringify(decoded));
+    await redis.setex(sessionKey, 24 * 60 * 60, JSON.stringify(decoded)); // Cache for 24 hours
     req.user = decoded;
     next();
   } catch (error) {
@@ -212,10 +212,10 @@ router.post('/login', authLimiter, async (req, res) => {
     const token = jwt.sign(
       { id: user._id, email, virtualNumber: user.virtualNumber, role: user.role },
       process.env.JWT_SECRET,
-      { expiresIn: '7d' }
+      { expiresIn: '24h' } // Aligned with refresh token expiration
     );
 
-    await redis.setex(`token:${user._id}`, 7 * 24 * 60 * 60, token);
+    await redis.setex(`token:${user._id}`, 24 * 60 * 60, token);
 
     logger.info('Login successful', { userId: user._id, email });
     res.json({
@@ -261,12 +261,14 @@ router.post('/add_contact', authMiddleware, async (req, res) => {
       lastSeen: contact.lastSeen,
     };
 
-    logger.info('Contact added', { userId, contactId: contact._id });
-    if (req.app.get('io')) {
-      req.app.get('io').to(userId).emit('newContact', contactData);
+    const io = req.app.get('io');
+    if (io) {
+      io.to(userId).emit('newContact', contactData);
     } else {
       logger.warn('Socket.io not initialized in app', { userId });
     }
+
+    logger.info('Contact added', { userId, contactId: contact._id });
     res.json(contactData);
   } catch (error) {
     logger.error('Add contact error:', { error: error.message, stack: error.stack, body: req.body });
@@ -304,7 +306,7 @@ router.post('/update_country', authMiddleware, async (req, res) => {
 router.post('/update_photo', authMiddleware, upload.single('photo'), async (req, res) => {
   try {
     const { userId } = req.body;
-    if (userId !== req.user.id) return res.status(403).json({ error: 'Not authorized' }); // Fixed typo: req-more.user.id -> req.user.id
+    if (userId !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
     if (!req.file) return res.status(400).json({ error: 'No photo provided' });
 
     const user = await User.findById(userId);
@@ -374,7 +376,7 @@ router.get('/contacts', authMiddleware, async (req, res) => {
       lastSeen: contact.lastSeen,
     }));
 
-    await redis.setex(cacheKey, 300, JSON.stringify(contacts));
+    await redis.setex(cacheKey, 300, JSON.stringify(contacts)); // Cache for 5 minutes
     logger.info('Contacts fetched successfully', { userId: req.user.id });
     res.json(contacts);
   } catch (error) {
@@ -399,7 +401,7 @@ router.get('/public_key/:userId', authMiddleware, async (req, res) => {
       return res.status(500).json({ error: 'Server returned invalid public key' });
     }
 
-    await redis.setex(cacheKey, 3600, user.publicKey);
+    await redis.setex(cacheKey, 3600, user.publicKey); // Cache for 1 hour
     logger.info('Public key fetched', { requesterId: req.user.id, targetUserId: req.params.userId });
     res.json({ publicKey: user.publicKey });
   } catch (error) {

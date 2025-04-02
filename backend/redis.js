@@ -15,8 +15,8 @@ const redisClient = redis.createClient({
   url: `redis://${process.env.REDIS_HOST}:${process.env.REDIS_PORT}`,
   password: process.env.REDIS_PASSWORD,
   socket: {
-    connectTimeout: 10000, // Increased from default 5000ms to 10000ms
-    keepAlive: 1000, // Enable keep-alive every 1s to detect issues early
+    connectTimeout: 10000,
+    keepAlive: 1000,
     reconnectStrategy: (retries) => {
       if (retries > 10) {
         logger.error('Redis reconnection failed after 10 attempts', { retries });
@@ -46,7 +46,6 @@ redisClient.on('end', () => logger.warn('Redis connection closed'));
 
 // Handle uncaught errors during runtime
 redisClient.on('error', async (err) => {
-  logger.error('Unhandled Redis error', { error: err.message });
   if (!redisClient.isOpen) {
     try {
       await redisClient.connect();
@@ -93,7 +92,9 @@ module.exports = {
   },
   lpush: async (key, value) => {
     try {
-      return await redisClient.lPush(key, value);
+      // Ensure value is stringified for Redis list compatibility
+      const stringValue = typeof value === 'string' ? value : JSON.stringify(value);
+      return await redisClient.lPush(key, stringValue);
     } catch (err) {
       logger.error('Redis lpush error', { key, error: err.message });
       throw err;
@@ -101,7 +102,15 @@ module.exports = {
   },
   lrange: async (key, start, stop) => {
     try {
-      return await redisClient.lRange(key, start, stop);
+      const result = await redisClient.lRange(key, start, stop);
+      // Parse JSON strings back to objects if applicable
+      return result.map((item) => {
+        try {
+          return JSON.parse(item);
+        } catch {
+          return item; // Return as-is if not JSON
+        }
+      });
     } catch (err) {
       logger.error('Redis lrange error', { key, start, stop, error: err.message });
       throw err;

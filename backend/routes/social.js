@@ -25,13 +25,6 @@ const socialLimiter = rateLimit({
   keyGenerator: (req) => req.ip,
 });
 
-const messageLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 200,
-  message: { error: 'Too many messages sent, please try again later.' },
-  keyGenerator: (req) => req.ip,
-});
-
 const messageSchema = Joi.object({
   senderId: Joi.string().required(),
   recipientId: Joi.string().required(),
@@ -41,7 +34,7 @@ const messageSchema = Joi.object({
   caption: Joi.string().max(500).allow('').optional(),
   replyTo: Joi.string().optional(),
   originalFilename: Joi.string().optional(),
-  clientMessageId: Joi.string().optional(), // Add this
+  clientMessageId: Joi.string().optional(),
 });
 const messageStatusSchema = Joi.object({
   messageId: Joi.string().required(),
@@ -121,12 +114,31 @@ module.exports = (io) => {
 
   router.post('/message', authMiddleware, socialLimiter, async (req, res) => {
     try {
+      const { error } = messageSchema.validate(req.body);
+      if (error) return res.status(400).json({ error: error.details[0].message });
+
       const { senderId, recipientId, contentType, content, plaintextContent, caption, replyTo, originalFilename, clientMessageId } = req.body;
-      if (!senderId || !recipientId || !contentType || !content) return res.status(400).json({ error: 'Missing required fields' });
-  
-      if (clientMessageId && await Message.findOne({ clientMessageId })) return res.status(200).json(await Message.findOne({ clientMessageId }).lean());
-  
-      const message = new Message({ senderId, recipientId, contentType, content, plaintextContent: plaintextContent || '', caption, replyTo, originalFilename, status: 'sent', senderVirtualNumber: req.user.virtualNumber, senderUsername: req.user.username, senderPhoto: req.user.photo, clientMessageId });
+      if (req.user.id !== senderId) return res.status(403).json({ error: 'Unauthorized' });
+
+      if (clientMessageId && await Message.findOne({ clientMessageId })) {
+        return res.status(200).json(await Message.findOne({ clientMessageId }).lean());
+      }
+
+      const message = new Message({
+        senderId,
+        recipientId,
+        contentType,
+        content,
+        plaintextContent: plaintextContent || '',
+        caption,
+        replyTo,
+        originalFilename,
+        status: 'sent',
+        senderVirtualNumber: req.user.virtualNumber,
+        senderUsername: req.user.username,
+        senderPhoto: req.user.photo,
+        clientMessageId,
+      });
       await message.save();
       io.to(recipientId).emit('message', message.toObject());
       io.to(senderId).emit('message', message.toObject());
@@ -137,32 +149,29 @@ module.exports = (io) => {
     }
   });
 
-
   router.get('/messages', authMiddleware, socialLimiter, async (req, res) => {
     try {
-      const { userId, recipientId, limit = 50, skip = 0 } = req.query;
+      const { userId, recipientId, limit = 50, skip = 0, since } = req.query;
       if (!userId || !recipientId || req.user.id !== userId) {
         return res.status(403).json({ error: 'Unauthorized' });
       }
-  
-      const messages = await Message.find({
+
+      const query = {
         $or: [
           { senderId: userId, recipientId },
           { senderId: recipientId, recipientId: userId },
         ],
-      })
+      };
+      if (since) query.createdAt = { $gt: new Date(since) };
+
+      const messages = await Message.find(query)
         .sort({ createdAt: -1 })
         .skip(parseInt(skip))
         .limit(parseInt(limit))
         .lean();
-  
-      const total = await Message.countDocuments({
-        $or: [
-          { senderId: userId, recipientId },
-          { senderId: recipientId, recipientId: userId },
-        ],
-      });
-  
+
+      const total = await Message.countDocuments(query);
+
       res.json({ messages: messages.reverse(), hasMore: total > skip + limit });
     } catch (error) {
       logger.error('Messages fetch error', { error: error.message, stack: error.stack, query: req.query });
@@ -170,69 +179,62 @@ module.exports = (io) => {
     }
   });
 
-router.get('/chat-list', authMiddleware, socialLimiter, async (req, res) => {
-  try {
-    const { userId } = req.query;
-    if (!userId || req.user.id !== userId) return res.status(403).json({ error: 'Unauthorized' });
+  router.get('/chat-list', authMiddleware, socialLimiter, async (req, res) => {
+    try {
+      const { userId } = req.query;
+      if (!userId || req.user.id !== userId) return res.status(403).json({ error: 'Unauthorized' });
 
-    // Get saved contacts
-    const savedContacts = await User.findById(userId).select('contacts').lean() || { contacts: [] };
-    const contactIds = savedContacts.contacts || [];
+      const savedContacts = await User.findById(userId).select('contacts').lean() || { contacts: [] };
+      const contactIds = savedContacts.contacts || [];
 
-    // Get users who have messaged or been messaged by userId
-    const messageParticipants = await Message.aggregate([
-      { $match: { $or: [{ senderId: userId }, { recipientId: userId }] } },
-      { $group: { _id: { $cond: [{ $eq: ['$senderId', userId] }, '$recipientId', '$senderId'] } } },
-    ]).catch(() => []); // Fallback to empty array if aggregation fails
-    const participantIds = messageParticipants.map((p) => p._id) || [];
+      const messageParticipants = await Message.aggregate([
+        { $match: { $or: [{ senderId: userId }, { recipientId: userId }] } },
+        { $group: { _id: { $cond: [{ $eq: ['$senderId', userId] }, '$recipientId', '$senderId'] } } },
+      ]).catch(() => []);
+      const participantIds = messageParticipants.map((p) => p._id) || [];
 
-    // Combine unique IDs
-    const allIds = [...new Set([...contactIds, ...participantIds])];
+      const allIds = [...new Set([...contactIds, ...participantIds])];
 
-    // Fetch user details
-    const users = await User.find({ _id: { $in: allIds } })
-      .select('virtualNumber username photo status lastSeen')
-      .lean()
-      .catch(() => []); // Fallback to empty array if query fails
-
-    const usersWithData = await Promise.all(users.map(async (user) => {
-      const latestMessageResult = await Message.find({
-        $or: [{ senderId: userId, recipientId: user._id }, { senderId: user._id, recipientId: userId }],
-      })
-        .sort({ createdAt: -1 })
-        .limit(1)
+      const users = await User.find({ _id: { $in: allIds } })
+        .select('virtualNumber username photo status lastSeen')
         .lean()
-        .catch(() => []); // Fallback to empty array if query fails
-      const latestMessage = latestMessageResult[0] || null;
+        .catch(() => []);
 
-      const unreadCountResult = await Message.countDocuments({
-        senderId: user._id,
-        recipientId: userId,
-        status: { $ne: 'read' },
-      }).catch(() => 0); // Fallback to 0 if count fails
+      const usersWithData = await Promise.all(users.map(async (user) => {
+        const latestMessageResult = await Message.find({
+          $or: [{ senderId: userId, recipientId: user._id }, { senderId: user._id, recipientId: userId }],
+        })
+          .sort({ createdAt: -1 })
+          .limit(1)
+          .lean()
+          .catch(() => []);
 
-      return {
-        id: user._id.toString(),
-        virtualNumber: user.virtualNumber || 'Unknown',
-        username: user.username || '',
-        photo: user.photo || 'https://placehold.co/40x40',
-        status: user.status || 'offline',
-        lastSeen: user.lastSeen || null,
-        latestMessage,
-        unreadCount: unreadCountResult,
-        isSaved: contactIds.map(String).includes(user._id.toString()),
-      };
-    }));
+        const unreadCountResult = await Message.countDocuments({
+          senderId: user._id,
+          recipientId: userId,
+          status: { $ne: 'read' },
+        }).catch(() => 0);
 
-    const sortedUsers = usersWithData.sort((a, b) => new Date(b.latestMessage?.createdAt || 0) - new Date(a.latestMessage?.createdAt || 0));
-    res.json(sortedUsers);
-  } catch (error) {
-    logger.error('Chat list fetch error', { error: error.message, stack: error.stack, userId: req.query.userId });
-    res.status(500).json({ error: 'Failed to fetch chat list' });
-  }
-});
+        return {
+          id: user._id.toString(),
+          virtualNumber: user.virtualNumber || 'Unknown',
+          username: user.username || '',
+          photo: user.photo || 'https://placehold.co/40x40',
+          status: user.status || 'offline',
+          lastSeen: user.lastSeen || null,
+          latestMessage: latestMessageResult[0] || null,
+          unreadCount: unreadCountResult,
+          isSaved: contactIds.map(String).includes(user._id.toString()),
+        };
+      }));
 
-
+      const sortedUsers = usersWithData.sort((a, b) => new Date(b.latestMessage?.createdAt || 0) - new Date(a.latestMessage?.createdAt || 0));
+      res.json(sortedUsers);
+    } catch (error) {
+      logger.error('Chat list fetch error', { error: error.message, stack: error.stack, userId: req.query.userId });
+      res.status(500).json({ error: 'Failed to fetch chat list' });
+    }
+  });
 
   router.delete('/message/:messageId', authMiddleware, socialLimiter, async (req, res) => {
     try {

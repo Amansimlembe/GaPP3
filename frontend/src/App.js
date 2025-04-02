@@ -13,7 +13,7 @@ import ChatScreen from './screens/ChatScreen';
 import ProfileScreen from './screens/ProfileScreen';
 import CountrySelector from './components/CountrySelector';
 
-// Initialize Socket.io with explicit connection options
+// Initialize Socket.IO with explicit connection options
 const socket = io('https://gapp-6yc3.onrender.com', {
   reconnection: true,
   reconnectionAttempts: Infinity,
@@ -35,7 +35,7 @@ const getTokenExpiration = (token) => {
         .join('')
     );
     const decoded = JSON.parse(jsonPayload);
-    return decoded.exp * 1000;
+    return decoded.exp * 1000; // Convert to milliseconds
   } catch (error) {
     console.error('Error decoding token:', error);
     return null;
@@ -80,7 +80,7 @@ const App = () => {
       localStorage.setItem('username', username);
       setIsAuthenticated(true);
       if (!socket.connected) {
-        socket.connect(); // Ensure socket connects when authenticated
+        socket.connect();
       }
     } else {
       localStorage.clear();
@@ -101,7 +101,6 @@ const App = () => {
       const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername, privateKey } = response.data;
       setAuth(newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername);
       localStorage.setItem('privateKey', privateKey);
-      console.log('Token refreshed successfully', { userId: newUserId });
       return newToken;
     } catch (error) {
       console.error('Token refresh failed:', error.response?.data || error.message);
@@ -139,7 +138,7 @@ const App = () => {
     const checkTokenExpiration = async () => {
       const expTime = getTokenExpiration(token);
       const now = Date.now();
-      const bufferTime = 5 * 60 * 1000;
+      const bufferTime = 5 * 60 * 1000; // 5 minutes buffer
 
       if (expTime && expTime - now < bufferTime) {
         await refreshToken();
@@ -147,7 +146,7 @@ const App = () => {
     };
 
     checkTokenExpiration();
-    const interval = setInterval(checkTokenExpiration, 60 * 1000);
+    const interval = setInterval(checkTokenExpiration, 60 * 1000); // Check every minute
     return () => clearInterval(interval);
   }, [isAuthenticated, token, userId]);
 
@@ -194,14 +193,13 @@ const App = () => {
 
     socket.on('newContact', (contactData) => {
       console.log('New contact added via socket:', contactData);
-      // Optionally update app-level state if needed, but ChatScreen will handle its own list
+      // ChatScreen handles its own contact list updates via fetchChatList
     });
 
     socket.on('connect_error', (error) => {
-      console.error('Socket connection error:', error);
-      if (error.message.includes('xhr poll error') && isAuthenticated) {
-        socket.disconnect();
-        socket.connect();
+      console.error('Socket connection error:', error.message);
+      if (isAuthenticated && !socket.connected) {
+        setTimeout(() => socket.connect(), 1000); // Retry after delay
       }
     });
 
@@ -230,7 +228,13 @@ const App = () => {
   };
 
   if (isLoadingAuth) {
-    return <div className="min-h-screen flex items-center justify-center bg-gray-100 dark:bg-gray-900">Loading...</div>;
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-100 dark:bg-gray-900 text-primary">
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 1 }}>
+          Loading...
+        </motion.div>
+      </div>
+    );
   }
 
   if (!isAuthenticated) {
