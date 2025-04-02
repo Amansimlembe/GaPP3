@@ -13,7 +13,6 @@ import ChatScreen from './screens/ChatScreen';
 import ProfileScreen from './screens/ProfileScreen';
 import CountrySelector from './components/CountrySelector';
 
-// Initialize Socket.IO with explicit connection options
 const socket = io('https://gapp-6yc3.onrender.com', {
   reconnection: true,
   reconnectionAttempts: Infinity,
@@ -21,7 +20,7 @@ const socket = io('https://gapp-6yc3.onrender.com', {
   reconnectionDelayMax: 5000,
   randomizationFactor: 0.5,
   withCredentials: true,
-  autoConnect: false, // Connect manually based on auth state
+  autoConnect: false,
 });
 
 const getTokenExpiration = (token) => {
@@ -35,7 +34,7 @@ const getTokenExpiration = (token) => {
         .join('')
     );
     const decoded = JSON.parse(jsonPayload);
-    return decoded.exp * 1000; // Convert to milliseconds
+    return decoded.exp * 1000;
   } catch (error) {
     console.error('Error decoding token:', error);
     return null;
@@ -79,9 +78,7 @@ const App = () => {
       localStorage.setItem('virtualNumber', virtualNumber);
       localStorage.setItem('username', username);
       setIsAuthenticated(true);
-      if (!socket.connected) {
-        socket.connect();
-      }
+      if (!socket.connected) socket.connect();
     } else {
       localStorage.clear();
       socket.emit('leave', userId);
@@ -94,7 +91,7 @@ const App = () => {
   const refreshToken = async () => {
     try {
       const response = await axios.post(
-        'https://gapp-6yc3.onrender.com/auth/refresh',
+        `${BASE_URL}/auth/refresh`,
         { userId },
         { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 5000 }
       );
@@ -138,15 +135,13 @@ const App = () => {
     const checkTokenExpiration = async () => {
       const expTime = getTokenExpiration(token);
       const now = Date.now();
-      const bufferTime = 5 * 60 * 1000; // 5 minutes buffer
+      const bufferTime = 5 * 60 * 1000;
 
-      if (expTime && expTime - now < bufferTime) {
-        await refreshToken();
-      }
+      if (expTime && expTime - now < bufferTime) await refreshToken();
     };
 
     checkTokenExpiration();
-    const interval = setInterval(checkTokenExpiration, 60 * 1000); // Check every minute
+    const interval = setInterval(checkTokenExpiration, 60 * 1000);
     return () => clearInterval(interval);
   }, [isAuthenticated, token, userId]);
 
@@ -193,21 +188,16 @@ const App = () => {
 
     socket.on('newContact', (contactData) => {
       console.log('New contact added via socket:', contactData);
-      // ChatScreen handles its own contact list updates via fetchChatList
     });
 
     socket.on('connect_error', (error) => {
       console.error('Socket connection error:', error.message);
-      if (isAuthenticated && !socket.connected) {
-        setTimeout(() => socket.connect(), 1000); // Retry after delay
-      }
+      if (isAuthenticated && !socket.connected) setTimeout(() => socket.connect(), 1000);
     });
 
     socket.on('disconnect', (reason) => {
       console.log('Socket disconnected:', reason);
-      if (reason === 'io server disconnect' && isAuthenticated) {
-        socket.connect();
-      }
+      if (reason === 'io server disconnect' && isAuthenticated) socket.connect();
     });
 
     return () => {
@@ -219,20 +209,13 @@ const App = () => {
     };
   }, [isAuthenticated, userId, token, selectedChat]);
 
-  const toggleTheme = () => {
-    setTheme((prevTheme) => (prevTheme === 'light' ? 'dark' : 'light'));
-  };
-
-  const handleChatNavigation = () => {
-    setChatNotifications(0);
-  };
+  const toggleTheme = () => setTheme((prevTheme) => (prevTheme === 'light' ? 'dark' : 'light'));
+  const handleChatNavigation = () => setChatNotifications(0);
 
   if (isLoadingAuth) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-100 dark:bg-gray-900 text-primary">
-        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 1 }}>
-          Loading...
-        </motion.div>
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 1 }}>Loading...</motion.div>
       </div>
     );
   }
@@ -258,33 +241,18 @@ const App = () => {
         )}
         <div className="flex-1 p-0 relative">
           <Routes>
-            <Route
-              path="/jobs"
-              element={role === 0 ? <JobSeekerScreen token={token} userId={userId} /> : <EmployerScreen token={token} userId={userId} />}
-            />
+            <Route path="/jobs" element={role === 0 ? <JobSeekerScreen token={token} userId={userId} /> : <EmployerScreen token={token} userId={userId} />} />
             <Route path="/feed" element={<FeedScreen token={token} userId={userId} />} />
             <Route path="/chat" element={<ChatScreen token={token} userId={userId} setAuth={setAuth} socket={socket} />} />
-            <Route
-              path="/profile"
-              element={
-                <ProfileScreen
-                  token={token}
-                  userId={userId}
-                  setAuth={setAuth}
-                  username={username}
-                  virtualNumber={virtualNumber}
-                  photo={photo}
-                />
-              }
-            />
+            <Route path="/profile" element={<ProfileScreen token={token} userId={userId} setAuth={setAuth} username={username} virtualNumber={virtualNumber} photo={photo} />} />
             <Route path="/" element={<Navigate to="/feed" replace />} />
           </Routes>
         </div>
         <motion.div
           initial={{ y: 100 }}
-          animate={{ y: isSmallDevice && selectedChat ? 100 : 0 }}
+          animate={{ y: selectedChat ? 100 : 0 }}
           transition={{ duration: 0.5 }}
-          className="fixed bottom-0 left-0 right-0 bg-primary text-white p-2 flex justify-around items-center shadow-lg z-20"
+          className="fixed bottom-0 left-0 right-0 bg-primary text-white p-2 flex justify-around items-center shadow-lg z-20 md:hidden"
         >
           <Link to="/feed" className="flex flex-col items-center p-2 hover:bg-secondary rounded">
             <FaHome className="text-xl" />
@@ -294,16 +262,10 @@ const App = () => {
             <FaBriefcase className="text-xl" />
             <span className="text-xs">Jobs</span>
           </Link>
-          <Link
-            to="/chat"
-            onClick={handleChatNavigation}
-            className="flex flex-col items-center p-2 hover:bg-secondary rounded relative"
-          >
+          <Link to="/chat" onClick={handleChatNavigation} className="flex flex-col items-center p-2 hover:bg-secondary rounded relative">
             <FaComments className="text-xl" />
             {chatNotifications > 0 && (
-              <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
-                {chatNotifications}
-              </span>
+              <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">{chatNotifications}</span>
             )}
             <span className="text-xs">Chat</span>
           </Link>
@@ -311,10 +273,7 @@ const App = () => {
             <FaUser className="text-xl" />
             <span className="text-xs">Profile</span>
           </Link>
-          <div
-            onClick={toggleTheme}
-            className="flex flex-col items-center p-2 hover:bg-secondary rounded cursor-pointer"
-          >
+          <div onClick={toggleTheme} className="flex flex-col items-center p-2 hover:bg-secondary rounded cursor-pointer">
             {theme === 'light' ? <FaMoon className="text-xl" /> : <FaSun className="text-xl" />}
             <span className="text-xs">{theme === 'light' ? 'Dark' : 'Light'}</span>
           </div>
