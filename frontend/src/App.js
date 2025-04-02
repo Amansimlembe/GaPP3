@@ -13,7 +13,9 @@ import ChatScreen from './screens/ChatScreen';
 import ProfileScreen from './screens/ProfileScreen';
 import CountrySelector from './components/CountrySelector';
 
-const socket = io('https://gapp-6yc3.onrender.com', {
+const BASE_URL = 'https://gapp-6yc3.onrender.com'; // Define BASE_URL explicitly
+
+const socket = io(BASE_URL, {
   reconnection: true,
   reconnectionAttempts: Infinity,
   reconnectionDelay: 1000,
@@ -106,6 +108,7 @@ const App = () => {
     }
   };
 
+  // Rest of the code remains unchanged...
   useEffect(() => {
     const initializeAuth = async () => {
       const storedToken = localStorage.getItem('token');

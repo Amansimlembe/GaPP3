@@ -31,7 +31,7 @@ const logger = winston.createLogger({
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+  limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const allowedTypes = ['image/jpeg', 'image/png', 'image/gif'];
     if (!allowedTypes.includes(file.mimetype)) {
@@ -42,7 +42,7 @@ const upload = multer({
 });
 
 const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
+  windowMs: 15 * 60 * 1000,
   max: 100,
   message: { error: 'Too many requests, please try again later.' },
 });
@@ -65,7 +65,7 @@ const authMiddleware = async (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
-    await redis.setex(sessionKey, 24 * 60 * 60, JSON.stringify(decoded)); // Cache for 24 hours
+    await redis.setex(sessionKey, 24 * 60 * 60, JSON.stringify(decoded));
     req.user = decoded;
     next();
   } catch (error) {
@@ -103,7 +103,6 @@ const generateVirtualNumber = (countryCode, userId) => {
     throw new Error(`Failed to generate virtual number: ${error.message}`);
   }
 };
-
 router.post('/register', authLimiter, upload.single('photo'), async (req, res) => {
   try {
     const { email, password, username, country, role } = req.body;

@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { authMiddleware } = require('../auth');
+const { authMiddleware } = require('./auth'); // Fixed import for same directory
 const Message = require('../models/Message');
 const User = require('../models/User');
 const redis = require('../redis');
