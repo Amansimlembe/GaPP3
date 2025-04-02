@@ -1,14 +1,13 @@
 const express = require('express');
 const router = express.Router();
-const { authMiddleware } = require('./auth'); // Correct import for same directory
+const { authMiddleware } = require('./auth');
 const Message = require('../models/Message');
 const User = require('../models/User');
 const redis = require('../redis');
-const winston = require('winston'); // Add winston
+const winston = require('winston');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
 
-// Define logger locally
 const logger = winston.createLogger({
   level: 'info',
   format: winston.format.combine(winston.format.timestamp(), winston.format.json()),
@@ -17,6 +16,13 @@ const logger = winston.createLogger({
     new winston.transports.File({ filename: 'logs/error.log', level: 'error' }),
     new winston.transports.File({ filename: 'logs/combined.log' }),
   ],
+});
+
+// Configure Cloudinary
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });

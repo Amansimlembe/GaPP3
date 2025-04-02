@@ -29,11 +29,15 @@ const messageSlice = createSlice({
       }
     },
     updateMessageStatus: (state, action) => {
-      const { recipientId, messageId, status } = action.payload;
+      const { recipientId, messageId, status, uploadProgress } = action.payload;
       if (state.chats[recipientId]) {
-        const msgIndex = state.chats[recipientId].findIndex((msg) => msg._id === messageId);
+        const msgIndex = state.chats[recipientId].findIndex((msg) => msg._id === messageId || msg.clientMessageId === messageId);
         if (msgIndex !== -1) {
-          state.chats[recipientId][msgIndex] = { ...state.chats[recipientId][msgIndex], status };
+          state.chats[recipientId][msgIndex] = {
+            ...state.chats[recipientId][msgIndex],
+            status,
+            ...(uploadProgress !== undefined && { uploadProgress }), // Add upload progress if provided
+          };
         }
       }
     },
@@ -78,7 +82,10 @@ const persistenceMiddleware = (store) => (next) => (action) => {
               key,
               messages.map((msg) => ({
                 ...msg,
-                content: typeof msg.content === 'string' ? msg.content : '[Media Content]',
+                content: typeof msg.content === 'string' ? msg.content : '[Media Content]', // Placeholder for non-string content
+                // Ensure all fields are serializable
+                uploadProgress: msg.uploadProgress || 0,
+                caption: msg.caption || '',
               })),
             ])
           ),
@@ -120,7 +127,7 @@ export const store = configureStore({
   middleware: (getDefaultMiddleware) =>
     getDefaultMiddleware({
       serializableCheck: {
-        ignoredActions: [addMessage.type, replaceMessage.type],
+        ignoredActions: [addMessage.type, replaceMessage.type, updateMessageStatus.type],
         ignoredPaths: ['messages.chats'],
       },
     }).concat(persistenceMiddleware),

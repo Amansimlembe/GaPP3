@@ -3,7 +3,7 @@ import { openDB } from 'idb';
 const DB_NAME = 'ChatDB';
 const MESSAGE_STORE_NAME = 'messages';
 const PENDING_STORE_NAME = 'pendingMessages';
-const VERSION = 4;
+const VERSION = 5; // Increment version to trigger upgrade
 
 const dbPromise = openDB(DB_NAME, VERSION, {
   upgrade(db, oldVersion, newVersion) {
@@ -14,11 +14,13 @@ const dbPromise = openDB(DB_NAME, VERSION, {
     const messageStore = db.createObjectStore(MESSAGE_STORE_NAME, { keyPath: '_id' });
     messageStore.createIndex('byRecipientId', 'recipientId', { multiEntry: false });
     messageStore.createIndex('byCreatedAt', 'createdAt', { multiEntry: false });
+    messageStore.createIndex('byClientMessageId', 'clientMessageId', { unique: false }); // New index for clientMessageId
 
-    if (!db.objectStoreNames.contains(PENDING_STORE_NAME)) {
-      const pendingStore = db.createObjectStore(PENDING_STORE_NAME, { keyPath: 'tempId' });
-      pendingStore.createIndex('byRecipientId', 'recipientId', { multiEntry: false });
+    if (db.objectStoreNames.contains(PENDING_STORE_NAME)) {
+      db.deleteObjectStore(PENDING_STORE_NAME);
     }
+    const pendingStore = db.createObjectStore(PENDING_STORE_NAME, { keyPath: 'tempId' });
+    pendingStore.createIndex('byRecipientId', 'recipientId', { multiEntry: false });
   },
   blocked() {
     console.error('Database upgrade blocked by an open connection');

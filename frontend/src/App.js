@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { BrowserRouter as Router, Route, Routes, Navigate, NavLink } from 'react-router-dom'; // Changed Link to NavLink
+import { BrowserRouter as Router, Route, Routes, Navigate, NavLink, useLocation } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { FaHome, FaBriefcase, FaComments, FaUser, FaMoon, FaSun } from 'react-icons/fa';
 import axios from 'axios';
@@ -55,7 +55,7 @@ const App = () => {
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
   const [isLoadingAuth, setIsLoadingAuth] = useState(true);
   const { selectedChat } = useSelector((state) => state.messages);
-  const isSmallDevice = window.innerWidth < 768;
+  const location = useLocation(); // Get current route
 
   const setAuth = (newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername) => {
     const token = newToken || '';
@@ -230,85 +230,91 @@ const App = () => {
     );
   }
 
+  const isChatRouteWithSelectedChat = location.pathname === '/chat' && selectedChat;
+
   return (
-    <Router>
-      <div className={`min-h-screen flex flex-col ${theme === 'dark' ? 'dark' : ''} bg-gray-100 dark:bg-gray-900`}>
-        {!virtualNumber && (
-          <CountrySelector
-            token={token}
-            userId={userId}
-            virtualNumber={virtualNumber}
-            onComplete={(newVirtualNumber) => setAuth(token, userId, role, photo, newVirtualNumber, username)}
-          />
-        )}
-        <div className="flex-1 p-0 relative">
-          <Routes>
-            <Route path="/jobs" element={role === 0 ? <JobSeekerScreen token={token} userId={userId} /> : <EmployerScreen token={token} userId={userId} />} />
-            <Route path="/feed" element={<FeedScreen token={token} userId={userId} />} />
-            <Route path="/chat" element={<ChatScreen token={token} userId={userId} setAuth={setAuth} socket={socket} />} />
-            <Route path="/profile" element={<ProfileScreen token={token} userId={userId} setAuth={setAuth} username={username} virtualNumber={virtualNumber} photo={photo} />} />
-            <Route path="/" element={<Navigate to="/feed" replace />} />
-          </Routes>
-        </div>
-        <motion.div
-          initial={{ y: 0 }}
-          animate={{ y: isSmallDevice && selectedChat ? 100 : 0 }}
-          transition={{ duration: 0.5 }}
-          className={`fixed bottom-0 left-0 right-0 bg-primary text-white p-2 flex justify-around items-center shadow-lg z-20 ${isSmallDevice ? 'block' : 'hidden'}`}
-        >
-          <NavLink
-            to="/feed"
-            className={({ isActive }) =>
-              `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`
-            }
-          >
-            <FaHome className="text-xl" />
-            <span className="text-xs">Feed</span>
-          </NavLink>
-          <NavLink
-            to="/jobs"
-            className={({ isActive }) =>
-              `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`
-            }
-          >
-            <FaBriefcase className="text-xl" />
-            <span className="text-xs">Jobs</span>
-          </NavLink>
-          <NavLink
-            to="/chat"
-            onClick={handleChatNavigation}
-            className={({ isActive }) =>
-              `flex flex-col items-center p-2 rounded relative ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`
-            }
-          >
-            <FaComments className="text-xl" />
-            {chatNotifications > 0 && (
-              <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
-                {chatNotifications}
-              </span>
-            )}
-            <span className="text-xs">Chat</span>
-          </NavLink>
-          <NavLink
-            to="/profile"
-            className={({ isActive }) =>
-              `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`
-            }
-          >
-            <FaUser className="text-xl" />
-            <span className="text-xs">Profile</span>
-          </NavLink>
-          <div
-            onClick={toggleTheme}
-            className="flex flex-col items-center p-2 hover:bg-secondary rounded cursor-pointer"
-          >
-            {theme === 'light' ? <FaMoon className="text-xl" /> : <FaSun className="text-xl" />}
-            <span className="text-xs">{theme === 'light' ? 'Dark' : 'Light'}</span>
-          </div>
-        </motion.div>
+    <div className={`min-h-screen flex flex-col ${theme === 'dark' ? 'dark' : ''} bg-gray-100 dark:bg-gray-900`}>
+      {!virtualNumber && (
+        <CountrySelector
+          token={token}
+          userId={userId}
+          virtualNumber={virtualNumber}
+          onComplete={(newVirtualNumber) => setAuth(token, userId, role, photo, newVirtualNumber, username)}
+        />
+      )}
+      <div className="flex-1 p-0 relative">
+        <Routes>
+          <Route path="/jobs" element={role === 0 ? <JobSeekerScreen token={token} userId={userId} /> : <EmployerScreen token={token} userId={userId} />} />
+          <Route path="/feed" element={<FeedScreen token={token} userId={userId} />} />
+          <Route path="/chat" element={<ChatScreen token={token} userId={userId} setAuth={setAuth} socket={socket} />} />
+          <Route path="/profile" element={<ProfileScreen token={token} userId={userId} setAuth={setAuth} username={username} virtualNumber={virtualNumber} photo={photo} />} />
+          <Route path="/" element={<Navigate to="/feed" replace />} />
+        </Routes>
       </div>
-    </Router>
+      <motion.div
+        initial={{ y: 0 }}
+        animate={{ y: isChatRouteWithSelectedChat ? 100 : 0 }}
+        transition={{ duration: 0.5 }}
+        className="fixed bottom-0 left-0 right-0 bg-primary text-white p-2 flex justify-around items-center shadow-lg z-20"
+      >
+        <NavLink
+          to="/feed"
+          className={({ isActive }) =>
+            `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`
+          }
+        >
+          <FaHome className="text-xl" />
+          <span className="text-xs">Feed</span>
+        </NavLink>
+        <NavLink
+          to="/jobs"
+          className={({ isActive }) =>
+            `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`
+          }
+        >
+          <FaBriefcase className="text-xl" />
+          <span className="text-xs">Jobs</span>
+        </NavLink>
+        <NavLink
+          to="/chat"
+          onClick={handleChatNavigation}
+          className={({ isActive }) =>
+            `flex flex-col items-center p-2 rounded relative ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`
+          }
+        >
+          <FaComments className="text-xl" />
+          {chatNotifications > 0 && (
+            <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
+              {chatNotifications}
+            </span>
+          )}
+          <span className="text-xs">Chat</span>
+        </NavLink>
+        <NavLink
+          to="/profile"
+          className={({ isActive }) =>
+            `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`
+          }
+        >
+          <FaUser className="text-xl" />
+          <span className="text-xs">Profile</span>
+        </NavLink>
+        <div
+          onClick={toggleTheme}
+          className="flex flex-col items-center p-2 hover:bg-secondary rounded cursor-pointer"
+        >
+          {theme === 'light' ? <FaMoon className="text-xl" /> : <FaSun className="text-xl" />}
+          <span className="text-xs">{theme === 'light' ? 'Dark' : 'Light'}</span>
+        </div>
+      </motion.div>
+    </div>
   );
 };
 
-export default App;
+const AppWrapper = () => (
+  <Router>
+    <App />
+  </Router>
+);
+
+export default AppWrapper;

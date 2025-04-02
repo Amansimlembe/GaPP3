@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import forge from 'node-forge';
 import {
   FaPaperPlane, FaPaperclip, FaTrash, FaArrowLeft, FaReply, FaEllipsisH, FaForward, FaFileAlt,
-  FaPlay, FaArrowDown, FaUserPlus, FaSignOutAlt, FaUser, FaCopy, FaClock, FaCamera, FaVideo, FaMapMarkerAlt, FaAddressCard,
+  FaPlay, FaArrowDown, FaUserPlus, FaSignOutAlt, FaUser, FaCopy, FaClock, FaCamera, FaVideo, FaMapMarkerAlt, FaAddressCard, FaMicrophone
 } from 'react-icons/fa';
 import { useDispatch, useSelector } from 'react-redux';
 import { setMessages, addMessage, updateMessageStatus, setSelectedChat, resetState, replaceMessage } from '../store';
@@ -17,8 +17,8 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
   const { chats, selectedChat } = useSelector((state) => state.messages);
   const [users, setUsers] = useState(() => JSON.parse(localStorage.getItem('cachedUsers')) || []);
   const [message, setMessage] = useState('');
-  const [file, setFile] = useState(null);
-  const [caption, setCaption] = useState('');
+  const [files, setFiles] = useState([]); // Changed to array for multiple files
+  const [captions, setCaptions] = useState({});
   const [contentType, setContentType] = useState('text');
   const [notifications, setNotifications] = useState(() => JSON.parse(localStorage.getItem('chatNotifications')) || {});
   const [typing, setTyping] = useState(false);
@@ -33,7 +33,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [showMessageMenu, setShowMessageMenu] = useState(null);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
-  const [mediaPreview, setMediaPreview] = useState(null);
+  const [mediaPreview, setMediaPreview] = useState([]); // Array for multiple previews
   const [showPicker, setShowPicker] = useState(false);
   const [viewMedia, setViewMedia] = useState(null);
   const [page, setPage] = useState(0);
@@ -43,11 +43,11 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
   const [pendingMessages, setPendingMessages] = useState([]);
   const [uploadProgress, setUploadProgress] = useState({});
   const chatRef = useRef(null);
+  const inputRef = useRef(null); // For managing input focus
   const typingTimeoutRef = useRef(null);
   const isAtBottomRef = useRef(true);
   const lastFetchedAtRef = useRef(null);
   const messagesPerPage = 50;
-  const isSmallDevice = window.innerWidth < 768;
 
   const handleLogout = useCallback(() => {
     socket.emit('leave', userId);
@@ -90,6 +90,42 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
     const { data } = await axios.get(`${BASE_URL}/auth/public_key/${recipientId}`, { headers: { Authorization: `Bearer ${token}` } });
     return data.publicKey;
   }, [token]);
+
+  const compressImage = async (file) => {
+    return new Promise((resolve) => {
+      const img = new Image();
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        img.src = e.target.result;
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          const ctx = canvas.getContext('2d');
+          const maxWidth = 800; // Adjust as needed
+          const maxHeight = 800;
+          let width = img.width;
+          let height = img.height;
+
+          if (width > height) {
+            if (width > maxWidth) {
+              height *= maxWidth / width;
+              width = maxWidth;
+            }
+          } else {
+            if (height > maxHeight) {
+              width *= maxHeight / height;
+              height = maxHeight;
+            }
+          }
+
+          canvas.width = width;
+          canvas.height = height;
+          ctx.drawImage(img, 0, 0, width, height);
+          canvas.toBlob((blob) => resolve(new File([blob], file.name, { type: 'image/jpeg', lastModified: Date.now() })), 'image/jpeg', 0.7);
+        };
+      };
+      reader.readAsDataURL(file);
+    });
+  };
 
   const formatChatListDate = (date) => new Date(date).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
   const formatDateHeader = (date) => {
@@ -152,7 +188,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
         } else if (msg.recipientId === userId) {
           newMsg.content = msg.contentType === 'text'
             ? await decryptMessage(msg.content, privateKeyPem)
-            : msg.content; // Cloudinary URL for media
+            : msg.content;
         }
         return newMsg;
       }));
@@ -193,66 +229,74 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
   }, [pendingMessages, token, dispatch]);
 
   const handleFileChange = async (e, type) => {
-    const selectedFile = e.target.files[0];
-    if (!selectedFile) return;
-    setFile(selectedFile);
+    const selectedFiles = Array.from(e.target.files);
+    if (!selectedFiles.length) return;
+
+    const compressedFiles = await Promise.all(selectedFiles.map(file => file.type.startsWith('image') ? compressImage(file) : file));
+    setFiles(compressedFiles);
     setContentType(type);
-    setMediaPreview({ type, url: URL.createObjectURL(selectedFile) });
+    setMediaPreview(compressedFiles.map(file => ({ type, url: URL.createObjectURL(file), originalFile: file })));
     setShowPicker(false);
 
-    const clientMessageId = `${userId}-${Date.now()}-${Math.random().toString(36).substring(2)}`;
-    const tempMessage = {
-      _id: clientMessageId,
-      senderId: userId,
-      recipientId: selectedChat,
-      contentType: type,
-      content: URL.createObjectURL(selectedFile),
-      status: 'uploading',
-      createdAt: new Date(),
-      originalFilename: selectedFile.name,
-      uploadProgress: 0,
-      clientMessageId,
-    };
+    const tempMessages = compressedFiles.map(file => {
+      const clientMessageId = `${userId}-${Date.now()}-${Math.random().toString(36).substring(2)}`;
+      return {
+        _id: clientMessageId,
+        senderId: userId,
+        recipientId: selectedChat,
+        contentType: type,
+        content: URL.createObjectURL(file),
+        status: 'uploading',
+        createdAt: new Date(),
+        originalFilename: file.name,
+        uploadProgress: 0,
+        clientMessageId,
+      };
+    });
 
-    dispatch(addMessage({ recipientId: selectedChat, message: tempMessage }));
+    tempMessages.forEach(msg => dispatch(addMessage({ recipientId: selectedChat, message: msg })));
     if (isAtBottomRef.current) chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight });
 
-    const formData = new FormData();
-    formData.append('file', selectedFile);
-    formData.append('userId', userId);
-    formData.append('recipientId', selectedChat);
-    formData.append('clientMessageId', clientMessageId);
+    for (const [index, file] of compressedFiles.entries()) {
+      const clientMessageId = tempMessages[index]._id;
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('userId', userId);
+      formData.append('recipientId', selectedChat);
+      formData.append('clientMessageId', clientMessageId);
 
-    try {
-      const response = await axios.post(
-        `${BASE_URL}/social/upload`,
-        formData,
-        {
-          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'multipart/form-data' },
-          onUploadProgress: (progressEvent) => {
-            const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-            setUploadProgress((prev) => ({ ...prev, [clientMessageId]: percentCompleted }));
-            dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: clientMessageId, status: 'uploading', uploadProgress: percentCompleted }));
-          },
-        }
-      );
+      try {
+        const response = await axios.post(
+          `${BASE_URL}/social/upload`,
+          formData,
+          {
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'multipart/form-data' },
+            onUploadProgress: (progressEvent) => {
+              const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+              setUploadProgress((prev) => ({ ...prev, [clientMessageId]: percentCompleted }));
+              dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: clientMessageId, status: 'uploading', uploadProgress: percentCompleted }));
+            },
+          }
+        );
 
-      const { message: uploadedMessage } = response.data;
-      dispatch(replaceMessage({ recipientId: selectedChat, message: uploadedMessage, replaceId: clientMessageId }));
-      socket.emit('message', uploadedMessage);
-      await saveMessages([uploadedMessage]);
-    } catch (error) {
-      console.error('Media upload failed:', error);
-      dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: clientMessageId, status: 'failed' }));
-    } finally {
-      setUploadProgress((prev) => {
-        const newProgress = { ...prev };
-        delete newProgress[clientMessageId];
-        return newProgress;
-      });
-      setFile(null);
-      setMediaPreview(null);
+        const { message: uploadedMessage } = response.data;
+        dispatch(replaceMessage({ recipientId: selectedChat, message: uploadedMessage, replaceId: clientMessageId }));
+        socket.emit('message', uploadedMessage);
+        await saveMessages([uploadedMessage]);
+      } catch (error) {
+        console.error('Media upload failed:', error);
+        dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: clientMessageId, status: 'failed' }));
+      } finally {
+        setUploadProgress((prev) => {
+          const newProgress = { ...prev };
+          delete newProgress[clientMessageId];
+          return newProgress;
+        });
+      }
     }
+
+    setFiles([]);
+    setMediaPreview([]);
   };
 
   useEffect(() => {
@@ -267,7 +311,8 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
 
       if (selectedChat) {
         await fetchMessages(selectedChat, 0);
-        fetchMessages(selectedChat, 0, true); // Initial sync
+        fetchMessages(selectedChat, 0, true);
+        inputRef.current?.focus(); // Keep input focused when chat is selected
       }
 
       const onlineHandler = () => sendPendingMessages();
@@ -361,45 +406,113 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
   }, [token, userId, selectedChat, dispatch, fetchChatList, fetchMessages, chats, decryptMessage, socket, sendPendingMessages, hasMore, loading]);
 
   const sendMessage = async () => {
-    if (!selectedChat || (!message.trim() && !file)) return;
+    if (!selectedChat || (!message.trim() && !files.length)) return;
     socket.emit('stopTyping', { userId, recipientId: selectedChat });
     setTyping(false);
 
-    const tempId = `${userId}-${Date.now()}`;
-    const plaintextContent = file ? file.name : message;
-    const tempMsg = { _id: tempId, senderId: userId, recipientId: selectedChat, contentType, content: file ? URL.createObjectURL(file) : message, caption, status: navigator.onLine ? 'sent' : 'pending', replyTo: replyTo?._id, createdAt: new Date(), originalFilename: file?.name, clientMessageId: tempId };
-    dispatch(addMessage({ recipientId: selectedChat, message: tempMsg }));
-    if (isAtBottomRef.current) chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight });
+    if (files.length > 0) {
+      for (const [index, file] of files.entries()) {
+        const tempId = `${userId}-${Date.now()}-${index}`;
+        const tempMsg = {
+          _id: tempId,
+          senderId: userId,
+          recipientId: selectedChat,
+          contentType,
+          content: URL.createObjectURL(file),
+          caption: captions[file.name] || '',
+          status: navigator.onLine ? 'sent' : 'pending',
+          replyTo: replyTo?._id,
+          createdAt: new Date(),
+          originalFilename: file.name,
+          clientMessageId: tempId,
+        };
+        dispatch(addMessage({ recipientId: selectedChat, message: tempMsg }));
+        if (isAtBottomRef.current) chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight });
+
+        if (!navigator.onLine) {
+          const newPending = [...pendingMessages, { tempId, recipientId: selectedChat, messageData: tempMsg }];
+          setPendingMessages(newPending);
+          await savePendingMessages(newPending);
+          continue;
+        }
+
+        try {
+          const recipientPublicKey = await getPublicKey(selectedChat);
+          const encryptedContent = await encryptMessage(await new Promise((resolve) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.readAsBinaryString(file);
+          }), recipientPublicKey, true);
+
+          const messageData = {
+            senderId: userId,
+            recipientId: selectedChat,
+            contentType,
+            content: encryptedContent,
+            plaintextContent: '',
+            caption: captions[file.name] || undefined,
+            replyTo: replyTo?._id || undefined,
+            originalFilename: file.name,
+            clientMessageId: tempId,
+          };
+          const { data } = await axios.post(`${BASE_URL}/social/message`, messageData, { headers: { Authorization: `Bearer ${token}` } });
+          dispatch(replaceMessage({ recipientId: selectedChat, message: { ...data, content: data.plaintextContent || data.content }, replaceId: tempId }));
+          await saveMessages([{ ...data, content: data.plaintextContent || data.content }]);
+        } catch (err) {
+          console.error('Send error:', err);
+          setError(`Send failed: ${err.message}`);
+        }
+      }
+    } else {
+      const tempId = `${userId}-${Date.now()}`;
+      const tempMsg = {
+        _id: tempId,
+        senderId: userId,
+        recipientId: selectedChat,
+        contentType: 'text',
+        content: message,
+        status: navigator.onLine ? 'sent' : 'pending',
+        replyTo: replyTo?._id,
+        createdAt: new Date(),
+        clientMessageId: tempId,
+      };
+      dispatch(addMessage({ recipientId: selectedChat, message: tempMsg }));
+      if (isAtBottomRef.current) chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight });
+
+      if (!navigator.onLine) {
+        const newPending = [...pendingMessages, { tempId, recipientId: selectedChat, messageData: tempMsg }];
+        setPendingMessages(newPending);
+        await savePendingMessages(newPending);
+      } else {
+        try {
+          const recipientPublicKey = await getPublicKey(selectedChat);
+          const encryptedContent = await encryptMessage(message, recipientPublicKey);
+          const messageData = {
+            senderId: userId,
+            recipientId: selectedChat,
+            contentType: 'text',
+            content: encryptedContent,
+            plaintextContent: message,
+            replyTo: replyTo?._id || undefined,
+            clientMessageId: tempId,
+          };
+          const { data } = await axios.post(`${BASE_URL}/social/message`, messageData, { headers: { Authorization: `Bearer ${token}` } });
+          dispatch(replaceMessage({ recipientId: selectedChat, message: { ...data, content: data.plaintextContent || data.content }, replaceId: tempId }));
+          await saveMessages([{ ...data, content: data.plaintextContent || data.content }]);
+        } catch (err) {
+          console.error('Send error:', err);
+          setError(`Send failed: ${err.message}`);
+        }
+      }
+    }
 
     setMessage('');
-    setFile(null);
-    setCaption('');
+    setFiles([]);
+    setCaptions({});
     setContentType('text');
     setReplyTo(null);
-    setMediaPreview(null);
+    setMediaPreview([]);
     setShowPicker(false);
-
-    if (!navigator.onLine) {
-      const newPending = [...pendingMessages, { tempId, recipientId: selectedChat, messageData: tempMsg }];
-      setPendingMessages(newPending);
-      await savePendingMessages(newPending);
-      return;
-    }
-
-    try {
-      const recipientPublicKey = await getPublicKey(selectedChat);
-      const encryptedContent = contentType === 'text' && !file
-        ? await encryptMessage(message, recipientPublicKey)
-        : file ? await encryptMessage(await new Promise((resolve) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.readAsBinaryString(file); }), recipientPublicKey, true) : null;
-
-      const messageData = { senderId: userId, recipientId: selectedChat, contentType, content: encryptedContent, plaintextContent: contentType === 'text' ? message : '', caption: caption || undefined, replyTo: replyTo?._id || undefined, originalFilename: file?.name || undefined, clientMessageId: tempId };
-      const { data } = await axios.post(`${BASE_URL}/social/message`, messageData, { headers: { Authorization: `Bearer ${token}` } });
-      dispatch(replaceMessage({ recipientId: selectedChat, message: { ...data, content: data.plaintextContent || data.content }, replaceId: tempId }));
-      await saveMessages([{ ...data, content: data.plaintextContent || data.content }]);
-    } catch (err) {
-      console.error('Send error:', err);
-      setError(`Send failed: ${err.message}`);
-    }
   };
 
   const handleTyping = useCallback((e) => {
@@ -433,7 +546,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
                       <span className="text-white text-sm">{msg.uploadProgress || 0}%</span>
                     </div>
                   )}
-                  {msg.contentType === 'image' && <img src={msg.content} alt="Chat" className="max-w-[80%] max-h-64 rounded-lg cursor-pointer" onClick={() => setViewMedia({ type: 'image', url: msg.content })} />}
+                  {msg.contentType === 'image' && <img src={msg.content} alt="Chat" className="max-w-[80%] max-h-64 rounded-lg cursor-pointer lazy-load" onClick={() => setViewMedia({ type: 'image', url: msg.content })} loading="lazy" />}
                   {msg.contentType === 'video' && <video src={msg.content} className="max-w-[80%] max-h-64 rounded-lg" controls />}
                   {msg.contentType === 'audio' && <audio src={msg.content} controls className="max-w-[80%]" />}
                   {msg.contentType === 'document' && <div className="flex items-center"><FaFileAlt className="text-blue-600 mr-2" /><a href={msg.content} download={msg.originalFilename} className="text-blue-600 truncate">{msg.originalFilename || 'file'}</a></div>}
@@ -455,7 +568,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex h-screen bg-gray-100 dark:bg-gray-900">
-      <div className={`w-full md:w-1/3 bg-white dark:bg-gray-800 border-r ${isSmallDevice && selectedChat ? 'hidden' : 'block'} flex flex-col`}>
+      <div className={`w-full md:w-1/3 bg-white dark:bg-gray-800 border-r ${selectedChat ? 'hidden md:block' : 'block'} flex flex-col`}>
         <div className="p-4 flex justify-between border-b dark:border-gray-700">
           <h2 className="text-xl font-bold text-primary dark:text-gray-100">Chats</h2>
           <FaEllipsisH onClick={() => setShowMenu(true)} className="text-2xl text-primary dark:text-gray-100 cursor-pointer" />
@@ -487,7 +600,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
         </div>
       </div>
 
-      <div className={`flex-1 flex flex-col ${isSmallDevice && !selectedChat ? 'hidden' : 'block'}`}>
+      <div className={`flex-1 flex flex-col ${!selectedChat ? 'hidden md:flex' : 'flex'}`}>
         {selectedChat ? (
           <>
             <div className="bg-white dark:bg-gray-800 p-3 flex items-center justify-between border-b dark:border-gray-700 fixed top-0 md:left-[33.33%] md:w-2/3 left-0 right-0 z-10">
@@ -516,14 +629,29 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
                   <button onClick={() => setReplyTo(null)} className="absolute top-2 right-2 bg-red-500 text-white p-1 rounded-full"><FaTrash /></button>
                 </div>
               )}
-              {mediaPreview && (
+              {mediaPreview.length > 0 && (
                 <div className="bg-gray-100 dark:bg-gray-700 p-2 mb-2 rounded relative">
-                  {mediaPreview.type === 'image' && <img src={mediaPreview.url} alt="Preview" className="max-w-full max-h-64 rounded-lg" />}
-                  {mediaPreview.type === 'video' && <video src={mediaPreview.url} className="max-w-full max-h-64 rounded-lg" controls />}
-                  {mediaPreview.type === 'audio' && <audio src={mediaPreview.url} controls />}
-                  {mediaPreview.type === 'document' && <div className="flex"><FaFileAlt className="text-blue-600 mr-2" /><span className="text-blue-600 truncate">{file.name}</span></div>}
-                  <input type="text" value={caption} onChange={(e) => setCaption(e.target.value)} placeholder="Add a caption..." className="w-full p-1 mt-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600" />
-                  <button onClick={() => { setMediaPreview(null); setFile(null); sendMessage(); }} className="absolute top-2 right-2 bg-green-500 text-white p-1 rounded-full"><FaPaperPlane /></button>
+                  <div className="grid grid-cols-2 gap-2">
+                    {mediaPreview.map((preview, index) => (
+                      <div key={index} className="relative">
+                        {preview.type === 'image' && <img src={preview.url} alt="Preview" className="max-w-full max-h-32 rounded-lg" />}
+                        {preview.type === 'video' && <video src={preview.url} className="max-w-full max-h-32 rounded-lg" controls />}
+                        {preview.type === 'audio' && <audio src={preview.url} controls />}
+                        {preview.type === 'document' && <div className="flex"><FaFileAlt className="text-blue-600 mr-2" /><span className="text-blue-600 truncate">{preview.originalFile.name}</span></div>}
+                        <input
+                          type="text"
+                          value={captions[preview.originalFile.name] || ''}
+                          onChange={(e) => setCaptions((prev) => ({ ...prev, [preview.originalFile.name]: e.target.value }))}
+                          placeholder="Add a caption..."
+                          className="w-full p-1 mt-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                  <div className="flex justify-end mt-2">
+                    <button onClick={() => { setMediaPreview([]); setFiles([]); setCaptions({}); }} className="bg-red-500 text-white p-1 rounded-full mr-2"><FaTrash /></button>
+                    <button onClick={sendMessage} className="bg-green-500 text-white p-1 rounded-full"><FaPaperPlane /></button>
+                  </div>
                 </div>
               )}
               <div className="flex items-center">
@@ -536,16 +664,42 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
                       exit={{ opacity: 0, y: 10 }}
                       className="absolute bottom-12 left-2 bg-white dark:bg-gray-800 p-4 rounded-lg shadow-lg z-20 grid grid-cols-3 gap-4 w-64"
                     >
-                      <label className="flex flex-col items-center cursor-pointer"><FaCamera className="text-blue-600" /><span className="text-xs">Photo</span><input type="file" accept="image/*" onChange={(e) => handleFileChange(e, 'image')} className="hidden" /></label>
-                      <label className="flex flex-col items-center cursor-pointer"><FaVideo className="text-green-500" /><span className="text-xs">Video</span><input type="file" accept="video/*" onChange={(e) => handleFileChange(e, 'video')} className="hidden" /></label>
-                      <label className="flex flex-col items-center cursor-pointer"><FaPlay className="text-purple-500" /><span className="text-xs">Audio</span><input type="file" accept="audio/*" onChange={(e) => handleFileChange(e, 'audio')} className="hidden" /></label>
-                      <label className="flex flex-col items-center cursor-pointer"><FaFileAlt className="text-red-500" /><span className="text-xs">Document</span><input type="file" accept=".pdf,.doc,.docx" onChange={(e) => handleFileChange(e, 'document')} className="hidden" /></label>
+                      <label className="flex flex-col items-center cursor-pointer">
+                        <FaCamera className="text-blue-600" />
+                        <span className="text-xs">Photo</span>
+                        <input type="file" accept="image/*" multiple onChange={(e) => handleFileChange(e, 'image')} className="hidden" />
+                      </label>
+                      <label className="flex flex-col items-center cursor-pointer">
+                        <FaVideo className="text-green-500" />
+                        <span className="text-xs">Video</span>
+                        <input type="file" accept="video/*" multiple onChange={(e) => handleFileChange(e, 'video')} className="hidden" />
+                      </label>
+                      <label className="flex flex-col items-center cursor-pointer">
+                        <FaMicrophone className="text-purple-500" />
+                        <span className="text-xs">Audio</span>
+                        <input type="file" accept="audio/*" onChange={(e) => handleFileChange(e, 'audio')} className="hidden" />
+                      </label>
+                      <label className="flex flex-col items-center cursor-pointer">
+                        <FaFileAlt className="text-red-500" />
+                        <span className="text-xs">Document</span>
+                        <input type="file" accept=".pdf,.doc,.docx" multiple onChange={(e) => handleFileChange(e, 'document')} className="hidden" />
+                      </label>
                       <div className="flex flex-col items-center cursor-pointer"><FaAddressCard className="text-yellow-500" /><span className="text-xs">Contact</span></div>
                       <div className="flex flex-col items-center cursor-pointer"><FaMapMarkerAlt className="text-orange-500" /><span className="text-xs">Location</span></div>
                     </motion.div>
                   )}
                 </AnimatePresence>
-                <input type="text" value={message} onChange={handleTyping} onKeyPress={(e) => e.key === 'Enter' && sendMessage()} placeholder="Type a message..." className="flex-1 p-2 border rounded-lg mr-2 dark:bg-gray-700 dark:text-white dark:border-gray-600" disabled={loading} />
+                <input
+                  ref={inputRef}
+                  type="text"
+                  value={message}
+                  onChange={handleTyping}
+                  onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
+                  onBlur={(e) => selectedChat && e.target.focus()} // Keep focus on input
+                  placeholder="Type a message..."
+                  className="flex-1 p-2 border rounded-lg mr-2 dark:bg-gray-700 dark:text-white dark:border-gray-600"
+                  disabled={loading}
+                />
                 <FaPaperPlane onClick={sendMessage} className="text-xl text-primary dark:text-gray-100 cursor-pointer" />
               </div>
             </motion.div>
