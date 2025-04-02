@@ -1,12 +1,8 @@
 {
-  "name": "gapp",
+  "name": "gapp-backend",
   "version": "1.0.0",
   "scripts": {
-    "install-frontend": "cd frontend && npm install",
-    "build-frontend": "cd frontend && npm run build",
-    "build": "npm run install-frontend && npm run build-frontend",
-    "start": "node server.js",
-    "dev": "node server.js"
+    "start": "node server.js"
   },
   "dependencies": {
     "axios": "^1.6.8",
