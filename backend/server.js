@@ -35,7 +35,7 @@ app.set('io', io);
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-const buildPath = path.join(__dirname, 'frontend/build');
+const buildPath = path.join(__dirname, '../frontend/build'); // Adjusted to go up from backend/ to root
 logger.info(`Attempting to serve static files from: ${buildPath}`);
 app.use(express.static(buildPath));
 
