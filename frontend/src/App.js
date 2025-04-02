@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { BrowserRouter as Router, Route, Routes, Navigate, Link } from 'react-router-dom';
+import { BrowserRouter as Router, Route, Routes, Navigate, NavLink } from 'react-router-dom'; // Changed Link to NavLink
 import { motion } from 'framer-motion';
 import { FaHome, FaBriefcase, FaComments, FaUser, FaMoon, FaSun } from 'react-icons/fa';
 import axios from 'axios';
@@ -13,7 +13,7 @@ import ChatScreen from './screens/ChatScreen';
 import ProfileScreen from './screens/ProfileScreen';
 import CountrySelector from './components/CountrySelector';
 
-const BASE_URL = 'https://gapp-6yc3.onrender.com'; // Define BASE_URL explicitly
+const BASE_URL = 'https://gapp-6yc3.onrender.com';
 
 const socket = io(BASE_URL, {
   reconnection: true,
@@ -108,7 +108,6 @@ const App = () => {
     }
   };
 
-  // Rest of the code remains unchanged...
   useEffect(() => {
     const initializeAuth = async () => {
       const storedToken = localStorage.getItem('token');
@@ -168,7 +167,7 @@ const App = () => {
   }, [token]);
 
   useEffect(() => {
-    document.documentElement.classList.toggle('dark', theme === 'dark');
+    document.documentElement.className = theme === 'dark' ? 'dark' : '';
     localStorage.setItem('theme', theme);
   }, [theme]);
 
@@ -252,31 +251,57 @@ const App = () => {
           </Routes>
         </div>
         <motion.div
-          initial={{ y: 100 }}
-          animate={{ y: selectedChat ? 100 : 0 }}
+          initial={{ y: 0 }}
+          animate={{ y: isSmallDevice && selectedChat ? 100 : 0 }}
           transition={{ duration: 0.5 }}
-          className="fixed bottom-0 left-0 right-0 bg-primary text-white p-2 flex justify-around items-center shadow-lg z-20 md:hidden"
+          className={`fixed bottom-0 left-0 right-0 bg-primary text-white p-2 flex justify-around items-center shadow-lg z-20 ${isSmallDevice ? 'block' : 'hidden'}`}
         >
-          <Link to="/feed" className="flex flex-col items-center p-2 hover:bg-secondary rounded">
+          <NavLink
+            to="/feed"
+            className={({ isActive }) =>
+              `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`
+            }
+          >
             <FaHome className="text-xl" />
             <span className="text-xs">Feed</span>
-          </Link>
-          <Link to="/jobs" className="flex flex-col items-center p-2 hover:bg-secondary rounded">
+          </NavLink>
+          <NavLink
+            to="/jobs"
+            className={({ isActive }) =>
+              `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`
+            }
+          >
             <FaBriefcase className="text-xl" />
             <span className="text-xs">Jobs</span>
-          </Link>
-          <Link to="/chat" onClick={handleChatNavigation} className="flex flex-col items-center p-2 hover:bg-secondary rounded relative">
+          </NavLink>
+          <NavLink
+            to="/chat"
+            onClick={handleChatNavigation}
+            className={({ isActive }) =>
+              `flex flex-col items-center p-2 rounded relative ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`
+            }
+          >
             <FaComments className="text-xl" />
             {chatNotifications > 0 && (
-              <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">{chatNotifications}</span>
+              <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
+                {chatNotifications}
+              </span>
             )}
             <span className="text-xs">Chat</span>
-          </Link>
-          <Link to="/profile" className="flex flex-col items-center p-2 hover:bg-secondary rounded">
+          </NavLink>
+          <NavLink
+            to="/profile"
+            className={({ isActive }) =>
+              `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`
+            }
+          >
             <FaUser className="text-xl" />
             <span className="text-xs">Profile</span>
-          </Link>
-          <div onClick={toggleTheme} className="flex flex-col items-center p-2 hover:bg-secondary rounded cursor-pointer">
+          </NavLink>
+          <div
+            onClick={toggleTheme}
+            className="flex flex-col items-center p-2 hover:bg-secondary rounded cursor-pointer"
+          >
             {theme === 'light' ? <FaMoon className="text-xl" /> : <FaSun className="text-xl" />}
             <span className="text-xs">{theme === 'light' ? 'Dark' : 'Light'}</span>
           </div>
