@@ -13,7 +13,7 @@ const jobseekerRoutes = require('./routes/jobseeker');
 const employerRoutes = require('./routes/employer');
 
 const app = express();
-app.set('trust proxy', 1); // Trust Render's proxy
+app.set('trust proxy', 1);
 
 const logger = winston.createLogger({
   level: 'info',
@@ -34,8 +34,17 @@ app.set('io', io);
 
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
-app.use(express.static(path.join(__dirname, '../frontend/build')));
 
+const buildPath = path.join(__dirname, 'frontend/build');
+logger.info(`Attempting to serve static files from: ${buildPath}`);
+app.use(express.static(buildPath));
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'OK', uptime: process.uptime() });
+});
+
+// JSON parsing error handler
 app.use((err, req, res, next) => {
   if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
     logger.error('Invalid JSON payload', { method: req.method, url: req.url, body: req.body, error: err.message });
@@ -63,6 +72,23 @@ app.use('/jobseeker', jobseekerRoutes);
 app.use('/employer', employerRoutes);
 app.use('/social', socialRoutes(io));
 
+// Fallback for client-side routing
+app.get('*', (req, res) => {
+  const indexPath = path.join(buildPath, 'index.html');
+  res.sendFile(indexPath, (err) => {
+    if (err) {
+      logger.error('Failed to serve index.html', { path: indexPath, error: err.message });
+      res.status(500).send('Server Error - Static files may not be built correctly');
+    }
+  });
+});
+
+// Global error handler
+app.use((err, req, res, next) => {
+  logger.error('Unhandled error', { error: err.message, stack: err.stack });
+  res.status(500).json({ error: 'Internal Server Error' });
+});
+
 io.on('connection', (socket) => {
   logger.info('User connected', { socketId: socket.id });
 
@@ -75,8 +101,6 @@ io.on('connection', (socket) => {
     logger.info('User disconnected', { socketId: socket.id });
   });
 });
-
-app.get('*', (req, res) => res.sendFile(path.join(__dirname, '../frontend/build', 'index.html')));
 
 const PORT = process.env.PORT || 8000;
 server.listen(PORT, '0.0.0.0', () => logger.info(`Server running on port ${PORT}`));

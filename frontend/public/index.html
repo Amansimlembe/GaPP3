@@ -2,10 +2,89 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>GaPP</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="description" content="GaPP - Connect, Chat, and Grow Your Professional Network" />
+    <meta name="theme-color" content="#4A90E2" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link rel="icon" href="%PUBLIC_URL%/favicon.ico" />
+    <link rel="apple-touch-icon" href="%PUBLIC_URL%/logo192.png" />
+    <link rel="manifest" href="%PUBLIC_URL%/manifest.json" />
+    <title>GaPP - Professional Networking & Chat</title>
+    <style>
+      /* Professional loading styles */
+      body {
+        margin: 0;
+        padding: 0;
+        font-family: 'Arial', sans-serif;
+        background: linear-gradient(135deg, #4A90E2, #50E3C2);
+        height: 100vh;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        overflow: hidden;
+      }
+      .loader-container {
+        text-align: center;
+        color: white;
+      }
+      .logo {
+        width: 80px;
+        height: 80px;
+        animation: pulse 1.5s infinite ease-in-out;
+      }
+      h1 {
+        font-size: 2.5rem;
+        margin: 20px 0 10px;
+        text-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+      }
+      p {
+        font-size: 1.2rem;
+        opacity: 0.9;
+      }
+      .spinner {
+        width: 40px;
+        height: 40px;
+        border: 4px solid rgba(255, 255, 255, 0.3);
+        border-top: 4px solid white;
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+        margin: 20px auto;
+      }
+      @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+      }
+      @keyframes pulse {
+        0% { transform: scale(1); }
+        50% { transform: scale(1.1); }
+        100% { transform: scale(1); }
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>
+    <!-- Fallback content while React loads -->
+    <div class="loader-container">
+      <img src="%PUBLIC_URL%/logo.jpg" alt="GaPP Logo" class="logo" />
+      <h1>Welcome to GaPP</h1>
+      <p>Connecting Professionals Worldwide</p>
+      <div class="spinner"></div>
+    </div>
+    <script>
+      // Hide loader when React mounts
+      document.addEventListener('DOMContentLoaded', () => {
+        const root = document.getElementById('root');
+        const loader = document.querySelector('.loader-container');
+        const checkRoot = () => {
+          if (root && root.children.length > 0) {
+            loader.style.display = 'none';
+          } else {
+            setTimeout(checkRoot, 100);
+          }
+        };
+        checkRoot();
+      });
+    </script>
   </body>
 </html>

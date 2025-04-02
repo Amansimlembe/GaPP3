@@ -19,11 +19,19 @@ const logger = winston.createLogger({
 });
 
 // Configure Cloudinary
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-});
+let cloudinaryConfigured = false;
+const configureCloudinary = () => {
+  if (!cloudinaryConfigured) {
+    cloudinary.config({
+      cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+      api_key: process.env.CLOUDINARY_API_KEY,
+      api_secret: process.env.CLOUDINARY_API_SECRET,
+    });
+    cloudinaryConfigured = true;
+  }
+};
+
+
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
@@ -101,6 +109,7 @@ router.post('/message', authMiddleware, async (req, res) => {
 });
 
 router.post('/upload', authMiddleware, upload.single('file'), async (req, res) => {
+  configureCloudinary();
   try {
     const { userId, recipientId, clientMessageId } = req.body;
     if (userId !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
