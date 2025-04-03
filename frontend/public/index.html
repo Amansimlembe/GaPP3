@@ -7,12 +7,12 @@
     <meta name="theme-color" content="#4A90E2" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="robots" content="index, follow" />
     <link rel="icon" href="%PUBLIC_URL%/favicon.ico" />
     <link rel="apple-touch-icon" href="%PUBLIC_URL%/logo192.png" />
     <link rel="manifest" href="%PUBLIC_URL%/manifest.json" />
     <title>GaPP - Professional Networking & Chat</title>
     <style>
-      /* Professional loading styles */
       body {
         margin: 0;
         padding: 0;
@@ -64,7 +64,6 @@
   </head>
   <body>
     <div id="root"></div>
-    <!-- Fallback content while React loads -->
     <div class="loader-container">
       <img src="%PUBLIC_URL%/logo.jpg" alt="GaPP Logo" class="logo" />
       <h1>Welcome to GaPP</h1>
@@ -72,12 +71,11 @@
       <div class="spinner"></div>
     </div>
     <script>
-      // Hide loader when React mounts
       document.addEventListener('DOMContentLoaded', () => {
         const root = document.getElementById('root');
         const loader = document.querySelector('.loader-container');
         const checkRoot = () => {
-          if (root && root.children.length > 0) {
+          if (root?.children.length > 0) {
             loader.style.display = 'none';
           } else {
             setTimeout(checkRoot, 100);

@@ -17,7 +17,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
   const { chats, selectedChat } = useSelector((state) => state.messages);
   const [users, setUsers] = useState(() => JSON.parse(localStorage.getItem('cachedUsers')) || []);
   const [message, setMessage] = useState('');
-  const [files, setFiles] = useState([]); // Changed to array for multiple files
+  const [files, setFiles] = useState([]);
   const [captions, setCaptions] = useState({});
   const [contentType, setContentType] = useState('text');
   const [notifications, setNotifications] = useState(() => JSON.parse(localStorage.getItem('chatNotifications')) || {});
@@ -33,7 +33,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [showMessageMenu, setShowMessageMenu] = useState(null);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
-  const [mediaPreview, setMediaPreview] = useState([]); // Array for multiple previews
+  const [mediaPreview, setMediaPreview] = useState([]);
   const [showPicker, setShowPicker] = useState(false);
   const [viewMedia, setViewMedia] = useState(null);
   const [page, setPage] = useState(0);
@@ -42,8 +42,9 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
   const [userStatus, setUserStatus] = useState({ status: 'offline', lastSeen: null });
   const [pendingMessages, setPendingMessages] = useState([]);
   const [uploadProgress, setUploadProgress] = useState({});
+  const [isKeyboardOpen, setIsKeyboardOpen] = useState(false);
   const chatRef = useRef(null);
-  const inputRef = useRef(null); // For managing input focus
+  const inputRef = useRef(null);
   const typingTimeoutRef = useRef(null);
   const isAtBottomRef = useRef(true);
   const lastFetchedAtRef = useRef(null);
@@ -100,7 +101,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
         img.onload = () => {
           const canvas = document.createElement('canvas');
           const ctx = canvas.getContext('2d');
-          const maxWidth = 800; // Adjust as needed
+          const maxWidth = 800;
           const maxHeight = 800;
           let width = img.width;
           let height = img.height;
@@ -131,10 +132,13 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
   const formatDateHeader = (date) => {
     const today = new Date();
     const msgDate = new Date(date);
-    if (msgDate.toDateString() === today.toDateString()) return 'Today';
+    today.setHours(0, 0, 0, 0);
+    msgDate.setHours(0, 0, 0, 0);
+
+    if (msgDate.getTime() === today.getTime()) return 'Today';
     today.setDate(today.getDate() - 1);
-    if (msgDate.toDateString() === today.toDateString()) return 'Yesterday';
-    return msgDate.toLocaleDateString('en-US', { day: '2-digit', month: '2-digit', year: '2-digit' });
+    if (msgDate.getTime() === today.getTime()) return 'Yesterday';
+    return msgDate.toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' });
   };
   const formatTime = (date) => new Date(date).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
   const formatLastSeen = (lastSeen) => (lastSeen ? `Last seen ${new Date(lastSeen).toLocaleString()}` : 'Offline');
@@ -299,6 +303,27 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
     setMediaPreview([]);
   };
 
+  const handleAddContact = async () => {
+    if (!newContactNumber) {
+      setError('Please enter a virtual number');
+      return;
+    }
+    try {
+      const { data } = await axios.post(
+        `${BASE_URL}/auth/add_contact`,
+        { userId, virtualNumber: newContactNumber },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      setUsers((prev) => [...prev, data]);
+      localStorage.setItem('cachedUsers', JSON.stringify([...users, data]));
+      setNewContactNumber('');
+      setMenuTab('');
+      setShowMenu(false);
+    } catch (err) {
+      setError(`Failed to add contact: ${err.message}`);
+    }
+  };
+
   useEffect(() => {
     if (!userId || !token) return;
 
@@ -312,7 +337,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
       if (selectedChat) {
         await fetchMessages(selectedChat, 0);
         fetchMessages(selectedChat, 0, true);
-        inputRef.current?.focus(); // Keep input focused when chat is selected
+        inputRef.current?.focus();
       }
 
       const onlineHandler = () => sendPendingMessages();
@@ -334,6 +359,11 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
         unread.forEach((m) => socket.emit('messageStatus', { messageId: m._id, status: 'read', recipientId: userId }));
         setUnreadCount(0);
       }
+    };
+
+    const handleResize = () => {
+      const keyboardHeight = window.innerHeight < window.outerHeight - 100;
+      setIsKeyboardOpen(keyboardHeight);
     };
 
     const setupSocketListeners = () => {
@@ -393,6 +423,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
 
     initializeChat().then(setupSocketListeners);
     chatRef.current?.addEventListener('scroll', handleScroll);
+    window.addEventListener('resize', handleResize);
 
     return () => {
       socket.off('connect');
@@ -402,6 +433,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
       socket.off('stopTyping');
       socket.off('onlineStatus');
       chatRef.current?.removeEventListener('scroll', handleScroll);
+      window.removeEventListener('resize', handleResize);
     };
   }, [token, userId, selectedChat, dispatch, fetchChatList, fetchMessages, chats, decryptMessage, socket, sendPendingMessages, hasMore, loading]);
 
@@ -622,7 +654,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
               )}
             </div>
 
-            <motion.div className="bg-white dark:bg-gray-800 p-2 border-t dark:border-gray-700 fixed md:left-[33.33%] md:w-2/3 left-0 right-0 bottom-0 z-30">
+            <motion.div className={`bg-white dark:bg-gray-800 p-2 border-t dark:border-gray-700 fixed md:left-[33.33%] md:w-2/3 left-0 right-0 bottom-0 z-30 chat-input ${isKeyboardOpen ? 'keyboard-open' : ''}`}>
               {replyTo && (
                 <div className="bg-gray-100 dark:bg-gray-700 p-2 mb-2 rounded relative">
                   <p className="text-sm">Replying to: {replyTo.content}</p>
@@ -695,9 +727,8 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
                   value={message}
                   onChange={handleTyping}
                   onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
-                  onBlur={(e) => selectedChat && e.target.focus()} // Keep focus on input
                   placeholder="Type a message..."
-                  className="flex-1 p-2 border rounded-lg mr-2 dark:bg-gray-700 dark:text-white dark:border-gray-600"
+                  className={`flex-1 p-2 border rounded-lg mr-2 dark:bg-gray-700 dark:text-white dark:border-gray-600 ${isKeyboardOpen ? 'keyboard-open' : ''}`}
                   disabled={loading}
                 />
                 <FaPaperPlane onClick={sendMessage} className="text-xl text-primary dark:text-gray-100 cursor-pointer" />
@@ -708,6 +739,39 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
           <div className="flex-1 flex items-center justify-center"><p className="text-gray-500 dark:text-gray-400">Select a chat to start messaging</p></div>
         )}
       </div>
+
+      {showMenu && (
+        <div className="menu-overlay fixed inset-0 bg-black bg-opacity-50 z-40" onClick={() => setShowMenu(false)}>
+          <motion.div
+            className="menu-content bg-white dark:bg-gray-800 p-4 rounded-lg shadow-lg absolute top-16 right-4 w-64"
+            onClick={(e) => e.stopPropagation()}
+            initial={{ opacity: 0, scale: 0.9 }}
+            animate={{ opacity: 1, scale: 1 }}
+          >
+            <div className="flex justify-between mb-4">
+              <button onClick={() => setMenuTab('')} className={`menu-item ${menuTab === '' ? 'active text-primary' : 'text-gray-600 dark:text-gray-300'}`}>Options</button>
+              <button onClick={() => setMenuTab('addContact')} className={`menu-item ${menuTab === 'addContact' ? 'active text-primary' : 'text-gray-600 dark:text-gray-300'}`}>Add Contact</button>
+            </div>
+            {menuTab === '' && (
+              <div className="menu-tab-content">
+                <div onClick={handleLogout} className="menu-item flex items-center text-gray-600 dark:text-gray-300 hover:text-primary dark:hover:text-gray-100 cursor-pointer"><FaSignOutAlt className="mr-2" /> Logout</div>
+              </div>
+            )}
+            {menuTab === 'addContact' && (
+              <div className="menu-tab-content">
+                <input
+                  type="text"
+                  value={newContactNumber}
+                  onChange={(e) => setNewContactNumber(e.target.value)}
+                  placeholder="Enter virtual number (e.g., +1234567890)"
+                  className="w-full p-2 mb-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600"
+                />
+                <button onClick={handleAddContact} className="w-full bg-green-500 text-white p-2 rounded-lg">Add Contact</button>
+              </div>
+            )}
+          </motion.div>
+        </div>
+      )}
     </motion.div>
   );
 });

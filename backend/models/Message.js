@@ -18,11 +18,11 @@ const messageSchema = new mongoose.Schema({
   },
   content: {
     type: String,
-    required: true, // Stores RSA-encrypted content or media URL
+    required: true, // RSA-encrypted content for text, media URL for others
   },
   plaintextContent: {
     type: String,
-    default: '', // Stores original plaintext for text messages, empty for media
+    default: '', // Original plaintext for text messages, empty for media
   },
   caption: {
     type: String,
@@ -60,7 +60,11 @@ const messageSchema = new mongoose.Schema({
   clientMessageId: {
     type: String,
     trim: true,
-    index: true, // Index for deduplication lookups
+    index: true,
+  },
+  isForwarded: {
+    type: Boolean,
+    default: false, // Replaces forwardCount for clarity
   },
   forwardCount: {
     type: Number,
@@ -72,22 +76,25 @@ const messageSchema = new mongoose.Schema({
     default: Date.now,
   },
 }, {
-  timestamps: false, // Only use createdAt explicitly
+  timestamps: false,
 });
 
 // Indexes for performance
-messageSchema.index({ senderId: 1, recipientId: 1, createdAt: -1 }); // For fetching messages by sender/recipient
-messageSchema.index({ recipientId: 1, createdAt: -1 }); // For recipient message lists
-messageSchema.index({ status: 1, createdAt: -1 }); // For filtering unread messages efficiently
-messageSchema.index({ clientMessageId: 1 }, { unique: true, sparse: true }); // Prevent duplicates, sparse allows null
+messageSchema.index({ senderId: 1, recipientId: 1, createdAt: -1 });
+messageSchema.index({ recipientId: 1, createdAt: -1 });
+messageSchema.index({ status: 1, recipientId: 1, createdAt: -1 }); // Optimized for unread messages
+messageSchema.index({ clientMessageId: 1 }, { unique: true, sparse: true });
 
-// Pre-save hook to ensure clientMessageId uniqueness
+// Pre-save hook for clientMessageId uniqueness and content validation
 messageSchema.pre('save', async function (next) {
-  if (this.clientMessageId && this.isNew) {
+  if (this.isNew && this.clientMessageId) {
     const existingMessage = await this.constructor.findOne({ clientMessageId: this.clientMessageId });
     if (existingMessage) {
       return next(new Error('Duplicate clientMessageId detected'));
     }
+  }
+  if (this.contentType === 'text' && !this.content.startsWith('-----BEGIN ENCRYPTED MESSAGE-----')) {
+    return next(new Error('Text content must be RSA-encrypted'));
   }
   next();
 });

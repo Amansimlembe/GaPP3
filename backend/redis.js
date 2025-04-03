@@ -30,31 +30,17 @@ const redisClient = redis.createClient({
 });
 
 redisClient.on('connect', () => logger.info('Connected to Redis'));
-redisClient.on('error', (err) => logger.error('Redis client error', { error: err.message, stack: err.stack }));
 redisClient.on('reconnecting', () => logger.info('Reconnecting to Redis'));
 redisClient.on('end', () => logger.warn('Redis connection closed'));
 
-// Graceful startup
 (async () => {
   try {
     await redisClient.connect();
     logger.info('Redis client initialized successfully');
   } catch (err) {
-    logger.error('Failed to connect to Redis on startup', { error: err.message, stack: err.stack });
+    logger.error('Failed to connect to Redis on startup', { error: err.message });
   }
 })();
-
-// Handle uncaught errors during runtime
-redisClient.on('error', async (err) => {
-  if (!redisClient.isOpen) {
-    try {
-      await redisClient.connect();
-      logger.info('Redis reconnected after unhandled error');
-    } catch (reconnectErr) {
-      logger.error('Reconnection attempt failed', { error: reconnectErr.message });
-    }
-  }
-});
 
 module.exports = {
   client: redisClient,
@@ -92,7 +78,6 @@ module.exports = {
   },
   lpush: async (key, value) => {
     try {
-      // Ensure value is stringified for Redis list compatibility
       const stringValue = typeof value === 'string' ? value : JSON.stringify(value);
       return await redisClient.lPush(key, stringValue);
     } catch (err) {
@@ -103,12 +88,11 @@ module.exports = {
   lrange: async (key, start, stop) => {
     try {
       const result = await redisClient.lRange(key, start, stop);
-      // Parse JSON strings back to objects if applicable
       return result.map((item) => {
         try {
           return JSON.parse(item);
         } catch {
-          return item; // Return as-is if not JSON
+          return item;
         }
       });
     } catch (err) {
@@ -123,7 +107,7 @@ module.exports = {
         logger.info('Redis connection closed gracefully');
       }
     } catch (err) {
-      logger.error('Error closing Redis connection', { error: err.message, stack: err.stack });
+      logger.error('Error closing Redis connection', { error: err.message });
     }
   },
 };

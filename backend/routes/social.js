@@ -18,7 +18,6 @@ const logger = winston.createLogger({
   ],
 });
 
-// Configure Cloudinary
 let cloudinaryConfigured = false;
 const configureCloudinary = () => {
   if (!cloudinaryConfigured) {
@@ -30,8 +29,6 @@ const configureCloudinary = () => {
     cloudinaryConfigured = true;
   }
 };
-
-
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
@@ -169,6 +166,41 @@ router.post('/message/status', authMiddleware, async (req, res) => {
   }
 });
 
+// Add Contact Endpoint
+router.post('/add_contact', authMiddleware, async (req, res) => {
+  try {
+    const { userId, virtualNumber } = req.body;
+    if (userId !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
+
+    const contact = await User.findOne({ virtualNumber });
+    if (!contact) return res.status(404).json({ error: 'User not found' });
+    if (contact._id.toString() === userId) return res.status(400).json({ error: 'Cannot add yourself' });
+
+    const user = await User.findById(userId);
+    if (!user.contacts.includes(contact._id)) {
+      user.contacts.push(contact._id);
+      await user.save();
+    }
+
+    const contactData = {
+      id: contact._id,
+      username: contact.username,
+      virtualNumber: contact.virtualNumber,
+      photo: contact.photo,
+      status: contact.status,
+      lastSeen: contact.lastSeen,
+    };
+
+    const io = req.app.get('io');
+    io.to(userId).emit('newContact', contactData);
+
+    res.json(contactData);
+  } catch (error) {
+    logger.error('Add contact error:', error);
+    res.status(500).json({ error: 'Failed to add contact' });
+  }
+});
+
 module.exports = (io) => {
   io.on('connection', (socket) => {
     socket.on('join', async (userId) => {
@@ -192,6 +224,10 @@ module.exports = (io) => {
         await message.save();
         io.to(message.senderId).emit('messageStatus', { messageId, status });
       }
+    });
+
+    socket.on('ping', ({ userId }) => {
+      // Handle keep-alive ping if needed
     });
 
     socket.on('disconnect', async () => {

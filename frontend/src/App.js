@@ -17,12 +17,13 @@ const BASE_URL = 'https://gapp-6yc3.onrender.com';
 
 const socket = io(BASE_URL, {
   reconnection: true,
-  reconnectionAttempts: Infinity,
+  reconnectionAttempts: 10,
   reconnectionDelay: 1000,
-  reconnectionDelayMax: 5000,
+  reconnectionDelayMax: 10000,
   randomizationFactor: 0.5,
   withCredentials: true,
   autoConnect: false,
+  transports: ['websocket', 'polling'],
 });
 
 const getTokenExpiration = (token) => {
@@ -55,7 +56,7 @@ const App = () => {
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
   const [isLoadingAuth, setIsLoadingAuth] = useState(true);
   const { selectedChat } = useSelector((state) => state.messages);
-  const location = useLocation(); // Get current route
+  const location = useLocation();
 
   const setAuth = (newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername) => {
     const token = newToken || '';
@@ -182,6 +183,19 @@ const App = () => {
       console.log('Socket connected:', socket.id);
     });
 
+    socket.on('connect_error', (error) => {
+      console.error('Socket connection error:', error.message);
+    });
+
+    socket.on('reconnect_attempt', (attempt) => {
+      console.log(`Reconnection attempt #${attempt}`);
+    });
+
+    socket.on('reconnect_failed', () => {
+      console.error('Reconnection failed after max attempts');
+      setAuth('', '', '', '', '', '');
+    });
+
     socket.on('message', (msg) => {
       if (msg.recipientId === userId && (!selectedChat || selectedChat !== msg.senderId)) {
         setChatNotifications((prev) => prev + 1);
@@ -192,21 +206,17 @@ const App = () => {
       console.log('New contact added via socket:', contactData);
     });
 
-    socket.on('connect_error', (error) => {
-      console.error('Socket connection error:', error.message);
-      if (isAuthenticated && !socket.connected) setTimeout(() => socket.connect(), 1000);
-    });
-
     socket.on('disconnect', (reason) => {
       console.log('Socket disconnected:', reason);
-      if (reason === 'io server disconnect' && isAuthenticated) socket.connect();
     });
 
     return () => {
       socket.off('connect');
+      socket.off('connect_error');
+      socket.off('reconnect_attempt');
+      socket.off('reconnect_failed');
       socket.off('message');
       socket.off('newContact');
-      socket.off('connect_error');
       socket.off('disconnect');
     };
   }, [isAuthenticated, userId, token, selectedChat]);
@@ -225,7 +235,10 @@ const App = () => {
   if (!isAuthenticated) {
     return (
       <div className="min-h-screen bg-gray-100 dark:bg-gray-900">
-        <LoginScreen setAuth={setAuth} />
+        <Routes>
+          <Route path="/" element={<LoginScreen setAuth={setAuth} />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
       </div>
     );
   }
@@ -249,6 +262,7 @@ const App = () => {
           <Route path="/chat" element={<ChatScreen token={token} userId={userId} setAuth={setAuth} socket={socket} />} />
           <Route path="/profile" element={<ProfileScreen token={token} userId={userId} setAuth={setAuth} username={username} virtualNumber={virtualNumber} photo={photo} />} />
           <Route path="/" element={<Navigate to="/feed" replace />} />
+          <Route path="*" element={<Navigate to="/feed" replace />} />
         </Routes>
       </div>
       <motion.div
@@ -257,31 +271,15 @@ const App = () => {
         transition={{ duration: 0.5 }}
         className="fixed bottom-0 left-0 right-0 bg-primary text-white p-2 flex justify-around items-center shadow-lg z-20"
       >
-        <NavLink
-          to="/feed"
-          className={({ isActive }) =>
-            `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`
-          }
-        >
+        <NavLink to="/feed" className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}>
           <FaHome className="text-xl" />
           <span className="text-xs">Feed</span>
         </NavLink>
-        <NavLink
-          to="/jobs"
-          className={({ isActive }) =>
-            `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`
-          }
-        >
+        <NavLink to="/jobs" className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}>
           <FaBriefcase className="text-xl" />
           <span className="text-xs">Jobs</span>
         </NavLink>
-        <NavLink
-          to="/chat"
-          onClick={handleChatNavigation}
-          className={({ isActive }) =>
-            `flex flex-col items-center p-2 rounded relative ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`
-          }
-        >
+        <NavLink to="/chat" onClick={handleChatNavigation} className={({ isActive }) => `flex flex-col items-center p-2 rounded relative ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}>
           <FaComments className="text-xl" />
           {chatNotifications > 0 && (
             <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
@@ -290,19 +288,11 @@ const App = () => {
           )}
           <span className="text-xs">Chat</span>
         </NavLink>
-        <NavLink
-          to="/profile"
-          className={({ isActive }) =>
-            `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`
-          }
-        >
+        <NavLink to="/profile" className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}>
           <FaUser className="text-xl" />
           <span className="text-xs">Profile</span>
         </NavLink>
-        <div
-          onClick={toggleTheme}
-          className="flex flex-col items-center p-2 hover:bg-secondary rounded cursor-pointer"
-        >
+        <div onClick={toggleTheme} className="flex flex-col items-center p-2 hover:bg-secondary rounded cursor-pointer">
           {theme === 'light' ? <FaMoon className="text-xl" /> : <FaSun className="text-xl" />}
           <span className="text-xs">{theme === 'light' ? 'Dark' : 'Light'}</span>
         </div>

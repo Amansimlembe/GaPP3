@@ -24,7 +24,7 @@ const userSchema = new mongoose.Schema({
   },
   photo: {
     type: String,
-    default: 'https://placehold.co/40x40',
+    default: 'https://placehold.co/40x40', // Matches auth.js default
   },
   country: {
     type: String,
@@ -33,9 +33,9 @@ const userSchema = new mongoose.Schema({
   },
   virtualNumber: {
     type: String,
-    required: true,
     unique: true,
     match: /^\+\d{10,15}$/,
+    default: null, // Allow null initially, set in auth.js
   },
   contacts: [{
     type: mongoose.Schema.Types.ObjectId,
@@ -53,7 +53,7 @@ const userSchema = new mongoose.Schema({
   privateKey: {
     type: String,
     required: true,
-    select: false, // Exclude from default queries for security
+    select: false,
   },
   status: {
     type: String,
@@ -65,21 +65,20 @@ const userSchema = new mongoose.Schema({
     default: null,
   },
 }, {
-  timestamps: true, // Adds createdAt and updatedAt fields
+  timestamps: true,
 });
 
 // Indexes for performance
-userSchema.index({ virtualNumber: 1 });
+userSchema.index({ virtualNumber: 1 }, { sparse: true });
 userSchema.index({ username: 1 });
 userSchema.index({ email: 1 });
-userSchema.index({ status: 1, lastSeen: -1 }); // For online status queries
+userSchema.index({ status: 1, lastSeen: -1, _id: 1 }); // Optimized for ProfileScreen.js
 
-// Pre-save hook to ensure uniqueness of virtualNumber
+// Pre-save hook for virtualNumber uniqueness
 userSchema.pre('save', async function (next) {
-  const user = this;
-  if (user.isModified('virtualNumber')) {
-    const existingUser = await mongoose.model('User').findOne({ virtualNumber: user.virtualNumber });
-    if (existingUser && existingUser._id.toString() !== user._id.toString()) {
+  if (this.isModified('virtualNumber') && this.virtualNumber) {
+    const existingUser = await this.constructor.findOne({ virtualNumber: this.virtualNumber });
+    if (existingUser && existingUser._id.toString() !== this._id.toString()) {
       return next(new Error('Virtual number already in use'));
     }
   }

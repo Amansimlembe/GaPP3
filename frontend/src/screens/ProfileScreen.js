@@ -16,25 +16,30 @@ const socket = io('https://gapp-6yc3.onrender.com', {
 const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virtualNumber: initialVirtualNumber, photo: initialPhoto }) => {
   const [cvFile, setCvFile] = useState(null);
   const [photoFile, setPhotoFile] = useState(null);
+  const [photoPreview, setPhotoPreview] = useState(null);
   const [username, setUsername] = useState(initialUsername || localStorage.getItem('username') || '');
   const [virtualNumber, setVirtualNumber] = useState(initialVirtualNumber || localStorage.getItem('virtualNumber') || '');
   const [editUsername, setEditUsername] = useState(false);
   const [error, setError] = useState('');
-  const [photoUrl, setPhotoUrl] = useState(initialPhoto || localStorage.getItem('photo') || 'https://placehold.co/100x100');
+  const [photoUrl, setPhotoUrl] = useState(initialPhoto || localStorage.getItem('photo') || 'https://placehold.co/40x40');
   const [myPosts, setMyPosts] = useState([]);
   const [showPosts, setShowPosts] = useState(false);
   const [selectedPost, setSelectedPost] = useState(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(null);
   const [darkMode, setDarkMode] = useState(localStorage.getItem('darkMode') === 'true');
+  const [loading, setLoading] = useState(false);
 
-  const retryRequest = async (url, config, retries = 3, delay = 1000) => {
+  const retryRequest = async (method, url, data, config, retries = 3, delay = 1000) => {
     for (let i = 0; i < retries; i++) {
       try {
-        const response = await axios.get(url, config);
-        return response;
+        const response = method === 'get' 
+          ? await axios.get(url, config)
+          : await axios.post(url, data, config);
+        return response.data;
       } catch (err) {
-        if (err.response?.status === 429 && i < retries - 1) {
-          await new Promise((resolve) => setTimeout(resolve, delay * (i + 1))); // Exponential backoff
+        console.log(`Attempt ${i + 1} failed:`, err.response?.data || err.message);
+        if ((err.response?.status === 429 || err.response?.status >= 500) && i < retries - 1) {
+          await new Promise((resolve) => setTimeout(resolve, delay * (i + 1)));
           continue;
         }
         throw err;
@@ -51,15 +56,17 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
     socket.emit('join', userId);
 
     const fetchMyPosts = async () => {
+      setLoading(true);
       try {
-        const { data } = await retryRequest(`https://gapp-6yc3.onrender.com/social/my-posts/${userId}`, {
+        const data = await retryRequest('get', `https://gapp-6yc3.onrender.com/social/my-posts/${userId}`, null, {
           headers: { Authorization: `Bearer ${token}` },
         });
-        setMyPosts(data || []); // Ensure empty array if no posts
-        setError(''); // Clear error on success
+        setMyPosts(data || []);
+        setError('');
       } catch (error) {
-        console.error('Fetch my posts error:', error.response?.data || error.message);
         setError(`Failed to load posts: ${error.response?.data?.error || error.message}`);
+      } finally {
+        setLoading(false);
       }
     };
 
@@ -75,34 +82,50 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
       }
     });
 
+    socket.on('connect_error', (err) => {
+      console.error('Socket connection error:', err.message);
+      setError('Connection lost. Trying to reconnect...');
+    });
+
     document.documentElement.classList.toggle('dark', darkMode);
     localStorage.setItem('darkMode', darkMode);
 
     return () => {
       socket.off('postDeleted');
       socket.off('onlineStatus');
+      socket.off('connect_error');
       socket.emit('leave', userId);
     };
   }, [token, userId, darkMode]);
+
+  const handlePhotoChange = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      setPhotoFile(file);
+      setPhotoPreview(URL.createObjectURL(file));
+    }
+  };
 
   const uploadCV = async () => {
     if (!cvFile) {
       setError('Please select a CV file');
       return;
     }
+    setLoading(true);
     const formData = new FormData();
     formData.append('cv_file', cvFile);
     formData.append('userId', userId);
     try {
-      await axios.post('https://gapp-6yc3.onrender.com/jobseeker/update_cv', formData, {
+      await retryRequest('post', 'https://gapp-6yc3.onrender.com/jobseeker/update_cv', formData, {
         headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
       });
       setCvFile(null);
       setError('');
       alert('CV uploaded successfully');
     } catch (error) {
-      console.error('CV upload error:', error.response?.data || error.message);
       setError(error.response?.data?.error || 'Failed to upload CV');
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -111,21 +134,24 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
       setError('Please select a photo');
       return;
     }
+    setLoading(true);
     const formData = new FormData();
     formData.append('photo', photoFile);
     formData.append('userId', userId);
     try {
-      const { data } = await axios.post('https://gapp-6yc3.onrender.com/auth/update_photo', formData, {
+      const data = await retryRequest('post', 'https://gapp-6yc3.onrender.com/auth/update_photo', formData, {
         headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
       });
       setPhotoUrl(data.photo);
       localStorage.setItem('photo', data.photo);
       setPhotoFile(null);
+      setPhotoPreview(null);
       setError('');
       alert('Photo uploaded successfully');
     } catch (error) {
-      console.error('Photo upload error:', error.response?.data || error.message);
       setError(error.response?.data?.error || 'Failed to upload photo');
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -134,8 +160,9 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
       setError('Please enter a valid username');
       return;
     }
+    setLoading(true);
     try {
-      const { data } = await axios.post('https://gapp-6yc3.onrender.com/auth/update_username', { userId, username }, {
+      const data = await retryRequest('post', 'https://gapp-6yc3.onrender.com/auth/update_username', { userId, username }, {
         headers: { Authorization: `Bearer ${token}` },
       });
       setUsername(data.username);
@@ -144,12 +171,14 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
       setError('');
       alert('Username updated successfully');
     } catch (error) {
-      console.error('Username update error:', error.response?.data || error.message);
       setError(error.response?.data?.error || 'Failed to update username');
+    } finally {
+      setLoading(false);
     }
   };
 
   const deletePost = async (postId) => {
+    setLoading(true);
     try {
       const response = await axios.delete(`https://gapp-6yc3.onrender.com/social/post/${postId}`, {
         headers: { Authorization: `Bearer ${token}` },
@@ -162,14 +191,15 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
         setError('');
       }
     } catch (error) {
-      console.error('Delete post error:', error.response?.data || error.message);
       setError(error.response?.data?.error || 'Failed to delete post');
+    } finally {
+      setLoading(false);
     }
   };
 
   const logout = () => {
     socket.emit('leave', userId);
-    setAuth('', '', '', '', '', ''); // Matches 6 arguments from LoginScreen.js
+    setAuth('', '', '', '', '', '');
     localStorage.clear();
   };
 
@@ -178,7 +208,7 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
       initial={{ y: 50, opacity: 0 }}
       animate={{ y: 0, opacity: 1 }}
       transition={{ duration: 0.5 }}
-      className={`min-h-screen bg-gray-100 dark:bg-gray-900 p-6 flex items-center justify-center`}
+      className="min-h-screen bg-gray-100 dark:bg-gray-900 p-6 flex items-center justify-center"
     >
       <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg max-w-md w-full">
         <div className="flex justify-between items-center mb-4">
@@ -188,6 +218,7 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
               whileHover={{ scale: 1.1 }}
               onClick={() => setDarkMode(!darkMode)}
               className="text-2xl text-primary dark:text-gray-100 hover:text-secondary"
+              disabled={loading}
             >
               {darkMode ? <FaSun /> : <FaMoon />}
             </motion.button>
@@ -209,7 +240,7 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
         )}
 
         <div className="flex flex-col items-center mb-4">
-          <img src={photoUrl} alt="Profile" className="w-24 h-24 rounded-full mb-4 object-cover" />
+          <img src={photoPreview || photoUrl} alt="Profile" className="w-24 h-24 rounded-full mb-4 object-cover photo-preview" />
           <p className="text-gray-700 dark:text-gray-300 mb-2">
             Virtual Number: <span className="font-semibold">{virtualNumber}</span>
           </p>
@@ -223,12 +254,14 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
                   onChange={(e) => setUsername(e.target.value)}
                   className="flex-1 p-2 border rounded-lg dark:bg-gray-700 dark:text-white focus:ring-2 focus:ring-primary"
                   placeholder="Enter unique username"
+                  disabled={loading}
                 />
                 <button
                   onClick={updateUsername}
                   className="ml-2 bg-primary text-white p-2 rounded-lg hover:bg-secondary"
+                  disabled={loading}
                 >
-                  Save
+                  {loading ? 'Saving...' : 'Save'}
                 </button>
               </>
             ) : (
@@ -248,13 +281,14 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
             accept=".pdf"
             onChange={(e) => setCvFile(e.target.files[0])}
             className="w-full p-3 border rounded-lg dark:bg-gray-700 dark:text-white"
+            disabled={loading}
           />
           <button
             onClick={uploadCV}
-            className="mt-2 bg-primary text-white p-2 rounded-lg hover:bg-secondary w-full"
-            disabled={!cvFile}
+            className="mt-2 bg-primary text-white p-2 rounded-lg hover:bg-secondary w-full disabled:opacity-50"
+            disabled={!cvFile || loading}
           >
-            Upload CV
+            {loading ? 'Uploading...' : 'Upload CV'}
           </button>
         </div>
 
@@ -263,23 +297,25 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
           <input
             type="file"
             accept="image/*"
-            onChange={(e) => setPhotoFile(e.target.files[0])}
+            onChange={handlePhotoChange}
             className="w-full p-3 border rounded-lg dark:bg-gray-700 dark:text-white"
+            disabled={loading}
           />
           <button
             onClick={uploadPhoto}
-            className="mt-2 bg-primary text-white p-2 rounded-lg hover:bg-secondary w-full"
-            disabled={!photoFile}
+            className="mt-2 bg-primary text-white p-2 rounded-lg hover:bg-secondary w-full disabled:opacity-50"
+            disabled={!photoFile || loading}
           >
-            Update Photo
+            {loading ? 'Uploading...' : 'Update Photo'}
           </button>
         </div>
 
         <button
           onClick={() => setShowPosts(!showPosts)}
-          className="bg-primary text-white p-2 rounded-lg w-full hover:bg-secondary"
+          className="bg-primary text-white p-2 rounded-lg w-full hover:bg-secondary disabled:opacity-50"
+          disabled={loading}
         >
-          {showPosts ? 'Hide My Posts' : 'Show My Posts'}
+          {loading ? 'Loading...' : showPosts ? 'Hide My Posts' : 'Show My Posts'}
         </button>
 
         <AnimatePresence>
@@ -315,6 +351,7 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
                           <button
                             onClick={() => setShowDeleteConfirm(post._id)}
                             className="flex items-center text-red-500 hover:text-red-700 dark:text-red-400"
+                            disabled={loading}
                           >
                             <FaTrash className="mr-1" /> Delete
                           </button>
@@ -333,22 +370,24 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
+            className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 menu-overlay"
           >
-            <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg">
+            <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg menu-content">
               <p className="mb-4 text-black dark:text-gray-100">Are you sure you want to delete this post?</p>
               <div className="flex justify-end space-x-4">
                 <button
                   onClick={() => setShowDeleteConfirm(null)}
-                  className="bg-gray-300 dark:bg-gray-600 text-black dark:text-white p-2 rounded hover:bg-gray-400"
+                  className="bg-gray-300 dark:bg-gray-600 text-black dark:text-white p-2 rounded hover:bg-gray-400 disabled:opacity-50"
+                  disabled={loading}
                 >
                   Cancel
                 </button>
                 <button
                   onClick={() => deletePost(showDeleteConfirm)}
-                  className="bg-red-500 text-white p-2 rounded hover:bg-red-700"
+                  className="bg-red-500 text-white p-2 rounded hover:bg-red-700 disabled:opacity-50"
+                  disabled={loading}
                 >
-                  Delete
+                  {loading ? 'Deleting...' : 'Delete'}
                 </button>
               </div>
             </div>

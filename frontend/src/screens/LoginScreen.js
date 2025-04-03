@@ -9,6 +9,7 @@ const LoginScreen = ({ setAuth }) => {
   const [role, setRole] = useState('0');
   const [username, setUsername] = useState('');
   const [photo, setPhoto] = useState(null);
+  const [photoPreview, setPhotoPreview] = useState(null);
   const [isLogin, setIsLogin] = useState(true);
   const [error, setError] = useState('');
   const [selectedCountry, setSelectedCountry] = useState('');
@@ -49,15 +50,12 @@ const LoginScreen = ({ setAuth }) => {
   const retryRequest = async (data, config, retries = 3, delay = 1000) => {
     for (let i = 0; i < retries; i++) {
       try {
-        const { data: response } = await axios.post(
+        const response = await axios.post(
           `https://gapp-6yc3.onrender.com/auth/${isLogin ? 'login' : 'register'}`,
           data,
           config
         );
-        if (!isLogin && (!response.privateKey || !response.privateKey.includes('-----BEGIN RSA PRIVATE KEY-----'))) {
-          throw new Error('Received invalid private key from server');
-        }
-        return response;
+        return response.data;
       } catch (err) {
         console.log(`Attempt ${i + 1} failed:`, {
           status: err.response?.status,
@@ -73,12 +71,11 @@ const LoginScreen = ({ setAuth }) => {
     }
   };
 
-
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
     if (!validateForm()) return;
-  
+
     setLoading(true);
     try {
       const data = isLogin
@@ -93,31 +90,35 @@ const LoginScreen = ({ setAuth }) => {
             if (photo) formData.append('photo', photo);
             return formData;
           })();
-  
+
       const config = isLogin
         ? { headers: { 'Content-Type': 'application/json' } }
         : { headers: { 'Content-Type': 'multipart/form-data' } };
-  
-      const response = await axios.post(
-        `https://gapp-6yc3.onrender.com/auth/${isLogin ? 'login' : 'register'}`,
-        data,
-        config
-      );
-  
-      localStorage.setItem('token', response.data.token);
-      localStorage.setItem('userId', response.data.userId);
-      localStorage.setItem('role', response.data.role);
-      localStorage.setItem('photo', response.data.photo || 'https://placehold.co/40x40');
-      localStorage.setItem('virtualNumber', response.data.virtualNumber || '');
-      localStorage.setItem('username', response.data.username);
-      localStorage.setItem('privateKey', response.data.privateKey);
-  
-      setAuth(response.data.token, response.data.userId, response.data.role, response.data.photo, response.data.virtualNumber, response.data.username);
+
+      const response = await retryRequest(data, config);
+
+      localStorage.setItem('token', response.token);
+      localStorage.setItem('userId', response.userId);
+      localStorage.setItem('role', response.role);
+      localStorage.setItem('photo', response.photo || 'https://placehold.co/40x40');
+      localStorage.setItem('virtualNumber', response.virtualNumber || '');
+      localStorage.setItem('username', response.username);
+      localStorage.setItem('privateKey', response.privateKey);
+
+      setAuth(response.token, response.userId, response.role, response.photo, response.virtualNumber, response.username);
     } catch (error) {
       console.error(`${isLogin ? 'Login' : 'Register'} error:`, error.response?.data || error.message);
       setError(error.response?.data?.error || error.message || `${isLogin ? 'Login' : 'Registration'} failed`);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handlePhotoChange = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      setPhoto(file);
+      setPhotoPreview(URL.createObjectURL(file));
     }
   };
 
@@ -174,13 +175,18 @@ const LoginScreen = ({ setAuth }) => {
                 <option value="0">Job Seeker</option>
                 <option value="1">Employer</option>
               </select>
-              <input
-                type="file"
-                accept="image/jpeg,image/png,image/gif"
-                onChange={(e) => setPhoto(e.target.files[0])}
-                className="w-full p-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600"
-                disabled={loading}
-              />
+              <div className="flex items-center space-x-4">
+                <input
+                  type="file"
+                  accept="image/jpeg,image/png,image/gif"
+                  onChange={handlePhotoChange}
+                  className="w-full p-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600"
+                  disabled={loading}
+                />
+                {photoPreview && (
+                  <img src={photoPreview} alt="Preview" className="w-12 h-12 rounded-full object-cover" />
+                )}
+              </div>
             </>
           )}
           <input
