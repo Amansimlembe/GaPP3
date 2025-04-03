@@ -1,147 +1,146 @@
-import { configureStore, createSlice } from '@reduxjs/toolkit';
+import { openDB } from 'idb';
 
-const messageSlice = createSlice({
-  name: 'messages',
-  initialState: {
-    chats: {},
-    selectedChat: null,
-  },
-  reducers: {
-    setMessages: (state, action) => {
-      const { recipientId, messages } = action.payload;
-      state.chats[recipientId] = messages;
-    },
-    addMessage: (state, action) => {
-      const { recipientId, message } = action.payload;
-      state.chats[recipientId] = state.chats[recipientId] || [];
-      if (!state.chats[recipientId].some((msg) => msg._id === message._id || msg.clientMessageId === message.clientMessageId)) {
-        state.chats[recipientId].push(message);
-      }
-    },
-    replaceMessage: (state, action) => {
-      const { recipientId, message, replaceId } = action.payload;
-      state.chats[recipientId] = state.chats[recipientId] || [];
-      const index = state.chats[recipientId].findIndex((msg) => msg._id === replaceId || msg.clientMessageId === replaceId);
-      if (index !== -1) {
-        state.chats[recipientId][index] = { ...message };
-      } else if (!state.chats[recipientId].some((msg) => msg._id === message._id || msg.clientMessageId === message.clientMessageId)) {
-        state.chats[recipientId].push(message);
-      }
-    },
-    updateMessageStatus: (state, action) => {
-      const { recipientId, messageId, status, uploadProgress } = action.payload;
-      if (state.chats[recipientId]) {
-        const msgIndex = state.chats[recipientId].findIndex((msg) => msg._id === messageId || msg.clientMessageId === messageId);
-        if (msgIndex !== -1) {
-          state.chats[recipientId][msgIndex] = {
-            ...state.chats[recipientId][msgIndex],
-            status,
-            ...(uploadProgress !== undefined && { uploadProgress }),
-          };
-        }
-      }
-    },
-    setSelectedChat: (state, action) => {
-      state.selectedChat = action.payload;
-    },
-    resetState: () => ({
-      chats: {},
-      selectedChat: null,
-    }),
-  },
-});
+const DB_NAME = 'ChatDB';
+const MESSAGE_STORE_NAME = 'messages';
+const PENDING_STORE_NAME = 'pendingMessages';
+const VERSION = 6; // Incremented for new index
 
-export const {
-  setMessages,
-  addMessage,
-  replaceMessage,
-  updateMessageStatus,
-  setSelectedChat,
-  resetState,
-} = messageSlice.actions;
-
-const persistenceMiddleware = (store) => (next) => (action) => {
-  const result = next(action);
-  const actionsToPersist = [
-    setMessages.type,
-    addMessage.type,
-    replaceMessage.type,
-    updateMessageStatus.type,
-    setSelectedChat.type,
-    resetState.type,
-  ];
-
-  if (actionsToPersist.includes(action.type)) {
-    requestAnimationFrame(() => {
-      const state = store.getState().messages;
-      try {
-        const serializableState = {
-          ...state,
-          chats: Object.fromEntries(
-            Object.entries(state.chats).map(([key, messages]) => [
-              key,
-              messages.map((msg) => ({
-                ...msg,
-                content: msg.content || '', // Ensure content is always a string
-                uploadProgress: msg.uploadProgress || 0,
-                caption: msg.caption || '',
-                createdAt: msg.createdAt || new Date().toISOString(), // Default timestamp
-              })),
-            ])
-          ),
-        };
-        localStorage.setItem('reduxState', JSON.stringify(serializableState));
-      } catch (error) {
-        console.error('Failed to persist state:', error);
-      }
-    });
-  }
-  return result;
-};
-
-const loadPersistedState = () => {
-  const persistedState = localStorage.getItem('reduxState');
-  if (persistedState) {
-    try {
-      const parsedState = JSON.parse(persistedState);
-      if (parsedState && typeof parsedState.chats === 'object' && parsedState.chats !== null) {
-        return {
-          ...parsedState,
-          chats: Object.fromEntries(
-            Object.entries(parsedState.chats).map(([key, messages]) => [
-              key,
-              messages.map((msg) => ({
-                ...msg,
-                content: msg.content || '',
-                uploadProgress: msg.uploadProgress || 0,
-                caption: msg.caption || '',
-                createdAt: msg.createdAt || new Date().toISOString(),
-              })),
-            ])
-          ),
-        };
-      }
-      throw new Error('Invalid persisted state format');
-    } catch (error) {
-      console.error('Failed to parse persisted state:', error);
-      localStorage.removeItem('reduxState');
+const dbPromise = openDB(DB_NAME, VERSION, {
+  upgrade(db, oldVersion, newVersion) {
+    console.log(`Upgrading database from version ${oldVersion} to ${newVersion}`);
+    if (db.objectStoreNames.contains(MESSAGE_STORE_NAME)) {
+      db.deleteObjectStore(MESSAGE_STORE_NAME);
     }
+    const messageStore = db.createObjectStore(MESSAGE_STORE_NAME, { keyPath: '_id' });
+    messageStore.createIndex('byRecipientId', 'recipientId');
+    messageStore.createIndex('byCreatedAt', 'createdAt');
+    messageStore.createIndex('byClientMessageId', 'clientMessageId', { unique: false });
+    messageStore.createIndex('byRecipientAndTime', ['recipientId', 'createdAt']); // New composite index
+
+    if (db.objectStoreNames.contains(PENDING_STORE_NAME)) {
+      db.deleteObjectStore(PENDING_STORE_NAME);
+    }
+    const pendingStore = db.createObjectStore(PENDING_STORE_NAME, { keyPath: 'tempId' });
+    pendingStore.createIndex('byRecipientId', 'recipientId');
+  },
+  blocked() {
+    console.error('Database upgrade blocked by an open connection');
+  },
+  blocking() {
+    console.warn('Current connection is blocking a database upgrade');
+  },
+});
+
+export const saveMessages = async (messages) => {
+  try {
+    const db = await dbPromise;
+    const tx = db.transaction(MESSAGE_STORE_NAME, 'readwrite');
+    const store = tx.objectStore(MESSAGE_STORE_NAME);
+    await Promise.all(messages.map((msg) => store.put(msg)));
+    await tx.done;
+  } catch (error) {
+    console.error('Error saving messages to IndexedDB:', error);
+    throw error;
   }
-  return undefined;
 };
 
-export const store = configureStore({
-  reducer: {
-    messages: messageSlice.reducer,
-  },
-  preloadedState: {
-    messages: loadPersistedState() || messageSlice.getInitialState(),
-  },
-  middleware: (getDefaultMiddleware) =>
-    getDefaultMiddleware({
-      serializableCheck: {
-        ignoredActions: [addMessage.type, replaceMessage.type, updateMessageStatus.type],
-        ignoredPaths: ['messages.chats'],
-      },
-    }).concat(persistenceMiddleware),
-});
+export const getMessages = async (recipientId = null) => {
+  try {
+    const db = await dbPromise;
+    const tx = db.transaction(MESSAGE_STORE_NAME, 'readonly');
+    const store = tx.objectStore(MESSAGE_STORE_NAME);
+    if (recipientId) {
+      const index = store.index('byRecipientAndTime');
+      const messages = await index.getAll([recipientId]);
+      return messages;
+    }
+    const allMessages = await store.getAll();
+    return allMessages.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+  } catch (error) {
+    console.error('Error retrieving messages from IndexedDB:', error);
+    return [];
+  }
+};
+
+export const deleteMessage = async (messageId) => {
+  try {
+    const db = await dbPromise;
+    const tx = db.transaction(MESSAGE_STORE_NAME, 'readwrite');
+    const store = tx.objectStore(MESSAGE_STORE_NAME);
+    await store.delete(messageId);
+    await tx.done;
+  } catch (error) {
+    console.error('Error deleting message from IndexedDB:', error);
+    throw error;
+  }
+};
+
+export const clearOldMessages = async (daysToKeep = 30) => {
+  try {
+    const db = await dbPromise;
+    const tx = db.transaction(MESSAGE_STORE_NAME, 'readwrite');
+    const store = tx.objectStore(MESSAGE_STORE_NAME);
+    const index = store.index('byCreatedAt');
+    const cutoff = new Date(Date.now() - daysToKeep * 24 * 60 * 60 * 1000);
+    let count = 0;
+    const cursor = await index.openCursor(IDBKeyRange.upperBound(cutoff));
+    while (cursor) {
+      await cursor.delete();
+      count++;
+      await cursor.continue();
+    }
+    await tx.done;
+    return count;
+  } catch (error) {
+    console.error('Error clearing old messages from IndexedDB:', error);
+    return 0;
+  }
+};
+
+export const savePendingMessages = async (pendingMessages) => {
+  try {
+    const db = await dbPromise;
+    const tx = db.transaction(PENDING_STORE_NAME, 'readwrite');
+    const store = tx.objectStore(PENDING_STORE_NAME);
+    await store.clear();
+    await Promise.all(
+      pendingMessages.map((msg) => {
+        if (!msg.tempId || typeof msg.tempId !== 'string') {
+          throw new Error('Invalid tempId in pending message');
+        }
+        return store.put(msg);
+      })
+    );
+    await tx.done;
+  } catch (error) {
+    console.error('Error saving pending messages to IndexedDB:', error);
+    throw error;
+  }
+};
+
+export const loadPendingMessages = async () => {
+  try {
+    const db = await dbPromise;
+    const tx = db.transaction(PENDING_STORE_NAME, 'readonly');
+    const store = tx.objectStore(PENDING_STORE_NAME);
+    return await store.getAll();
+  } catch (error) {
+    console.error('Error loading pending messages from IndexedDB:', error);
+    return [];
+  }
+};
+
+export const clearPendingMessages = async () => {
+  try {
+    const db = await dbPromise;
+    const tx = db.transaction(PENDING_STORE_NAME, 'readwrite');
+    const store = tx.objectStore(PENDING_STORE_NAME);
+    await store.clear();
+    await tx.done;
+  } catch (error) {
+    console.error('Error clearing pending messages from IndexedDB:', error);
+    throw error;
+  }
+};
+
+export default dbPromise;
