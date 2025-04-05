@@ -32,13 +32,14 @@ const redisClient = redis.createClient({
 redisClient.on('connect', () => logger.info('Connected to Redis'));
 redisClient.on('reconnecting', () => logger.info('Reconnecting to Redis'));
 redisClient.on('end', () => logger.warn('Redis connection closed'));
+redisClient.on('error', (err) => logger.error('Redis client error', { error: err.message, stack: err.stack }));
 
 (async () => {
   try {
     await redisClient.connect();
     logger.info('Redis client initialized successfully');
   } catch (err) {
-    logger.error('Failed to connect to Redis on startup', { error: err.message });
+    logger.error('Failed to connect to Redis on startup', { error: err.message, stack: err.stack });
   }
 })();
 

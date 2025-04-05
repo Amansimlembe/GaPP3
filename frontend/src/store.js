@@ -82,10 +82,14 @@ const persistenceMiddleware = (store) => (next) => (action) => {
               key,
               messages.map((msg) => ({
                 ...msg,
-                content: msg.content || '', // Ensure content is always a string
+                content: msg.content || '',
+                plaintextContent: msg.plaintextContent || '',
                 uploadProgress: msg.uploadProgress || 0,
                 caption: msg.caption || '',
-                createdAt: msg.createdAt || new Date().toISOString(), // Default timestamp
+                createdAt: msg.createdAt || new Date().toISOString(),
+                senderVirtualNumber: msg.senderVirtualNumber || '',
+                senderUsername: msg.senderUsername || '',
+                senderPhoto: msg.senderPhoto || 'https://placehold.co/40x40',
               })),
             ])
           ),
@@ -113,9 +117,13 @@ const loadPersistedState = () => {
               messages.map((msg) => ({
                 ...msg,
                 content: msg.content || '',
+                plaintextContent: msg.plaintextContent || '',
                 uploadProgress: msg.uploadProgress || 0,
                 caption: msg.caption || '',
                 createdAt: msg.createdAt || new Date().toISOString(),
+                senderVirtualNumber: msg.senderVirtualNumber || '',
+                senderUsername: msg.senderUsername || '',
+                senderPhoto: msg.senderPhoto || 'https://placehold.co/40x40',
               })),
             ])
           ),

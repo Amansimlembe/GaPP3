@@ -3,7 +3,7 @@ import { openDB } from 'idb';
 const DB_NAME = 'ChatDB';
 const MESSAGE_STORE_NAME = 'messages';
 const PENDING_STORE_NAME = 'pendingMessages';
-const VERSION = 6; // Incremented for new index
+const VERSION = 7; // Incremented to add new fields
 
 const dbPromise = openDB(DB_NAME, VERSION, {
   upgrade(db, oldVersion, newVersion) {
@@ -15,7 +15,7 @@ const dbPromise = openDB(DB_NAME, VERSION, {
     messageStore.createIndex('byRecipientId', 'recipientId');
     messageStore.createIndex('byCreatedAt', 'createdAt');
     messageStore.createIndex('byClientMessageId', 'clientMessageId', { unique: false });
-    messageStore.createIndex('byRecipientAndTime', ['recipientId', 'createdAt']); // New composite index
+    messageStore.createIndex('byRecipientAndTime', ['recipientId', 'createdAt']);
 
     if (db.objectStoreNames.contains(PENDING_STORE_NAME)) {
       db.deleteObjectStore(PENDING_STORE_NAME);
@@ -36,7 +36,13 @@ export const saveMessages = async (messages) => {
     const db = await dbPromise;
     const tx = db.transaction(MESSAGE_STORE_NAME, 'readwrite');
     const store = tx.objectStore(MESSAGE_STORE_NAME);
-    await Promise.all(messages.map((msg) => store.put(msg)));
+    await Promise.all(messages.map((msg) => store.put({
+      ...msg,
+      plaintextContent: msg.plaintextContent || '',
+      senderVirtualNumber: msg.senderVirtualNumber || '',
+      senderUsername: msg.senderUsername || '',
+      senderPhoto: msg.senderPhoto || 'https://placehold.co/40x40',
+    })));
     await tx.done;
   } catch (error) {
     console.error('Error saving messages to IndexedDB:', error);
@@ -108,7 +114,13 @@ export const savePendingMessages = async (pendingMessages) => {
         if (!msg.tempId || typeof msg.tempId !== 'string') {
           throw new Error('Invalid tempId in pending message');
         }
-        return store.put(msg);
+        return store.put({
+          ...msg,
+          plaintextContent: msg.plaintextContent || '',
+          senderVirtualNumber: msg.senderVirtualNumber || '',
+          senderUsername: msg.senderUsername || '',
+          senderPhoto: msg.senderPhoto || 'https://placehold.co/40x40',
+        });
       })
     );
     await tx.done;
