@@ -6,7 +6,7 @@ const cors = require('cors');
 const mongoose = require('mongoose');
 const redis = require('./redis');
 const winston = require('winston');
-const path = require('path'); // Add this
+const path = require('path');
 const { router: authRoutes, authMiddleware } = require('./routes/auth');
 const socialRoutes = require('./routes/social');
 const jobseekerRoutes = require('./routes/jobseeker');
@@ -44,8 +44,8 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '50mb' }));
 
-// Serve static files from client/build
-app.use(express.static(path.join(__dirname, '../client/build')));
+// Serve static files from frontend/public
+aapp.use(express.static(path.join(__dirname, '../../frontend/public')));
 
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'OK', uptime: process.uptime(), mongodb: mongoose.connection.readyState });
@@ -85,8 +85,14 @@ app.use('/employer', authMiddleware, employerRoutes);
 app.use('/social', socialRoutes);
 
 // Handle SPA routing: serve index.html for all non-API routes
+
 app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, '../client/build', 'index.html'));
+  res.sendFile(path.join(__dirname, '../../frontend/public', 'index.html'), (err) => {
+    if (err) {
+      logger.error('Error serving index.html', { error: err.message, url: req.url });
+      res.status(500).json({ error: 'Internal Server Error', message: 'Failed to load frontend' });
+    }
+  });
 });
 
 app.use((err, req, res, next) => {
