@@ -183,18 +183,13 @@ const App = () => {
       console.log('Socket connected:', socket.id);
     });
 
-    socket.on('connect_error', (error) => {
-      console.error('Socket connection error:', error.message);
-    });
-
-    socket.on('reconnect_attempt', (attempt) => {
-      console.log(`Reconnection attempt #${attempt}`);
-    });
-
+    socket.on('connect_error', (error) => console.error('Socket connection error:', error.message));
+    socket.on('reconnect_attempt', (attempt) => console.log(`Reconnection attempt #${attempt}`));
     socket.on('reconnect_failed', () => {
       console.error('Reconnection failed after max attempts');
       setAuth('', '', '', '', '', '');
     });
+    socket.on('disconnect', (reason) => console.log('Socket disconnected:', reason));
 
     socket.on('message', (msg) => {
       if (msg.recipientId === userId && (!selectedChat || selectedChat !== msg.senderId)) {
@@ -202,13 +197,7 @@ const App = () => {
       }
     });
 
-    socket.on('newContact', (contactData) => {
-      console.log('New contact added via socket:', contactData);
-    });
-
-    socket.on('disconnect', (reason) => {
-      console.log('Socket disconnected:', reason);
-    });
+    socket.on('newContact', (contactData) => console.log('New contact added via socket:', contactData));
 
     return () => {
       socket.off('connect');
@@ -259,7 +248,7 @@ const App = () => {
         <Routes>
           <Route path="/jobs" element={role === 0 ? <JobSeekerScreen token={token} userId={userId} /> : <EmployerScreen token={token} userId={userId} />} />
           <Route path="/feed" element={<FeedScreen token={token} userId={userId} />} />
-          <Route path="/chat" element={<ChatScreen token={token} userId={userId} setAuth={setAuth} socket={socket} />} />
+          <Route path="/chat" element={<ChatScreen token={token} userId={userId} setAuth={setAuth} socket={socket} username={username} virtualNumber={virtualNumber} photo={photo} />} />
           <Route path="/profile" element={<ProfileScreen token={token} userId={userId} setAuth={setAuth} username={username} virtualNumber={virtualNumber} photo={photo} />} />
           <Route path="/" element={<Navigate to="/feed" replace />} />
           <Route path="*" element={<Navigate to="/feed" replace />} />

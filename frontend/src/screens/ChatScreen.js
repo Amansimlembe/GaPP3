@@ -1,18 +1,20 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import forge from 'node-forge';
+import { List } from 'react-virtualized';
+import { format, isToday, isYesterday, parseISO } from 'date-fns';
 import {
-  FaPaperPlane, FaPaperclip, FaTrash, FaArrowLeft, FaReply, FaEllipsisH, FaForward, FaFileAlt,
-  FaPlay, FaArrowDown, FaUserPlus, FaSignOutAlt, FaUser, FaCopy, FaClock, FaCamera, FaVideo, FaMapMarkerAlt, FaAddressCard, FaMicrophone
+  FaPaperPlane, FaPaperclip, FaTrash, FaArrowLeft, FaReply, FaEllipsisH, FaFileAlt,
+  FaPlay, FaArrowDown, FaUserPlus, FaSignOutAlt, FaCamera, FaVideo, FaMicrophone
 } from 'react-icons/fa';
 import { useDispatch, useSelector } from 'react-redux';
 import { setMessages, addMessage, updateMessageStatus, setSelectedChat, resetState, replaceMessage } from '../store';
-import { saveMessages, getMessages, clearOldMessages, deleteMessage, savePendingMessages, loadPendingMessages } from '../db';
+import { saveMessages, getMessages, clearOldMessages, savePendingMessages, loadPendingMessages } from '../db';
 
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
 
-const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
+const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtualNumber, photo }) => {
   const dispatch = useDispatch();
   const { chats, selectedChat } = useSelector((state) => state.messages);
   const [users, setUsers] = useState(() => JSON.parse(localStorage.getItem('cachedUsers')) || []);
@@ -20,42 +22,28 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
   const [files, setFiles] = useState([]);
   const [captions, setCaptions] = useState({});
   const [contentType, setContentType] = useState('text');
-  const [notifications, setNotifications] = useState(() => JSON.parse(localStorage.getItem('chatNotifications')) || {});
-  const [typing, setTyping] = useState(false);
   const [isTyping, setIsTyping] = useState({});
   const [replyTo, setReplyTo] = useState(null);
   const [showMenu, setShowMenu] = useState(false);
   const [menuTab, setMenuTab] = useState('');
   const [newContactNumber, setNewContactNumber] = useState('');
   const [error, setError] = useState('');
-  const [unreadCount, setUnreadCount] = useState(0);
-  const [firstUnreadMessageId, setFirstUnreadMessageId] = useState(null);
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
-  const [showMessageMenu, setShowMessageMenu] = useState(null);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   const [mediaPreview, setMediaPreview] = useState([]);
   const [showPicker, setShowPicker] = useState(false);
-  const [viewMedia, setViewMedia] = useState(null);
-  const [page, setPage] = useState(0);
-  const [hasMore, setHasMore] = useState(true);
-  const [loading, setLoading] = useState(false);
   const [userStatus, setUserStatus] = useState({ status: 'offline', lastSeen: null });
   const [pendingMessages, setPendingMessages] = useState([]);
-  const [uploadProgress, setUploadProgress] = useState({});
-  const [isKeyboardOpen, setIsKeyboardOpen] = useState(false);
   const chatRef = useRef(null);
   const inputRef = useRef(null);
+  const listRef = useRef(null);
   const typingTimeoutRef = useRef(null);
   const isAtBottomRef = useRef(true);
-  const lastFetchedAtRef = useRef(null);
-  const messagesPerPage = 50;
 
   const handleLogout = useCallback(() => {
     socket.emit('leave', userId);
     dispatch(resetState());
     localStorage.clear();
     setUsers([]);
-    setNotifications({});
     setAuth('', '', '', '', '');
   }, [dispatch, setAuth, userId, socket]);
 
@@ -88,7 +76,10 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
   }, []);
 
   const getPublicKey = useCallback(async (recipientId) => {
+    const cachedKey = localStorage.getItem(`publicKey:${recipientId}`);
+    if (cachedKey) return cachedKey;
     const { data } = await axios.get(`${BASE_URL}/auth/public_key/${recipientId}`, { headers: { Authorization: `Bearer ${token}` } });
+    localStorage.setItem(`publicKey:${recipientId}`, data.publicKey);
     return data.publicKey;
   }, [token]);
 
@@ -128,22 +119,9 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
     });
   };
 
-  const formatChatListDate = (date) => new Date(date).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
-  const formatDateHeader = (date) => {
-    const today = new Date();
-    const msgDate = new Date(date);
-    today.setHours(0, 0, 0, 0);
-    msgDate.setHours(0, 0, 0, 0);
-
-    if (msgDate.getTime() === today.getTime()) return 'Today';
-    today.setDate(today.getDate() - 1);
-    if (msgDate.getTime() === today.getTime()) return 'Yesterday';
-    return msgDate.toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' });
-  };
-  const formatTime = (date) => new Date(date).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
-  const formatLastSeen = (lastSeen) => (lastSeen ? `Last seen ${new Date(lastSeen).toLocaleString()}` : 'Offline');
-
   const fetchChatList = useCallback(async () => {
+    const cachedUsers = JSON.parse(localStorage.getItem('cachedUsers')) || [];
+    if (cachedUsers.length) setUsers(cachedUsers); // Load cached immediately
     try {
       const { data } = await axios.get(`${BASE_URL}/social/chat-list`, { headers: { Authorization: `Bearer ${token}` }, params: { userId } });
       const privateKeyPem = localStorage.getItem('privateKey');
@@ -160,77 +138,130 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
       setUsers(processedUsers);
       localStorage.setItem('cachedUsers', JSON.stringify(processedUsers));
     } catch (err) {
-      setError(`Failed to load chat list: ${err.message}`);
+      setError(`Chat list fetch failed: ${err.message}`);
       if (err.response?.status === 401) handleLogout();
     }
   }, [token, userId, handleLogout, decryptMessage]);
 
-  const fetchMessages = useCallback(async (recipientId, pageNum = 0, syncOnly = false) => {
-    if (!recipientId || loading || (!hasMore && !syncOnly)) return;
-    setLoading(true);
+  const fetchMessages = useCallback(async (recipientId) => {
+    const cachedMessages = await getMessages(recipientId);
+    if (cachedMessages.length) {
+      dispatch(setMessages({ recipientId, messages: cachedMessages }));
+      listRef.current?.scrollToRow(cachedMessages.length - 1);
+    }
     try {
-      const localMessages = await getMessages(recipientId);
-      if (!syncOnly && localMessages.length && pageNum === 0) {
-        dispatch(setMessages({ recipientId, messages: localMessages }));
-        lastFetchedAtRef.current = localMessages[localMessages.length - 1]?.createdAt || null;
-        chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight });
-      }
-
-      const params = {
-        userId,
-        recipientId,
-        limit: messagesPerPage,
-        skip: pageNum * messagesPerPage,
-        since: syncOnly && lastFetchedAtRef.current ? new Date(lastFetchedAtRef.current).toISOString() : undefined,
-      };
-      const { data } = await axios.get(`${BASE_URL}/social/messages`, { headers: { Authorization: `Bearer ${token}` }, params });
+      const { data } = await axios.get(`${BASE_URL}/social/messages`, { headers: { Authorization: `Bearer ${token}` }, params: { userId, recipientId, limit: 50 } });
       const privateKeyPem = localStorage.getItem('privateKey');
       const messages = await Promise.all(data.messages.map(async (msg) => {
         const newMsg = { ...msg };
         if (msg.senderId === userId) {
           newMsg.content = msg.plaintextContent || msg.content;
         } else if (msg.recipientId === userId) {
-          newMsg.content = msg.contentType === 'text'
-            ? await decryptMessage(msg.content, privateKeyPem)
-            : msg.content;
+          newMsg.content = msg.contentType === 'text' ? await decryptMessage(msg.content, privateKeyPem) : msg.content;
         }
         return newMsg;
       }));
-
-      if (syncOnly) {
-        messages.forEach((msg) => {
-          if (!chats[recipientId]?.some((m) => m._id === msg._id)) {
-            dispatch(addMessage({ recipientId, message: msg }));
-          }
-        });
-      } else {
-        dispatch(setMessages({ recipientId, messages: [...(chats[recipientId] || []).filter((m) => !messages.some((nm) => nm._id === m._id)), ...messages] }));
-      }
-      setHasMore(data.hasMore);
+      dispatch(setMessages({ recipientId, messages }));
       await saveMessages(messages);
-      lastFetchedAtRef.current = messages[messages.length - 1]?.createdAt || lastFetchedAtRef.current;
+      if (isAtBottomRef.current) listRef.current?.scrollToRow(messages.length - 1);
     } catch (err) {
-      setError(`Failed to load messages: ${err.message}`);
-    } finally {
-      setLoading(false);
+      setError(`Messages fetch failed: ${err.message}`);
     }
-  }, [token, userId, dispatch, decryptMessage, loading, hasMore, chats]);
+  }, [token, userId, dispatch, decryptMessage]);
 
   const sendPendingMessages = useCallback(async () => {
     if (!navigator.onLine || !pendingMessages.length) return;
     for (const { tempId, recipientId, messageData } of pendingMessages) {
       try {
-        const response = await axios.post(`${BASE_URL}/social/message`, messageData, { headers: { Authorization: `Bearer ${token}` } });
-        const { data } = response;
-        dispatch(replaceMessage({ recipientId, message: { ...data, content: data.plaintextContent || data.content }, replaceId: tempId }));
-        await saveMessages([{ ...data, content: data.plaintextContent || data.content }]);
+        const { data } = await axios.post(`${BASE_URL}/social/message`, messageData, { headers: { Authorization: `Bearer ${token}` } });
+        dispatch(replaceMessage({ recipientId, message: { ...data.message, content: data.message.plaintextContent || data.message.content }, replaceId: tempId }));
+        await saveMessages([{ ...data.message, content: data.message.plaintextContent || data.message.content }]);
         setPendingMessages((prev) => prev.filter((p) => p.tempId !== tempId));
         await savePendingMessages(pendingMessages.filter((p) => p.tempId !== tempId));
+        socket.emit('message', data.message);
       } catch (err) {
         console.error('Pending message send error:', err);
       }
     }
-  }, [pendingMessages, token, dispatch]);
+  }, [pendingMessages, token, dispatch, socket]);
+
+  const sendMessage = async () => {
+    if (!selectedChat || (!message.trim() && !files.length)) return;
+    socket.emit('stopTyping', { userId, recipientId: selectedChat });
+
+    const tempId = `${userId}-${Date.now()}`;
+    const tempMsg = {
+      _id: tempId,
+      senderId: userId,
+      recipientId: selectedChat,
+      contentType: files.length ? contentType : 'text',
+      content: files.length ? URL.createObjectURL(files[0]) : message,
+      status: navigator.onLine ? 'sent' : 'pending',
+      replyTo: replyTo?._id || null,
+      createdAt: new Date().toISOString(),
+      clientMessageId: tempId,
+      caption: files.length ? captions[files[0].name] || '' : '',
+      originalFilename: files.length ? files[0].name : null,
+    };
+    dispatch(addMessage({ recipientId: selectedChat, message: tempMsg }));
+    if (isAtBottomRef.current) listRef.current?.scrollToRow((chats[selectedChat] || []).length - 1);
+
+    if (!navigator.onLine) {
+      const newPending = [...pendingMessages, { tempId, recipientId: selectedChat, messageData: tempMsg }];
+      setPendingMessages(newPending);
+      await savePendingMessages(newPending);
+    } else {
+      try {
+        const recipientPublicKey = await getPublicKey(selectedChat);
+        const messageData = files.length
+          ? {
+              senderId: userId,
+              recipientId: selectedChat,
+              content: await encryptMessage(await new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result);
+                reader.readAsBinaryString(files[0]);
+              }), recipientPublicKey, true),
+              contentType,
+              plaintextContent: '',
+              caption: captions[files[0].name] || '',
+              replyTo: replyTo?._id || null,
+              originalFilename: files[0].name,
+              clientMessageId: tempId,
+              senderVirtualNumber: virtualNumber,
+              senderUsername: username,
+              senderPhoto: photo,
+            }
+          : {
+              senderId: userId,
+              recipientId: selectedChat,
+              content: await encryptMessage(message, recipientPublicKey),
+              contentType: 'text',
+              plaintextContent: message,
+              replyTo: replyTo?._id || null,
+              clientMessageId: tempId,
+              senderVirtualNumber: virtualNumber,
+              senderUsername: username,
+              senderPhoto: photo,
+            };
+        const { data } = await axios.post(`${BASE_URL}/social/message`, messageData, { headers: { Authorization: `Bearer ${token}` } });
+        dispatch(replaceMessage({ recipientId: selectedChat, message: { ...data.message, content: data.message.plaintextContent || data.message.content }, replaceId: tempId }));
+        await saveMessages([{ ...data.message, content: data.message.plaintextContent || data.message.content }]);
+        socket.emit('message', data.message);
+      } catch (err) {
+        console.error('Send error:', err);
+        setError(`Send failed: ${err.message}`);
+      }
+    }
+
+    setMessage('');
+    setFiles([]);
+    setCaptions({});
+    setContentType('text');
+    setReplyTo(null);
+    setMediaPreview([]);
+    inputRef.current?.focus();
+  };
 
   const handleFileChange = async (e, type) => {
     const selectedFiles = Array.from(e.target.files);
@@ -241,362 +272,116 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
     setContentType(type);
     setMediaPreview(compressedFiles.map(file => ({ type, url: URL.createObjectURL(file), originalFile: file })));
     setShowPicker(false);
-
-    const tempMessages = compressedFiles.map(file => {
-      const clientMessageId = `${userId}-${Date.now()}-${Math.random().toString(36).substring(2)}`;
-      return {
-        _id: clientMessageId,
-        senderId: userId,
-        recipientId: selectedChat,
-        contentType: type,
-        content: URL.createObjectURL(file),
-        status: 'uploading',
-        createdAt: new Date(),
-        originalFilename: file.name,
-        uploadProgress: 0,
-        clientMessageId,
-      };
-    });
-
-    tempMessages.forEach(msg => dispatch(addMessage({ recipientId: selectedChat, message: msg })));
-    if (isAtBottomRef.current) chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight });
-
-    for (const [index, file] of compressedFiles.entries()) {
-      const clientMessageId = tempMessages[index]._id;
-      const formData = new FormData();
-      formData.append('file', file);
-      formData.append('userId', userId);
-      formData.append('recipientId', selectedChat);
-      formData.append('clientMessageId', clientMessageId);
-
-      try {
-        const response = await axios.post(
-          `${BASE_URL}/social/upload`,
-          formData,
-          {
-            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'multipart/form-data' },
-            onUploadProgress: (progressEvent) => {
-              const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-              setUploadProgress((prev) => ({ ...prev, [clientMessageId]: percentCompleted }));
-              dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: clientMessageId, status: 'uploading', uploadProgress: percentCompleted }));
-            },
-          }
-        );
-
-        const { message: uploadedMessage } = response.data;
-        dispatch(replaceMessage({ recipientId: selectedChat, message: uploadedMessage, replaceId: clientMessageId }));
-        socket.emit('message', uploadedMessage);
-        await saveMessages([uploadedMessage]);
-      } catch (error) {
-        console.error('Media upload failed:', error);
-        dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: clientMessageId, status: 'failed' }));
-      } finally {
-        setUploadProgress((prev) => {
-          const newProgress = { ...prev };
-          delete newProgress[clientMessageId];
-          return newProgress;
-        });
-      }
-    }
-
-    setFiles([]);
-    setMediaPreview([]);
+    sendMessage(); // Send immediately after selection
   };
 
-  const handleAddContact = async () => {
-    if (!newContactNumber) {
-      setError('Please enter a virtual number');
-      return;
+  const handleTyping = useCallback((e) => {
+    setMessage(e.target.value);
+    if (e.target.value && !typingTimeoutRef.current) {
+      socket.emit('typing', { userId, recipientId: selectedChat });
     }
-    try {
-      const { data } = await axios.post(
-        `${BASE_URL}/auth/add_contact`,
-        { userId, virtualNumber: newContactNumber },
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      setUsers((prev) => [...prev, data]);
-      localStorage.setItem('cachedUsers', JSON.stringify([...users, data]));
-      setNewContactNumber('');
-      setMenuTab('');
-      setShowMenu(false);
-    } catch (err) {
-      setError(`Failed to add contact: ${err.message}`);
-    }
-  };
+    clearTimeout(typingTimeoutRef.current);
+    typingTimeoutRef.current = setTimeout(() => {
+      socket.emit('stopTyping', { userId, recipientId: selectedChat });
+      typingTimeoutRef.current = null;
+    }, 2000);
+  }, [userId, selectedChat, socket]);
 
   useEffect(() => {
-    if (!userId || !token) return;
+    fetchChatList();
+    loadPendingMessages().then(setPendingMessages);
+    const keepAlive = setInterval(() => socket.emit('ping', { userId }), 3000);
+    clearOldMessages(30);
 
-    const initializeChat = async () => {
-      await fetchChatList();
-      const pending = await loadPendingMessages();
-      setPendingMessages(pending);
-      const keepAlive = setInterval(() => socket.emit('ping', { userId }), 3000);
-      clearOldMessages(30).catch((err) => console.error('IndexedDB error:', err));
+    if (selectedChat) fetchMessages(selectedChat);
 
-      if (selectedChat) {
-        await fetchMessages(selectedChat, 0);
-        fetchMessages(selectedChat, 0, true);
-        inputRef.current?.focus();
-      }
+    socket.on('message', async (msg) => {
+      const chatId = msg.senderId === userId ? msg.recipientId : msg.senderId;
+      const privateKeyPem = localStorage.getItem('privateKey');
+      const content = msg.senderId === userId ? msg.plaintextContent || msg.content : msg.contentType === 'text'
+        ? await decryptMessage(msg.content, privateKeyPem)
+        : msg.content;
+      const newMsg = { ...msg, content };
+      dispatch(addMessage({ recipientId: chatId, message: newMsg }));
+      await saveMessages([newMsg]);
+      if (chatId === selectedChat && isAtBottomRef.current) listRef.current?.scrollToRow((chats[chatId] || []).length - 1);
+    });
 
-      const onlineHandler = () => sendPendingMessages();
-      window.addEventListener('online', onlineHandler);
-
-      return () => {
-        clearInterval(keepAlive);
-        window.removeEventListener('online', onlineHandler);
-      };
-    };
-
-    const handleScroll = () => {
-      const { scrollTop, scrollHeight, clientHeight } = chatRef.current;
-      isAtBottomRef.current = scrollHeight - scrollTop - clientHeight < 50;
-      setShowJumpToBottom(!isAtBottomRef.current);
-      if (scrollTop < 50 && hasMore && !loading) setPage((prev) => prev + 1);
-      if (isAtBottomRef.current && selectedChat) {
-        const unread = (chats[selectedChat] || []).filter((m) => m.recipientId === userId && m.status !== 'read');
-        unread.forEach((m) => socket.emit('messageStatus', { messageId: m._id, status: 'read', recipientId: userId }));
-        setUnreadCount(0);
-      }
-    };
-
-    const handleResize = () => {
-      const keyboardHeight = window.innerHeight < window.outerHeight - 100;
-      setIsKeyboardOpen(keyboardHeight);
-    };
-
-    const setupSocketListeners = () => {
-      socket.on('connect', () => {
-        socket.emit('join', userId);
-        sendPendingMessages();
-      });
-
-      socket.on('message', async (msg) => {
-        const chatId = msg.senderId === userId ? msg.recipientId : msg.senderId;
-        if (chats[chatId]?.some((m) => m._id === msg._id || m.clientMessageId === msg.clientMessageId)) return;
-
-        const privateKeyPem = localStorage.getItem('privateKey');
-        const content = msg.senderId === userId ? msg.plaintextContent || msg.content : msg.contentType === 'text'
-          ? await decryptMessage(msg.content, privateKeyPem)
-          : msg.content;
-
-        const newMsg = { ...msg, content };
-        dispatch(addMessage({ recipientId: chatId, message: newMsg }));
-        await saveMessages([newMsg]);
-
-        setUsers((prev) => {
-          const updated = prev.map((u) => u.id === chatId ? { ...u, latestMessage: { ...newMsg, content: msg.senderId === userId ? `You: ${msg.plaintextContent || `[${msg.contentType}]`}` : content }, unreadCount: msg.recipientId === userId && chatId !== selectedChat ? (u.unreadCount || 0) + 1 : u.unreadCount } : u);
-          const sorted = updated.sort((a, b) => new Date(b.latestMessage?.createdAt || 0) - new Date(a.latestMessage?.createdAt || 0));
-          localStorage.setItem('cachedUsers', JSON.stringify(sorted));
-          return sorted;
-        });
-
-        if (chatId === selectedChat && isAtBottomRef.current) {
-          chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
-        } else if (chatId === selectedChat) {
-          setUnreadCount((prev) => prev + 1);
-          if (!firstUnreadMessageId) setFirstUnreadMessageId(msg._id);
+    socket.on('messageStatus', ({ messageId, status }) => {
+      Object.keys(chats).forEach((chatId) => {
+        if (chats[chatId]?.some((m) => m._id === messageId)) {
+          dispatch(updateMessageStatus({ recipientId: chatId, messageId, status }));
         }
       });
+    });
 
-      socket.on('messageStatus', ({ messageId, status }) => {
-        Object.keys(chats).forEach((chatId) => {
-          if (chats[chatId]?.some((m) => m._id === messageId)) {
-            dispatch(updateMessageStatus({ recipientId: chatId, messageId, status }));
-          }
-        });
+    socket.on('typing', ({ userId: senderId }) => setIsTyping((prev) => ({ ...prev, [senderId]: true })));
+    socket.on('stopTyping', ({ userId: senderId }) => setIsTyping((prev) => ({ ...prev, [senderId]: false })));
+
+    socket.on('onlineStatus', ({ userId: contactId, status, lastSeen }) => {
+      setUsers((prev) => {
+        const updated = prev.map((u) => (u.id === contactId ? { ...u, status, lastSeen } : u));
+        localStorage.setItem('cachedUsers', JSON.stringify(updated));
+        return updated;
       });
+      if (contactId === selectedChat) setUserStatus({ status, lastSeen });
+    });
 
-      socket.on('typing', ({ userId: senderId }) => setIsTyping((prev) => ({ ...prev, [senderId]: true })));
-      socket.on('stopTyping', ({ userId: senderId }) => setIsTyping((prev) => ({ ...prev, [senderId]: false })));
-
-      socket.on('onlineStatus', ({ userId: contactId, status, lastSeen }) => {
-        setUsers((prev) => {
-          const updated = prev.map((u) => (u.id === contactId ? { ...u, status, lastSeen } : u));
-          localStorage.setItem('cachedUsers', JSON.stringify(updated));
-          return updated;
-        });
-        if (contactId === selectedChat) setUserStatus({ status, lastSeen });
-      });
+    const handleScroll = () => {
+      isAtBottomRef.current = chatRef.current.scrollTop + chatRef.current.clientHeight >= chatRef.current.scrollHeight - 50;
+      setShowJumpToBottom(!isAtBottomRef.current);
     };
-
-    initializeChat().then(setupSocketListeners);
     chatRef.current?.addEventListener('scroll', handleScroll);
-    window.addEventListener('resize', handleResize);
+
+    window.addEventListener('online', sendPendingMessages);
 
     return () => {
-      socket.off('connect');
+      clearInterval(keepAlive);
       socket.off('message');
       socket.off('messageStatus');
       socket.off('typing');
       socket.off('stopTyping');
       socket.off('onlineStatus');
       chatRef.current?.removeEventListener('scroll', handleScroll);
-      window.removeEventListener('resize', handleResize);
+      window.removeEventListener('online', sendPendingMessages);
     };
-  }, [token, userId, selectedChat, dispatch, fetchChatList, fetchMessages, chats, decryptMessage, socket, sendPendingMessages, hasMore, loading]);
+  }, [selectedChat, fetchChatList, fetchMessages, sendPendingMessages, socket, userId, dispatch, chats, decryptMessage]);
 
-  const sendMessage = async () => {
-    if (!selectedChat || (!message.trim() && !files.length)) return;
-    socket.emit('stopTyping', { userId, recipientId: selectedChat });
-    setTyping(false);
-
-    if (files.length > 0) {
-      for (const [index, file] of files.entries()) {
-        const tempId = `${userId}-${Date.now()}-${index}`;
-        const tempMsg = {
-          _id: tempId,
-          senderId: userId,
-          recipientId: selectedChat,
-          contentType,
-          content: URL.createObjectURL(file),
-          caption: captions[file.name] || '',
-          status: navigator.onLine ? 'sent' : 'pending',
-          replyTo: replyTo?._id,
-          createdAt: new Date(),
-          originalFilename: file.name,
-          clientMessageId: tempId,
-        };
-        dispatch(addMessage({ recipientId: selectedChat, message: tempMsg }));
-        if (isAtBottomRef.current) chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight });
-
-        if (!navigator.onLine) {
-          const newPending = [...pendingMessages, { tempId, recipientId: selectedChat, messageData: tempMsg }];
-          setPendingMessages(newPending);
-          await savePendingMessages(newPending);
-          continue;
-        }
-
-        try {
-          const recipientPublicKey = await getPublicKey(selectedChat);
-          const encryptedContent = await encryptMessage(await new Promise((resolve) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(reader.result);
-            reader.readAsBinaryString(file);
-          }), recipientPublicKey, true);
-
-          const messageData = {
-            senderId: userId,
-            recipientId: selectedChat,
-            contentType,
-            content: encryptedContent,
-            plaintextContent: '',
-            caption: captions[file.name] || undefined,
-            replyTo: replyTo?._id || undefined,
-            originalFilename: file.name,
-            clientMessageId: tempId,
-          };
-          const { data } = await axios.post(`${BASE_URL}/social/message`, messageData, { headers: { Authorization: `Bearer ${token}` } });
-          dispatch(replaceMessage({ recipientId: selectedChat, message: { ...data, content: data.plaintextContent || data.content }, replaceId: tempId }));
-          await saveMessages([{ ...data, content: data.plaintextContent || data.content }]);
-        } catch (err) {
-          console.error('Send error:', err);
-          setError(`Send failed: ${err.message}`);
-        }
-      }
-    } else {
-      const tempId = `${userId}-${Date.now()}`;
-      const tempMsg = {
-        _id: tempId,
-        senderId: userId,
-        recipientId: selectedChat,
-        contentType: 'text',
-        content: message,
-        status: navigator.onLine ? 'sent' : 'pending',
-        replyTo: replyTo?._id,
-        createdAt: new Date(),
-        clientMessageId: tempId,
-      };
-      dispatch(addMessage({ recipientId: selectedChat, message: tempMsg }));
-      if (isAtBottomRef.current) chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight });
-
-      if (!navigator.onLine) {
-        const newPending = [...pendingMessages, { tempId, recipientId: selectedChat, messageData: tempMsg }];
-        setPendingMessages(newPending);
-        await savePendingMessages(newPending);
-      } else {
-        try {
-          const recipientPublicKey = await getPublicKey(selectedChat);
-          const encryptedContent = await encryptMessage(message, recipientPublicKey);
-          const messageData = {
-            senderId: userId,
-            recipientId: selectedChat,
-            contentType: 'text',
-            content: encryptedContent,
-            plaintextContent: message,
-            replyTo: replyTo?._id || undefined,
-            clientMessageId: tempId,
-          };
-          const { data } = await axios.post(`${BASE_URL}/social/message`, messageData, { headers: { Authorization: `Bearer ${token}` } });
-          dispatch(replaceMessage({ recipientId: selectedChat, message: { ...data, content: data.plaintextContent || data.content }, replaceId: tempId }));
-          await saveMessages([{ ...data, content: data.plaintextContent || data.content }]);
-        } catch (err) {
-          console.error('Send error:', err);
-          setError(`Send failed: ${err.message}`);
-        }
-      }
-    }
-
-    setMessage('');
-    setFiles([]);
-    setCaptions({});
-    setContentType('text');
-    setReplyTo(null);
-    setMediaPreview([]);
-    setShowPicker(false);
-  };
-
-  const handleTyping = useCallback((e) => {
-    setMessage(e.target.value);
-    if (!typing && e.target.value) {
-      socket.emit('typing', { userId, recipientId: selectedChat });
-      setTyping(true);
-    }
-    clearTimeout(typingTimeoutRef.current);
-    typingTimeoutRef.current = setTimeout(() => {
-      socket.emit('stopTyping', { userId, recipientId: selectedChat });
-      setTyping(false);
-    }, 2000);
-  }, [typing, userId, selectedChat, socket]);
-
-  const messagesList = useMemo(() => (
-    (chats[selectedChat] || []).map((msg, i) => {
-      const showDateHeader = i === 0 || new Date(msg.createdAt).toDateString() !== new Date(chats[selectedChat][i - 1].createdAt).toDateString();
-      return (
-        <motion.div key={msg._id || msg.clientMessageId} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
-          {showDateHeader && <div className="text-center my-2"><span className="bg-gray-300 dark:bg-gray-700 text-gray-700 dark:text-gray-300 px-2 py-1 rounded-full text-sm">{formatDateHeader(msg.createdAt)}</span></div>}
-          {firstUnreadMessageId === msg._id && unreadCount > 0 && <div className="text-center my-2"><span className="bg-blue-500 text-white px-2 py-1 rounded-full text-sm">{unreadCount} New Messages</span></div>}
-          <div className={`flex ${msg.senderId === userId ? 'justify-end' : 'justify-start'} px-2 py-1`}>
-            <div className={`max-w-[70%] p-2 rounded-lg shadow-sm relative ${msg.senderId === userId ? 'bg-green-500 text-white rounded-br-none' : 'bg-white dark:bg-gray-800 rounded-bl-none'}`}>
-              {msg.replyTo && <div className="text-xs italic mb-1 bg-gray-200 dark:bg-gray-700 p-1 rounded">{chats[selectedChat].find((m) => m._id === msg.replyTo)?.content || 'Original message not found'}</div>}
-              {msg.contentType === 'text' && <p className="text-sm break-words">{msg.content}</p>}
-              {msg.contentType !== 'text' && (
-                <div className="relative">
-                  {msg.status === 'uploading' && (
-                    <div className="absolute inset-0 flex items-center justify-center bg-gray-500 bg-opacity-50 rounded-lg">
-                      <span className="text-white text-sm">{msg.uploadProgress || 0}%</span>
-                    </div>
-                  )}
-                  {msg.contentType === 'image' && <img src={msg.content} alt="Chat" className="max-w-[80%] max-h-64 rounded-lg cursor-pointer lazy-load" onClick={() => setViewMedia({ type: 'image', url: msg.content })} loading="lazy" />}
-                  {msg.contentType === 'video' && <video src={msg.content} className="max-w-[80%] max-h-64 rounded-lg" controls />}
-                  {msg.contentType === 'audio' && <audio src={msg.content} controls className="max-w-[80%]" />}
-                  {msg.contentType === 'document' && <div className="flex items-center"><FaFileAlt className="text-blue-600 mr-2" /><a href={msg.content} download={msg.originalFilename} className="text-blue-600 truncate">{msg.originalFilename || 'file'}</a></div>}
-                </div>
-              )}
-              {msg.caption && <p className="text-xs italic mt-1">{msg.caption}</p>}
-              <div className="flex justify-between mt-1">
-                {msg.senderId === userId && (
-                  <span className="text-xs">{msg.status === 'pending' ? <FaClock /> : msg.status === 'sent' ? '✔' : msg.status === 'delivered' ? '✔✔' : <span className="text-blue-300">✔✔</span>}</span>
-                )}
-                <span className="text-xs text-gray-500">{formatTime(msg.createdAt)}</span>
-              </div>
-            </div>
+  const rowRenderer = ({ index, key, style }) => {
+    const msg = (chats[selectedChat] || [])[index];
+    const showDateHeader = index === 0 || format(parseISO(msg.createdAt), 'MMM d, yyyy') !== format(parseISO((chats[selectedChat] || [])[index - 1]?.createdAt), 'MMM d, yyyy');
+    return (
+      <div key={key} style={style}>
+        {showDateHeader && (
+          <div className="text-center my-2">
+            <span className="bg-gray-300 dark:bg-gray-700 text-gray-700 dark:text-gray-300 px-2 py-1 rounded-full text-sm">
+              {isToday(parseISO(msg.createdAt)) ? 'Today' : isYesterday(parseISO(msg.createdAt)) ? 'Yesterday' : format(parseISO(msg.createdAt), 'MMM d, yyyy')}
+            </span>
           </div>
-        </motion.div>
-      );
-    })
-  ), [chats, selectedChat, userId, unreadCount, firstUnreadMessageId]);
+        )}
+        <div className={`flex ${msg.senderId === userId ? 'justify-end' : 'justify-start'} px-2 py-1`}>
+          <div className={`max-w-[70%] p-2 rounded-lg shadow-sm ${msg.senderId === userId ? 'bg-green-500 text-white rounded-br-none' : 'bg-white dark:bg-gray-800 rounded-bl-none'}`}>
+            {msg.replyTo && (
+              <div className="text-xs italic mb-1 bg-gray-200 dark:bg-gray-700 p-1 rounded">
+                {chats[selectedChat].find((m) => m._id === msg.replyTo)?.content || 'Original message not found'}
+              </div>
+            )}
+            {msg.contentType === 'text' && <p className="text-sm break-words">{msg.content}</p>}
+            {msg.contentType !== 'text' && (
+              <>
+                {msg.contentType === 'image' && <img src={msg.content} alt="Chat" className="max-w-[80%] max-h-64 rounded-lg" />}
+                {msg.contentType === 'video' && <video src={msg.content} className="max-w-[80%] max-h-64 rounded-lg" controls />}
+                {msg.contentType === 'audio' && <audio src={msg.content} controls className="max-w-[80%]" />}
+                {msg.contentType === 'document' && <div className="flex items-center"><FaFileAlt className="text-blue-600 mr-2" /><a href={msg.content} download={msg.originalFilename}>{msg.originalFilename || 'file'}</a></div>}
+              </>
+            )}
+            {msg.caption && <p className="text-xs italic mt-1">{msg.caption}</p>}
+            <span className="text-xs text-gray-500">{format(parseISO(msg.createdAt), 'hh:mm a')}</span>
+          </div>
+        </div>
+      </div>
+    );
+  };
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex h-screen bg-gray-100 dark:bg-gray-900">
@@ -609,23 +394,17 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
           {users.map((user) => (
             <motion.div
               key={user.id}
-              onClick={() => { dispatch(setSelectedChat(user.id)); setNotifications((prev) => ({ ...prev, [user.id]: 0 })); }}
+              onClick={() => dispatch(setSelectedChat(user.id))}
               className={`flex items-center p-3 border-b dark:border-gray-700 cursor-pointer ${selectedChat === user.id ? 'bg-gray-100 dark:bg-gray-700' : ''}`}
               whileHover={{ backgroundColor: '#f0f0f0' }}
             >
-              <div className="relative">
-                <img src={user.photo || 'https://placehold.co/40x40'} alt="Profile" className="w-12 h-12 rounded-full mr-3" />
-                {user.status === 'online' && <span className="absolute bottom-0 right-3 w-3 h-3 bg-green-500 rounded-full border-2 border-white dark:border-gray-800"></span>}
-              </div>
+              <img src={user.photo || 'https://placehold.co/40x40'} alt="Profile" className="w-12 h-12 rounded-full mr-3" />
               <div className="flex-1">
                 <div className="flex justify-between">
                   <span className="font-semibold dark:text-gray-100">{user.username || user.virtualNumber}</span>
-                  {user.latestMessage && <span className="text-xs text-gray-500 dark:text-gray-400">{formatChatListDate(user.latestMessage.createdAt)}</span>}
+                  {user.latestMessage && <span className="text-xs text-gray-500 dark:text-gray-400">{format(parseISO(user.latestMessage.createdAt), 'hh:mm a')}</span>}
                 </div>
-                <div className="flex justify-between">
-                  <span className="text-sm text-gray-600 dark:text-gray-300 truncate w-3/4">{user.latestMessage?.content || 'No messages'}</span>
-                  {user.unreadCount > 0 && <span className="bg-green-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">{user.unreadCount}</span>}
-                </div>
+                <span className="text-sm text-gray-600 dark:text-gray-300 truncate w-3/4">{user.latestMessage?.content || 'No messages'}</span>
               </div>
             </motion.div>
           ))}
@@ -640,21 +419,28 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
                 <FaArrowLeft onClick={() => dispatch(setSelectedChat(null))} className="text-xl text-primary dark:text-gray-100 cursor-pointer mr-3" />
                 <img src={users.find((u) => u.id === selectedChat)?.photo || 'https://placehold.co/40x40'} alt="Profile" className="w-10 h-10 rounded-full mr-2" />
                 <div>
-                  <span className="font-semibold dark:text-gray-100">{users.find((u) => u.id === selectedChat)?.username || users.find((u) => u.id === selectedChat)?.virtualNumber || 'Unknown'}</span>
-                  <div className="text-sm text-gray-500 dark:text-gray-400">{isTyping[selectedChat] ? 'Typing...' : userStatus.status === 'online' ? 'Online' : formatLastSeen(userStatus.lastSeen)}</div>
+                  <span className="font-semibold dark:text-gray-100">{users.find((u) => u.id === selectedChat)?.username || 'Unknown'}</span>
+                  <div className="text-sm text-gray-500 dark:text-gray-400">{isTyping[selectedChat] ? 'Typing...' : userStatus.status === 'online' ? 'Online' : userStatus.lastSeen ? `Last seen ${format(parseISO(userStatus.lastSeen), 'MMM d, yyyy hh:mm a')}` : 'Offline'}</div>
                 </div>
               </div>
             </div>
             <div ref={chatRef} className="flex-1 overflow-y-auto bg-gray-100 dark:bg-gray-900 p-2 pt-16" style={{ paddingBottom: '80px' }}>
-              {messagesList}
+              <List
+                ref={listRef}
+                width={window.innerWidth > 640 ? window.innerWidth * 0.6667 : window.innerWidth}
+                height={window.innerHeight - 180}
+                rowCount={(chats[selectedChat] || []).length}
+                rowHeight={60}
+                rowRenderer={rowRenderer}
+                className="chat-messages"
+              />
               {showJumpToBottom && (
-                <button onClick={() => chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' })} className="fixed bottom-20 right-4 bg-primary text-white p-2 rounded-full">
+                <button onClick={() => listRef.current?.scrollToRow((chats[selectedChat] || []).length - 1)} className="fixed bottom-20 right-4 bg-primary text-white p-2 rounded-full">
                   <FaArrowDown />
                 </button>
               )}
             </div>
-
-            <motion.div className={`bg-white dark:bg-gray-800 p-2 border-t dark:border-gray-700 fixed md:left-[33.33%] md:w-2/3 left-0 right-0 bottom-0 z-30 chat-input ${isKeyboardOpen ? 'keyboard-open' : ''}`}>
+            <motion.div className="bg-white dark:bg-gray-800 p-2 border-t dark:border-gray-700 fixed md:left-[33.33%] md:w-2/3 left-0 right-0 bottom-0 z-30 chat-input">
               {replyTo && (
                 <div className="bg-gray-100 dark:bg-gray-700 p-2 mb-2 rounded relative">
                   <p className="text-sm">Replying to: {replyTo.content}</p>
@@ -663,27 +449,22 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
               )}
               {mediaPreview.length > 0 && (
                 <div className="bg-gray-100 dark:bg-gray-700 p-2 mb-2 rounded relative">
-                  <div className="grid grid-cols-2 gap-2">
-                    {mediaPreview.map((preview, index) => (
-                      <div key={index} className="relative">
-                        {preview.type === 'image' && <img src={preview.url} alt="Preview" className="max-w-full max-h-32 rounded-lg" />}
-                        {preview.type === 'video' && <video src={preview.url} className="max-w-full max-h-32 rounded-lg" controls />}
-                        {preview.type === 'audio' && <audio src={preview.url} controls />}
-                        {preview.type === 'document' && <div className="flex"><FaFileAlt className="text-blue-600 mr-2" /><span className="text-blue-600 truncate">{preview.originalFile.name}</span></div>}
-                        <input
-                          type="text"
-                          value={captions[preview.originalFile.name] || ''}
-                          onChange={(e) => setCaptions((prev) => ({ ...prev, [preview.originalFile.name]: e.target.value }))}
-                          placeholder="Add a caption..."
-                          className="w-full p-1 mt-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600"
-                        />
-                      </div>
-                    ))}
-                  </div>
-                  <div className="flex justify-end mt-2">
-                    <button onClick={() => { setMediaPreview([]); setFiles([]); setCaptions({}); }} className="bg-red-500 text-white p-1 rounded-full mr-2"><FaTrash /></button>
-                    <button onClick={sendMessage} className="bg-green-500 text-white p-1 rounded-full"><FaPaperPlane /></button>
-                  </div>
+                  {mediaPreview.map((preview, index) => (
+                    <div key={index} className="relative">
+                      {preview.type === 'image' && <img src={preview.url} alt="Preview" className="max-w-full max-h-32 rounded-lg" />}
+                      {preview.type === 'video' && <video src={preview.url} className="max-w-full max-h-32 rounded-lg" controls />}
+                      {preview.type === 'audio' && <audio src={preview.url} controls />}
+                      {preview.type === 'document' && <div className="flex"><FaFileAlt className="text-blue-600 mr-2" /><span className="text-blue-600 truncate">{preview.originalFile.name}</span></div>}
+                      <input
+                        type="text"
+                        value={captions[preview.originalFile.name] || ''}
+                        onChange={(e) => setCaptions((prev) => ({ ...prev, [preview.originalFile.name]: e.target.value }))}
+                        placeholder="Add a caption..."
+                        className="w-full p-1 mt-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600"
+                      />
+                    </div>
+                  ))}
+                  <button onClick={() => { setMediaPreview([]); setFiles([]); setCaptions({}); }} className="absolute top-2 right-2 bg-red-500 text-white p-1 rounded-full"><FaTrash /></button>
                 </div>
               )}
               <div className="flex items-center">
@@ -711,13 +492,6 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
                         <span className="text-xs">Audio</span>
                         <input type="file" accept="audio/*" onChange={(e) => handleFileChange(e, 'audio')} className="hidden" />
                       </label>
-                      <label className="flex flex-col items-center cursor-pointer">
-                        <FaFileAlt className="text-red-500" />
-                        <span className="text-xs">Document</span>
-                        <input type="file" accept=".pdf,.doc,.docx" multiple onChange={(e) => handleFileChange(e, 'document')} className="hidden" />
-                      </label>
-                      <div className="flex flex-col items-center cursor-pointer"><FaAddressCard className="text-yellow-500" /><span className="text-xs">Contact</span></div>
-                      <div className="flex flex-col items-center cursor-pointer"><FaMapMarkerAlt className="text-orange-500" /><span className="text-xs">Location</span></div>
                     </motion.div>
                   )}
                 </AnimatePresence>
@@ -728,8 +502,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
                   onChange={handleTyping}
                   onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
                   placeholder="Type a message..."
-                  className={`flex-1 p-2 border rounded-lg mr-2 dark:bg-gray-700 dark:text-white dark:border-gray-600 ${isKeyboardOpen ? 'keyboard-open' : ''}`}
-                  disabled={loading}
+                  className="flex-1 p-2 border rounded-lg mr-2 dark:bg-gray-700 dark:text-white dark:border-gray-600"
                 />
                 <FaPaperPlane onClick={sendMessage} className="text-xl text-primary dark:text-gray-100 cursor-pointer" />
               </div>
@@ -766,8 +539,9 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket }) => {
                   placeholder="Enter virtual number (e.g., +1234567890)"
                   className="w-full p-2 mb-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600"
                 />
-                <button onClick={handleAddContact} className="w-full bg-green-500 text-white p-2 rounded-lg">Add Contact</button>
-              </div>
+                  <button onClick={handleAddContact} className="w-full bg-green-500 text-white p-2 rounded-lg">Add Contact</button>
+         
+               </div>
             )}
           </motion.div>
         </div>

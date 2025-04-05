@@ -3,7 +3,6 @@ const router = express.Router();
 const { authMiddleware } = require('./auth');
 const Message = require('../models/Message');
 const User = require('../models/User');
-const redis = require('../redis');
 const winston = require('winston');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
@@ -18,15 +17,20 @@ const logger = winston.createLogger({
   ],
 });
 
-let cloudinaryConfigured = false;
 const configureCloudinary = () => {
-  if (!cloudinaryConfigured) {
+  try {
+    if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) {
+      throw new Error('Cloudinary environment variables are missing');
+    }
     cloudinary.config({
       cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
       api_key: process.env.CLOUDINARY_API_KEY,
       api_secret: process.env.CLOUDINARY_API_SECRET,
     });
-    cloudinaryConfigured = true;
+    logger.info('Cloudinary configured');
+  } catch (error) {
+    logger.error('Cloudinary configuration failed', { error: error.message });
+    throw error;
   }
 };
 
@@ -35,61 +39,86 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 
 router.get('/chat-list', authMiddleware, async (req, res) => {
   try {
     const { userId } = req.query;
+    if (!userId) return res.status(400).json({ error: 'userId is required' });
+
     const user = await User.findById(userId).populate('contacts', 'username virtualNumber photo status lastSeen');
     if (!user) return res.status(404).json({ error: 'User not found' });
 
     const chatList = await Promise.all(user.contacts.map(async (contact) => {
-      const latestMessage = await Message.findOne({ $or: [{ senderId: userId, recipientId: contact._id }, { senderId: contact._id, recipientId: userId }] })
-        .sort({ createdAt: -1 })
-        .select('content contentType plaintextContent senderId recipientId createdAt');
-      const unreadCount = await Message.countDocuments({ senderId: contact._id, recipientId: userId, status: { $ne: 'read' } });
-      return { id: contact._id, username: contact.username, virtualNumber: contact.virtualNumber, photo: contact.photo, status: contact.status, lastSeen: contact.lastSeen, latestMessage, unreadCount };
+      const latestMessage = await Message.findOne({
+        $or: [
+          { senderId: userId, recipientId: contact._id },
+          { senderId: contact._id, recipientId: userId },
+        ],
+      }).sort({ createdAt: -1 }).lean();
+
+      return {
+        id: contact._id.toString(),
+        username: contact.username,
+        virtualNumber: contact.virtualNumber,
+        photo: contact.photo,
+        status: contact.status || 'offline',
+        lastSeen: contact.lastSeen,
+        latestMessage: latestMessage ? { ...latestMessage, senderId: latestMessage.senderId.toString(), recipientId: latestMessage.recipientId.toString() } : null,
+        unreadCount: await Message.countDocuments({ senderId: contact._id, recipientId: userId, status: { $ne: 'read' } }),
+      };
     }));
 
-    res.json(chatList);
+    res.json(chatList.sort((a, b) => new Date(b.latestMessage?.createdAt || 0) - new Date(a.latestMessage?.createdAt || 0)));
   } catch (error) {
-    logger.error('Chat list error:', error);
+    logger.error('Chat list fetch failed', { error: error.message, stack: error.stack });
     res.status(500).json({ error: 'Failed to fetch chat list' });
   }
 });
 
 router.get('/messages', authMiddleware, async (req, res) => {
   try {
-    const { userId, recipientId, limit = 50, skip = 0, since } = req.query;
-    const query = {
-      $or: [{ senderId: userId, recipientId }, { senderId: recipientId, recipientId: userId }],
-      ...(since ? { createdAt: { $gt: new Date(since) } } : {}),
-    };
-    const messages = await Message.find(query)
-      .sort({ createdAt: -1 })
-      .skip(parseInt(skip))
-      .limit(parseInt(limit) + 1);
-    const hasMore = messages.length > limit;
-    res.json({ messages: messages.slice(0, limit).reverse(), hasMore });
+    const { userId, recipientId, limit = 50, skip = 0 } = req.query;
+    if (!userId || !recipientId) return res.status(400).json({ error: 'userId and recipientId are required' });
+
+    const messages = await Message.find({
+      $or: [
+        { senderId: userId, recipientId },
+        { senderId: recipientId, recipientId: userId },
+      ],
+    })
+      .sort({ createdAt: 1 })
+      .skip(Number(skip))
+      .limit(Number(limit))
+      .lean();
+
+    res.json({ messages, hasMore: messages.length === Number(limit) });
   } catch (error) {
-    logger.error('Fetch messages error:', error);
+    logger.error('Messages fetch failed', { error: error.message, stack: error.stack });
     res.status(500).json({ error: 'Failed to fetch messages' });
   }
 });
 
 router.post('/message', authMiddleware, async (req, res) => {
   try {
-    const { senderId, recipientId, contentType, content, plaintextContent, caption, replyTo, originalFilename, clientMessageId } = req.body;
-    if (senderId !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
+    const {
+      senderId, recipientId, content, contentType, plaintextContent, caption, replyTo, originalFilename, clientMessageId,
+      senderVirtualNumber, senderUsername, senderPhoto,
+    } = req.body;
+
+    if (!senderId || !recipientId || !content || !contentType) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
 
     const message = new Message({
       senderId,
       recipientId,
-      contentType,
       content,
-      plaintextContent,
-      caption,
-      replyTo,
-      originalFilename,
-      clientMessageId,
-      senderVirtualNumber: req.user.virtualNumber,
-      senderUsername: req.user.username,
-      senderPhoto: req.user.photo,
+      contentType,
+      plaintextContent: plaintextContent || '',
+      status: 'sent',
+      caption: caption || '',
+      replyTo: replyTo || null,
+      originalFilename: originalFilename || null,
+      clientMessageId: clientMessageId || null,
+      senderVirtualNumber: senderVirtualNumber || '',
+      senderUsername: senderUsername || '',
+      senderPhoto: senderPhoto || '',
     });
 
     await message.save();
@@ -97,42 +126,41 @@ router.post('/message', authMiddleware, async (req, res) => {
     io.to(recipientId).emit('message', message);
     io.to(senderId).emit('message', message);
 
-    await redis.lpush(`undelivered:${recipientId}`, JSON.stringify(message));
-    res.json(message);
+    res.status(201).json({ message });
   } catch (error) {
-    logger.error('Send message error:', error);
-    res.status(500).json({ error: 'Failed to send message' });
+    logger.error('Message send failed', { error: error.message, stack: error.stack, body: req.body });
+    res.status(500).json({ error: 'Failed to send message', details: error.message });
   }
 });
 
-router.post('/upload', authMiddleware, upload.single('file'), async (req, res) => {
-  configureCloudinary();
+router.post('/upload', upload.single('file'), authMiddleware, async (req, res) => {
   try {
+    configureCloudinary();
     const { userId, recipientId, clientMessageId } = req.body;
-    if (userId !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
-    if (!req.file) return res.status(400).json({ error: 'No file provided' });
+    const file = req.file;
+
+    if (!userId || !recipientId || !file) return res.status(400).json({ error: 'Missing required fields' });
 
     const result = await new Promise((resolve, reject) => {
-      cloudinary.uploader.upload_stream(
-        { resource_type: 'auto', folder: 'gapp_media' },
+      const stream = cloudinary.uploader.upload_stream(
+        { resource_type: file.mimetype.startsWith('video') ? 'video' : file.mimetype.startsWith('audio') ? 'auto' : 'image' },
         (error, result) => (error ? reject(error) : resolve(result))
-      ).end(req.file.buffer);
+      );
+      stream.end(file.buffer);
     });
 
-    const contentType = req.file.mimetype.startsWith('image') ? 'image' :
-                        req.file.mimetype.startsWith('video') ? 'video' :
-                        req.file.mimetype.startsWith('audio') ? 'audio' : 'document';
+    const contentType = file.mimetype.startsWith('image') ? 'image' :
+                        file.mimetype.startsWith('video') ? 'video' :
+                        file.mimetype.startsWith('audio') ? 'audio' : 'document';
 
     const message = new Message({
       senderId: userId,
       recipientId,
-      contentType,
       content: result.secure_url,
-      originalFilename: req.file.originalname,
-      clientMessageId,
-      senderVirtualNumber: req.user.virtualNumber,
-      senderUsername: req.user.username,
-      senderPhoto: req.user.photo,
+      contentType,
+      status: 'sent',
+      originalFilename: file.originalname,
+      clientMessageId: clientMessageId || null,
     });
 
     await message.save();
@@ -140,104 +168,11 @@ router.post('/upload', authMiddleware, upload.single('file'), async (req, res) =
     io.to(recipientId).emit('message', message);
     io.to(userId).emit('message', message);
 
-    res.json({ message });
+    res.status(201).json({ message });
   } catch (error) {
-    logger.error('Media upload error:', error);
-    res.status(500).json({ error: 'Failed to upload media' });
+    logger.error('File upload failed', { error: error.message, stack: error.stack });
+    res.status(500).json({ error: 'Failed to upload file', details: error.message });
   }
 });
 
-router.post('/message/status', authMiddleware, async (req, res) => {
-  try {
-    const { messageId, status } = req.body;
-    const message = await Message.findById(messageId);
-    if (!message) return res.status(404).json({ error: 'Message not found' });
-    if (message.recipientId !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
-
-    message.status = status;
-    await message.save();
-
-    const io = req.app.get('io');
-    io.to(message.senderId).emit('messageStatus', { messageId, status });
-    res.json({ messageId, status });
-  } catch (error) {
-    logger.error('Update message status error:', error);
-    res.status(500).json({ error: 'Failed to update status' });
-  }
-});
-
-// Add Contact Endpoint
-router.post('/add_contact', authMiddleware, async (req, res) => {
-  try {
-    const { userId, virtualNumber } = req.body;
-    if (userId !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
-
-    const contact = await User.findOne({ virtualNumber });
-    if (!contact) return res.status(404).json({ error: 'User not found' });
-    if (contact._id.toString() === userId) return res.status(400).json({ error: 'Cannot add yourself' });
-
-    const user = await User.findById(userId);
-    if (!user.contacts.includes(contact._id)) {
-      user.contacts.push(contact._id);
-      await user.save();
-    }
-
-    const contactData = {
-      id: contact._id,
-      username: contact.username,
-      virtualNumber: contact.virtualNumber,
-      photo: contact.photo,
-      status: contact.status,
-      lastSeen: contact.lastSeen,
-    };
-
-    const io = req.app.get('io');
-    io.to(userId).emit('newContact', contactData);
-
-    res.json(contactData);
-  } catch (error) {
-    logger.error('Add contact error:', error);
-    res.status(500).json({ error: 'Failed to add contact' });
-  }
-});
-
-module.exports = (io) => {
-  io.on('connection', (socket) => {
-    socket.on('join', async (userId) => {
-      socket.join(userId);
-      await User.findByIdAndUpdate(userId, { status: 'online', lastSeen: null });
-      io.emit('onlineStatus', { userId, status: 'online', lastSeen: null });
-    });
-
-    socket.on('typing', ({ userId, recipientId }) => {
-      io.to(recipientId).emit('typing', { userId });
-    });
-
-    socket.on('stopTyping', ({ userId, recipientId }) => {
-      io.to(recipientId).emit('stopTyping', { userId });
-    });
-
-    socket.on('messageStatus', async ({ messageId, status, recipientId }) => {
-      const message = await Message.findById(messageId);
-      if (message && message.recipientId === recipientId) {
-        message.status = status;
-        await message.save();
-        io.to(message.senderId).emit('messageStatus', { messageId, status });
-      }
-    });
-
-    socket.on('ping', ({ userId }) => {
-      // Handle keep-alive ping if needed
-    });
-
-    socket.on('disconnect', async () => {
-      const userId = Array.from(socket.rooms)[1];
-      if (userId) {
-        await User.findByIdAndUpdate(userId, { status: 'offline', lastSeen: new Date() });
-        io.emit('onlineStatus', { userId, status: 'offline', lastSeen: new Date() });
-      }
-    });
-  });
-
-  return router;
-};
+module.exports = router;

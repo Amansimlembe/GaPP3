@@ -74,14 +74,12 @@
       document.addEventListener('DOMContentLoaded', () => {
         const root = document.getElementById('root');
         const loader = document.querySelector('.loader-container');
-        const checkRoot = () => {
+        const checkRoot = setInterval(() => {
           if (root?.children.length > 0) {
             loader.style.display = 'none';
-          } else {
-            setTimeout(checkRoot, 100);
+            clearInterval(checkRoot);
           }
-        };
-        checkRoot();
+        }, 100);
       });
     </script>
   </body>

@@ -17,7 +17,10 @@
     "react-scripts": "5.0.1",
     "react-swipeable": "^7.0.2",
     "socket.io-client": "^4.8.1",
-    "react-router-dom": "^6.22.3"
+    "react-router-dom": "^6.22.3",
+    "jsencrypt": "^3.3.2",
+    "date-fns": "^3.6.0",
+    "react-virtualized": "^9.22.5"
   },
   "scripts": {
     "start": "react-scripts start",

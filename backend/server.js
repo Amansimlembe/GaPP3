@@ -3,7 +3,6 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
-const path = require('path');
 const mongoose = require('mongoose');
 const redis = require('./redis');
 const winston = require('winston');
@@ -28,13 +27,13 @@ const logger = winston.createLogger({
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: process.env.FRONTEND_URL || 'http://localhost:3000', // Tighten for production
+    origin: process.env.FRONTEND_URL || 'http://localhost:3000',
     methods: ['GET', 'POST'],
     credentials: true,
   },
-  pingTimeout: 120000, // Increased for stability
-  pingInterval: 30000, // Matches client keep-alive
-  transports: ['websocket', 'polling'], // Explicit transport options
+  pingTimeout: 120000,
+  pingInterval: 30000,
+  transports: ['websocket', 'polling'],
 });
 app.set('io', io);
 
@@ -44,16 +43,10 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '50mb' }));
 
-const buildPath = path.join(__dirname, '../frontend/build');
-logger.info(`Serving static files from: ${buildPath}`);
-app.use(express.static(buildPath));
-
-// Health check endpoint
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'OK', uptime: process.uptime(), mongodb: mongoose.connection.readyState });
 });
 
-// JSON parsing error handler
 app.use((err, req, res, next) => {
   if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
     logger.error('Invalid JSON payload', { method: req.method, url: req.url, body: req.body, error: err.message });
@@ -64,6 +57,7 @@ app.use((err, req, res, next) => {
 
 const connectDB = async () => {
   try {
+    if (!process.env.MONGO_URI) throw new Error('MONGO_URI is not defined');
     await mongoose.connect(process.env.MONGO_URI, {
       useNewUrlParser: true,
       useUnifiedTopology: true,
@@ -76,49 +70,53 @@ const connectDB = async () => {
 };
 connectDB();
 
-// Routes
 app.use('/auth', authRoutes);
-app.use('/jobseeker', authMiddleware, jobseekerRoutes); // Protect routes
+app.use('/jobseeker', authMiddleware, jobseekerRoutes);
 app.use('/employer', authMiddleware, employerRoutes);
-app.use('/social', socialRoutes(io));
+app.use('/social', socialRoutes);
 
-// Fallback for client-side routing (only serve index.html if not authenticated)
-app.get('*', (req, res, next) => {
-  if (req.path.startsWith('/auth') || req.path === '/health') return next();
-  
-  const token = req.headers.authorization?.split('Bearer ')[1];
-  if (token) {
-    // If authenticated, let client-side routing handle it (do not serve index.html)
-    return res.status(404).json({ error: 'Not Found - Use client-side routing' });
-  }
-
-  const indexPath = path.join(buildPath, 'index.html');
-  res.sendFile(indexPath, (err) => {
-    if (err) {
-      logger.error('Failed to serve index.html', { path: indexPath, error: err.message });
-      res.status(500).send('Server Error - Static files may not be built correctly');
-    }
-  });
-});
-
-// Global error handler
 app.use((err, req, res, next) => {
   logger.error('Unhandled error', { method: req.method, url: req.url, error: err.message, stack: err.stack });
   res.status(500).json({ error: 'Internal Server Error', message: err.message });
 });
 
-// Socket.IO Setup
 io.on('connection', (socket) => {
   logger.info('User connected', { socketId: socket.id });
 
   socket.on('join', (userId) => {
+    if (!userId) return logger.warn('Join attempted without userId', { socketId: socket.id });
     socket.join(userId);
     logger.info('User joined room', { userId, socketId: socket.id });
+    io.to(userId).emit('onlineStatus', { userId, status: 'online', lastSeen: null });
   });
 
   socket.on('ping', ({ userId }) => {
     logger.debug('Ping received', { userId, socketId: socket.id });
-    socket.emit('pong', { userId }); // Optional response
+    socket.emit('pong', { userId });
+  });
+
+  socket.on('message', (msg) => {
+    logger.info('Message received', { msg, socketId: socket.id });
+    io.to(msg.recipientId).emit('message', msg);
+    io.to(msg.senderId).emit('message', msg);
+  });
+
+  socket.on('typing', ({ userId, recipientId }) => {
+    io.to(recipientId).emit('typing', { userId });
+  });
+
+  socket.on('stopTyping', ({ userId, recipientId }) => {
+    io.to(recipientId).emit('stopTyping', { userId });
+  });
+
+  socket.on('messageStatus', ({ messageId, status, recipientId }) => {
+    io.to(recipientId).emit('messageStatus', { messageId, status });
+  });
+
+  socket.on('leave', (userId) => {
+    socket.leave(userId);
+    logger.info('User left room', { userId, socketId: socket.id });
+    io.to(userId).emit('onlineStatus', { userId, status: 'offline', lastSeen: new Date().toISOString() });
   });
 
   socket.on('disconnect', (reason) => {
@@ -127,14 +125,6 @@ io.on('connection', (socket) => {
 
   socket.on('connect_error', (error) => {
     logger.error('Socket connection error', { socketId: socket.id, error: error.message });
-  });
-
-  socket.on('reconnect_attempt', (attempt) => {
-    logger.info('Reconnection attempt', { socketId: socket.id, attempt });
-  });
-
-  socket.on('reconnect_failed', () => {
-    logger.error('Reconnection failed', { socketId: socket.id });
   });
 });
 
