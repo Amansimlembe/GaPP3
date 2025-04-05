@@ -164,10 +164,10 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
     res.status(201).json({
       token,
       userId: user._id,
-      virtualNumber,
-      username,
-      photo: user.photo,
       role: user.role,
+      photo: user.photo,
+      virtualNumber: user.virtualNumber,
+      username: user.username,
       privateKey: privateKeyPem,
     });
   } catch (error) {
@@ -200,9 +200,9 @@ router.post('/login', authLimiter, async (req, res) => {
       token,
       userId: user._id,
       role: user.role,
-      username: user.username,
-      virtualNumber: user.virtualNumber || '',
       photo: user.photo || 'https://placehold.co/40x40',
+      virtualNumber: user.virtualNumber || '',
+      username: user.username,
       privateKey: user.privateKey,
     });
   } catch (error) {
@@ -224,6 +224,8 @@ router.post('/update_country', authMiddleware, async (req, res) => {
     if (userId !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
 
     const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
     if (user.country !== country) {
       user.country = country;
       user.virtualNumber = await generateVirtualNumber(country, user._id.toString());
@@ -233,7 +235,7 @@ router.post('/update_country', authMiddleware, async (req, res) => {
     logger.info('Country updated', { userId, country });
     res.json({ virtualNumber: user.virtualNumber });
   } catch (error) {
-    logger.error('Update country error:', { error: error.message });
+    logger.error('Update country error:', { error: error.message, userId: req.body.userId });
     res.status(500).json({ error: error.message || 'Failed to update country' });
   }
 });
@@ -245,6 +247,8 @@ router.post('/update_photo', authMiddleware, upload.single('photo'), async (req,
     if (!req.file) return res.status(400).json({ error: 'No photo provided' });
 
     const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
     const result = await new Promise((resolve, reject) => {
       cloudinary.uploader.upload_stream(
         { resource_type: 'image', folder: 'gapp_profile_photos' },
@@ -258,7 +262,7 @@ router.post('/update_photo', authMiddleware, upload.single('photo'), async (req,
     logger.info('Photo updated', { userId });
     res.json({ photo: user.photo });
   } catch (error) {
-    logger.error('Update photo error:', { error: error.message });
+    logger.error('Update photo error:', { error: error.message, userId: req.body.userId });
     res.status(500).json({ error: error.message || 'Failed to update photo' });
   }
 });
@@ -276,6 +280,8 @@ router.post('/update_username', authMiddleware, async (req, res) => {
     if (userId !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
 
     const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
     const existingUser = await User.findOne({ username });
     if (existingUser && existingUser._id.toString() !== userId) return res.status(400).json({ error: 'Username already taken' });
 
@@ -285,7 +291,7 @@ router.post('/update_username', authMiddleware, async (req, res) => {
     logger.info('Username updated', { userId, username });
     res.json({ username: user.username });
   } catch (error) {
-    logger.error('Update username error:', { error: error.message });
+    logger.error('Update username error:', { error: error.message, userId: req.body.userId });
     res.status(500).json({ error: error.message || 'Failed to update username' });
   }
 });
@@ -328,7 +334,7 @@ router.get('/public_key/:userId', authMiddleware, async (req, res) => {
     await redis.setex(cacheKey, 3600, user.publicKey);
     res.json({ publicKey: user.publicKey });
   } catch (error) {
-    logger.error('Fetch public key error:', { error: error.message });
+    logger.error('Fetch public key error:', { error: error.message, userId: req.params.userId });
     res.status(500).json({ error: error.message || 'Failed to fetch public key' });
   }
 });
@@ -346,7 +352,8 @@ router.post('/refresh', authMiddleware, async (req, res) => {
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
-    await redis.setex(`token:${user._id}`, 24 * 60 * 60, newToken); // Invalidate old token by overwriting
+    await redis.setex(`token:${user._id}`, 24 * 60 * 60, newToken);
+    await redis.del(`session:${req.headers.authorization.split(' ')[1]}`); // Clear old session
 
     logger.info('Token refreshed', { userId: user._id });
     res.json({
@@ -354,13 +361,53 @@ router.post('/refresh', authMiddleware, async (req, res) => {
       userId: user._id,
       role: user.role,
       photo: user.photo || 'https://placehold.co/40x40',
-      virtualNumber: user.virtualNumber,
+      virtualNumber: user.virtualNumber || '',
       username: user.username,
       privateKey: user.privateKey,
     });
   } catch (error) {
     logger.error('Refresh token error:', { error: error.message, userId: req.user?.id });
     res.status(500).json({ error: error.message || 'Failed to refresh token' });
+  }
+});
+
+router.post('/add_contact', authMiddleware, async (req, res) => {
+  try {
+    const addContactSchema = Joi.object({
+      userId: Joi.string().required(),
+      virtualNumber: Joi.string().required(),
+    });
+    const { error } = addContactSchema.validate(req.body);
+    if (error) return res.status(400).json({ error: error.details[0].message });
+
+    const { userId, virtualNumber } = req.body;
+    if (userId !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
+
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const contact = await User.findOne({ virtualNumber });
+    if (!contact) return res.status(404).json({ error: 'Contact not found' });
+    if (user.contacts.includes(contact._id)) return res.status(400).json({ error: 'Contact already added' });
+
+    user.contacts.push(contact._id);
+    await user.save();
+
+    const contactData = {
+      id: contact._id,
+      username: contact.username,
+      virtualNumber: contact.virtualNumber,
+      photo: contact.photo || 'https://placehold.co/40x40',
+      status: contact.status,
+      lastSeen: contact.lastSeen,
+    };
+
+    await redis.del(`contacts:${userId}`); // Invalidate cache
+    logger.info('Contact added', { userId, contactId: contact._id });
+    res.json(contactData);
+  } catch (error) {
+    logger.error('Add contact error:', { error: error.message, userId: req.body.userId });
+    res.status(500).json({ error: error.message || 'Failed to add contact' });
   }
 });
 
