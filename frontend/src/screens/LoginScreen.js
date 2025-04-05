@@ -108,7 +108,11 @@ const LoginScreen = ({ setAuth }) => {
       setAuth(response.token, response.userId, response.role, response.photo, response.virtualNumber, response.username);
     } catch (error) {
       console.error(`${isLogin ? 'Login' : 'Register'} error:`, error.response?.data || error.message);
-      setError(error.response?.data?.error || error.message || `${isLogin ? 'Login' : 'Registration'} failed`);
+      setError(
+        error.response?.status === 429
+          ? 'Too many requests, please try again later'
+          : error.response?.data?.error || error.message || `${isLogin ? 'Login' : 'Registration'} failed`
+      );
     } finally {
       setLoading(false);
     }

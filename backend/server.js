@@ -47,6 +47,11 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'OK', uptime: process.uptime(), mongodb: mongoose.connection.readyState });
 });
 
+app.use((req, res, next) => {
+  logger.info('Incoming request', { method: req.method, url: req.url, ip: req.ip });
+  next();
+});
+
 app.use((err, req, res, next) => {
   if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
     logger.error('Invalid JSON payload', { method: req.method, url: req.url, body: req.body, error: err.message });
@@ -74,6 +79,12 @@ app.use('/auth', authRoutes);
 app.use('/jobseeker', authMiddleware, jobseekerRoutes);
 app.use('/employer', authMiddleware, employerRoutes);
 app.use('/social', socialRoutes);
+
+// Handle 404s
+app.use((req, res) => {
+  logger.warn('Route not found', { method: req.method, url: req.url });
+  res.status(404).json({ error: 'Route not found' });
+});
 
 app.use((err, req, res, next) => {
   logger.error('Unhandled error', { method: req.method, url: req.url, error: err.message, stack: err.stack });
@@ -111,6 +122,11 @@ io.on('connection', (socket) => {
 
   socket.on('messageStatus', ({ messageId, status, recipientId }) => {
     io.to(recipientId).emit('messageStatus', { messageId, status });
+  });
+
+  socket.on('newContact', ({ userId, contactData }) => {
+    logger.info('New contact added', { userId, contactId: contactData.id });
+    io.to(userId).emit('newContact', contactData);
   });
 
   socket.on('leave', (userId) => {
