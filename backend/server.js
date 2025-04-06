@@ -44,18 +44,37 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '50mb' }));
 
-// Serve static files from frontend/public
-app.use(express.static(path.join(__dirname, '../frontend/public')));
+// Serve static files from frontend/build (for production) or frontend/public (for dev)
+const staticPath = process.env.NODE_ENV === 'production'
+  ? path.join(__dirname, '../frontend/build')
+  : path.join(__dirname, '../frontend/public');
 
+app.use(express.static(staticPath, {
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('.json')) {
+      res.setHeader('Content-Type', 'application/json');
+    } else if (filePath.endsWith('.ico')) {
+      res.setHeader('Content-Type', 'image/x-icon');
+    } else if (filePath.endsWith('.jpg') || filePath.endsWith('.jpeg')) {
+      res.setHeader('Content-Type', 'image/jpeg');
+    } else if (filePath.endsWith('.png')) {
+      res.setHeader('Content-Type', 'image/png');
+    }
+  },
+}));
+
+// Health check endpoint
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'OK', uptime: process.uptime(), mongodb: mongoose.connection.readyState });
 });
 
+// Request logging middleware
 app.use((req, res, next) => {
   logger.info('Incoming request', { method: req.method, url: req.url, ip: req.ip });
   next();
 });
 
+// JSON parsing error handler
 app.use((err, req, res, next) => {
   if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
     logger.error('Invalid JSON payload', { method: req.method, url: req.url, body: req.body, error: err.message });
@@ -64,6 +83,7 @@ app.use((err, req, res, next) => {
   next(err);
 });
 
+// MongoDB connection
 const connectDB = async () => {
   try {
     if (!process.env.MONGO_URI) throw new Error('MONGO_URI is not defined');
@@ -79,14 +99,16 @@ const connectDB = async () => {
 };
 connectDB();
 
+// API routes
 app.use('/auth', authRoutes);
 app.use('/jobseeker', authMiddleware, jobseekerRoutes);
 app.use('/employer', authMiddleware, employerRoutes);
 app.use('/social', socialRoutes);
 
-// Handle SPA routing: serve index.html for all non-API routes
+// Handle SPA routing: serve index.html for non-API routes and handle missing assets
 app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, '../frontend/public', 'index.html'), (err) => {
+  const filePath = path.join(staticPath, 'index.html');
+  res.sendFile(filePath, (err) => {
     if (err) {
       logger.error('Error serving index.html', { error: err.message, url: req.url });
       res.status(500).json({ error: 'Internal Server Error', message: 'Failed to load frontend' });
@@ -94,11 +116,13 @@ app.get('*', (req, res) => {
   });
 });
 
+// Global error handler
 app.use((err, req, res, next) => {
   logger.error('Unhandled error', { method: req.method, url: req.url, error: err.message, stack: err.stack });
   res.status(500).json({ error: 'Internal Server Error', message: err.message });
 });
 
+// Socket.IO setup
 io.on('connection', (socket) => {
   logger.info('User connected', { socketId: socket.id });
 
@@ -155,6 +179,7 @@ io.on('connection', (socket) => {
 const PORT = process.env.PORT || 8000;
 server.listen(PORT, '0.0.0.0', () => logger.info(`Server running on port ${PORT}`));
 
+// Graceful shutdown
 const shutdown = async () => {
   logger.info('Shutting down server');
   await redis.quit();
