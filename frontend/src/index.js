@@ -28,7 +28,12 @@ class ErrorBoundary extends React.Component {
   }
 }
 
-const root = ReactDOM.createRoot(document.getElementById('root'));
+// Create a root element dynamically instead of relying on index.html
+const rootElement = document.createElement('div');
+rootElement.id = 'root';
+document.body.appendChild(rootElement);
+
+const root = ReactDOM.createRoot(rootElement);
 root.render(
   <React.StrictMode>
     <Provider store={store}>

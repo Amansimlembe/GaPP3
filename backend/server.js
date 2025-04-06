@@ -44,12 +44,12 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '50mb' }));
 
-// Serve static files from frontend/build (for production) or frontend/public (for dev)
+// Serve static files only for specific assets, not index.html
 const staticPath = process.env.NODE_ENV === 'production'
   ? path.join(__dirname, '../frontend/build')
   : path.join(__dirname, '../frontend/public');
 
-app.use(express.static(staticPath, {
+app.use('/static', express.static(staticPath, {
   setHeaders: (res, filePath) => {
     if (filePath.endsWith('.json')) {
       res.setHeader('Content-Type', 'application/json');
@@ -105,15 +105,9 @@ app.use('/jobseeker', authMiddleware, jobseekerRoutes);
 app.use('/employer', authMiddleware, employerRoutes);
 app.use('/social', socialRoutes);
 
-// Handle SPA routing: serve index.html for non-API routes and handle missing assets
+// Handle SPA routing: No index.html, let frontend handle routing
 app.get('*', (req, res) => {
-  const filePath = path.join(staticPath, 'index.html');
-  res.sendFile(filePath, (err) => {
-    if (err) {
-      logger.error('Error serving index.html', { error: err.message, url: req.url });
-      res.status(500).json({ error: 'Internal Server Error', message: 'Failed to load frontend' });
-    }
-  });
+  res.status(200).send('<!DOCTYPE html><html><body><div id="root"></div></body></html>');
 });
 
 // Global error handler
