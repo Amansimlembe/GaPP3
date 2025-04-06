@@ -7,11 +7,11 @@ const mongoose = require('mongoose');
 const redis = require('./redis');
 const winston = require('winston');
 const path = require('path');
+const fs = require('fs');
 const { router: authRoutes, authMiddleware } = require('./routes/auth');
 const socialRoutes = require('./routes/social');
 const jobseekerRoutes = require('./routes/jobseeker');
 const employerRoutes = require('./routes/employer');
-const fs = require('fs'); // Added for dynamic script detection
 
 const app = express();
 app.set('trust proxy', 1);
@@ -50,6 +50,13 @@ const staticPath = process.env.NODE_ENV === 'production'
   ? path.join(__dirname, 'build')
   : path.join(__dirname, '../frontend/build');
 
+logger.info(`Static path set to: ${staticPath}`);
+
+// Verify static directory exists
+if (!fs.existsSync(staticPath)) {
+  logger.error(`Static directory not found: ${staticPath}`);
+}
+
 app.use('/static', express.static(staticPath, {
   setHeaders: (res, filePath) => {
     logger.info(`Serving static file: ${filePath}`);
@@ -67,8 +74,13 @@ app.use('/static', express.static(staticPath, {
       res.setHeader('Content-Type', 'image/png');
     }
   },
-  fallthrough: true,
 }));
+
+// Explicit 404 for static files
+app.use('/static/*', (req, res, next) => {
+  logger.warn(`Static file not found: ${req.originalUrl}`);
+  res.status(404).send('Static resource not found');
+});
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -123,24 +135,28 @@ app.get('*', (req, res) => {
     const mainJs = jsFiles.find(file => file.startsWith('main.') && file.endsWith('.js'));
     if (mainJs) {
       scriptSrc = `/static/js/${mainJs}`;
+      logger.info(`Found main JS file: ${scriptSrc}`);
     } else {
-      logger.warn('No main.[hash].js found in static/js, using fallback');
+      logger.warn('No main.[hash].js found in static/js');
+      return res.status(500).send('Error: No JavaScript bundle found. Please build the frontend.');
     }
   } catch (err) {
     logger.error('Error reading JS directory:', { error: err.message });
+    return res.status(500).send('Error: Unable to load JavaScript bundle.');
   }
 
   const cssDir = path.join(staticPath, 'static', 'css');
-  let cssSrc = '/static/index.css'; // Fallback
+  let cssSrc = ''; // Optional CSS
 
   try {
     const cssFiles = fs.readdirSync(cssDir);
     const mainCss = cssFiles.find(file => file.startsWith('main.') && file.endsWith('.css'));
     if (mainCss) {
-      cssSrc = `/static/css/${mainCss}`;
+      cssSrc = `<link rel="stylesheet" href="/static/css/${mainCss}">`;
+      logger.info(`Found main CSS file: /static/css/${mainCss}`);
     }
   } catch (err) {
-    logger.error('Error reading CSS directory:', { error: err.message });
+    logger.warn('No CSS found or error reading CSS directory:', { error: err.message });
   }
 
   res.status(200).send(`
@@ -150,7 +166,7 @@ app.get('*', (req, res) => {
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>GaPP</title>
-        <link rel="stylesheet" href="${cssSrc}">
+        ${cssSrc}
       </head>
       <body>
         <div id="root"></div>
