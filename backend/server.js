@@ -44,14 +44,19 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '50mb' }));
 
-// Serve static files under /static
+// Serve static files
 const staticPath = process.env.NODE_ENV === 'production'
-  ? path.join(__dirname, '../frontend/build')
-  : path.join(__dirname, '../frontend/public');
+  ? path.join(__dirname, 'build') // Expects frontend/build copied to backend/build
+  : path.join(__dirname, '../frontend/build'); // Use frontend/build after npm run build
 
 app.use('/static', express.static(staticPath, {
   setHeaders: (res, filePath) => {
-    if (filePath.endsWith('.json')) {
+    logger.info(`Serving static file: ${filePath}`);
+    if (filePath.endsWith('.js')) {
+      res.setHeader('Content-Type', 'application/javascript');
+    } else if (filePath.endsWith('.css')) {
+      res.setHeader('Content-Type', 'text/css');
+    } else if (filePath.endsWith('.json')) {
       res.setHeader('Content-Type', 'application/json');
     } else if (filePath.endsWith('.ico')) {
       res.setHeader('Content-Type', 'image/x-icon');
@@ -61,6 +66,7 @@ app.use('/static', express.static(staticPath, {
       res.setHeader('Content-Type', 'image/png');
     }
   },
+  fallthrough: true, // Pass to next handler if file not found
 }));
 
 // Health check endpoint
@@ -115,9 +121,11 @@ app.get('*', (req, res) => {
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>GaPP</title>
+        <link rel="stylesheet" href="/static/index.css">
       </head>
       <body>
         <div id="root"></div>
+        <script src="/static/index.js"></script>
       </body>
     </html>
   `);
