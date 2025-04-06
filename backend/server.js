@@ -11,6 +11,7 @@ const { router: authRoutes, authMiddleware } = require('./routes/auth');
 const socialRoutes = require('./routes/social');
 const jobseekerRoutes = require('./routes/jobseeker');
 const employerRoutes = require('./routes/employer');
+const fs = require('fs'); // Added for dynamic script detection
 
 const app = express();
 app.set('trust proxy', 1);
@@ -46,8 +47,8 @@ app.use(express.json({ limit: '50mb' }));
 
 // Serve static files
 const staticPath = process.env.NODE_ENV === 'production'
-  ? path.join(__dirname, 'build') // Expects frontend/build copied to backend/build
-  : path.join(__dirname, '../frontend/build'); // Use frontend/build after npm run build
+  ? path.join(__dirname, 'build')
+  : path.join(__dirname, '../frontend/build');
 
 app.use('/static', express.static(staticPath, {
   setHeaders: (res, filePath) => {
@@ -66,7 +67,7 @@ app.use('/static', express.static(staticPath, {
       res.setHeader('Content-Type', 'image/png');
     }
   },
-  fallthrough: true, // Pass to next handler if file not found
+  fallthrough: true,
 }));
 
 // Health check endpoint
@@ -111,9 +112,37 @@ app.use('/jobseeker', authMiddleware, jobseekerRoutes);
 app.use('/employer', authMiddleware, employerRoutes);
 app.use('/social', socialRoutes);
 
-// SPA routing: Serve minimal HTML for all non-API routes
+// SPA routing: Serve minimal HTML with dynamic script path
 app.get('*', (req, res) => {
   logger.info('Serving SPA entry point');
+  const jsDir = path.join(staticPath, 'static', 'js');
+  let scriptSrc = '/static/index.js'; // Fallback
+
+  try {
+    const jsFiles = fs.readdirSync(jsDir);
+    const mainJs = jsFiles.find(file => file.startsWith('main.') && file.endsWith('.js'));
+    if (mainJs) {
+      scriptSrc = `/static/js/${mainJs}`;
+    } else {
+      logger.warn('No main.[hash].js found in static/js, using fallback');
+    }
+  } catch (err) {
+    logger.error('Error reading JS directory:', { error: err.message });
+  }
+
+  const cssDir = path.join(staticPath, 'static', 'css');
+  let cssSrc = '/static/index.css'; // Fallback
+
+  try {
+    const cssFiles = fs.readdirSync(cssDir);
+    const mainCss = cssFiles.find(file => file.startsWith('main.') && file.endsWith('.css'));
+    if (mainCss) {
+      cssSrc = `/static/css/${mainCss}`;
+    }
+  } catch (err) {
+    logger.error('Error reading CSS directory:', { error: err.message });
+  }
+
   res.status(200).send(`
     <!DOCTYPE html>
     <html lang="en">
@@ -121,11 +150,11 @@ app.get('*', (req, res) => {
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>GaPP</title>
-        <link rel="stylesheet" href="/static/index.css">
+        <link rel="stylesheet" href="${cssSrc}">
       </head>
       <body>
         <div id="root"></div>
-        <script src="/static/index.js"></script>
+        <script src="${scriptSrc}"></script>
       </body>
     </html>
   `);
