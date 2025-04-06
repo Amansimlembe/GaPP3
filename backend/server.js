@@ -44,7 +44,7 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '50mb' }));
 
-// Serve static files only for specific assets, not index.html
+// Serve static files under /static
 const staticPath = process.env.NODE_ENV === 'production'
   ? path.join(__dirname, '../frontend/build')
   : path.join(__dirname, '../frontend/public');
@@ -105,9 +105,22 @@ app.use('/jobseeker', authMiddleware, jobseekerRoutes);
 app.use('/employer', authMiddleware, employerRoutes);
 app.use('/social', socialRoutes);
 
-// Handle SPA routing: No index.html, let frontend handle routing
+// SPA routing: Serve minimal HTML for all non-API routes
 app.get('*', (req, res) => {
-  res.status(200).send('<!DOCTYPE html><html><body><div id="root"></div></body></html>');
+  logger.info('Serving SPA entry point');
+  res.status(200).send(`
+    <!DOCTYPE html>
+    <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>GaPP</title>
+      </head>
+      <body>
+        <div id="root"></div>
+      </body>
+    </html>
+  `);
 });
 
 // Global error handler

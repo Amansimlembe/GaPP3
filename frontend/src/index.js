@@ -28,18 +28,20 @@ class ErrorBoundary extends React.Component {
   }
 }
 
-// Create a root element dynamically instead of relying on index.html
-const rootElement = document.createElement('div');
-rootElement.id = 'root';
-document.body.appendChild(rootElement);
-
-const root = ReactDOM.createRoot(rootElement);
-root.render(
-  <React.StrictMode>
-    <Provider store={store}>
-      <ErrorBoundary>
-        <App />
-      </ErrorBoundary>
-    </Provider>
-  </React.StrictMode>
-);
+const rootElement = document.getElementById('root');
+if (!rootElement) {
+  console.error('No root element found in DOM');
+  document.body.innerHTML = '<h1>Error: Root element not found</h1>';
+} else {
+  console.log('Root element found, rendering App');
+  const root = ReactDOM.createRoot(rootElement);
+  root.render(
+    <React.StrictMode>
+      <Provider store={store}>
+        <ErrorBoundary>
+          <App />
+        </ErrorBoundary>
+      </Provider>
+    </React.StrictMode>
+  );
+}

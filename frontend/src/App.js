@@ -118,6 +118,8 @@ const App = () => {
       const storedVirtualNumber = localStorage.getItem('virtualNumber');
       const storedUsername = localStorage.getItem('username');
 
+      console.log('Initializing auth:', { storedToken, storedUserId, isAuthenticated });
+
       if (storedToken && storedUserId) {
         const expTime = getTokenExpiration(storedToken);
         if (expTime && expTime < Date.now()) {
@@ -215,6 +217,7 @@ const App = () => {
   const handleChatNavigation = () => setChatNotifications(0);
 
   if (isLoadingAuth) {
+    console.log('Showing loading screen');
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-100 dark:bg-gray-900 text-primary">
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 1 }}>Loading...</motion.div>
@@ -222,7 +225,10 @@ const App = () => {
     );
   }
 
+  console.log('Auth state:', { isAuthenticated, token, userId });
+
   if (!isAuthenticated) {
+    console.log('Rendering LoginScreen');
     return (
       <Router>
         <div className="min-h-screen bg-gray-100 dark:bg-gray-900">
