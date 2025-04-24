@@ -35,60 +35,83 @@ redisClient.on('end', () => logger.warn('Redis connection closed'));
 redisClient.on('error', (err) => logger.error('Redis client error', { error: err.message, stack: err.stack }));
 
 (async () => {
-  try {
-    await redisClient.connect();
-    logger.info('Redis client initialized successfully');
-  } catch (err) {
-    logger.error('Failed to connect to Redis on startup', { error: err.message, stack: err.stack });
+  let attempts = 0;
+  const maxAttempts = 5;
+  while (attempts < maxAttempts) {
+    try {
+      await redisClient.connect();
+      logger.info('Redis client initialized successfully');
+      break;
+    } catch (err) {
+      attempts++;
+      logger.error(`Failed to connect to Redis on startup, attempt ${attempts}`, { error: err.message, stack: err.stack });
+      if (attempts === maxAttempts) {
+        logger.error('Redis connection failed after max attempts');
+        process.exit(1);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000 * attempts));
+    }
   }
 })();
+
+const withRetry = async (operation, maxRetries = 3) => {
+  let attempt = 0;
+  while (attempt < maxRetries) {
+    try {
+      return await operation();
+    } catch (err) {
+      attempt++;
+      logger.error(`Redis operation failed, attempt ${attempt}`, { error: err.message });
+      if (attempt === maxRetries) {
+        throw err;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
+    }
+  }
+};
 
 module.exports = {
   client: redisClient,
   get: async (key) => {
-    try {
-      return await redisClient.get(key);
-    } catch (err) {
-      logger.error('Redis get error', { key, error: err.message });
-      throw err;
-    }
+    return await withRetry(async () => {
+      const result = await redisClient.get(key);
+      logger.info('Redis get', { key, result: result ? 'found' : 'not found' });
+      return result;
+    });
   },
   set: async (key, value) => {
-    try {
-      return await redisClient.set(key, value);
-    } catch (err) {
-      logger.error('Redis set error', { key, error: err.message });
-      throw err;
-    }
+    return await withRetry(async () => {
+      const result = await redisClient.set(key, value);
+      logger.info('Redis set', { key });
+      return result;
+    });
   },
   setex: async (key, seconds, value) => {
-    try {
-      return await redisClient.setEx(key, seconds, value);
-    } catch (err) {
-      logger.error('Redis setex error', { key, seconds, error: err.message });
-      throw err;
-    }
+    return await withRetry(async () => {
+      const result = await redisClient.setEx(key, seconds, value);
+      logger.info('Redis setex', { key, seconds });
+      return result;
+    });
   },
   del: async (key) => {
-    try {
-      return await redisClient.del(key);
-    } catch (err) {
-      logger.error('Redis del error', { key, error: err.message });
-      throw err;
-    }
+    return await withRetry(async () => {
+      const result = await redisClient.del(key);
+      logger.info('Redis del', { key });
+      return result;
+    });
   },
   lpush: async (key, value) => {
-    try {
+    return await withRetry(async () => {
       const stringValue = typeof value === 'string' ? value : JSON.stringify(value);
-      return await redisClient.lPush(key, stringValue);
-    } catch (err) {
-      logger.error('Redis lpush error', { key, error: err.message });
-      throw err;
-    }
+      const result = await redisClient.lPush(key, stringValue);
+      logger.info('Redis lpush', { key });
+      return result;
+    });
   },
   lrange: async (key, start, stop) => {
-    try {
+    return await withRetry(async () => {
       const result = await redisClient.lRange(key, start, stop);
+      logger.info('Redis lrange', { key, start, stop });
       return result.map((item) => {
         try {
           return JSON.parse(item);
@@ -96,10 +119,7 @@ module.exports = {
           return item;
         }
       });
-    } catch (err) {
-      logger.error('Redis lrange error', { key, start, stop, error: err.message });
-      throw err;
-    }
+    });
   },
   quit: async () => {
     try {

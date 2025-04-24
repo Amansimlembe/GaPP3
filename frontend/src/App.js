@@ -28,7 +28,12 @@ const socket = io(BASE_URL, {
 
 const getTokenExpiration = (token) => {
   try {
+    if (!token || typeof token !== 'string' || !token.includes('.')) {
+      console.warn('Invalid token format');
+      return null;
+    }
     const base64Url = token.split('.')[1];
+    if (!base64Url) return null;
     const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
     const jsonPayload = decodeURIComponent(
       atob(base64)
@@ -92,46 +97,85 @@ const App = () => {
   };
 
   const refreshToken = async () => {
-    try {
-      const response = await axios.post(
-        `${BASE_URL}/auth/refresh`,
-        { userId },
-        { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 5000 }
-      );
-      const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername, privateKey } = response.data;
-      setAuth(newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername);
-      localStorage.setItem('privateKey', privateKey);
-      return newToken;
-    } catch (error) {
-      console.error('Token refresh failed:', error.response?.data || error.message);
-      setAuth('', '', '', '', '', '');
-      return null;
+    const maxRetries = 3;
+    let attempt = 0;
+    while (attempt < maxRetries) {
+      try {
+        console.log(`Refresh token attempt ${attempt + 1}`);
+        const response = await axios.post(
+          `${BASE_URL}/auth/refresh`,
+          { userId },
+          {
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+            timeout: 10000, // Increased timeout
+            withCredentials: true, // Align with server CORS
+          }
+        );
+        const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername, privateKey } = response.data;
+        setAuth(newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername);
+        localStorage.setItem('privateKey', privateKey);
+        console.log('Token refreshed successfully');
+        return newToken;
+      } catch (error) {
+        attempt++;
+        console.error(`Token refresh attempt ${attempt} failed:`, error.response?.data || error.message);
+        if (attempt === maxRetries || error.response?.status === 401) {
+          console.warn('Token refresh failed after max attempts or unauthorized, clearing auth');
+          setAuth('', '', '', '', '', '');
+          localStorage.clear();
+          return null;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+      }
     }
   };
 
   useEffect(() => {
     const initializeAuth = async () => {
-      const storedToken = localStorage.getItem('token');
-      const storedUserId = localStorage.getItem('userId');
-      const storedRole = localStorage.getItem('role');
-      const storedPhoto = localStorage.getItem('photo');
-      const storedVirtualNumber = localStorage.getItem('virtualNumber');
-      const storedUsername = localStorage.getItem('username');
+      console.log('Starting initializeAuth');
+      try {
+        const storedToken = localStorage.getItem('token');
+        const storedUserId = localStorage.getItem('userId');
+        const storedRole = localStorage.getItem('role');
+        const storedPhoto = localStorage.getItem('photo');
+        const storedVirtualNumber = localStorage.getItem('virtualNumber');
+        const storedUsername = localStorage.getItem('username');
 
-      console.log('Initializing auth:', { storedToken, storedUserId, isAuthenticated });
+        console.log('Stored values:', { storedToken, storedUserId });
 
-      if (storedToken && storedUserId) {
-        const expTime = getTokenExpiration(storedToken);
-        if (expTime && expTime < Date.now()) {
-          const newToken = await refreshToken();
-          if (!newToken) console.warn('Initial token refresh failed, redirecting to login');
+        if (storedToken && storedUserId) {
+          const expTime = getTokenExpiration(storedToken);
+          console.log('Token expiration:', expTime);
+          if (!expTime) {
+            console.warn('Invalid token, clearing localStorage');
+            localStorage.clear();
+            return;
+          }
+          if (expTime < Date.now()) {
+            console.log('Token expired, refreshing');
+            const newToken = await refreshToken();
+            if (!newToken) {
+              console.warn('Initial token refresh failed, clearing auth');
+              localStorage.clear();
+              return;
+            }
+          } else {
+            console.log('Token valid, setting auth');
+            setAuth(storedToken, storedUserId, storedRole, storedPhoto, storedVirtualNumber, storedUsername);
+          }
         } else {
-          setAuth(storedToken, storedUserId, storedRole, storedPhoto, storedVirtualNumber, storedUsername);
+          console.log('No token or userId, skipping auth');
         }
+      } catch (error) {
+        console.error('Authentication initialization failed:', error);
+        localStorage.clear();
+      } finally {
+        console.log('Authentication initialization complete, setting isLoadingAuth to false');
+        setIsLoadingAuth(false);
       }
-      setIsLoadingAuth(false);
     };
 
+    console.log('Calling initializeAuth');
     initializeAuth();
   }, []);
 

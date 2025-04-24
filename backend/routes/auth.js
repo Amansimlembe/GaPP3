@@ -43,7 +43,7 @@ const upload = multer({
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 100,
+  max: 50, // Reduced for /refresh endpoint
   message: { error: 'Too many requests, please try again later.' },
 });
 
@@ -68,6 +68,7 @@ const authMiddleware = async (req, res, next) => {
     const storedToken = await redis.get(`token:${decoded.id}`);
     if (storedToken !== token) {
       logger.warn('Token mismatch or invalidated', { userId: decoded.id });
+      await redis.del(sessionKey); // Clear invalid session
       return res.status(401).json({ error: 'Invalid or expired token' });
     }
     await redis.setex(sessionKey, 24 * 60 * 60, JSON.stringify(decoded));
@@ -75,6 +76,7 @@ const authMiddleware = async (req, res, next) => {
     next();
   } catch (error) {
     logger.error('Auth middleware error:', { error: error.message, token });
+    await redis.del(sessionKey); // Clear invalid session
     res.status(401).json({ error: 'Invalid token' });
   }
 };
@@ -339,21 +341,42 @@ router.get('/public_key/:userId', authMiddleware, async (req, res) => {
   }
 });
 
-router.post('/refresh', authMiddleware, async (req, res) => {
+router.post('/refresh', authLimiter, authMiddleware, async (req, res) => {
   try {
     const { userId } = req.body;
     if (userId && userId !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
 
     const user = await User.findById(req.user.id).select('+privateKey');
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (!user) {
+      logger.warn('User not found during token refresh', { userId: req.user.id });
+      return res.status(401).json({ error: 'User not found' });
+    }
 
+    const oldToken = req.headers.authorization.split(' ')[1];
     const newToken = jwt.sign(
       { id: user._id, email: user.email, virtualNumber: user.virtualNumber, role: user.role },
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
-    await redis.setex(`token:${user._id}`, 24 * 60 * 60, newToken);
-    await redis.del(`session:${req.headers.authorization.split(' ')[1]}`); // Clear old session
+
+    // Retry logic for Redis operations
+    const maxRetries = 3;
+    let attempt = 0;
+    let redisSuccess = false;
+    while (attempt < maxRetries && !redisSuccess) {
+      try {
+        await redis.setex(`token:${user._id}`, 24 * 60 * 60, newToken);
+        await redis.del(`session:${oldToken}`); // Clear old session
+        redisSuccess = true;
+      } catch (redisError) {
+        attempt++;
+        logger.error(`Redis operation failed during token refresh, attempt ${attempt}`, { error: redisError.message });
+        if (attempt === maxRetries) {
+          throw redisError;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
+      }
+    }
 
     logger.info('Token refreshed', { userId: user._id });
     res.json({

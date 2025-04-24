@@ -27,16 +27,23 @@ const logger = winston.createLogger({
 
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: '*' },
+  cors: {
+    origin: ['https://gapp-6yc3.onrender.com', 'http://localhost:3000'], // Explicitly allow client origins
+    methods: ['GET', 'POST'],
+    credentials: true,
+  },
   pingTimeout: 60000,
   pingInterval: 25000,
 });
 app.set('io', io);
 
-app.use(cors());
+app.use(cors({
+  origin: ['https://gapp-6yc3.onrender.com', 'http://localhost:3000'],
+  credentials: true,
+}));
 app.use(express.json({ limit: '50mb' }));
 
-const buildPath = path.join(__dirname, 'frontend/build'); // Serve from backend/frontend/build
+const buildPath = path.join(__dirname, 'frontend/build');
 logger.info(`Attempting to serve static files from: ${buildPath}`);
 try {
   const buildFiles = fs.readdirSync(buildPath);
@@ -65,7 +72,7 @@ const connectDB = async () => {
     await mongoose.connect(process.env.MONGO_URI);
     logger.info('MongoDB connected');
   } catch (err) {
-    logger.error('MongoDB connection error:', { error: err.message });
+    logger.error('MongoDB connection error:', { error: err.message, stack: err.stack });
     process.exit(1);
   }
 };
@@ -111,8 +118,21 @@ server.listen(PORT, '0.0.0.0', () => logger.info(`Server running on port ${PORT}
 
 const shutdown = async () => {
   logger.info('Shutting down server');
-  await redis.quit();
-  await mongoose.connection.close();
+  try {
+    await redis.quit();
+    logger.info('Redis connection closed');
+  } catch (err) {
+    logger.error('Error closing Redis connection during shutdown', { error: err.message });
+  }
+  try {
+    await mongoose.connection.close();
+    logger.info('MongoDB connection closed');
+  } catch (err) {
+    logger.error('Error closing MongoDB connection during shutdown', { error: err.message });
+  }
+  io.close(() => {
+    logger.info('Socket.IO connections closed');
+  });
   server.close(() => {
     logger.info('Server closed');
     process.exit(0);

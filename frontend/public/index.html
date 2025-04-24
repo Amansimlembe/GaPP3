@@ -18,69 +18,74 @@
         margin: 0;
         padding: 0;
         font-family: 'Arial', sans-serif;
-        background: linear-gradient(135deg, #4A90E2, #50E3C2);
+        background: #f3f4f6; /* Light gray to match LoginScreen */
         height: 100vh;
-        display: flex;
-        justify-content: center;
-        align-items: center;
         overflow: hidden;
       }
       .loader-container {
-        text-align: center;
-        color: white;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+        color: #4A90E2;
+        background: #f3f4f6;
+        transition: opacity 0.3s ease-out;
       }
-      .logo {
-        width: 80px;
-        height: 80px;
-        animation: pulse 1.5s infinite ease-in-out;
-      }
-      h1 {
-        font-size: 2.5rem;
-        margin: 20px 0 10px;
-        text-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
-      }
-      p {
-        font-size: 1.2rem;
-        opacity: 0.9;
+      .loader-container.hidden {
+        opacity: 0;
+        pointer-events: none;
       }
       .spinner {
-        width: 40px;
-        height: 40px;
-        border: 4px solid rgba(255, 255, 255, 0.3);
-        border-top: 4px solid white;
+        width: 24px;
+        height: 24px;
+        border: 3px solid rgba(74, 144, 226, 0.3);
+        border-top: 3px solid #4A90E2;
         border-radius: 50%;
         animation: spin 1s linear infinite;
-        margin: 20px auto;
+        margin-top: 10px;
       }
       @keyframes spin {
         0% { transform: rotate(0deg); }
         100% { transform: rotate(360deg); }
       }
-      @keyframes pulse {
-        0% { transform: scale(1); }
-        50% { transform: scale(1.1); }
-        100% { transform: scale(1); }
+      .no-js {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+        background: #f3f4f6;
+        color: #333;
+        font-size: 1.2rem;
+        text-align: center;
+        padding: 20px;
       }
     </style>
   </head>
   <body>
+    <noscript>
+      <div class="no-js">
+        JavaScript is disabled. Please enable JavaScript to use GaPP.
+      </div>
+    </noscript>
     <div id="root"></div>
-    <div class="loader-container">
-      <img src="/logo.jpg" alt="GaPP Logo" class="logo" />
-      <h1>Welcome to GaPP</h1>
-      <p>Connecting Professionals Worldwide</p>
+    <div id="loader" class="loader-container">
       <div class="spinner"></div>
     </div>
     <script>
+      // Hide loader as soon as React starts rendering
       document.addEventListener('DOMContentLoaded', () => {
-        const root = document.getElementById('root');
-        const loader = document.querySelector('.loader-container');
-        const checkRoot = setInterval(() => {
-          if (root?.children.length > 0) {
-            loader.style.display = 'none';
-            clearInterval(checkRoot);
-          }
-        }, 100);
+        const loader = document.getElementById('loader');
+        // Add hidden class immediately; React will take over rendering
+        if (loader) {
+          loader.classList.add('hidden');
+          // Remove loader after transition to avoid DOM clutter
+          setTimeout(() => {
+            if (loader.parentNode) {
+              loader.parentNode.removeChild(loader);
+            }
+          }, 300); // Match transition duration
+        }
       });
     </script>
   </body>

@@ -97,6 +97,7 @@ const persistenceMiddleware = (store) => (next) => (action) => {
         localStorage.setItem('reduxState', JSON.stringify(serializableState));
       } catch (error) {
         console.error('Failed to persist state:', error);
+        localStorage.removeItem('reduxState');
       }
     });
   }
@@ -133,6 +134,7 @@ const loadPersistedState = () => {
     } catch (error) {
       console.error('Failed to parse persisted state:', error);
       localStorage.removeItem('reduxState');
+      return undefined;
     }
   }
   return undefined;
