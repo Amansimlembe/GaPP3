@@ -8,13 +8,6 @@ const mongoose = require('mongoose');
 const redis = require('./redis');
 const winston = require('winston');
 const fs = require('fs');
-const { router: authRoutes, authMiddleware } = require('./routes/auth');
-const socialRoutes = require('./routes/social');
-const jobseekerRoutes = require('./routes/jobseeker');
-const employerRoutes = require('./routes/employer');
-
-const app = express();
-app.set('trust proxy', 1);
 
 const logger = winston.createLogger({
   level: 'info',
@@ -24,6 +17,21 @@ const logger = winston.createLogger({
     new winston.transports.File({ filename: 'logs/combined.log' }),
   ],
 });
+
+// Load route modules safely
+let authRoutes, authMiddleware, socialRoutes, jobseekerRoutes, employerRoutes;
+try {
+  ({ router: authRoutes, authMiddleware } = require('./routes/auth'));
+  socialRoutes = require('./routes/social');
+  jobseekerRoutes = require('./routes/jobseeker');
+  employerRoutes = require('./routes/employer');
+} catch (err) {
+  logger.error('Failed to load route modules', { error: err.message, stack: err.stack });
+  process.exit(1);
+}
+
+const app = express();
+app.set('trust proxy', 1);
 
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -44,7 +52,7 @@ app.use(cors({
 app.use(express.json({ limit: '50mb' }));
 
 // Serve static files from frontend/build
-const buildPath = path.join(__dirname, '..', 'frontend', 'build'); // Points to frontend/build
+const buildPath = path.join(__dirname, '..', 'frontend', 'build');
 logger.info(`Attempting to serve static files from: ${buildPath}`);
 if (fs.existsSync(buildPath)) {
   try {
@@ -53,7 +61,7 @@ if (fs.existsSync(buildPath)) {
     app.use(express.static(buildPath));
   } catch (err) {
     logger.error(`Failed to read build directory: ${buildPath}`, { error: err.message });
-    app.use(express.static(path.join(__dirname, '..', 'frontend', 'public'))); // Fallback to frontend/public
+    app.use(express.static(path.join(__dirname, '..', 'frontend', 'public')));
   }
 } else {
   logger.warn(`Build directory not found: ${buildPath}, falling back to frontend/public`);
@@ -85,19 +93,31 @@ const connectDB = async () => {
 };
 connectDB();
 
-// Route setup with guards
+// Route setup with enhanced validation
 const routes = [
-  { path: '/auth', handler: authRoutes },
-  { path: '/jobseeker', handler: jobseekerRoutes },
-  { path: '/employer', handler: employerRoutes },
-  { path: '/social', handler: socialRoutes(io) },
+  { path: '/auth', handler: authRoutes, name: 'authRoutes' },
+  { path: '/jobseeker', handler: jobseekerRoutes, name: 'jobseekerRoutes' },
+  { path: '/employer', handler: employerRoutes, name: 'employerRoutes' },
+  { path: '/social', handler: socialRoutes(io), name: 'socialRoutes' },
 ];
 
-routes.forEach(({ path, handler }) => {
-  if (handler && typeof handler === 'function') {
+logger.info('Inspecting route handlers:', {
+  authRoutes: authRoutes ? 'defined' : 'undefined',
+  jobseekerRoutes: jobseekerRoutes ? 'defined' : 'undefined',
+  employerRoutes: employerRoutes ? 'defined' : 'undefined',
+  socialRoutes: socialRoutes ? 'defined' : 'undefined',
+  socialRoutesResult: socialRoutes(io) ? 'defined' : 'undefined',
+});
+
+routes.forEach(({ path, handler, name }) => {
+  if (handler && (typeof handler === 'function' || (typeof handler === 'object' && handler.handle))) {
+    logger.info(`Registering route: ${path}`);
     app.use(path, handler);
   } else {
-    logger.error(`Invalid route handler for ${path}`);
+    logger.error(`Skipping invalid route handler for ${path} (${name})`, {
+      handlerType: typeof handler,
+      handler: handler,
+    });
   }
 });
 
@@ -146,7 +166,7 @@ const shutdown = async () => {
   }
   try {
     await mongoose.connection.close();
-    logger.info('MongoDB connected');
+    logger.info('MongoDB connection closed');
   } catch (err) {
     logger.error('Error closing MongoDB connection during shutdown', { error: err.message });
   }
