@@ -6,28 +6,33 @@ import { Provider } from 'react-redux';
 import { store } from './store';
 
 class ErrorBoundary extends React.Component {
-  state = { hasError: false };
+  state = { error: null, errorInfo: null };
 
-  static getDerivedStateFromError() {
-    return { hasError: true };
+  static getDerivedStateFromError(error) {
+    return { error };
   }
 
   componentDidCatch(error, errorInfo) {
-    console.error('Uncaught error:', error, errorInfo);
-    // Optionally send error to a logging service
+    console.error('ErrorBoundary caught error:', {
+      error: error.message,
+      stack: error.stack,
+      componentStack: errorInfo.componentStack,
+    });
+    this.setState({ error, errorInfo });
   }
 
   handleRetry = () => {
-    this.setState({ hasError: false });
+    this.setState({ error: null, errorInfo: null });
+    localStorage.clear();
     window.location.reload();
   };
 
   render() {
-    if (this.state.hasError) {
+    if (this.state.error) {
       return (
         <div className="min-h-screen flex flex-col items-center justify-center bg-gray-100 dark:bg-gray-900 text-center p-4">
           <h1 className="text-2xl text-red-500 mb-4">Something went wrong</h1>
-          <p className="text-gray-700 dark:text-gray-300 mb-6">Please try again or refresh the page.</p>
+          <p className="text-gray-700 dark:text-gray-300 mb-6">{this.state.error.message}</p>
           <button
             onClick={this.handleRetry}
             className="bg-primary text-white px-4 py-2 rounded hover:bg-secondary transition"

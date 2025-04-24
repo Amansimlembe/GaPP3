@@ -10,7 +10,7 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="robots" content="index, follow" />
     <link rel="icon" href="/favicon.ico" />
-    <link rel="apple-touch-icon" href="/logo192.png" />
+    <link rel="apple-touch-icon" href="/logo192.jpg" />
     <link rel="manifest" href="/manifest.json" />
     <title>GaPP - Professional Networking & Chat</title>
     <style>
@@ -19,73 +19,9 @@
         padding: 0;
         font-family: 'Arial', sans-serif;
       }
-      .loader-container {
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        background: linear-gradient(135deg, #4A90E2, #50E3C2);
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-        align-items: center;
-        color: white;
-        z-index: 9999;
-      }
-      .logo {
-        width: 60px;
-        height: 60px;
-        animation: pulse 1.5s infinite ease-in-out;
-      }
-      h1 {
-        font-size: 2rem;
-        margin: 10px 0;
-        text-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
-      }
-      .spinner {
-        width: 30px;
-        height: 30px;
-        border: 3px solid rgba(255, 255, 255, 0.3);
-        border-top: 3px solid white;
-        border-radius: 50%;
-        animation: spin 1s linear infinite;
-        margin-top: 10px;
-      }
-      @keyframes spin {
-        0% { transform: rotate(0deg); }
-        100% { transform: rotate(360deg); }
-      }
-      @keyframes pulse {
-        0% { transform: scale(1); }
-        50% { transform: scale(1.1); }
-        100% { transform: scale(1); }
-      }
     </style>
   </head>
   <body>
     <div id="root"></div>
-    <div class="loader-container">
-      <img src="/logo192.png" alt="GaPP Logo" class="logo" />
-      <h1>Loading GaPP</h1>
-      <div class="spinner"></div>
-    </div>
-    <script>
-      document.addEventListener('DOMContentLoaded', () => {
-        const root = document.getElementById('root');
-        const loader = document.querySelector('.loader-container');
-        if (!root) {
-          loader.innerHTML = '<h1>Error: App failed to load</h1>';
-          return;
-        }
-        const observer = new MutationObserver(() => {
-          if (root.children.length > 0) {
-            loader.style.display = 'none';
-            observer.disconnect();
-          }
-        });
-        observer.observe(root, { childList: true });
-      });
-    </script>
   </body>
 </html>
