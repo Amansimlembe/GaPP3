@@ -28,7 +28,7 @@ const logger = winston.createLogger({
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: ['https://gapp-6yc3.onrender.com', 'http://localhost:3000'], // Explicitly allow client origins
+    origin: ['https://gapp-6yc3.onrender.com', 'http://localhost:3000'],
     methods: ['GET', 'POST'],
     credentials: true,
   },
@@ -43,15 +43,22 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '50mb' }));
 
-const buildPath = path.join(__dirname, 'frontend/build');
+// Serve static files from frontend/build
+const buildPath = path.join(__dirname, '..', 'frontend', 'build'); // Points to frontend/build
 logger.info(`Attempting to serve static files from: ${buildPath}`);
-try {
-  const buildFiles = fs.readdirSync(buildPath);
-  logger.info(`Build directory contents: ${buildFiles.join(', ')}`);
-} catch (err) {
-  logger.error(`Failed to read build directory: ${buildPath}`, { error: err.message });
+if (fs.existsSync(buildPath)) {
+  try {
+    const buildFiles = fs.readdirSync(buildPath);
+    logger.info(`Build directory contents: ${buildFiles.join(', ')}`);
+    app.use(express.static(buildPath));
+  } catch (err) {
+    logger.error(`Failed to read build directory: ${buildPath}`, { error: err.message });
+    app.use(express.static(path.join(__dirname, '..', 'frontend', 'public'))); // Fallback to frontend/public
+  }
+} else {
+  logger.warn(`Build directory not found: ${buildPath}, falling back to frontend/public`);
+  app.use(express.static(path.join(__dirname, '..', 'frontend', 'public')));
 }
-app.use(express.static(buildPath));
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -78,18 +85,31 @@ const connectDB = async () => {
 };
 connectDB();
 
-app.use('/auth', authRoutes);
-app.use('/jobseeker', jobseekerRoutes);
-app.use('/employer', employerRoutes);
-app.use('/social', socialRoutes(io));
+// Route setup with guards
+const routes = [
+  { path: '/auth', handler: authRoutes },
+  { path: '/jobseeker', handler: jobseekerRoutes },
+  { path: '/employer', handler: employerRoutes },
+  { path: '/social', handler: socialRoutes(io) },
+];
+
+routes.forEach(({ path, handler }) => {
+  if (handler && typeof handler === 'function') {
+    app.use(path, handler);
+  } else {
+    logger.error(`Invalid route handler for ${path}`);
+  }
+});
 
 // Fallback for client-side routing
 app.get('*', (req, res) => {
-  const indexPath = path.join(buildPath, 'index.html');
+  const indexPath = fs.existsSync(buildPath)
+    ? path.join(buildPath, 'index.html')
+    : path.join(__dirname, '..', 'frontend', 'public', 'index.html');
   res.sendFile(indexPath, (err) => {
     if (err) {
       logger.error('Failed to serve index.html', { path: indexPath, error: err.message });
-      res.status(500).send('Server Error - Static files may not be built correctly');
+      res.status(500).json({ error: 'Server Error - Static files may not be available' });
     }
   });
 });
@@ -126,7 +146,7 @@ const shutdown = async () => {
   }
   try {
     await mongoose.connection.close();
-    logger.info('MongoDB connection closed');
+    logger.info('MongoDB connected');
   } catch (err) {
     logger.error('Error closing MongoDB connection during shutdown', { error: err.message });
   }
