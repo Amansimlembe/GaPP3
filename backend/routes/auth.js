@@ -1,4 +1,26 @@
+const express = require('express');
+const jwt = require('jsonwebtoken');
+const winston = require('winston');
+const rateLimit = require('express-rate-limit');
+const User = require('../models/user');
 const redis = require('../redis');
+
+const router = express.Router(); // Define Express router
+
+const logger = winston.createLogger({
+  level: 'info',
+  format: winston.format.combine(winston.format.timestamp(), winston.format.json()),
+  transports: [
+    new winston.transports.Console(),
+    new winston.transports.File({ filename: 'logs/auth.log' }),
+  ],
+});
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // Limit each IP to 100 requests
+  message: 'Too many requests, please try again later',
+});
 
 const authMiddleware = async (req, res, next) => {
   const authHeader = req.headers.authorization;
@@ -50,6 +72,50 @@ const authMiddleware = async (req, res, next) => {
     res.status(401).json({ error: 'Invalid token' });
   }
 };
+
+router.post('/register', authLimiter, async (req, res) => {
+  const { username, email, password, role, virtualNumber, photo } = req.body;
+  try {
+    const existingUser = await User.findOne({ $or: [{ email }, { virtualNumber }] });
+    if (existingUser) {
+      return res.status(400).json({ error: 'Email or virtual number already in use' });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const user = new User({ username, email, password: hashedPassword, role, virtualNumber, photo });
+    await user.save();
+
+    const token = jwt.sign({ id: user._id, email: user.email, virtualNumber: user.virtualNumber, role: user.role }, process.env.JWT_SECRET, { expiresIn: '24h' });
+    res.status(201).json({ userId: user._id, role, token, virtualNumber, username, photo });
+  } catch (err) {
+    logger.error('Registration error', { error: err.message });
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+router.post('/login', authLimiter, async (req, res) => {
+  const { email, password } = req.body;
+  try {
+    const user = await User.findOne({ email });
+    if (!user || !(await bcrypt.compare(password, user.password))) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    const token = jwt.sign({ id: user._id, email: user.email, virtualNumber: user.virtualNumber, role: user.role }, process.env.JWT_SECRET, { expiresIn: '24h' });
+    res.json({
+      userId: user._id,
+      role: user.role,
+      token,
+      virtualNumber: user.virtualNumber,
+      username: user.username,
+      photo: user.photo,
+      privateKey: user.privateKey,
+    });
+  } catch (err) {
+    logger.error('Login error', { error: err.message });
+    res.status(500).json({ error: 'Server error' });
+  }
+});
 
 router.post('/refresh', authLimiter, authMiddleware, async (req, res) => {
   try {
@@ -104,3 +170,18 @@ router.post('/refresh', authLimiter, authMiddleware, async (req, res) => {
     res.status(500).json({ error: error.message || 'Failed to refresh token' });
   }
 });
+
+router.get('/public_key/:userId', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.params.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    res.json({ publicKey: user.publicKey });
+  } catch (err) {
+    logger.error('Public key retrieval error', { error: err.message });
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+module.exports = { router, authMiddleware };
