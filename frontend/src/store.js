@@ -85,16 +85,17 @@ const persistenceMiddleware = (store) => (next) => (action) => {
   }
   return result;
 };
-
 const loadPersistedState = () => {
   const persistedState = localStorage.getItem('reduxState');
   if (persistedState) {
     try {
       const parsedState = JSON.parse(persistedState);
-      if (parsedState && typeof parsedState.selectedChat === 'string') {
+      if (parsedState && (typeof parsedState.selectedChat === 'string' || parsedState.selectedChat === null)) {
         return { selectedChat: parsedState.selectedChat };
       }
-      throw new Error('Invalid persisted state format');
+      console.warn('Invalid persisted state format, clearing');
+      localStorage.removeItem('reduxState');
+      return undefined;
     } catch (error) {
       console.error('Failed to parse persisted state:', error);
       localStorage.removeItem('reduxState');
