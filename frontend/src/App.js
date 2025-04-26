@@ -59,6 +59,7 @@ const App = () => {
   const [chatNotifications, setChatNotifications] = useState(0);
   const [isAuthenticated, setIsAuthenticated] = useState(!!localStorage.getItem('token'));
   const [isLoadingAuth, setIsLoadingAuth] = useState(false);
+  const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
   const { selectedChat } = useSelector((state) => state.messages);
 
   const setAuth = (newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername) => {
@@ -282,6 +283,7 @@ const App = () => {
         toggleTheme={toggleTheme}
         handleChatNavigation={handleChatNavigation}
         theme={theme}
+        setTheme={setTheme}
         selectedChat={selectedChat}
       />
     </Router>
@@ -302,6 +304,7 @@ const AuthenticatedApp = ({
   toggleTheme,
   handleChatNavigation,
   theme,
+  setTheme,
   selectedChat,
 }) => {
   const location = useLocation();

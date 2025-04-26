@@ -17,6 +17,7 @@ class ErrorBoundary extends React.Component {
       error: error.message,
       stack: error.stack,
       componentStack: errorInfo.componentStack,
+      state: this.props.store ? this.props.store.getState() : null,
     });
     this.setState({ error, errorInfo });
   }
@@ -62,7 +63,7 @@ if (!rootElement) {
   root.render(
     <React.StrictMode>
       <Provider store={store}>
-        <ErrorBoundary>
+        <ErrorBoundary store={store}>
           <App />
         </ErrorBoundary>
       </Provider>

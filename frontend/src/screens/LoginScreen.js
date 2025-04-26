@@ -16,13 +16,19 @@ const LoginScreen = ({ setAuth }) => {
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(false);
 
-  const countries = getCountries().map((code) => ({
-    code,
-    name: new Intl.DisplayNames(['en'], { type: 'region' }).of(code),
-  }));
+  let countries = [];
+  try {
+    countries = getCountries().map((code) => ({
+      code,
+      name: new Intl.DisplayNames(['en'], { type: 'region' }).of(code) || code,
+    }));
+  } catch (err) {
+    console.error('Error loading countries:', err);
+    setError('Failed to load countries, please try again');
+  }
 
   const filteredCountries = countries.filter((c) =>
-    (c.name.toLowerCase().includes(search.toLowerCase()) || c.code.toLowerCase().includes(search.toLowerCase()))
+    c.name.toLowerCase().includes(search.toLowerCase()) || c.code.toLowerCase().includes(search.toLowerCase())
   );
 
   const validateForm = () => {
