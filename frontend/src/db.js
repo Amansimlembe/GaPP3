@@ -3,7 +3,7 @@ import { openDB } from 'idb';
 const DB_NAME = 'ChatDB';
 const MESSAGE_STORE_NAME = 'messages';
 const PENDING_STORE_NAME = 'pendingMessages';
-const VERSION = 7;
+const VERSION = 1; // Start fresh for consistency
 
 const dbPromise = openDB(DB_NAME, VERSION, {
   upgrade(db, oldVersion, newVersion) {
@@ -25,7 +25,7 @@ const dbPromise = openDB(DB_NAME, VERSION, {
   },
   blocked() {
     console.error('Database upgrade blocked by an open connection');
-    indexedDB.deleteDatabase(DB_NAME); // Clear database to resolve blocking issues
+    indexedDB.deleteDatabase(DB_NAME);
   },
   blocking() {
     console.warn('Current connection is blocking a database upgrade');
@@ -55,13 +55,26 @@ export const saveMessages = async (messages) => {
       const db = await dbPromise;
       const tx = db.transaction(MESSAGE_STORE_NAME, 'readwrite');
       const store = tx.objectStore(MESSAGE_STORE_NAME);
-      await Promise.all(messages.map((msg) => store.put({
-        ...msg,
-        plaintextContent: msg.plaintextContent || '',
-        senderVirtualNumber: msg.senderVirtualNumber || '',
-        senderUsername: msg.senderUsername || '',
-        senderPhoto: msg.senderPhoto || 'https://placehold.co/40x40',
-      })));
+      await Promise.all(
+        messages.map((msg) =>
+          store.put({
+            ...msg,
+            _id: msg._id || `${msg.clientMessageId}`,
+            content: msg.content || '',
+            plaintextContent: msg.plaintextContent || '',
+            status: msg.status || 'pending',
+            contentType: msg.contentType || 'text',
+            caption: msg.caption || '',
+            createdAt: msg.createdAt || new Date().toISOString(),
+            senderVirtualNumber: msg.senderVirtualNumber || '',
+            senderUsername: msg.senderUsername || '',
+            senderPhoto: msg.senderPhoto || 'https://placehold.co/40x40',
+            replyTo: msg.replyTo || undefined,
+            originalFilename: msg.originalFilename || undefined,
+            clientMessageId: msg.clientMessageId || `${msg.senderId}-${Date.now()}`,
+          })
+        )
+      );
       await tx.done;
     });
   } catch (error) {
@@ -114,7 +127,7 @@ export const clearOldMessages = async (daysToKeep = 30) => {
       const index = store.index('byCreatedAt');
       const cutoff = new Date(Date.now() - daysToKeep * 24 * 60 * 60 * 1000);
       let count = 0;
-      const cursor = await index.openCursor(IDBKeyRange.upperBound(cutoff));
+      const cursor = await index.openCursor(IDBKeyRange.upperBound(cutoff.toISOString()));
       while (cursor) {
         await cursor.delete();
         count++;

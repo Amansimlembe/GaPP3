@@ -24,6 +24,7 @@ const socket = io(BASE_URL, {
   withCredentials: true,
   autoConnect: false,
   transports: ['websocket', 'polling'],
+  auth: { token: localStorage.getItem('token') },
 });
 
 const getTokenExpiration = (token) => {

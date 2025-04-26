@@ -12,8 +12,7 @@ const logger = winston.createLogger({
 });
 
 const redisClient = redis.createClient({
-  url: `redis://${process.env.REDIS_HOST}:${process.env.REDIS_PORT}`,
-  password: process.env.REDIS_PASSWORD,
+  url: process.env.REDIS_URL || 'redis://localhost:6379',
   socket: {
     connectTimeout: 10000,
     keepAlive: 1000,
@@ -46,8 +45,8 @@ redisClient.on('error', (err) => logger.error('Redis client error', { error: err
       attempts++;
       logger.error(`Failed to connect to Redis on startup, attempt ${attempts}`, { error: err.message, stack: err.stack });
       if (attempts === maxAttempts) {
-        logger.error('Redis connection failed after max attempts');
-        process.exit(1);
+        logger.warn('Redis connection failed after max attempts, continuing without caching');
+        break; // Continue without Redis
       }
       await new Promise((resolve) => setTimeout(resolve, 1000 * attempts));
     }
@@ -63,7 +62,8 @@ const withRetry = async (operation, maxRetries = 3) => {
       attempt++;
       logger.error(`Redis operation failed, attempt ${attempt}`, { error: err.message });
       if (attempt === maxRetries) {
-        throw err;
+        logger.warn('Redis operation failed after max retries, bypassing cache');
+        return null; // Return null to bypass cache
       }
       await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
     }

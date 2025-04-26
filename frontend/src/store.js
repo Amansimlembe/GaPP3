@@ -41,6 +41,12 @@ const messageSlice = createSlice({
         }
       }
     },
+    deleteMessage: (state, action) => {
+      const { recipientId, messageId } = action.payload;
+      if (state.chats[recipientId]) {
+        state.chats[recipientId] = state.chats[recipientId].filter((msg) => msg._id !== messageId);
+      }
+    },
     setSelectedChat: (state, action) => {
       state.selectedChat = action.payload;
     },
@@ -56,44 +62,20 @@ export const {
   addMessage,
   replaceMessage,
   updateMessageStatus,
+  deleteMessage,
   setSelectedChat,
   resetState,
 } = messageSlice.actions;
 
 const persistenceMiddleware = (store) => (next) => (action) => {
   const result = next(action);
-  const actionsToPersist = [
-    setMessages.type,
-    addMessage.type,
-    replaceMessage.type,
-    updateMessageStatus.type,
-    setSelectedChat.type,
-    resetState.type,
-  ];
+  const actionsToPersist = [setSelectedChat.type, resetState.type];
 
   if (actionsToPersist.includes(action.type)) {
     requestAnimationFrame(() => {
       const state = store.getState().messages;
       try {
-        const serializableState = {
-          ...state,
-          chats: Object.fromEntries(
-            Object.entries(state.chats).map(([key, messages]) => [
-              key,
-              messages.map((msg) => ({
-                ...msg,
-                content: msg.content || '',
-                plaintextContent: msg.plaintextContent || '',
-                uploadProgress: msg.uploadProgress || 0,
-                caption: msg.caption || '',
-                createdAt: msg.createdAt || new Date().toISOString(),
-                senderVirtualNumber: msg.senderVirtualNumber || '',
-                senderUsername: msg.senderUsername || '',
-                senderPhoto: msg.senderPhoto || 'https://placehold.co/40x40',
-              })),
-            ])
-          ),
-        };
+        const serializableState = { selectedChat: state.selectedChat };
         localStorage.setItem('reduxState', JSON.stringify(serializableState));
       } catch (error) {
         console.error('Failed to persist state:', error);
@@ -109,26 +91,8 @@ const loadPersistedState = () => {
   if (persistedState) {
     try {
       const parsedState = JSON.parse(persistedState);
-      if (parsedState && typeof parsedState.chats === 'object' && parsedState.chats !== null) {
-        return {
-          ...parsedState,
-          chats: Object.fromEntries(
-            Object.entries(parsedState.chats).map(([key, messages]) => [
-              key,
-              messages.map((msg) => ({
-                ...msg,
-                content: msg.content || '',
-                plaintextContent: msg.plaintextContent || '',
-                uploadProgress: msg.uploadProgress || 0,
-                caption: msg.caption || '',
-                createdAt: msg.createdAt || new Date().toISOString(),
-                senderVirtualNumber: msg.senderVirtualNumber || '',
-                senderUsername: msg.senderUsername || '',
-                senderPhoto: msg.senderPhoto || 'https://placehold.co/40x40',
-              })),
-            ])
-          ),
-        };
+      if (parsedState && typeof parsedState.selectedChat === 'string') {
+        return { selectedChat: parsedState.selectedChat };
       }
       throw new Error('Invalid persisted state format');
     } catch (error) {
@@ -150,7 +114,7 @@ export const store = configureStore({
   middleware: (getDefaultMiddleware) =>
     getDefaultMiddleware({
       serializableCheck: {
-        ignoredActions: [addMessage.type, replaceMessage.type, updateMessageStatus.type],
+        ignoredActions: [addMessage.type, replaceMessage.type, updateMessageStatus.type, deleteMessage.type],
         ignoredPaths: ['messages.chats'],
       },
     }).concat(persistenceMiddleware),

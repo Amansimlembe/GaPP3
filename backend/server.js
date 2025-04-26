@@ -18,7 +18,6 @@ const logger = winston.createLogger({
   ],
 });
 
-// Load route modules safely
 let authRoutes, authMiddleware, socialRoutes, jobseekerRoutes, employerRoutes;
 try {
   ({ router: authRoutes, authMiddleware } = require('./routes/auth'));
@@ -36,7 +35,7 @@ app.set('trust proxy', 1);
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: ['https://gapp-6yc3.onrender.com', 'http://localhost:3000'],
+    origin: ['https://gapp-6yc3.onrender.com', 'http://localhost:5173'],
     methods: ['GET', 'POST'],
     credentials: true,
   },
@@ -46,12 +45,11 @@ const io = new Server(server, {
 app.set('io', io);
 
 app.use(cors({
-  origin: ['https://gapp-6yc3.onrender.com', 'http://localhost:3000'],
+  origin: ['https://gapp-6yc3.onrender.com', 'http://localhost:5173'],
   credentials: true,
 }));
 app.use(express.json({ limit: '50mb' }));
 
-// Serve static files from frontend/build
 const buildPath = path.join(__dirname, '..', 'frontend', 'build');
 logger.info(`Attempting to serve static files from: ${buildPath}`);
 if (fs.existsSync(buildPath)) {
@@ -61,19 +59,17 @@ if (fs.existsSync(buildPath)) {
     app.use(express.static(buildPath));
   } catch (err) {
     logger.error(`Failed to read build directory: ${buildPath}`, { error: err.message });
-    app.use(express.static(path.join(__dirname, '..', 'frontend', 'public')));
+    process.exit(1); // Fail if build directory is invalid
   }
 } else {
-  logger.warn(`Build directory not found: ${buildPath}, falling back to frontend/public`);
-  app.use(express.static(path.join(__dirname, '..', 'frontend', 'public')));
+  logger.error(`Build directory not found: ${buildPath}`);
+  process.exit(1); // Fail if build directory is missing
 }
 
-// Health check endpoint
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'OK', uptime: process.uptime() });
 });
 
-// JSON parsing error handler
 app.use((err, req, res, next) => {
   if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
     logger.error('Invalid JSON payload', { method: req.method, url: req.url, body: req.body, error: err.message });
@@ -93,7 +89,6 @@ const connectDB = async () => {
 };
 connectDB();
 
-// Route setup with enhanced validation
 const routes = [
   { path: '/auth', handler: authRoutes, name: 'authRoutes' },
   { path: '/jobseeker', handler: jobseekerRoutes, name: 'jobseekerRoutes' },
@@ -121,11 +116,8 @@ routes.forEach(({ path, handler, name }) => {
   }
 });
 
-// Fallback for client-side routing
 app.get('*', (req, res) => {
-  const indexPath = fs.existsSync(buildPath)
-    ? path.join(buildPath, 'index.html')
-    : path.join(__dirname, '..', 'frontend', 'public', 'index.html');
+  const indexPath = path.join(buildPath, 'index.html');
   res.sendFile(indexPath, (err) => {
     if (err) {
       logger.error('Failed to serve index.html', { path: indexPath, error: err.message });
@@ -134,7 +126,6 @@ app.get('*', (req, res) => {
   });
 });
 
-// Global error handler
 app.use((err, req, res, next) => {
   logger.error('Unhandled error', { error: err.message, stack: err.stack });
   res.status(500).json({ error: 'Internal Server Error' });

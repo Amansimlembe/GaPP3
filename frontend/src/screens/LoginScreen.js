@@ -63,10 +63,11 @@ const LoginScreen = ({ setAuth }) => {
         );
         return response.data;
       } catch (err) {
-        console.log(`Attempt ${i + 1} failed:`, {
+        console.error(`Attempt ${i + 1} failed:`, {
           status: err.response?.status,
           data: err.response?.data,
           message: err.message,
+          stack: err.stack,
         });
         if ((err.response?.status === 429 || err.response?.status >= 500) && i < retries - 1) {
           await new Promise((resolve) => setTimeout(resolve, delay * (i + 1)));
@@ -113,12 +114,19 @@ const LoginScreen = ({ setAuth }) => {
 
       setAuth(response.token, response.userId, response.role, response.photo, response.virtualNumber, response.username);
     } catch (error) {
-      console.error(`${isLogin ? 'Login' : 'Register'} error:`, error.response?.data || error.message);
-      setError(
+      console.error(`${isLogin ? 'Login' : 'Register'} error:`, {
+        status: error.response?.status,
+        data: error.response?.data,
+        message: error.message,
+        stack: error.stack,
+      });
+      const errorMessage =
         error.response?.status === 429
           ? 'Too many requests, please try again later'
-          : error.response?.data?.error || error.message || `${isLogin ? 'Login' : 'Registration'} failed`
-      );
+          : error.response?.data?.error ||
+            error.message ||
+            (isLogin ? 'Login failed' : 'Registration failed. Please try again.');
+      setError(errorMessage);
     } finally {
       setLoading(false);
     }
