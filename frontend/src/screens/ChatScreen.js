@@ -463,8 +463,8 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       inputRef.current?.focus();
     } catch (err) {
       console.error('Send message error:', err);
-      setPendingMessages((prev) => [...prev, { tempId: clientMessageId, recipientId, messageData: { ...messageData } }]));
-      await savePendingMessages([...pendingMessages, { tempId: clientMessageId, recipientId, messageData: { ...messageData } }]));
+      setPendingMessages((prev) => [...prev, { tempId: clientMessageId, recipientId, messageData: { ...messageData } }]);
+      await savePendingMessages([...pendingMessages, { tempId: clientMessageId, recipientId, messageData: { ...messageData } }]);
       setError('Failed to send message');
     }
   }, [
