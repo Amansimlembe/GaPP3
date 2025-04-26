@@ -12,7 +12,7 @@ const logger = winston.createLogger({
 });
 
 const redisClient = redis.createClient({
-  url: process.env.REDIS_URL || 'redis://localhost:6379',
+  url: process.env.REDIS_URL || 'redis://localhost:6379', // Fallback for local dev
   socket: {
     connectTimeout: 10000,
     keepAlive: 1000,
@@ -26,12 +26,15 @@ const redisClient = redis.createClient({
       return delay;
     },
   },
+  disableOfflineQueue: true, // Prevent queuing commands when disconnected
 });
 
 redisClient.on('connect', () => logger.info('Connected to Redis'));
 redisClient.on('reconnecting', () => logger.info('Reconnecting to Redis'));
 redisClient.on('end', () => logger.warn('Redis connection closed'));
 redisClient.on('error', (err) => logger.error('Redis client error', { error: err.message, stack: err.stack }));
+
+let isRedisAvailable = false;
 
 (async () => {
   let attempts = 0;
@@ -40,13 +43,15 @@ redisClient.on('error', (err) => logger.error('Redis client error', { error: err
     try {
       await redisClient.connect();
       logger.info('Redis client initialized successfully');
+      isRedisAvailable = true;
       break;
     } catch (err) {
       attempts++;
       logger.error(`Failed to connect to Redis on startup, attempt ${attempts}`, { error: err.message, stack: err.stack });
       if (attempts === maxAttempts) {
         logger.warn('Redis connection failed after max attempts, continuing without caching');
-        break; // Continue without Redis
+        isRedisAvailable = false;
+        break;
       }
       await new Promise((resolve) => setTimeout(resolve, 1000 * attempts));
     }
@@ -54,6 +59,10 @@ redisClient.on('error', (err) => logger.error('Redis client error', { error: err
 })();
 
 const withRetry = async (operation, maxRetries = 3) => {
+  if (!isRedisAvailable) {
+    logger.warn('Redis unavailable, bypassing cache operation');
+    return null;
+  }
   let attempt = 0;
   while (attempt < maxRetries) {
     try {
@@ -63,7 +72,7 @@ const withRetry = async (operation, maxRetries = 3) => {
       logger.error(`Redis operation failed, attempt ${attempt}`, { error: err.message });
       if (attempt === maxRetries) {
         logger.warn('Redis operation failed after max retries, bypassing cache');
-        return null; // Return null to bypass cache
+        return null;
       }
       await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
     }
@@ -72,6 +81,7 @@ const withRetry = async (operation, maxRetries = 3) => {
 
 module.exports = {
   client: redisClient,
+  isAvailable: () => isRedisAvailable,
   get: async (key) => {
     return await withRetry(async () => {
       const result = await redisClient.get(key);
@@ -126,6 +136,7 @@ module.exports = {
       if (redisClient.isOpen) {
         await redisClient.quit();
         logger.info('Redis connection closed gracefully');
+        isRedisAvailable = false;
       }
     } catch (err) {
       logger.error('Error closing Redis connection', { error: err.message });
