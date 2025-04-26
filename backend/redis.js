@@ -11,8 +11,16 @@ const logger = winston.createLogger({
   ],
 });
 
+// Construct REDIS_URL from REDIS_HOST, REDIS_PORT, and REDIS_PASSWORD
+const REDIS_HOST = process.env.REDIS_HOST || 'localhost';
+const REDIS_PORT = process.env.REDIS_PORT || 6379;
+const REDIS_PASSWORD = process.env.REDIS_PASSWORD || '';
+const REDIS_URL = REDIS_PASSWORD
+  ? `rediss://default:${REDIS_PASSWORD}@${REDIS_HOST}:${REDIS_PORT}`
+  : `redis://${REDIS_HOST}:${REDIS_PORT}`;
+
 const redisClient = redis.createClient({
-  url: process.env.REDIS_URL || 'redis://localhost:6379', // Fallback for local dev
+  url: REDIS_URL,
   socket: {
     connectTimeout: 10000,
     keepAlive: 1000,
