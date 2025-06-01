@@ -11,36 +11,79 @@ const logger = winston.createLogger({
   ],
 });
 
-// Use REDIS_URL directly if provided, otherwise construct from components
-const REDIS_URL = process.env.REDIS_URL || (process.env.REDIS_PASSWORD
-  ? `rediss://default:${process.env.REDIS_PASSWORD}@${process.env.REDIS_HOST || 'localhost'}:${process.env.REDIS_PORT || 6379}`
-  : `redis://${process.env.REDIS_HOST || 'localhost'}:${process.env.REDIS_PORT || 6379}`);
+// Validate and construct REDIS_URL
+const validateRedisConfig = () => {
+  const redisUrl = process.env.REDIS_URL;
+  const redisHost = process.env.REDIS_HOST || 'localhost';
+  const redisPort = process.env.REDIS_PORT || 6379;
+  const redisPassword = process.env.REDIS_PASSWORD;
+
+  if (redisUrl) {
+    try {
+      new URL(redisUrl);
+      return redisUrl;
+    } catch (err) {
+      logger.error('Invalid REDIS_URL format', { error: err.message });
+    }
+  }
+
+  if (!redisHost || !redisPort) {
+    logger.error('Missing REDIS_HOST or REDIS_PORT, using fallback localhost');
+    return 'redis://localhost:6379';
+  }
+
+  const protocol = redisPassword ? 'rediss' : 'redis';
+  const url = redisPassword
+    ? `${protocol}://default:${redisPassword}@${redisHost}:${redisPort}`
+    : `${protocol}://${redisHost}:${redisPort}`;
+  logger.info('Constructed Redis URL', { url: url.replace(/:[^@]+@/, ':****@') });
+  return url;
+};
+
+const REDIS_URL = validateRedisConfig();
 
 const redisClient = redis.createClient({
   url: REDIS_URL,
   socket: {
-    connectTimeout: 15000, // Increased timeout
+    connectTimeout: 15000,
     keepAlive: 1000,
     reconnectStrategy: (retries) => {
       if (retries > 20) {
         logger.error('Redis reconnection failed after 20 attempts', { retries });
         return new Error('Redis reconnection failed');
       }
-      const delay = Math.min(retries * 200, 5000); // Increased delay
+      const delay = Math.min(retries * 200, 5000);
       logger.info('Reconnect attempt', { retries, delay });
       return delay;
     },
-    // Custom DNS resolution
+    // Enhanced DNS resolution with fallback servers
     lookup: (hostname, opts, callback) => {
       const dns = require('dns');
-      dns.resolve4(hostname, { ttl: true, resolver: '8.8.8.8' }, (err, addresses) => {
-        if (err) {
-          logger.error('DNS resolution failed', { hostname, error: err.message });
-          return callback(err);
+      const dnsServers = ['8.8.8.8', '1.1.1.1']; // Google and Cloudflare DNS
+      let lastError = null;
+
+      const tryResolve = (index) => {
+        if (index >= dnsServers.length) {
+          logger.error('DNS resolution failed for all servers', { hostname, error: lastError?.message });
+          return callback(lastError);
         }
-        logger.info('DNS resolved', { hostname, address: addresses[0] });
-        callback(null, addresses[0], 4);
-      });
+
+        dns.resolve4(hostname, { ttl: true, resolver: dnsServers[index] }, (err, addresses) => {
+          if (err) {
+            lastError = err;
+            logger.warn('DNS resolution attempt failed', {
+              hostname,
+              dnsServer: dnsServers[index],
+              error: err.message,
+            });
+            return tryResolve(index + 1);
+          }
+          logger.info('DNS resolved', { hostname, address: addresses[0], dnsServer: dnsServers[index] });
+          callback(null, addresses[0], 4);
+        });
+      };
+
+      tryResolve(0);
     },
   },
   disableOfflineQueue: true,
@@ -59,12 +102,15 @@ let isRedisAvailable = false;
   while (attempts < maxAttempts) {
     try {
       await redisClient.connect();
-      logger.info('Redis client initialized successfully', { url: REDIS_URL });
+      logger.info('Redis client initialized successfully', { url: REDIS_URL.replace(/:[^@]+@/, ':****@') });
       isRedisAvailable = true;
       break;
     } catch (err) {
       attempts++;
-      logger.error(`Failed to connect to Redis on startup, attempt ${attempts}`, { error: err.message, stack: err.stack });
+      logger.error(`Failed to connect to Redis on startup, attempt ${attempts}`, {
+        error: err.message,
+        stack: err.stack,
+      });
       if (attempts === maxAttempts) {
         logger.warn('Redis connection failed after max attempts, continuing without caching');
         isRedisAvailable = false;

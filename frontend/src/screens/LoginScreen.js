@@ -49,6 +49,10 @@ const LoginScreen = ({ setAuth }) => {
         setError('Please select a country');
         return false;
       }
+      if (photo && photo.size > 5 * 1024 * 1024) { // 5MB limit
+        setError('Photo must be smaller than 5MB');
+        return false;
+      }
     }
     return true;
   };
@@ -68,6 +72,7 @@ const LoginScreen = ({ setAuth }) => {
           data: err.response?.data,
           message: err.message,
           stack: err.stack,
+          requestData: isLogin ? data : 'FormData (multipart)',
         });
         if ((err.response?.status === 429 || err.response?.status >= 500) && i < retries - 1) {
           await new Promise((resolve) => setTimeout(resolve, delay * (i + 1)));
@@ -110,7 +115,7 @@ const LoginScreen = ({ setAuth }) => {
       localStorage.setItem('photo', response.photo || 'https://placehold.co/40x40');
       localStorage.setItem('virtualNumber', response.virtualNumber || '');
       localStorage.setItem('username', response.username);
-      localStorage.setItem('privateKey', response.privateKey);
+      localStorage.setItem('privateKey', response.privateKey || '');
 
       setAuth(response.token, response.userId, response.role, response.photo, response.virtualNumber, response.username);
     } catch (error) {
@@ -124,6 +129,7 @@ const LoginScreen = ({ setAuth }) => {
         error.response?.status === 429
           ? 'Too many requests, please try again later'
           : error.response?.data?.error ||
+            error.response?.data?.details ||
             error.message ||
             (isLogin ? 'Login failed' : 'Registration failed. Please try again.');
       setError(errorMessage);
@@ -135,6 +141,10 @@ const LoginScreen = ({ setAuth }) => {
   const handlePhotoChange = (e) => {
     const file = e.target.files[0];
     if (file) {
+      if (file.size > 5 * 1024 * 1024) { // 5MB limit
+        setError('Photo must be smaller than 5MB');
+        return;
+      }
       setPhoto(file);
       setPhotoPreview(URL.createObjectURL(file));
     }
@@ -211,16 +221,18 @@ const LoginScreen = ({ setAuth }) => {
             type="email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            className="w-full p-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600"
+            className="w-full p-2 border rounded-md dark:bg-gray-700 dark:text-white dark:border-gray-600"
             placeholder="Email"
+            required
             disabled={loading}
           />
           <input
             type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            className="w-full p-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600"
+            className="w-full p-2 border rounded-md dark:bg-gray-700 dark:text-white dark:border-gray-600"
             placeholder="Password (min 6 characters)"
+            required
             disabled={loading}
           />
           <button

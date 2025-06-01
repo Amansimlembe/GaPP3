@@ -189,7 +189,7 @@ const shutdown = async () => {
   }
   io.close(() => {
     logger.info('Socket.IO connections closed');
-  });
+    });
   server.close(() => {
     logger.info('Server closed');
     process.exit(0);

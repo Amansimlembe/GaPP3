@@ -13,6 +13,11 @@ const redis = require('../redis');
 
 const router = express.Router();
 
+// Validate environment variables
+if (!process.env.JWT_SECRET) {
+  throw new Error('JWT_SECRET is not defined');
+}
+
 // Parse CLOUDINARY_URL or use individual variables
 let cloudinaryConfig = {};
 if (process.env.CLOUDINARY_URL) {
@@ -128,13 +133,11 @@ const authMiddleware = async (req, res, next) => {
   }
 };
 
-// ... (rest of the file remains unchanged)
-
 const registerSchema = Joi.object({
   email: Joi.string().email().required(),
   password: Joi.string().min(6).required(),
   username: Joi.string().min(3).max(20).required(),
-  country: Joi.string().required(),
+  country: Joi.string().length(2).required(), // ISO 3166-1 alpha-2
   role: Joi.number().integer().min(0).max(1).required(),
 });
 
@@ -194,7 +197,7 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
       virtualNumber = await generateVirtualNumber(country, forge.util.bytesToHex(forge.random.getBytesSync(16)));
     } catch (err) {
       logger.error('Virtual number generation failed', { error: err.message, country });
-      return res.status(500).json({ error: 'Failed to generate virtual number' });
+      return res.status(400).json({ error: 'Failed to generate virtual number', details: err.message });
     }
 
     const user = new User({
@@ -218,19 +221,43 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
           ).end(req.file.buffer);
         });
         user.photo = result.secure_url;
+        logger.info('Photo uploaded to Cloudinary', { email, url: result.secure_url });
       } catch (err) {
         logger.error('Cloudinary upload failed', { error: err.message, email });
-        return res.status(500).json({ error: 'Failed to upload photo' });
+        return res.status(400).json({ error: 'Failed to upload photo', details: err.message });
       }
     }
 
     await user.save();
-    const token = jwt.sign({ id: user._id, email, virtualNumber, role: user.role }, process.env.JWT_SECRET, { expiresIn: '24h' });
-    try {
-      await redis.setex(`token:${user._id}`, 24 * 60 * 60, token);
-    } catch (err) {
-      logger.error('Redis setex failed', { error: err.message, userId: user._id });
-      return res.status(500).json({ error: 'Failed to store token in Redis' });
+    const token = jwt.sign({ id: user._id, email, virtualNumber, role: user.role }, process.env.JWT_SECRET, {
+      expiresIn: '24h',
+    });
+
+    // Handle Redis with retries and fallback
+    let redisSuccess = false;
+    const maxRetries = 3;
+    let attempt = 0;
+    if (redis.isAvailable()) {
+      while (attempt < maxRetries && !redisSuccess) {
+        try {
+          await redis.setex(`token:${user._id}`, 24 * 60 * 60, token);
+          redisSuccess = true;
+          logger.info('Token stored in Redis', { userId: user._id });
+        } catch (redisError) {
+          attempt++;
+          logger.error(`Redis setex failed during registration, attempt ${attempt}`, {
+            error: redisError.message,
+            userId: user._id,
+          });
+          if (attempt === maxRetries) {
+            logger.warn('Redis unavailable after max retries, proceeding without caching', { userId: user._id });
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
+        }
+      }
+    } else {
+      logger.warn('Redis unavailable, skipping token storage', { userId: user._id });
     }
 
     logger.info('User registered', { userId: user._id, email });
@@ -247,16 +274,26 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
     logger.error('Register error:', {
       error: error.message,
       stack: error.stack,
-      body: req.body,
+      body: {
+        email: req.body.email,
+        username: req.body.username,
+        country: req.body.country,
+        role: req.body.role,
+        hasPhoto: !!req.file,
+      },
       file: req.file ? { mimetype: req.file.mimetype, size: req.file.size } : null,
     });
     if (error.code === 11000) {
       return res.status(400).json({ error: 'Duplicate email, username, or virtual number' });
     }
-    res.status(500).json({ error: error.message || 'Failed to register' });
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({ error: 'Invalid user data', details: error.message });
+    }
+    res.status(500).json({ error: 'Failed to register', details: error.message });
   }
 });
 
+// Keep other routes unchanged
 router.post('/login', authLimiter, async (req, res) => {
   try {
     const { error } = loginSchema.validate(req.body);
@@ -274,21 +311,26 @@ router.post('/login', authLimiter, async (req, res) => {
       { expiresIn: '24h' }
     );
 
+    let redisSuccess = false;
     const maxRetries = 3;
     let attempt = 0;
-    let redisSuccess = false;
-    while (attempt < maxRetries && !redisSuccess) {
-      try {
-        await redis.setex(`token:${user._id}`, 24 * 60 * 60, token);
-        redisSuccess = true;
-      } catch (redisError) {
-        attempt++;
-        logger.error(`Redis setex failed during login, attempt ${attempt}`, { error: redisError.message });
-        if (attempt === maxRetries) {
-          throw redisError;
+    if (redis.isAvailable()) {
+      while (attempt < maxRetries && !redisSuccess) {
+        try {
+          await redis.setex(`token:${user._id}`, 24 * 60 * 60, token);
+          redisSuccess = true;
+        } catch (redisError) {
+          attempt++;
+          logger.error(`Redis setex failed during login, attempt ${attempt}`, { error: redisError.message });
+          if (attempt === maxRetries) {
+            logger.warn('Redis unavailable after max retries, proceeding without caching', { userId: user._id });
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
         }
-        await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
       }
+    } else {
+      logger.warn('Redis unavailable, skipping token storage', { userId: user._id });
     }
 
     logger.info('Login successful', { userId: user._id, email });
@@ -303,7 +345,7 @@ router.post('/login', authLimiter, async (req, res) => {
     });
   } catch (error) {
     logger.error('Login error', { error: error.message, body: req.body });
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    res.status(500).json({ error: 'Failed to login', details: error.message });
   }
 });
 
@@ -332,7 +374,7 @@ router.post('/update_country', authMiddleware, async (req, res) => {
     res.json({ virtualNumber: user.virtualNumber });
   } catch (error) {
     logger.error('Update country error:', { error: error.message, userId: req.body.userId });
-    res.status(500).json({ error: error.message || 'Failed to update country' });
+    res.status(500).json({ error: 'Failed to update country', details: error.message });
   }
 });
 
@@ -359,7 +401,7 @@ router.post('/update_photo', authMiddleware, upload.single('photo'), async (req,
     res.json({ photo: user.photo });
   } catch (error) {
     logger.error('Update photo error:', { error: error.message, userId: req.body.userId });
-    res.status(500).json({ error: error.message || 'Failed to update photo' });
+    res.status(500).json({ error: 'Failed to update photo', details: error.message });
   }
 });
 
@@ -388,20 +430,23 @@ router.post('/update_username', authMiddleware, async (req, res) => {
     res.json({ username: user.username });
   } catch (error) {
     logger.error('Update username error:', { error: error.message, userId: req.body.userId });
-    res.status(500).json({ error: error.message || 'Failed to update username' });
+    res.status(500).json({ error: 'Failed to update username', details: error.message });
   }
 });
 
 router.get('/contacts', authMiddleware, async (req, res) => {
   try {
     const cacheKey = `contacts:${req.user.id}`;
-    const cachedContacts = await redis.get(cacheKey);
-    if (cachedContacts) return res.json(JSON.parse(cachedContacts));
+    let contacts;
+    if (redis.isAvailable()) {
+      const cachedContacts = await redis.get(cacheKey);
+      if (cachedContacts) return res.json(JSON.parse(cachedContacts));
+    }
 
     const user = await User.findById(req.user.id).populate('contacts', 'username virtualNumber photo status lastSeen');
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    const contacts = user.contacts.map((contact) => ({
+    contacts = user.contacts.map((contact) => ({
       id: contact._id,
       username: contact.username,
       virtualNumber: contact.virtualNumber,
@@ -410,28 +455,38 @@ router.get('/contacts', authMiddleware, async (req, res) => {
       lastSeen: contact.lastSeen,
     }));
 
-    await redis.setex(cacheKey, 300, JSON.stringify(contacts));
+    if (redis.isAvailable()) {
+      await redis.setex(cacheKey, 300, JSON.stringify(contacts));
+    }
+
     res.json(contacts);
   } catch (error) {
     logger.error('Fetch contacts error', { error: error.message, userId: req.user.id });
-    res.status(500).json({ error: error.message || 'Failed to fetch contacts' });
+    res.status(500).json({ error: 'Failed to fetch contacts', details: error.message });
   }
 });
 
 router.get('/public_key/:userId', authMiddleware, async (req, res) => {
   try {
     const cacheKey = `publicKey:${req.params.userId}`;
-    const cachedKey = await redis.get(cacheKey);
-    if (cachedKey) return res.json({ publicKey: cachedKey });
+    let publicKey;
+    if (redis.isAvailable()) {
+      const cachedKey = await redis.get(cacheKey);
+      if (cachedKey) return res.json({ publicKey: cachedKey });
+    }
 
     const user = await User.findById(req.params.userId).select('publicKey');
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    await redis.setex(cacheKey, 3600, user.publicKey);
-    res.json({ publicKey: user.publicKey });
+    publicKey = user.publicKey;
+    if (redis.isAvailable()) {
+      await redis.setex(cacheKey, 3600, publicKey);
+    }
+
+    res.json({ publicKey });
   } catch (error) {
     logger.error('Fetch public key error:', { error: error.message, userId: req.params.userId });
-    res.status(500).json({ error: error.message || 'Failed to fetch public key' });
+    res.status(500).json({ error: 'Failed to fetch public key', details: error.message });
   }
 });
 
@@ -457,22 +512,27 @@ router.post('/refresh', authLimiter, authMiddleware, async (req, res) => {
       { expiresIn: '24h' }
     );
 
+    let redisSuccess = false;
     const maxRetries = 3;
     let attempt = 0;
-    let redisSuccess = false;
-    while (attempt < maxRetries && !redisSuccess) {
-      try {
-        await redis.setex(`token:${user._id}`, 24 * 60 * 60, newToken);
-        await redis.del(`session:${oldToken}`);
-        redisSuccess = true;
-      } catch (redisError) {
-        attempt++;
-        logger.error(`Redis operation failed during token refresh, attempt ${attempt}`, { error: redisError.message });
-        if (attempt === maxRetries) {
-          throw redisError;
+    if (redis.isAvailable()) {
+      while (attempt < maxRetries && !redisSuccess) {
+        try {
+          await redis.setex(`token:${user._id}`, 24 * 60 * 60, newToken);
+          await redis.del(`session:${oldToken}`);
+          redisSuccess = true;
+        } catch (redisError) {
+          attempt++;
+          logger.error(`Redis operation failed during token refresh, attempt ${attempt}`, { error: redisError.message });
+          if (attempt === maxRetries) {
+            logger.warn('Redis unavailable after max retries, proceeding without caching', { userId: user._id });
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
         }
-        await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
       }
+    } else {
+      logger.warn('Redis unavailable, skipping token storage', { userId: user._id });
     }
 
     logger.info('Token refreshed successfully', { userId: user._id });
@@ -487,7 +547,7 @@ router.post('/refresh', authLimiter, authMiddleware, async (req, res) => {
     });
   } catch (error) {
     logger.error('Refresh token error:', { error: error.message, userId: req.user?.id, ip: req.ip });
-    res.status(500).json({ error: error.message || 'Failed to refresh token' });
+    res.status(500).json({ error: 'Failed to refresh token', details: error.message });
   }
 });
 
