@@ -3,25 +3,33 @@ import { openDB } from 'idb';
 const DB_NAME = 'ChatDB';
 const MESSAGE_STORE_NAME = 'messages';
 const PENDING_STORE_NAME = 'pendingMessages';
-const VERSION = 1; // Start fresh for consistency
+const VERSION = 8; // Set to 8 to surpass existing version 7
 
 const dbPromise = openDB(DB_NAME, VERSION, {
   upgrade(db, oldVersion, newVersion) {
     console.log(`Upgrading database from version ${oldVersion} to ${newVersion}`);
-    if (db.objectStoreNames.contains(MESSAGE_STORE_NAME)) {
-      db.deleteObjectStore(MESSAGE_STORE_NAME);
+    
+    // Create or update 'messages' store
+    if (!db.objectStoreNames.contains(MESSAGE_STORE_NAME)) {
+      const messageStore = db.createObjectStore(MESSAGE_STORE_NAME, { keyPath: '_id' });
+      messageStore.createIndex('byRecipientId', 'recipientId');
+      messageStore.createIndex('byCreatedAt', 'createdAt');
+      messageStore.createIndex('byClientMessageId', 'clientMessageId', { unique: false });
+      messageStore.createIndex('byRecipientAndTime', ['recipientId', 'createdAt']);
+    } else if (oldVersion < 8) {
+      // Example: Add new index for version 8 without deleting store
+      const tx = db.transaction(MESSAGE_STORE_NAME, 'readwrite');
+      const messageStore = tx.objectStore(MESSAGE_STORE_NAME);
+      if (!messageStore.indexNames.contains('byStatus')) {
+        messageStore.createIndex('byStatus', 'status', { unique: false });
+      }
     }
-    const messageStore = db.createObjectStore(MESSAGE_STORE_NAME, { keyPath: '_id' });
-    messageStore.createIndex('byRecipientId', 'recipientId');
-    messageStore.createIndex('byCreatedAt', 'createdAt');
-    messageStore.createIndex('byClientMessageId', 'clientMessageId', { unique: false });
-    messageStore.createIndex('byRecipientAndTime', ['recipientId', 'createdAt']);
 
-    if (db.objectStoreNames.contains(PENDING_STORE_NAME)) {
-      db.deleteObjectStore(PENDING_STORE_NAME);
+    // Create or update 'pendingMessages' store
+    if (!db.objectStoreNames.contains(PENDING_STORE_NAME)) {
+      const pendingStore = db.createObjectStore(PENDING_STORE_NAME, { keyPath: 'tempId' });
+      pendingStore.createIndex('byRecipientId', 'recipientId');
     }
-    const pendingStore = db.createObjectStore(PENDING_STORE_NAME, { keyPath: 'tempId' });
-    pendingStore.createIndex('byRecipientId', 'recipientId');
   },
   blocked() {
     console.error('Database upgrade blocked by an open connection');
@@ -41,11 +49,25 @@ const withRetry = async (operation, maxRetries = 3) => {
     } catch (error) {
       attempt++;
       console.error(`Database operation failed, attempt ${attempt}:`, error);
+      if (error.name === 'VersionError' && attempt === 1) {
+        console.warn('VersionError detected, clearing database and retrying');
+        await indexedDB.deleteDatabase(DB_NAME);
+      }
       if (attempt === maxRetries) {
         throw error;
       }
       await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
     }
+  }
+};
+
+// Utility to clear the database for debugging or recovery
+export const clearDatabase = async () => {
+  try {
+    await indexedDB.deleteDatabase(DB_NAME);
+    console.log('IndexedDB database cleared');
+  } catch (error) {
+    console.error('Error clearing IndexedDB database:', error);
   }
 };
 

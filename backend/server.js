@@ -36,7 +36,7 @@ const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
     origin: ['https://gapp-6yc3.onrender.com', 'http://localhost:5173'],
-    methods: ['GET', 'POST'],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // Added OPTIONS
     credentials: true,
   },
   pingTimeout: 60000,
@@ -44,8 +44,10 @@ const io = new Server(server, {
 });
 app.set('io', io);
 
+// Updated CORS configuration
 app.use(cors({
   origin: ['https://gapp-6yc3.onrender.com', 'http://localhost:5173'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // Added OPTIONS
   credentials: true,
 }));
 app.use(express.json({ limit: '50mb' }));

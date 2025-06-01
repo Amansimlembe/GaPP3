@@ -27,6 +27,7 @@ const socket = io(BASE_URL, {
   auth: { token: localStorage.getItem('token') },
 });
 
+// Updated getTokenExpiration with improved error handling
 const getTokenExpiration = (token) => {
   try {
     if (!token || typeof token !== 'string' || !token.includes('.')) {
@@ -34,7 +35,10 @@ const getTokenExpiration = (token) => {
       return null;
     }
     const base64Url = token.split('.')[1];
-    if (!base64Url) return null;
+    if (!base64Url) {
+      console.warn('Token payload missing');
+      return null;
+    }
     const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
     const jsonPayload = decodeURIComponent(
       atob(base64)
@@ -43,9 +47,13 @@ const getTokenExpiration = (token) => {
         .join('')
     );
     const decoded = JSON.parse(jsonPayload);
+    if (!decoded.exp) {
+      console.warn('Token missing exp claim');
+      return null;
+    }
     return decoded.exp * 1000;
   } catch (error) {
-    console.error('Error decoding token:', error);
+    console.error('Error decoding token:', error.message);
     return null;
   }
 };
@@ -96,6 +104,7 @@ const App = () => {
     }
   };
 
+  // Updated refreshToken to handle 401 errors after retries
   const refreshToken = async () => {
     const maxRetries = 3;
     let attempt = 0;
@@ -119,8 +128,11 @@ const App = () => {
       } catch (error) {
         attempt++;
         console.error(`Token refresh attempt ${attempt} failed:`, error.response?.data || error.message);
-        if (attempt === maxRetries || error.response?.status === 401) {
-          console.warn('Token refresh failed after max attempts or unauthorized, clearing auth');
+        if (error.response?.status === 429) {
+          console.warn('Rate limit hit, waiting before retry');
+          await new Promise((resolve) => setTimeout(resolve, 1000 * attempt * 5));
+        } else if (attempt === maxRetries) {
+          console.warn('Token refresh failed after max attempts, clearing auth');
           setAuth('', '', '', '', '', '');
           return null;
         }
@@ -129,72 +141,35 @@ const App = () => {
     }
   };
 
-  useEffect(() => {
-    const initializeAuth = async () => {
-      setIsLoadingAuth(true);
-      try {
-        const storedToken = localStorage.getItem('token');
-        const storedUserId = localStorage.getItem('userId');
-        const storedRole = localStorage.getItem('role');
-        const storedPhoto = localStorage.getItem('photo');
-        const storedVirtualNumber = localStorage.getItem('virtualNumber');
-        const storedUsername = localStorage.getItem('username');
-
-        if (storedToken && storedUserId) {
-          const expTime = getTokenExpiration(storedToken);
-          if (!expTime) {
-            console.warn('Invalid token, clearing localStorage');
-            localStorage.clear();
-            setIsAuthenticated(false);
-            return;
-          }
-          if (expTime < Date.now()) {
-            console.log('Token expired, refreshing');
-            const newToken = await refreshToken();
-            if (!newToken) {
-              console.warn('Initial token refresh failed, clearing auth');
-              localStorage.clear();
-              setIsAuthenticated(false);
-              return;
-            }
-          } else {
-            console.log('Token valid, setting auth');
-            setAuth(storedToken, storedUserId, storedRole, storedPhoto, storedVirtualNumber, storedUsername);
-          }
-        }
-      } catch (error) {
-        console.error('Authentication initialization failed:', error);
-        localStorage.clear();
-        setIsAuthenticated(false);
-      } finally {
-        setIsLoadingAuth(false);
-      }
-    };
-
-    if (localStorage.getItem('token')) {
-      initializeAuth();
-    } else {
-      setIsLoadingAuth(false);
-    }
-  }, []);
-
+  // Updated useEffect with delayed initial token check
   useEffect(() => {
     if (!isAuthenticated || !token || !userId) return;
 
+    let isRefreshing = false;
     const checkTokenExpiration = async () => {
-      const expTime = getTokenExpiration(token);
-      const now = Date.now();
-      const bufferTime = 5 * 60 * 1000;
+      if (isRefreshing) return;
+      isRefreshing = true;
+      try {
+        const expTime = getTokenExpiration(token);
+        const now = Date.now();
+        const bufferTime = 5 * 60 * 1000;
 
-      if (expTime && expTime - now < bufferTime) {
-        const newToken = await refreshToken();
-        if (!newToken) console.warn('Periodic token refresh failed');
+        if (expTime && expTime - now < bufferTime) {
+          const newToken = await refreshToken();
+          if (!newToken) console.warn('Periodic token refresh failed');
+        }
+      } finally {
+        isRefreshing = false;
       }
     };
 
-    checkTokenExpiration();
+    // Delay initial check to avoid race condition
+    const initialCheck = setTimeout(checkTokenExpiration, 5000); // Wait 5 seconds
     const interval = setInterval(checkTokenExpiration, 60 * 1000);
-    return () => clearInterval(interval);
+    return () => {
+      clearTimeout(initialCheck);
+      clearInterval(interval);
+    };
   }, [isAuthenticated, token, userId]);
 
   useEffect(() => {

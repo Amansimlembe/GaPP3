@@ -13,7 +13,7 @@ import EmojiPicker from 'emoji-picker-react';
 import { debounce } from 'lodash';
 import { useSwipeable } from 'react-swipeable';
 import { setMessages, addMessage, updateMessageStatus, setSelectedChat, resetState, replaceMessage, deleteMessage } from '../store';
-import { saveMessages, getMessages, clearOldMessages, savePendingMessages, loadPendingMessages, clearPendingMessages } from '../db';
+import { saveMessages, getMessages, clearOldMessages, savePendingMessages, loadPendingMessages, clearPendingMessages, clearDatabase } from '../db';
 import './ChatScreen.css';
 
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
@@ -143,46 +143,73 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   };
   const formatTime = (date) => format(parseISO(date), 'hh:mm a');
 
-  const fetchChatList = useCallback(async () => {
+  const fetchChatList = useCallback(async (retryCount = 3) => {
     const cached = localStorage.getItem('cachedUsers');
-    if (cached) return;
-    try {
-      const { data } = await axios.get(`${BASE_URL}/social/chat-list`, {
-        headers: { Authorization: `Bearer ${token}` },
-        params: { userId },
-      });
-      const privateKeyPem = localStorage.getItem('privateKey');
-      const processedUsers = await Promise.all(
-        data.map(async (user) => {
-          if (user.latestMessage) {
-            user.latestMessage.content =
-              user.latestMessage.senderId === userId
-                ? `You: ${user.latestMessage.plaintextContent || '[Media]'}` 
-                : user.latestMessage.recipientId === userId && user.latestMessage.contentType === 'text'
-                ? await decryptMessage(user.latestMessage.content, privateKeyPem)
-                : `[${user.latestMessage.contentType}]`;
-          }
-          return user;
-        })
-      );
-      setUsers(processedUsers);
-      localStorage.setItem('cachedUsers', JSON.stringify(processedUsers));
-    } catch (err) {
-      setError(`Failed to load chat list: ${err.message}`);
-      if (err.response?.status === 401) handleLogout();
+    if (cached) {
+      setUsers(JSON.parse(cached));
+      return;
+    }
+    let attempt = 0;
+    while (attempt < retryCount) {
+      try {
+        const { data } = await axios.get(`${BASE_URL}/social/chat-list`, {
+          headers: { Authorization: `Bearer ${token}` },
+          params: { userId },
+          timeout: 10000,
+        });
+        const privateKeyPem = localStorage.getItem('privateKey');
+        const processedUsers = await Promise.all(
+          data.map(async (user) => {
+            if (user.latestMessage) {
+              user.latestMessage.content =
+                user.latestMessage.senderId === userId
+                  ? `You: ${user.latestMessage.plaintextContent || '[Media]'}` 
+                  : user.latestMessage.recipientId === userId && user.latestMessage.contentType === 'text'
+                  ? await decryptMessage(user.latestMessage.content, privateKeyPem)
+                  : `[${user.latestMessage.contentType}]`;
+            }
+            return user;
+          })
+        );
+        setUsers(processedUsers);
+        localStorage.setItem('cachedUsers', JSON.stringify(processedUsers));
+        setError('');
+        return;
+      } catch (err) {
+        attempt++;
+        console.error(`Fetch chat list attempt ${attempt} failed:`, err.message);
+        if (err.response?.status === 401) {
+          console.warn('Unauthorized, attempting token refresh');
+          // Trigger token refresh via App.js (handled in parent component)
+          setError('Session expired, please log in again');
+          setTimeout(() => handleLogout(), 2000); // Delay logout to allow refresh
+          return;
+        }
+        if (err.response?.status === 429) {
+          const delay = Math.pow(2, attempt) * 1000; // Exponential backoff: 1s, 2s, 4s
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+        if (attempt === retryCount) {
+          setError(`Failed to load chat list after ${retryCount} attempts: ${err.message}`);
+        }
+      }
     }
   }, [token, userId, handleLogout, decryptMessage]);
 
-  const fetchMessages = useCallback(async (recipientId) => {
+  const fetchMessages = useCallback(async (recipientId, retryCount = 3) => {
     const localMessages = await getMessages(recipientId);
     if (localMessages.length) {
       dispatch(setMessages({ recipientId, messages: localMessages }));
       listRef.current?.scrollToRow(localMessages.length - 1);
-    } else {
+      return;
+    }
+    let attempt = 0;
+    while (attempt < retryCount) {
       try {
         const { data } = await axios.get(`${BASE_URL}/social/messages`, {
           headers: { Authorization: `Bearer ${token}` },
           params: { userId, recipientId, limit: 50, skip: 0 },
+          timeout: 10000,
         });
         const privateKeyPem = localStorage.getItem('privateKey');
         const messages = await Promise.all(
@@ -200,8 +227,24 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         dispatch(setMessages({ recipientId, messages }));
         await saveMessages(messages);
         listRef.current?.scrollToRow(messages.length - 1);
+        setError('');
+        return;
       } catch (err) {
-        setError(`Failed to load messages: ${err.message}`);
+        attempt++;
+        console.error(`Fetch messages attempt ${attempt} failed:`, err.message);
+        if (err.response?.status === 401) {
+          console.warn('Unauthorized, attempting token refresh');
+          setError('Session expired, please log in again');
+          setTimeout(() => handleLogout(), 2000);
+          return;
+        }
+        if (err.response?.status === 429) {
+          const delay = Math.pow(2, attempt) * 1000;
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+        if (attempt === retryCount) {
+          setError(`Failed to load messages: ${err.message}`);
+        }
       }
     }
   }, [token, userId, dispatch, decryptMessage]);
@@ -279,54 +322,66 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
 
       for (const [index, file] of compressedFiles.entries()) {
         const clientMessageId = tempMessages[index]._id;
-        const retryUpload = async () => {
-          const formData = new FormData();
-          formData.append('file', file);
-          formData.append('userId', userId);
-          formData.append('recipientId', selectedChat);
-          formData.append('clientMessageId', clientMessageId);
-          formData.append('senderVirtualNumber', virtualNumber);
-          formData.append('senderUsername', username);
-          formData.append('senderPhoto', photo);
-          if (captions[clientMessageId]) formData.append('caption', captions[clientMessageId]);
+        const retryUpload = async (retryCount = 3) => {
+          let attempt = 0;
+          while (attempt < retryCount) {
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('userId', userId);
+            formData.append('recipientId', selectedChat);
+            formData.append('clientMessageId', clientMessageId);
+            formData.append('senderVirtualNumber', virtualNumber);
+            formData.append('senderUsername', username);
+            formData.append('senderPhoto', photo);
+            if (captions[clientMessageId]) formData.append('caption', captions[clientMessageId]);
 
-          try {
-            const response = await axios.post(`${BASE_URL}/social/upload`, formData, {
-              headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'multipart/form-data' },
-              onUploadProgress: (progressEvent) => {
-                const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-                setUploadProgress((prev) => ({ ...prev, [clientMessageId]: percentCompleted }));
+            try {
+              const response = await axios.post(`${BASE_URL}/social/upload`, formData, {
+                headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'multipart/form-data' },
+                onUploadProgress: (progressEvent) => {
+                  const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+                  setUploadProgress((prev) => ({ ...prev, [clientMessageId]: percentCompleted }));
+                  dispatch(
+                    updateMessageStatus({
+                      recipientId: selectedChat,
+                      messageId: clientMessageId,
+                      status: 'uploading',
+                      uploadProgress: percentCompleted,
+                    })
+                  );
+                },
+                timeout: 30000,
+              });
+
+              const { message: uploadedMessage } = response.data;
+              dispatch(replaceMessage({ recipientId: selectedChat, message: uploadedMessage, replaceId: clientMessageId }));
+              socket.emit('message', uploadedMessage);
+              await saveMessages([uploadedMessage]);
+              return;
+            } catch (error) {
+              attempt++;
+              console.error(`Media upload attempt ${attempt} failed:`, error.message);
+              if (error.response?.status === 401) {
+                setError('Session expired, please log in again');
+                setTimeout(() => handleLogout(), 2000);
+                return;
+              }
+              if (error.response?.status === 429) {
+                const delay = Math.pow(2, attempt) * 1000;
+                await new Promise((resolve) => setTimeout(resolve, delay));
+              }
+              if (attempt === retryCount) {
                 dispatch(
                   updateMessageStatus({
                     recipientId: selectedChat,
                     messageId: clientMessageId,
-                    status: 'uploading',
-                    uploadProgress: percentCompleted,
+                    status: 'failed',
+                    uploadProgress: 0,
                   })
                 );
-              },
-            });
-
-            const { message: uploadedMessage } = response.data;
-            dispatch(replaceMessage({ recipientId: selectedChat, message: uploadedMessage, replaceId: clientMessageId }));
-            socket.emit('message', uploadedMessage);
-            await saveMessages([uploadedMessage]);
-          } catch (error) {
-            console.error('Media upload failed:', error);
-            dispatch(
-              updateMessageStatus({
-                recipientId: selectedChat,
-                messageId: clientMessageId,
-                status: 'failed',
-                uploadProgress: 0,
-              })
-            );
-          } finally {
-            setUploadProgress((prev) => {
-              const newProgress = { ...prev };
-              delete newProgress[clientMessageId];
-              return newProgress;
-            });
+                setError('Failed to upload media');
+              }
+            }
           }
         };
 
@@ -359,7 +414,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         const { data } = await axios.post(
           `${BASE_URL}/social/add_contact`,
           { userId, virtualNumber: newContactNumber },
-          { headers: { Authorization: `Bearer ${token}` } }
+          { headers: { Authorization: `Bearer ${token}` }, timeout: 10000 }
         );
         if (!data.id || !data.username) {
           throw new Error('Invalid contact data');
@@ -383,17 +438,21 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         attempt++;
         lastError = err;
         console.error(`Add contact attempt ${attempt} failed:`, err.message);
-        if (attempt < maxRetries) {
-          const delay = Math.pow(2, attempt) * 1000; // Exponential backoff: 1s, 2s, 4s
+        if (err.response?.status === 401) {
+          setError('Session expired, please log in again');
+          setTimeout(() => handleLogout(), 2000);
+          return;
+        }
+        if (err.response?.status === 429) {
+          const delay = Math.pow(2, attempt) * 1000;
           await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+        if (attempt === maxRetries) {
+          setError(`Failed to add contact: ${err.response?.data?.error || err.message}`);
         }
       }
     }
-
-    if (!success) {
-      setError(`Failed to add contact after ${maxRetries} attempts: ${lastError.response?.data?.error || lastError.message}`);
-    }
-  }, [newContactNumber, userId, token, socket]);
+  }, [newContactNumber, userId, token, socket, handleLogout]);
 
   const sendMessage = useCallback(async () => {
     if ((!message.trim() && !files.length) || !selectedChat) return;
@@ -463,8 +522,8 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       inputRef.current?.focus();
     } catch (err) {
       console.error('Send message error:', err);
-      setPendingMessages((prev) => [...prev, { tempId: clientMessageId, recipientId, messageData: { ...messageData } }]));
-      await savePendingMessages([...pendingMessages, { tempId: clientMessageId, recipientId, messageData: { ...messageData } }]));
+      setPendingMessages((prev) => [...prev, { tempId: clientMessageId, recipientId, messageData: { ...messageData } }]);
+      await savePendingMessages([...pendingMessages, { tempId: clientMessageId, recipientId, messageData: { ...messageData } }]);
       setError('Failed to send message');
     }
   }, [
@@ -567,14 +626,26 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   );
 
   useEffect(() => {
-    fetchChatList();
-    const loadPending = async () => {
-      const pending = await loadPendingMessages();
-      setPendingMessages(pending);
+    const initializeChat = async () => {
+      try {
+        await fetchChatList();
+        const pending = await loadPendingMessages();
+        setPendingMessages(pending);
+      } catch (err) {
+        console.error('Chat initialization error:', err);
+        if (err.name === 'VersionError') {
+          console.warn('IndexedDB VersionError, clearing database');
+          await clearDatabase();
+          setPendingMessages([]);
+          await fetchChatList(); // Retry after clearing
+        } else {
+          setError('Failed to initialize chat: ' + err.message);
+        }
+      }
+      const interval = setInterval(sendPendingMessages, 5000);
+      return () => clearInterval(interval);
     };
-    loadPending();
-    const interval = setInterval(sendPendingMessages, 5000);
-    return () => clearInterval(interval);
+    initializeChat();
   }, [fetchChatList, sendPendingMessages]);
 
   useEffect(() => {

@@ -73,6 +73,7 @@ const authLimiter = rateLimit({
   message: { error: 'Too many requests, please try again later.' },
 });
 
+// Updated authMiddleware with detailed JWT error logging
 const authMiddleware = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -89,10 +90,18 @@ const authMiddleware = async (req, res, next) => {
       return next();
     }
 
-    const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
+    let decoded;
+    try {
+      decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
+    } catch (jwtError) {
+      logger.error('JWT verification failed', { error: jwtError.message, token: token.substring(0, 10) + '...' });
+      await redis.del(sessionKey);
+      return res.status(401).json({ error: 'Invalid token', details: jwtError.message });
+    }
+
     const storedToken = await redis.get(`token:${decoded.id}`);
     if (storedToken !== token) {
-      logger.warn('Token mismatch or invalidated', { userId: decoded.id });
+      logger.warn('Token mismatch or invalidated', { userId: decoded.id, token: token.substring(0, 10) + '...' });
       await redis.del(sessionKey);
       return res.status(401).json({ error: 'Invalid or expired token' });
     }
@@ -100,9 +109,9 @@ const authMiddleware = async (req, res, next) => {
     req.user = decoded;
     next();
   } catch (error) {
-    logger.error('Auth middleware error:', { error: error.message, token });
+    logger.error('Auth middleware error:', { error: error.message, token: token.substring(0, 10) + '...', url: req.url });
     await redis.del(sessionKey);
-    res.status(401).json({ error: 'Invalid token' });
+    res.status(401).json({ error: 'Invalid token', details: error.message });
   }
 };
 
@@ -233,6 +242,7 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
   }
 });
 
+// Updated /auth/login with Redis retry logic
 router.post('/login', authLimiter, async (req, res) => {
   try {
     const { error } = loginSchema.validate(req.body);
@@ -249,7 +259,23 @@ router.post('/login', authLimiter, async (req, res) => {
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
-    await redis.setex(`token:${user._id}`, 24 * 60 * 60, token);
+
+    const maxRetries = 3;
+    let attempt = 0;
+    let redisSuccess = false;
+    while (attempt < maxRetries && !redisSuccess) {
+      try {
+        await redis.setex(`token:${user._id}`, 24 * 60 * 60, token);
+        redisSuccess = true;
+      } catch (redisError) {
+        attempt++;
+        logger.error(`Redis setex failed during login, attempt ${attempt}`, { error: redisError.message });
+        if (attempt === maxRetries) {
+          throw redisError;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
+      }
+    }
 
     logger.info('Login successful', { userId: user._id, email });
     res.json({
@@ -395,10 +421,15 @@ router.get('/public_key/:userId', authMiddleware, async (req, res) => {
   }
 });
 
+// Updated /auth/refresh with enhanced logging
 router.post('/refresh', authLimiter, authMiddleware, async (req, res) => {
   try {
     const { userId } = req.body;
-    if (userId && userId !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
+    logger.info('Refresh token request', { userId, ip: req.ip });
+    if (userId && userId !== req.user.id) {
+      logger.warn('Unauthorized refresh attempt', { userId, reqUserId: req.user.id });
+      return res.status(403).json({ error: 'Not authorized' });
+    }
 
     const user = await User.findById(req.user.id).select('+privateKey');
     if (!user) {
@@ -431,7 +462,7 @@ router.post('/refresh', authLimiter, authMiddleware, async (req, res) => {
       }
     }
 
-    logger.info('Token refreshed', { userId: user._id });
+    logger.info('Token refreshed successfully', { userId: user._id });
     res.json({
       token: newToken,
       userId: user._id,
@@ -442,7 +473,7 @@ router.post('/refresh', authLimiter, authMiddleware, async (req, res) => {
       privateKey: user.privateKey,
     });
   } catch (error) {
-    logger.error('Refresh token error:', { error: error.message, userId: req.user?.id });
+    logger.error('Refresh token error:', { error: error.message, userId: req.user?.id, ip: req.ip });
     res.status(500).json({ error: error.message || 'Failed to refresh token' });
   }
 });
