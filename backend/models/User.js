@@ -4,7 +4,7 @@ const userSchema = new mongoose.Schema({
   email: {
     type: String,
     required: true,
-    unique: true,
+    unique: true, // Implies unique index
     lowercase: true,
     trim: true,
     match: /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/,
@@ -17,14 +17,14 @@ const userSchema = new mongoose.Schema({
   username: {
     type: String,
     required: true,
-    unique: true,
+    unique: true, // Implies unique index
     trim: true,
     minlength: 3,
     maxlength: 20,
   },
   photo: {
     type: String,
-    default: 'https://placehold.co/40x40', // Matches auth.js default
+    default: 'https://placehold.co/40x40',
   },
   country: {
     type: String,
@@ -33,9 +33,9 @@ const userSchema = new mongoose.Schema({
   },
   virtualNumber: {
     type: String,
-    unique: true,
+    unique: true, // Implies unique index
     match: /^\+\d{10,15}$/,
-    default: null, // Allow null initially, set in auth.js
+    default: null,
   },
   contacts: [{
     type: mongoose.Schema.Types.ObjectId,
@@ -56,7 +56,7 @@ const userSchema = new mongoose.Schema({
     select: false,
   },
   status: {
-    type: String,
+    type: Date,
     enum: ['online', 'offline'],
     default: 'offline',
   },
@@ -68,19 +68,14 @@ const userSchema = new mongoose.Schema({
   timestamps: true,
 });
 
-// Indexes for performance
-userSchema.index({ virtualNumber: 1 }, { sparse: true });
-userSchema.index({ username: 1 });
-userSchema.index({ email: 1 });
-userSchema.index({ status: 1, lastSeen: -1, _id: 1 }); // Optimized for ProfileScreen.js
+// Indexes for performance (only non-unique or compound indexes)
+userSchema.index({ status: 1, lastSeen: -1 }); // Optimized for ProfileScreen.js
 
-// Pre-save hook for virtualNumber uniqueness
-userSchema.pre('save', async function (next) {
+// Pre-save hook for virtualNumber uniqueness (already handled by unique: true)
+userSchema.pre('save', async function(next) {
   if (this.isModified('virtualNumber') && this.virtualNumber) {
-    const existingUser = await this.constructor.findOne({ virtualNumber: this.virtualNumber });
-    if (existingUser && existingUser._id.toString() !== this._id.toString()) {
-      return next(new Error('Virtual number already in use'));
-    }
+    // Optional: Additional validation if needed, but unique: true handles it
+    next();
   }
   next();
 });

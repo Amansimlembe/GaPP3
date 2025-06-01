@@ -1130,7 +1130,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         )}
       </div>
     </div>
-  );
+  )
 });
 
 export default ChatScreen;
