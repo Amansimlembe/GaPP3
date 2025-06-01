@@ -36,7 +36,7 @@ const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
     origin: ['https://gapp-6yc3.onrender.com', 'http://localhost:5173'],
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // Added OPTIONS
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     credentials: true,
   },
   pingTimeout: 60000,
@@ -44,10 +44,9 @@ const io = new Server(server, {
 });
 app.set('io', io);
 
-// Updated CORS configuration
 app.use(cors({
   origin: ['https://gapp-6yc3.onrender.com', 'http://localhost:5173'],
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // Added OPTIONS
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   credentials: true,
 }));
 app.use(express.json({ limit: '50mb' }));
@@ -61,17 +60,32 @@ if (fs.existsSync(buildPath)) {
     app.use(express.static(buildPath));
   } catch (err) {
     logger.error(`Failed to read build directory: ${buildPath}`, { error: err.message });
-    process.exit(1); // Fail if build directory is invalid
+    process.exit(1);
   }
 } else {
   logger.error(`Build directory not found: ${buildPath}`);
-  process.exit(1); // Fail if build directory is missing
+  process.exit(1);
 }
 
+// Health check endpoint
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'OK', uptime: process.uptime() });
 });
 
+// DNS test endpoint
+app.get('/test-dns', async (req, res) => {
+  const dns = require('dns').promises;
+  try {
+    const addresses = await dns.resolve4('redis-16680.c341.af-south-1-1.ec2.redns.redis-cloud.com');
+    logger.info('DNS resolution successful', { host: 'redis-16680.c341.af-south-1-1.ec2.redns.redis-cloud.com', addresses });
+    res.json({ status: 'success', addresses });
+  } catch (err) {
+    logger.error('DNS resolution test failed', { host: 'redis-16680.c341.af-south-1-1.ec2.redns.redis-cloud.com', error: err.message });
+    res.status(500).json({ status: 'error', error: err.message });
+  }
+});
+
+// Error handling for invalid JSON
 app.use((err, req, res, next) => {
   if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
     logger.error('Invalid JSON payload', { method: req.method, url: req.url, body: req.body, error: err.message });
@@ -80,6 +94,7 @@ app.use((err, req, res, next) => {
   next(err);
 });
 
+// MongoDB connection
 const connectDB = async () => {
   try {
     await mongoose.connect(process.env.MONGO_URI);
@@ -91,6 +106,7 @@ const connectDB = async () => {
 };
 connectDB();
 
+// Register routes
 const routes = [
   { path: '/auth', handler: authRoutes, name: 'authRoutes' },
   { path: '/jobseeker', handler: jobseekerRoutes, name: 'jobseekerRoutes' },
@@ -118,6 +134,7 @@ routes.forEach(({ path, handler, name }) => {
   }
 });
 
+// Serve frontend
 app.get('*', (req, res) => {
   const indexPath = path.join(buildPath, 'index.html');
   res.sendFile(indexPath, (err) => {
@@ -128,11 +145,13 @@ app.get('*', (req, res) => {
   });
 });
 
+// Global error handler
 app.use((err, req, res, next) => {
   logger.error('Unhandled error', { error: err.message, stack: err.stack });
   res.status(500).json({ error: 'Internal Server Error' });
 });
 
+// Socket.IO connection
 io.on('connection', (socket) => {
   logger.info('User connected', { socketId: socket.id });
 
@@ -149,11 +168,16 @@ io.on('connection', (socket) => {
 const PORT = process.env.PORT || 8000;
 server.listen(PORT, '0.0.0.0', () => logger.info(`Server running on port ${PORT}`));
 
+// Shutdown handler
 const shutdown = async () => {
   logger.info('Shutting down server');
   try {
-    await redis.quit();
-    logger.info('Redis connection closed');
+    if (redis.isAvailable()) {
+      await redis.quit();
+      logger.info('Redis connection closed');
+    } else {
+      logger.warn('Redis unavailable, skipping connection close');
+    }
   } catch (err) {
     logger.error('Error closing Redis connection during shutdown', { error: err.message });
   }

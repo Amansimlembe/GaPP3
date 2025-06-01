@@ -73,7 +73,7 @@ const authLimiter = rateLimit({
   message: { error: 'Too many requests, please try again later.' },
 });
 
-// Updated authMiddleware with detailed JWT error logging
+// Updated authMiddleware with Redis fallback
 const authMiddleware = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -84,6 +84,19 @@ const authMiddleware = async (req, res, next) => {
   const token = authHeader.split(' ')[1];
   const sessionKey = `session:${token}`;
   try {
+    // Fallback to JWT verification if Redis is unavailable
+    if (!redis.isAvailable()) {
+      logger.warn('Redis unavailable, using JWT verification only', { url: req.url });
+      try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
+        req.user = decoded;
+        return next();
+      } catch (jwtError) {
+        logger.error('JWT verification failed in Redis fallback', { error: jwtError.message, token: token.substring(0, 10) + '...' });
+        return res.status(401).json({ error: 'Invalid token', details: jwtError.message });
+      }
+    }
+
     const cachedSession = await redis.get(sessionKey);
     if (cachedSession) {
       req.user = JSON.parse(cachedSession);
@@ -114,6 +127,8 @@ const authMiddleware = async (req, res, next) => {
     res.status(401).json({ error: 'Invalid token', details: error.message });
   }
 };
+
+// ... (rest of the file remains unchanged)
 
 const registerSchema = Joi.object({
   email: Joi.string().email().required(),
@@ -242,7 +257,6 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
   }
 });
 
-// Updated /auth/login with Redis retry logic
 router.post('/login', authLimiter, async (req, res) => {
   try {
     const { error } = loginSchema.validate(req.body);
@@ -421,7 +435,6 @@ router.get('/public_key/:userId', authMiddleware, async (req, res) => {
   }
 });
 
-// Updated /auth/refresh with enhanced logging
 router.post('/refresh', authLimiter, authMiddleware, async (req, res) => {
   try {
     const { userId } = req.body;

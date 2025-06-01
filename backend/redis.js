@@ -11,30 +11,39 @@ const logger = winston.createLogger({
   ],
 });
 
-// Construct REDIS_URL from REDIS_HOST, REDIS_PORT, and REDIS_PASSWORD
-const REDIS_HOST = process.env.REDIS_HOST || 'localhost';
-const REDIS_PORT = process.env.REDIS_PORT || 6379;
-const REDIS_PASSWORD = process.env.REDIS_PASSWORD || '';
-const REDIS_URL = REDIS_PASSWORD
-  ? `rediss://default:${REDIS_PASSWORD}@${REDIS_HOST}:${REDIS_PORT}`
-  : `redis://${REDIS_HOST}:${REDIS_PORT}`;
+// Use REDIS_URL directly if provided, otherwise construct from components
+const REDIS_URL = process.env.REDIS_URL || (process.env.REDIS_PASSWORD
+  ? `rediss://default:${process.env.REDIS_PASSWORD}@${process.env.REDIS_HOST || 'localhost'}:${process.env.REDIS_PORT || 6379}`
+  : `redis://${process.env.REDIS_HOST || 'localhost'}:${process.env.REDIS_PORT || 6379}`);
 
 const redisClient = redis.createClient({
   url: REDIS_URL,
   socket: {
-    connectTimeout: 10000,
+    connectTimeout: 15000, // Increased timeout
     keepAlive: 1000,
     reconnectStrategy: (retries) => {
-      if (retries > 10) {
-        logger.error('Redis reconnection failed after 10 attempts', { retries });
+      if (retries > 20) {
+        logger.error('Redis reconnection failed after 20 attempts', { retries });
         return new Error('Redis reconnection failed');
       }
-      const delay = Math.min(retries * 100, 2000);
+      const delay = Math.min(retries * 200, 5000); // Increased delay
       logger.info('Reconnect attempt', { retries, delay });
       return delay;
     },
+    // Custom DNS resolution
+    lookup: (hostname, opts, callback) => {
+      const dns = require('dns');
+      dns.resolve4(hostname, { ttl: true, resolver: '8.8.8.8' }, (err, addresses) => {
+        if (err) {
+          logger.error('DNS resolution failed', { hostname, error: err.message });
+          return callback(err);
+        }
+        logger.info('DNS resolved', { hostname, address: addresses[0] });
+        callback(null, addresses[0], 4);
+      });
+    },
   },
-  disableOfflineQueue: true, // Prevent queuing commands when disconnected
+  disableOfflineQueue: true,
 });
 
 redisClient.on('connect', () => logger.info('Connected to Redis'));
@@ -46,11 +55,11 @@ let isRedisAvailable = false;
 
 (async () => {
   let attempts = 0;
-  const maxAttempts = 5;
+  const maxAttempts = 10;
   while (attempts < maxAttempts) {
     try {
       await redisClient.connect();
-      logger.info('Redis client initialized successfully');
+      logger.info('Redis client initialized successfully', { url: REDIS_URL });
       isRedisAvailable = true;
       break;
     } catch (err) {
@@ -61,7 +70,7 @@ let isRedisAvailable = false;
         isRedisAvailable = false;
         break;
       }
-      await new Promise((resolve) => setTimeout(resolve, 1000 * attempts));
+      await new Promise((resolve) => setTimeout(resolve, 2000 * attempts));
     }
   }
 })();
