@@ -3,43 +3,74 @@ import { openDB } from 'idb';
 const DB_NAME = 'ChatDB';
 const MESSAGE_STORE_NAME = 'messages';
 const PENDING_STORE_NAME = 'pendingMessages';
-const VERSION = 8; // Set to 8 to surpass existing version 7
+const VERSION = 9; // Incremented to 9 to force clean upgrade
 
-const dbPromise = openDB(DB_NAME, VERSION, {
-  upgrade(db, oldVersion, newVersion) {
-    console.log(`Upgrading database from version ${oldVersion} to ${newVersion}`);
-    
-    // Create or update 'messages' store
-    if (!db.objectStoreNames.contains(MESSAGE_STORE_NAME)) {
-      const messageStore = db.createObjectStore(MESSAGE_STORE_NAME, { keyPath: '_id' });
-      messageStore.createIndex('byRecipientId', 'recipientId');
-      messageStore.createIndex('byCreatedAt', 'createdAt');
-      messageStore.createIndex('byClientMessageId', 'clientMessageId', { unique: false });
-      messageStore.createIndex('byRecipientAndTime', ['recipientId', 'createdAt']);
-    } else if (oldVersion < 8) {
-      // Example: Add new index for version 8 without deleting store
-      const tx = db.transaction(MESSAGE_STORE_NAME, 'readwrite');
-      const messageStore = tx.objectStore(MESSAGE_STORE_NAME);
-      if (!messageStore.indexNames.contains('byStatus')) {
-        messageStore.createIndex('byStatus', 'status', { unique: false });
+// Singleton to manage single openDB instance
+let dbInstance = null;
+
+const getDB = async () => {
+  if (dbInstance) {
+    try {
+      // Verify connection is still valid
+      await dbInstance.transaction(MESSAGE_STORE_NAME).objectStore(MESSAGE_STORE_NAME).getAll();
+      return dbInstance;
+    } catch (err) {
+      console.warn('Existing DB connection invalid, reopening:', err.message);
+      dbInstance.close();
+      dbInstance = null;
+    }
+  }
+
+  dbInstance = await openDB(DB_NAME, VERSION, {
+    upgrade(db, oldVersion, newVersion, transaction) {
+      console.log(`Upgrading database from version ${oldVersion} to ${newVersion}`);
+
+      try {
+        // Create 'messages' store if it doesn't exist
+        if (!db.objectStoreNames.contains(MESSAGE_STORE_NAME)) {
+          const messageStore = db.createObjectStore(MESSAGE_STORE_NAME, { keyPath: '_id' });
+          messageStore.createIndex('byRecipientId', 'recipientId');
+          messageStore.createIndex('byCreatedAt', 'createdAt');
+          messageStore.createIndex('byClientMessageId', 'clientMessageId', { unique: false });
+          messageStore.createIndex('byRecipientAndTime', ['recipientId', 'createdAt']);
+          messageStore.createIndex('byStatus', 'status', { unique: false });
+        } else {
+          // Update existing 'messages' store safely
+          const messageStore = transaction.objectStore(MESSAGE_STORE_NAME);
+          if (!messageStore.indexNames.contains('byStatus') && oldVersion < 8) {
+            messageStore.createIndex('byStatus', 'status', { unique: false });
+          }
+        }
+
+        // Create 'pendingMessages' store if it doesn't exist
+        if (!db.objectStoreNames.contains(PENDING_STORE_NAME)) {
+          const pendingStore = db.createObjectStore(PENDING_STORE_NAME, { keyPath: 'tempId' });
+          pendingStore.createIndex('byRecipientId', 'recipientId');
+        }
+      } catch (err) {
+        console.error('Error in upgradeneeded handler:', err);
+        throw err; // Let transaction abort naturally
       }
-    }
+    },
+    blocked(currentVersion, blockedVersion, event) {
+      console.error(`Database upgrade blocked by open connection (current: ${currentVersion}, blocked: ${blockedVersion})`);
+      // Attempt to close all connections
+      dbInstance?.close();
+      // Notify user to close other tabs
+      alert('Please close other tabs or instances of the app to allow database upgrade.');
+    },
+    blocking(currentVersion, blockedVersion, event) {
+      console.warn(`Current connection (v${currentVersion}) is blocking upgrade to v${blockedVersion}`);
+      dbInstance?.close();
+    },
+    terminated() {
+      console.warn('Database connection terminated unexpectedly');
+      dbInstance = null;
+    },
+  });
 
-    // Create or update 'pendingMessages' store
-    if (!db.objectStoreNames.contains(PENDING_STORE_NAME)) {
-      const pendingStore = db.createObjectStore(PENDING_STORE_NAME, { keyPath: 'tempId' });
-      pendingStore.createIndex('byRecipientId', 'recipientId');
-    }
-  },
-  blocked() {
-    console.error('Database upgrade blocked by an open connection');
-    indexedDB.deleteDatabase(DB_NAME);
-  },
-  blocking() {
-    console.warn('Current connection is blocking a database upgrade');
-    dbPromise.then((db) => db.close());
-  },
-});
+  return dbInstance;
+};
 
 const withRetry = async (operation, maxRetries = 3) => {
   let attempt = 0;
@@ -48,10 +79,11 @@ const withRetry = async (operation, maxRetries = 3) => {
       return await operation();
     } catch (error) {
       attempt++;
-      console.error(`Database operation failed, attempt ${attempt}:`, error);
-      if (error.name === 'VersionError' && attempt === 1) {
-        console.warn('VersionError detected, clearing database and retrying');
-        await indexedDB.deleteDatabase(DB_NAME);
+      console.error(`Database operation failed, attempt ${attempt}:`, error.message);
+      if (error.name === 'AbortError' && attempt === 1) {
+        console.warn('AbortError detected, closing connection and retrying');
+        dbInstance?.close();
+        dbInstance = null;
       }
       if (attempt === maxRetries) {
         throw error;
@@ -64,7 +96,9 @@ const withRetry = async (operation, maxRetries = 3) => {
 // Utility to clear the database for debugging or recovery
 export const clearDatabase = async () => {
   try {
+    dbInstance?.close();
     await indexedDB.deleteDatabase(DB_NAME);
+    dbInstance = null;
     console.log('IndexedDB database cleared');
   } catch (error) {
     console.error('Error clearing IndexedDB database:', error);
@@ -74,7 +108,7 @@ export const clearDatabase = async () => {
 export const saveMessages = async (messages) => {
   try {
     return await withRetry(async () => {
-      const db = await dbPromise;
+      const db = await getDB();
       const tx = db.transaction(MESSAGE_STORE_NAME, 'readwrite');
       const store = tx.objectStore(MESSAGE_STORE_NAME);
       await Promise.all(
@@ -108,7 +142,7 @@ export const saveMessages = async (messages) => {
 export const getMessages = async (recipientId = null) => {
   try {
     return await withRetry(async () => {
-      const db = await dbPromise;
+      const db = await getDB();
       const tx = db.transaction(MESSAGE_STORE_NAME, 'readonly');
       const store = tx.objectStore(MESSAGE_STORE_NAME);
       if (recipientId) {
@@ -128,7 +162,7 @@ export const getMessages = async (recipientId = null) => {
 export const deleteMessage = async (messageId) => {
   try {
     return await withRetry(async () => {
-      const db = await dbPromise;
+      const db = await getDB();
       const tx = db.transaction(MESSAGE_STORE_NAME, 'readwrite');
       const store = tx.objectStore(MESSAGE_STORE_NAME);
       await store.delete(messageId);
@@ -143,7 +177,7 @@ export const deleteMessage = async (messageId) => {
 export const clearOldMessages = async (daysToKeep = 30) => {
   try {
     return await withRetry(async () => {
-      const db = await dbPromise;
+      const db = await getDB();
       const tx = db.transaction(MESSAGE_STORE_NAME, 'readwrite');
       const store = tx.objectStore(MESSAGE_STORE_NAME);
       const index = store.index('byCreatedAt');
@@ -167,7 +201,7 @@ export const clearOldMessages = async (daysToKeep = 30) => {
 export const savePendingMessages = async (pendingMessages) => {
   try {
     return await withRetry(async () => {
-      const db = await dbPromise;
+      const db = await getDB();
       const tx = db.transaction(PENDING_STORE_NAME, 'readwrite');
       const store = tx.objectStore(PENDING_STORE_NAME);
       await store.clear();
@@ -196,7 +230,7 @@ export const savePendingMessages = async (pendingMessages) => {
 export const loadPendingMessages = async () => {
   try {
     return await withRetry(async () => {
-      const db = await dbPromise;
+      const db = await getDB();
       const tx = db.transaction(PENDING_STORE_NAME, 'readonly');
       const store = tx.objectStore(PENDING_STORE_NAME);
       return await store.getAll();
@@ -210,7 +244,7 @@ export const loadPendingMessages = async () => {
 export const clearPendingMessages = async () => {
   try {
     return await withRetry(async () => {
-      const db = await dbPromise;
+      const db = await getDB();
       const tx = db.transaction(PENDING_STORE_NAME, 'readwrite');
       const store = tx.objectStore(PENDING_STORE_NAME);
       await store.clear();
@@ -222,4 +256,4 @@ export const clearPendingMessages = async () => {
   }
 };
 
-export default dbPromise;
+export default getDB;
