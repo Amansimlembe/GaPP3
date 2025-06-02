@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { motion } from 'framer-motion';
 import { getCountries } from 'libphonenumber-js';
@@ -16,6 +16,8 @@ const LoginScreen = ({ setAuth }) => {
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [isCountryInputFocused, setIsCountryInputFocused] = useState(false);
+  const countryInputRef = useRef(null);
 
   let countries = [];
   try {
@@ -95,13 +97,11 @@ const LoginScreen = ({ setAuth }) => {
           stack: err.stack,
           requestData: isLogin ? data : 'FormData (multipart)',
         });
-        // Stop retries for specific login errors
         if (isLogin && err.response?.status === 401 && 
             (err.response?.data?.error === 'Email not registered' || 
              err.response?.data?.error === 'Wrong password')) {
-          throw err; // Exit retry loop
+          throw err;
         }
-        // Retry for rate limit (429) or server errors (5xx)
         if ((err.response?.status === 429 || err.response?.status >= 500) && i < retries - 1) {
           await new Promise((resolve) => setTimeout(resolve, delay * (i + 1)));
           continue;
@@ -179,6 +179,45 @@ const LoginScreen = ({ setAuth }) => {
     setError('');
     setShowPassword(false);
     setShowConfirmPassword(false);
+    setIsCountryInputFocused(false);
+  };
+
+  const handleCountrySelect = (country) => {
+    setSelectedCountry(country.code);
+    setSearch('');
+    setIsCountryInputFocused(false);
+  };
+
+  const handleCountryKeyDown = (e) => {
+    if (e.key === 'Enter' && filteredCountries.length > 0) {
+      e.preventDefault();
+      setSelectedCountry(filteredCountries[0].code);
+      setSearch('');
+      setIsCountryInputFocused(false);
+    }
+  };
+
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (countryInputRef.current && !countryInputRef.current.contains(e.target)) {
+        if (filteredCountries.length > 0 && search) {
+          setSelectedCountry(filteredCountries[0].code);
+          setSearch('');
+        }
+        setIsCountryInputFocused(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [filteredCountries, search]);
+
+  const getCountryInputValue = () => {
+    if (search) return search;
+    if (selectedCountry) {
+      const country = countries.find((c) => c.code === selectedCountry);
+      return country ? country.name : '';
+    }
+    return '';
   };
 
   return (
@@ -204,29 +243,37 @@ const LoginScreen = ({ setAuth }) => {
                 placeholder="Username (3-20 characters)"
                 disabled={loading}
               />
-              <input
-                type="text"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                className="w-full p-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600"
-                placeholder="Search for a country..."
-                disabled={loading}
-              />
-              <select
-                value={selectedCountry}
-                onChange={(e) => setSelectedCountry(e.target.value)}
-                className="w-full p-2 border rounded-lg max-h-40 overflow-y-auto dark:bg-gray-700 dark:text-white dark:border-gray-600"
-                disabled={loading}
-              >
-                <option value="">
-                  {search && filteredCountries.length > 0 ? filteredCountries[0].name : 'Select a country'}
-                </option>
-                {filteredCountries.map((c) => (
-                  <option key={c.code} value={c.code}>
-                    {c.name}
-                  </option>
-                ))}
-              </select>
+              <div className="relative" ref={countryInputRef}>
+                <input
+                  type="text"
+                  value={getCountryInputValue()}
+                  onChange={(e) => setSearch(e.target.value)}
+                  onFocus={() => setIsCountryInputFocused(true)}
+                  onKeyDown={handleCountryKeyDown}
+                  className="w-full p-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600"
+                  placeholder="Select a country"
+                  disabled={loading}
+                />
+                {isCountryInputFocused && (
+                  <div className="absolute z-10 w-full mt-1 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg shadow-lg max-h-40 overflow-y-auto">
+                    <ul>
+                      {filteredCountries.length > 0 ? (
+                        filteredCountries.map((c, index) => (
+                          <li
+                            key={c.code}
+                            onClick={() => handleCountrySelect(c)}
+                            className={`p-2 cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-600 ${index === 0 ? 'bg-gray-100 dark:bg-gray-600' : ''}`}
+                          >
+                            {c.name}
+                          </li>
+                        ))
+                      ) : (
+                        <li className="p-2 text-gray-500 dark:text-gray-400">No countries found</li>
+                      )}
+                    </ul>
+                  </div>
+                )}
+              </div>
             </>
           )}
           <input
