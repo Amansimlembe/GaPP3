@@ -1,11 +1,12 @@
 const mongoose = require('mongoose');
 const { getCountries } = require('libphonenumber-js');
+const Message = require('./Message'); // Import Message model
 
 const userSchema = new mongoose.Schema({
   email: {
     type: String,
     required: true,
-    unique: true, // Implies unique index
+    unique: true,
     lowercase: true,
     trim: true,
     match: /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/,
@@ -18,7 +19,7 @@ const userSchema = new mongoose.Schema({
   username: {
     type: String,
     required: true,
-    unique: true, // Implies unique index
+    unique: true,
     trim: true,
     minlength: 3,
     maxlength: 20,
@@ -41,8 +42,8 @@ const userSchema = new mongoose.Schema({
   },
   virtualNumber: {
     type: String,
-    unique: true, // Implies unique index
-    match: /^\+\d{1,4}[1-9]{5}\d{4}$/, // Country code + 9 digits, first 5 digits non-zero
+    unique: true,
+    match: /^\+\d{1,4}[1-9]{5}\d{4}$/,
     default: null,
   },
   contacts: [{
@@ -64,7 +65,7 @@ const userSchema = new mongoose.Schema({
     select: false,
   },
   status: {
-    type: String, // Corrected from Date to String
+    type: String,
     enum: ['online', 'offline'],
     default: 'offline',
   },
@@ -76,7 +77,24 @@ const userSchema = new mongoose.Schema({
   timestamps: true,
 });
 
-// Indexes for performance (only non-unique or compound indexes)
-userSchema.index({ status: 1, lastSeen: -1 }); // Optimized for ProfileScreen.js
+// Indexes for performance
+userSchema.index({ status: 1, lastSeen: -1 });
+
+// Middleware to delete associated messages when a user is deleted
+userSchema.pre('deleteOne', { document: true, query: false }, async function (next) {
+  try {
+    const userId = this._id;
+    // Delete all messages where the user is either sender or recipient
+    await Message.deleteMany({
+      $or: [
+        { senderId: userId },
+        { recipientId: userId },
+      ],
+    });
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
 
 module.exports = mongoose.model('User', userSchema);
