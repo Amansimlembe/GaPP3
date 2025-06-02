@@ -78,7 +78,7 @@ const LoginScreen = ({ setAuth }) => {
     }
   };
 
-  const retryRequest = async (data, config, retries = 3, delay = 1000) => {
+  const retryRequest = async (data, config, retries = 5, delay = 1000) => {
     for (let i = 0; i < retries; i++) {
       try {
         const response = await axios.post(
@@ -95,6 +95,13 @@ const LoginScreen = ({ setAuth }) => {
           stack: err.stack,
           requestData: isLogin ? data : 'FormData (multipart)',
         });
+        // Stop retries for specific login errors
+        if (isLogin && err.response?.status === 401 && 
+            (err.response?.data?.error === 'Email not registered' || 
+             err.response?.data?.error === 'Wrong password')) {
+          throw err; // Exit retry loop
+        }
+        // Retry for rate limit (429) or server errors (5xx)
         if ((err.response?.status === 429 || err.response?.status >= 500) && i < retries - 1) {
           await new Promise((resolve) => setTimeout(resolve, delay * (i + 1)));
           continue;
@@ -211,7 +218,9 @@ const LoginScreen = ({ setAuth }) => {
                 className="w-full p-2 border rounded-lg max-h-40 overflow-y-auto dark:bg-gray-700 dark:text-white dark:border-gray-600"
                 disabled={loading}
               >
-                <option value="">{search || 'Select a country'}</option>
+                <option value="">
+                  {search && filteredCountries.length > 0 ? filteredCountries[0].name : 'Select a country'}
+                </option>
                 {filteredCountries.map((c) => (
                   <option key={c.code} value={c.code}>
                     {c.name}
