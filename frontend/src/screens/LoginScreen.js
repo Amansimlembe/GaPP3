@@ -197,6 +197,13 @@ const LoginScreen = ({ setAuth }) => {
     }
   };
 
+  const handleCountryChange = (e) => {
+    setSearch(e.target.value);
+    if (selectedCountry) {
+      setSelectedCountry(''); // Reset selectedCountry when user types (e.g., backspace)
+    }
+  };
+
   useEffect(() => {
     const handleClickOutside = (e) => {
       if (countryInputRef.current && !countryInputRef.current.contains(e.target)) {
@@ -212,7 +219,7 @@ const LoginScreen = ({ setAuth }) => {
   }, [filteredCountries, search]);
 
   const getCountryInputValue = () => {
-    if (search) return search;
+    if (search) return search; // Prioritize search text when typing
     if (selectedCountry) {
       const country = countries.find((c) => c.code === selectedCountry);
       return country ? country.name : '';
@@ -247,7 +254,7 @@ const LoginScreen = ({ setAuth }) => {
                 <input
                   type="text"
                   value={getCountryInputValue()}
-                  onChange={(e) => setSearch(e.target.value)}
+                  onChange={handleCountryChange}
                   onFocus={() => setIsCountryInputFocused(true)}
                   onKeyDown={handleCountryKeyDown}
                   className="w-full p-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600"
