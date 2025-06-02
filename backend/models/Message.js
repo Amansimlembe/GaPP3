@@ -34,36 +34,49 @@ const messageSchema = new mongoose.Schema({
 messageSchema.index({ senderId: 1 });
 messageSchema.index({ recipientId: 1 });
 
+// Pre-save hook to validate senderId and recipientId
+messageSchema.pre('save', async function (next) {
+  try {
+    const [senderExists, recipientExists] = await Promise.all([
+      User.exists({ _id: this.senderId }),
+      User.exists({ _id: this.recipientId }),
+    ]);
+    if (!senderExists || !recipientExists) {
+      const error = new Error('Sender or recipient does not exist');
+      error.status = 400;
+      logger.error('Failed to save message: invalid sender or recipient', {
+        senderId: this.senderId,
+        recipientId: this.recipientId,
+      });
+      return next(error);
+    }
+    next();
+  } catch (error) {
+    logger.error('Error in message pre-save validation', { error: error.message, stack: error.stack });
+    next(error);
+  }
+});
+
 // Static method to clean up orphaned messages
 messageSchema.statics.cleanupOrphanedMessages = async function () {
   try {
     logger.info('Starting orphaned messages cleanup');
 
-    // Get all unique sender and recipient IDs from messages
-    const messageUsers = await this.aggregate([
-      {
-        $group: {
-          _id: null,
-          senderIds: { $addToSet: '$senderId' },
-          recipientIds: { $addToSet: '$recipientId' },
-        },
-      },
-    ]);
+    // Get all message sender and recipient IDs
+    const messageUsers = await this.distinct('senderId').concat(await this.distinct('recipientId'));
+    const uniqueUserIds = [...new Set(messageUsers.map(id => id.toString()))];
 
-    if (!messageUsers.length) {
+    if (!uniqueUserIds.length) {
       logger.info('No messages found');
       return { deletedCount: 0, orphanedUserIds: 0 };
     }
 
-    const { senderIds, recipientIds } = messageUsers[0];
-    const allMessageUserIds = [...new Set([...senderIds, ...recipientIds])];
-
     // Get existing user IDs
-    const existingUsers = await User.find({ _id: { $in: allMessageUserIds } }).select('_id');
+    const existingUsers = await User.find({ _id: { $in: uniqueUserIds } }).select('_id');
     const existingUserIds = new Set(existingUsers.map(user => user._id.toString()));
 
-    // Identify orphaned messages
-    const orphanedUserIds = allMessageUserIds.filter(id => !existingUserIds.has(id.toString()));
+    // Identify orphaned user IDs
+    const orphanedUserIds = uniqueUserIds.filter(id => !existingUserIds.has(id));
 
     if (orphanedUserIds.length === 0) {
       logger.info('No orphaned messages found');

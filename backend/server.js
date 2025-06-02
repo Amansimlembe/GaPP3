@@ -6,7 +6,7 @@ const cors = require('cors');
 const path = require('path');
 const mongoose = require('mongoose');
 const winston = require('winston');
-const fs = require('fs');
+const Message = require('./model/Message'); // Import Message model for cleanup
 
 const logger = winston.createLogger({
   level: 'info',
@@ -71,19 +71,6 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'OK', uptime: process.uptime() });
 });
 
-// DNS test endpoint
-app.get('/test-dns', async (req, res) => {
-  const dns = require('dns').promises;
-  try {
-    const addresses = await dns.resolve4('redis-16680.c341.af-south-1-1.ec2.redns.redis-cloud.com');
-    logger.info('DNS resolution successful', { host: 'redis-16680.c341.af-south-1-1.ec2.redns.redis-cloud.com', addresses });
-    res.json({ status: 'success', addresses });
-  } catch (err) {
-    logger.error('DNS resolution test failed', { host: 'redis-16680.c341.af-south-1-1.ec2.redns.redis-cloud.com', error: err.message });
-    res.status(500).json({ status: 'error', error: err.message });
-  }
-});
-
 // Error handling for invalid JSON
 app.use((err, req, res, next) => {
   if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
@@ -98,6 +85,28 @@ const connectDB = async () => {
   try {
     await mongoose.connect(process.env.MONGO_URI);
     logger.info('MongoDB connected');
+    // Run initial cleanup of orphaned messages
+    try {
+      const result = await Message.cleanupOrphanedMessages();
+      logger.info('Initial orphaned messages cleanup completed', {
+        deletedCount: result.deletedCount,
+        orphanedUserIds: result.orphanedUserIds,
+      });
+    } catch (err) {
+      logger.error('Initial orphaned messages cleanup failed', { error: err.message });
+    }
+    // Start periodic cleanup of orphaned messages
+    setInterval(async () => {
+      try {
+        const result = await Message.cleanupOrphanedMessages();
+        logger.info('Periodic orphaned messages cleanup completed', {
+          deletedCount: result.deletedCount,
+          orphanedUserIds: result.orphanedUserIds,
+        });
+      } catch (err) {
+        logger.error('Periodic orphaned messages cleanup failed', { error: err.message });
+      }
+    }, 6 * 60 * 60 * 1000); // Run every 6 hours
   } catch (err) {
     logger.error('MongoDB connection error:', { error: err.message, stack: err.stack });
     process.exit(1);
