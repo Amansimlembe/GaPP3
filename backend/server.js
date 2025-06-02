@@ -6,6 +6,7 @@ const cors = require('cors');
 const path = require('path');
 const mongoose = require('mongoose');
 const winston = require('winston');
+const fs = require('fs'); // Added to fix ReferenceError
 const Message = require('./models/Message'); // Import Message model for cleanup
 
 const logger = winston.createLogger({
@@ -52,18 +53,16 @@ app.use(express.json({ limit: '50mb' }));
 
 const buildPath = path.join(__dirname, '..', 'frontend', 'build');
 logger.info(`Attempting to serve static files from: ${buildPath}`);
-if (fs.existsSync(buildPath)) {
-  try {
+try {
+  if (fs.existsSync(buildPath)) {
     const buildFiles = fs.readdirSync(buildPath);
     logger.info(`Build directory contents: ${buildFiles.join(', ')}`);
     app.use(express.static(buildPath));
-  } catch (err) {
-    logger.error(`Failed to read build directory: ${buildPath}`, { error: err.message });
-    process.exit(1);
+  } else {
+    logger.warn(`Build directory not found: ${buildPath}. Static files will not be served.`);
   }
-} else {
-  logger.error(`Build directory not found: ${buildPath}`);
-  process.exit(1);
+} catch (err) {
+  logger.error(`Failed to access build directory: ${buildPath}`, { error: err.message });
 }
 
 // Health check endpoint
@@ -145,12 +144,17 @@ routes.forEach(({ path, handler, name }) => {
 // Serve frontend
 app.get('*', (req, res) => {
   const indexPath = path.join(buildPath, 'index.html');
-  res.sendFile(indexPath, (err) => {
-    if (err) {
-      logger.error('Failed to serve index.html', { path: indexPath, error: err.message });
-      res.status(500).json({ error: 'Server Error - Static files may not be available' });
-    }
-  });
+  if (fs.existsSync(indexPath)) {
+    res.sendFile(indexPath, (err) => {
+      if (err) {
+        logger.error('Failed to serve index.html', { path: indexPath, error: err.message });
+        res.status(500).json({ error: 'Server Error - Static files may not be available' });
+      }
+    });
+  } else {
+    logger.error('index.html not found', { path: indexPath });
+    res.status(500).json({ error: 'Server Error - Frontend not built' });
+  }
 });
 
 // Global error handler
