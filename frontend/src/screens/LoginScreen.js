@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import axios from 'axios';
 import { motion } from 'framer-motion';
 import { getCountries } from 'libphonenumber-js';
-import { Eye, EyeOff } from 'lucide-react';
+import { FaEye, FaEyeSlash } from 'react-icons/fa';
 
 const LoginScreen = ({ setAuth }) => {
   const [email, setEmail] = useState('');
@@ -59,7 +59,7 @@ const LoginScreen = ({ setAuth }) => {
   };
 
   const checkLocation = async (selectedCountry) => {
-    if (isLogin) return true;
+    if (isLogin) return true; // Skip for login
     try {
       const position = await new Promise((resolve, reject) => {
         navigator.geolocation.getCurrentPosition(resolve, reject);
@@ -245,7 +245,7 @@ const LoginScreen = ({ setAuth }) => {
               className="absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-500 dark:text-gray-300"
               disabled={loading}
             >
-              {showPassword ? <EyeOff size={20} /> : <Eye size={20} />}
+              {showPassword ? <FaEyeSlash size={20} /> : <FaEye size={20} />}
             </button>
           </div>
           {!isLogin && (
@@ -265,7 +265,7 @@ const LoginScreen = ({ setAuth }) => {
                 className="absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-500 dark:text-gray-300"
                 disabled={loading}
               >
-                {showConfirmPassword ? <EyeOff size={20} /> : <Eye size={20} />}
+                {showConfirmPassword ? <FaEyeSlash size={20} /> : <FaEye size={20} />}
               </button>
             </div>
           )}
