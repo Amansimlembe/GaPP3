@@ -104,7 +104,7 @@ const App = () => {
     }
   };
 
-  // Updated refreshToken to handle 401 errors after retries
+  // Updated refreshToken to handle specific 401 errors
   const refreshToken = async () => {
     const maxRetries = 3;
     let attempt = 0;
@@ -128,6 +128,13 @@ const App = () => {
       } catch (error) {
         attempt++;
         console.error(`Token refresh attempt ${attempt} failed:`, error.response?.data || error.message);
+        // Stop retries for specific login-related errors
+        if (error.response?.status === 401 && 
+            (error.response?.data?.error === 'Email not registered' || 
+             error.response?.data?.error === 'Wrong password')) {
+          console.warn('Stopping token refresh for login error:', error.response.data.error);
+          throw error; // Exit retry loop
+        }
         if (error.response?.status === 429) {
           console.warn('Rate limit hit, waiting before retry');
           await new Promise((resolve) => setTimeout(resolve, 1000 * attempt * 5));
@@ -177,6 +184,12 @@ const App = () => {
       (response) => response,
       async (error) => {
         const originalRequest = error.config;
+        // Skip token refresh for specific login errors
+        if (error.response?.status === 401 && 
+            (error.response?.data?.error === 'Email not registered' || 
+             error.response?.data?.error === 'Wrong password')) {
+          return Promise.reject(error);
+        }
         if (error.response?.status === 401 && !originalRequest._retry) {
           originalRequest._retry = true;
           const newToken = await refreshToken();
