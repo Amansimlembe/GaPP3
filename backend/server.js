@@ -6,7 +6,7 @@ const cors = require('cors');
 const path = require('path');
 const mongoose = require('mongoose');
 const winston = require('winston');
-const Message = require('./model/Message'); // Import Message model for cleanup
+const Message = require('./models/Message'); // Import Message model for cleanup
 
 const logger = winston.createLogger({
   level: 'info',
