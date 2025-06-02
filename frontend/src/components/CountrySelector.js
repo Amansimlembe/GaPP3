@@ -7,7 +7,6 @@ const CountrySelector = ({ token, userId, virtualNumber, onComplete }) => {
   const [selectedCountry, setSelectedCountry] = useState('');
   const [search, setSearch] = useState('');
   const [error, setError] = useState('');
-  const [locationConfirmed, setLocationConfirmed] = useState(false);
   const wrapperRef = useRef(null);
 
   useEffect(() => {
@@ -16,23 +15,6 @@ const CountrySelector = ({ token, userId, virtualNumber, onComplete }) => {
       return;
     }
 
-    const checkLocation = () => {
-      navigator.geolocation.getCurrentPosition(
-        async (position) => {
-          const { latitude, longitude } = position.coords;
-          const response = await axios.get(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=en`);
-          const currentCountryCode = response.data.countryCode;
-          if (currentCountryCode === selectedCountry) {
-            setLocationConfirmed(true);
-          } else {
-            setError('Selected country does not match your current location.');
-          }
-        },
-        () => setError('Unable to detect location. Please select your current country.')
-      );
-    };
-    if (selectedCountry) checkLocation();
-
     const handleClickOutside = (event) => {
       if (wrapperRef.current && !wrapperRef.current.contains(event.target)) {
         onComplete(null);
@@ -40,21 +22,40 @@ const CountrySelector = ({ token, userId, virtualNumber, onComplete }) => {
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [token, userId, selectedCountry, onComplete, virtualNumber]);
+  }, [virtualNumber, onComplete]);
+
+  const checkLocation = async (selectedCountry) => {
+    try {
+      const position = await new Promise((resolve, reject) => {
+        navigator.geolocation.getCurrentPosition(resolve, reject);
+      });
+      const { latitude, longitude } = position.coords;
+      const response = await axios.get(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=en`);
+      const currentCountryCode = response.data.countryCode;
+      if (currentCountryCode !== selectedCountry) {
+        setError('Selected country does not match your current location.');
+        return false;
+      }
+      return true;
+    } catch (err) {
+      setError('Unable to detect location. Please ensure you are in the selected country.');
+      return false;
+    }
+  };
 
   const saveCountry = async () => {
     if (!selectedCountry) {
       setError('Please select a country');
       return;
     }
-    if (!locationConfirmed) {
-      setError('Please confirm your location matches the selected country.');
-      return;
-    }
+
+    const locationValid = await checkLocation(selectedCountry);
+    if (!locationValid) return;
+
     try {
       const { data } = await axios.post(
         '/auth/update_country',
-        { userId, country: selectedCountry }, // Send only country, backend generates virtualNumber
+        { userId, country: selectedCountry },
         { headers: { Authorization: `Bearer ${token}` } }
       );
       onComplete(data.virtualNumber);
@@ -73,6 +74,13 @@ const CountrySelector = ({ token, userId, virtualNumber, onComplete }) => {
     c.code.toLowerCase().includes(search.toLowerCase())
   );
 
+  const handleSearchKeyDown = (e) => {
+    if (e.key === 'Enter' && filteredCountries.length > 0) {
+      setSelectedCountry(filteredCountries[0].code);
+      setSearch(''); // Clear search after selecting
+    }
+  };
+
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
       <div ref={wrapperRef} className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg w-full max-w-md">
@@ -82,6 +90,7 @@ const CountrySelector = ({ token, userId, virtualNumber, onComplete }) => {
           type="text"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
+          onKeyDown={handleSearchKeyDown}
           className="w-full p-2 mb-4 border rounded-lg dark:bg-gray-700 dark:text-white"
           placeholder="Search for a country..."
         />

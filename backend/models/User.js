@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { getCountries } = require('libphonenumber-js');
 
 const userSchema = new mongoose.Schema({
   email: {
@@ -30,11 +31,18 @@ const userSchema = new mongoose.Schema({
     type: String,
     required: true,
     uppercase: true,
+    validate: {
+      validator: function (value) {
+        const validCountries = getCountries();
+        return validCountries.includes(value.toUpperCase());
+      },
+      message: 'Invalid country code. Must be a valid ISO 3166-1 alpha-2 code.',
+    },
   },
   virtualNumber: {
     type: String,
     unique: true, // Implies unique index
-    match: /^\+\d{10,15}$/,
+    match: /^\+\d{1,4}[1-9]{5}\d{4}$/, // Country code + 9 digits, first 5 digits non-zero
     default: null,
   },
   contacts: [{
@@ -56,7 +64,7 @@ const userSchema = new mongoose.Schema({
     select: false,
   },
   status: {
-    type: Date,
+    type: String, // Corrected from Date to String
     enum: ['online', 'offline'],
     default: 'offline',
   },
@@ -70,14 +78,5 @@ const userSchema = new mongoose.Schema({
 
 // Indexes for performance (only non-unique or compound indexes)
 userSchema.index({ status: 1, lastSeen: -1 }); // Optimized for ProfileScreen.js
-
-// Pre-save hook for virtualNumber uniqueness (already handled by unique: true)
-userSchema.pre('save', async function(next) {
-  if (this.isModified('virtualNumber') && this.virtualNumber) {
-    // Optional: Additional validation if needed, but unique: true handles it
-    next();
-  }
-  next();
-});
 
 module.exports = mongoose.model('User', userSchema);

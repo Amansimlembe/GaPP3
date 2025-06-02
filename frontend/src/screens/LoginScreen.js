@@ -6,10 +6,8 @@ import { getCountries } from 'libphonenumber-js';
 const LoginScreen = ({ setAuth }) => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [role, setRole] = useState('0');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [username, setUsername] = useState('');
-  const [photo, setPhoto] = useState(null);
-  const [photoPreview, setPhotoPreview] = useState(null);
   const [isLogin, setIsLogin] = useState(true);
   const [error, setError] = useState('');
   const [selectedCountry, setSelectedCountry] = useState('');
@@ -49,12 +47,32 @@ const LoginScreen = ({ setAuth }) => {
         setError('Please select a country');
         return false;
       }
-      if (photo && photo.size > 5 * 1024 * 1024) { // 5MB limit
-        setError('Photo must be smaller than 5MB');
+      if (password !== confirmPassword) {
+        setError('Passwords do not match');
         return false;
       }
     }
     return true;
+  };
+
+  const checkLocation = async (selectedCountry) => {
+    if (isLogin) return true; // Skip for login
+    try {
+      const position = await new Promise((resolve, reject) => {
+        navigator.geolocation.getCurrentPosition(resolve, reject);
+      });
+      const { latitude, longitude } = position.coords;
+      const response = await axios.get(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=en`);
+      const currentCountryCode = response.data.countryCode;
+      if (currentCountryCode !== selectedCountry) {
+        setError('Selected country does not match your current location.');
+        return false;
+      }
+      return true;
+    } catch (err) {
+      setError('Unable to detect location. Please ensure you are in the selected country.');
+      return false;
+    }
   };
 
   const retryRequest = async (data, config, retries = 3, delay = 1000) => {
@@ -88,6 +106,11 @@ const LoginScreen = ({ setAuth }) => {
     setError('');
     if (!validateForm()) return;
 
+    if (!isLogin) {
+      const locationValid = await checkLocation(selectedCountry);
+      if (!locationValid) return;
+    }
+
     setLoading(true);
     try {
       const data = isLogin
@@ -97,9 +120,7 @@ const LoginScreen = ({ setAuth }) => {
             formData.append('email', email);
             formData.append('password', password);
             formData.append('username', username);
-            formData.append('role', role);
             formData.append('country', selectedCountry);
-            if (photo) formData.append('photo', photo);
             return formData;
           })();
 
@@ -135,18 +156,6 @@ const LoginScreen = ({ setAuth }) => {
       setError(errorMessage);
     } finally {
       setLoading(false);
-    }
-  };
-
-  const handlePhotoChange = (e) => {
-    const file = e.target.files[0];
-    if (file) {
-      if (file.size > 5 * 1024 * 1024) { // 5MB limit
-        setError('Photo must be smaller than 5MB');
-        return;
-      }
-      setPhoto(file);
-      setPhotoPreview(URL.createObjectURL(file));
     }
   };
 
@@ -194,27 +203,6 @@ const LoginScreen = ({ setAuth }) => {
                   </option>
                 ))}
               </select>
-              <select
-                value={role}
-                onChange={(e) => setRole(e.target.value)}
-                className="w-full p-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600"
-                disabled={loading}
-              >
-                <option value="0">Job Seeker</option>
-                <option value="1">Employer</option>
-              </select>
-              <div className="flex items-center space-x-4">
-                <input
-                  type="file"
-                  accept="image/jpeg,image/png,image/gif"
-                  onChange={handlePhotoChange}
-                  className="w-full p-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600"
-                  disabled={loading}
-                />
-                {photoPreview && (
-                  <img src={photoPreview} alt="Preview" className="w-12 h-12 rounded-full object-cover" />
-                )}
-              </div>
             </>
           )}
           <input
@@ -235,6 +223,17 @@ const LoginScreen = ({ setAuth }) => {
             required
             disabled={loading}
           />
+          {!isLogin && (
+            <input
+              type="password"
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              className="w-full p-2 border rounded-md dark:bg-gray-700 dark:text-white dark:border-gray-600"
+              placeholder="Confirm Password"
+              required
+              disabled={loading}
+            />
+          )}
           <button
             type="submit"
             className={`w-full bg-primary text-white p-2 rounded-lg hover:bg-secondary ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}

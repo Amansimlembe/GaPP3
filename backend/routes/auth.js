@@ -9,7 +9,6 @@ const Joi = require('joi');
 const winston = require('winston');
 const rateLimit = require('express-rate-limit');
 const User = require('../models/User');
-const redis = require('../redis');
 
 const router = express.Router();
 
@@ -71,7 +70,7 @@ const upload = multer({
     }
     cb(null, true);
   },
-}).single('photo');
+});
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -79,7 +78,7 @@ const authLimiter = rateLimit({
   message: { error: 'Too many requests, please try again later.' },
 });
 
-// Updated authMiddleware with Redis fallback
+// Updated authMiddleware without Redis
 const authMiddleware = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -88,34 +87,12 @@ const authMiddleware = async (req, res, next) => {
   }
 
   const token = authHeader.split(' ')[1];
-  const sessionKey = `session:${token}`;
   try {
-    if (!redis.isAvailable()) {
-      logger.warn('Redis unavailable, using JWT verification only', { url: req.url });
-      const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
-      req.user = decoded;
-      return next();
-    }
-
-    const cachedSession = await redis.get(sessionKey);
-    if (cachedSession) {
-      req.user = JSON.parse(cachedSession);
-      return next();
-    }
-
     const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
-    const storedToken = await redis.get(`token:${decoded.id}`);
-    if (storedToken !== token) {
-      logger.warn('Token mismatch or invalidated', { userId: decoded.id, token: token.substring(0, 10) + '...' });
-      await redis.del(sessionKey).catch(() => {});
-      return res.status(401).json({ error: 'Invalid or expired token' });
-    }
-    await redis.setex(sessionKey, 24 * 60 * 60, JSON.stringify(decoded));
     req.user = decoded;
     next();
   } catch (error) {
     logger.error('Auth middleware error:', { error: error.message, token: token.substring(0, 10) + '...', url: req.url });
-    await redis.del(sessionKey).catch(() => {});
     res.status(401).json({ error: 'Invalid token', details: error.message });
   }
 };
@@ -125,7 +102,7 @@ const registerSchema = Joi.object({
   password: Joi.string().min(6).required(),
   username: Joi.string().min(3).max(20).required(),
   country: Joi.string().length(2).uppercase().required(),
-  role: Joi.number().integer().min(0).max(1).required(),
+  role: Joi.number().integer().min(0).max(1).optional().default(0), // Made role optional with default
 });
 
 const loginSchema = Joi.object({
@@ -142,8 +119,14 @@ const generateVirtualNumber = async (countryCode, userId) => {
     const maxAttempts = 10;
 
     do {
-      const numericPart = Math.floor(Math.random() * 1000000000).toString().padStart(9, '0');
-      virtualNumber = `+${countryCallingCode}${numericPart}`;
+      // Generate first 5 digits (1-9, no zeros)
+      let firstFive = '';
+      for (let i = 0; i < 5; i++) {
+        firstFive += Math.floor(Math.random() * 9) + 1; // 1 to 9
+      }
+      // Generate remaining 4 digits (0-9)
+      const remainingFour = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
+      virtualNumber = `+${countryCallingCode}${firstFive}${remainingFour}`;
       const existingUser = await User.findOne({ virtualNumber });
       if (!existingUser) break;
       attempts++;
@@ -164,15 +147,7 @@ const generateVirtualNumber = async (countryCode, userId) => {
   }
 };
 
-router.post('/register', authLimiter, (req, res, next) => {
-  upload(req, res, (err) => {
-    if (err) {
-      logger.error('Multer error', { error: err.message, body: req.body });
-      return res.status(400).json({ error: err.message });
-    }
-    next();
-  });
-}, async (req, res) => {
+router.post('/register', authLimiter, upload.single('photo'), async (req, res) => {
   try {
     logger.info('Register request received', { email: req.body.email, username: req.body.username });
 
@@ -182,7 +157,7 @@ router.post('/register', authLimiter, (req, res, next) => {
       return res.status(400).json({ error: error.details[0].message });
     }
 
-    const { email, password, username, country, role } = req.body;
+    const { email, password, username, country, role = 0 } = req.body; // Default role to 0 if not provided
 
     logger.info('Checking for existing user', { email, username });
     const existingUser = await User.findOne({ $or: [{ email }, { username }] });
@@ -244,30 +219,6 @@ router.post('/register', authLimiter, (req, res, next) => {
       expiresIn: '24h',
     });
 
-    if (redis.isAvailable()) {
-      logger.info('Attempting to store token in Redis', { userId: user._id });
-      let redisSuccess = false;
-      const maxRetries = 3;
-      let attempt = 0;
-      while (attempt < maxRetries && !redisSuccess) {
-        try {
-          await redis.setex(`token:${user._id}`, 24 * 60 * 60, token);
-          redisSuccess = true;
-          logger.info('Token stored in Redis', { userId: user._id });
-        } catch (redisError) {
-          attempt++;
-          logger.error(`Redis setex failed, attempt ${attempt}`, { error: redisError.message, userId: user._id });
-          if (attempt === maxRetries) {
-            logger.warn('Redis unavailable after max retries, proceeding without caching', { userId: user._id });
-            break;
-          }
-          await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
-        }
-      }
-    } else {
-      logger.warn('Redis unavailable, skipping token storage', { userId: user._id });
-    }
-
     logger.info('User registered successfully', { userId: user._id, email });
     res.status(201).json({
       token,
@@ -301,7 +252,6 @@ router.post('/register', authLimiter, (req, res, next) => {
   }
 });
 
-// Keep other routes unchanged
 router.post('/login', authLimiter, async (req, res) => {
   try {
     const { error } = loginSchema.validate(req.body);
@@ -318,28 +268,6 @@ router.post('/login', authLimiter, async (req, res) => {
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
-
-    let redisSuccess = false;
-    const maxRetries = 3;
-    let attempt = 0;
-    if (redis.isAvailable()) {
-      while (attempt < maxRetries && !redisSuccess) {
-        try {
-          await redis.setex(`token:${user._id}`, 24 * 60 * 60, token);
-          redisSuccess = true;
-        } catch (redisError) {
-          attempt++;
-          logger.error(`Redis setex failed during login, attempt ${attempt}`, { error: redisError.message });
-          if (attempt === maxRetries) {
-            logger.warn('Redis unavailable after max retries, proceeding without caching', { userId: user._id });
-            break;
-          }
-          await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
-        }
-      }
-    } else {
-      logger.warn('Redis unavailable, skipping token storage', { userId: user._id });
-    }
 
     logger.info('Login successful', { userId: user._id, email });
     res.json({
@@ -444,17 +372,10 @@ router.post('/update_username', authMiddleware, async (req, res) => {
 
 router.get('/contacts', authMiddleware, async (req, res) => {
   try {
-    const cacheKey = `contacts:${req.user.id}`;
-    let contacts;
-    if (redis.isAvailable()) {
-      const cachedContacts = await redis.get(cacheKey);
-      if (cachedContacts) return res.json(JSON.parse(cachedContacts));
-    }
-
     const user = await User.findById(req.user.id).populate('contacts', 'username virtualNumber photo status lastSeen');
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    contacts = user.contacts.map((contact) => ({
+    const contacts = user.contacts.map((contact) => ({
       id: contact._id,
       username: contact.username,
       virtualNumber: contact.virtualNumber,
@@ -462,10 +383,6 @@ router.get('/contacts', authMiddleware, async (req, res) => {
       status: contact.status,
       lastSeen: contact.lastSeen,
     }));
-
-    if (redis.isAvailable()) {
-      await redis.setex(cacheKey, 300, JSON.stringify(contacts));
-    }
 
     res.json(contacts);
   } catch (error) {
@@ -476,22 +393,10 @@ router.get('/contacts', authMiddleware, async (req, res) => {
 
 router.get('/public_key/:userId', authMiddleware, async (req, res) => {
   try {
-    const cacheKey = `publicKey:${req.params.userId}`;
-    let publicKey;
-    if (redis.isAvailable()) {
-      const cachedKey = await redis.get(cacheKey);
-      if (cachedKey) return res.json({ publicKey: cachedKey });
-    }
-
     const user = await User.findById(req.params.userId).select('publicKey');
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    publicKey = user.publicKey;
-    if (redis.isAvailable()) {
-      await redis.setex(cacheKey, 3600, publicKey);
-    }
-
-    res.json({ publicKey });
+    res.json({ publicKey: user.publicKey });
   } catch (error) {
     logger.error('Fetch public key error:', { error: error.message, userId: req.params.userId });
     res.status(500).json({ error: 'Failed to fetch public key', details: error.message });
@@ -513,35 +418,11 @@ router.post('/refresh', authLimiter, authMiddleware, async (req, res) => {
       return res.status(401).json({ error: 'User not found' });
     }
 
-    const oldToken = req.headers.authorization.split(' ')[1];
     const newToken = jwt.sign(
       { id: user._id, email: user.email, virtualNumber: user.virtualNumber, role: user.role },
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
-
-    let redisSuccess = false;
-    const maxRetries = 3;
-    let attempt = 0;
-    if (redis.isAvailable()) {
-      while (attempt < maxRetries && !redisSuccess) {
-        try {
-          await redis.setex(`token:${user._id}`, 24 * 60 * 60, newToken);
-          await redis.del(`session:${oldToken}`);
-          redisSuccess = true;
-        } catch (redisError) {
-          attempt++;
-          logger.error(`Redis operation failed during token refresh, attempt ${attempt}`, { error: redisError.message });
-          if (attempt === maxRetries) {
-            logger.warn('Redis unavailable after max retries, proceeding without caching', { userId: user._id });
-            break;
-          }
-          await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
-        }
-      }
-    } else {
-      logger.warn('Redis unavailable, skipping token storage', { userId: user._id });
-    }
 
     logger.info('Token refreshed successfully', { userId: user._id });
     res.json({

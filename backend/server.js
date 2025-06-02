@@ -5,7 +5,6 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 const path = require('path');
 const mongoose = require('mongoose');
-const redis = require('./redis');
 const winston = require('winston');
 const fs = require('fs');
 
@@ -172,16 +171,6 @@ server.listen(PORT, '0.0.0.0', () => logger.info(`Server running on port ${PORT}
 const shutdown = async () => {
   logger.info('Shutting down server');
   try {
-    if (redis.isAvailable()) {
-      await redis.quit();
-      logger.info('Redis connection closed');
-    } else {
-      logger.warn('Redis unavailable, skipping connection close');
-    }
-  } catch (err) {
-    logger.error('Error closing Redis connection during shutdown', { error: err.message });
-  }
-  try {
     await mongoose.connection.close();
     logger.info('MongoDB connection closed');
   } catch (err) {
@@ -189,7 +178,7 @@ const shutdown = async () => {
   }
   io.close(() => {
     logger.info('Socket.IO connections closed');
-    });
+  });
   server.close(() => {
     logger.info('Server closed');
     process.exit(0);
