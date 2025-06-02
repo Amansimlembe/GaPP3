@@ -11,9 +11,10 @@ const logger = winston.createLogger({
   ],
 });
 
-// In-memory cache as fallback
+// In-memory cache with TTL and basic queue support
 const inMemoryCache = new Map();
-const CACHE_TTL = 3600; // 1 hour TTL for in-memory cache
+const CACHE_TTL = 3600; // 1 hour TTL
+const inMemoryQueues = new Map(); // For lpush/lrange fallback
 
 // Validate and construct REDIS_URL
 const validateRedisConfig = () => {
@@ -22,6 +23,7 @@ const validateRedisConfig = () => {
   const redisPort = process.env.REDIS_PORT || 6379;
   const redisPassword = process.env.REDIS_PASSWORD;
   const redisUser = process.env.REDIS_USER || 'default';
+  const redisFallbackUrl = process.env.REDIS_FALLBACK_URL; // Optional fallback endpoint
 
   if (redisUrl) {
     try {
@@ -30,7 +32,7 @@ const validateRedisConfig = () => {
         throw new Error('Invalid REDIS_URL: missing hostname or port');
       }
       logger.info('Using REDIS_URL from environment', { url: url.toString().replace(/:[^@]+@/, ':****@') });
-      return redisUrl;
+      return { primary: redisUrl, fallback: redisFallbackUrl };
     } catch (err) {
       logger.error('Invalid REDIS_URL format', { error: err.message });
     }
@@ -38,7 +40,7 @@ const validateRedisConfig = () => {
 
   if (!redisHost || !redisPort) {
     logger.error('Missing REDIS_HOST or REDIS_PORT, using fallback localhost');
-    return 'redis://localhost:6379';
+    return { primary: 'redis://localhost:6379', fallback: redisFallbackUrl };
   }
 
   const protocol = redisPassword ? 'rediss' : 'redis';
@@ -46,31 +48,34 @@ const validateRedisConfig = () => {
     ? `${protocol}://${redisUser}:${redisPassword}@${redisHost}:${redisPort}`
     : `${protocol}://${redisHost}:${redisPort}`;
   logger.info('Constructed Redis URL', { url: url.replace(/:[^@]+@/, ':****@') });
-  return url;
+  return { primary: url, fallback: redisFallbackUrl };
 };
 
-const REDIS_URL = validateRedisConfig();
+const { primary: REDIS_URL, fallback: REDIS_FALLBACK_URL } = validateRedisConfig();
 
-const redisClient = redis.createClient({
-  url: REDIS_URL,
+const createRedisClient = (url) => redis.createClient({
+  url,
   socket: {
-    connectTimeout: 10000, // Reduced timeout for faster failure detection
-    keepAlive: 500, // More frequent keep-alive for active connections
+    connectTimeout: 5000, // Reduced for faster failure
+    keepAlive: 300, // Frequent keep-alive
     reconnectStrategy: (retries) => {
-      if (retries > 10) { // Reduced max retries to avoid long delays
-        logger.error('Redis reconnection failed after 10 attempts', { retries });
+      if (retries > 8) { // Reduced max retries
+        logger.error('Redis reconnection failed after 8 attempts', { retries, url: url.replace(/:[^@]+@/, ':****@') });
         return new Error('Redis reconnection failed');
       }
-      const delay = Math.min(100 + retries * 50, 2000); // Start at 100ms, cap at 2s
-      logger.info('Reconnect attempt', { retries, delay });
+      const delay = 50 + retries * 25; // Start at 50ms, increase by 25ms
+      logger.info('Reconnect attempt', { retries, delay, url: url.replace(/:[^@]+@/, ':****@') });
       return delay;
     },
   },
-  disableOfflineQueue: true, // Prevent queuing during disconnections
+  disableOfflineQueue: true,
 });
 
+let redisClient = createRedisClient(REDIS_URL);
+let isRedisAvailable = false;
+
 redisClient.on('connect', () => {
-  logger.info('Connected to Redis', { url: REDIS_URL.replace(/:[^@]+@/, ':****@') });
+  logger.info('Connected to Redis', { url: redisClient.options.url.replace(/:[^@]+@/, ':****@') });
   isRedisAvailable = true;
 });
 redisClient.on('reconnecting', () => logger.info('Reconnecting to Redis'));
@@ -83,16 +88,16 @@ redisClient.on('error', (err) => {
   isRedisAvailable = false;
 });
 
-let isRedisAvailable = false;
-
-// Initialize Redis connection
+// Initialize Redis connection with fallback
 (async () => {
   let attempts = 0;
-  const maxAttempts = 5; // Reduced attempts for faster fallback
+  const maxAttempts = 3;
+  let usingFallback = false;
+
   while (attempts < maxAttempts) {
     try {
       await redisClient.connect();
-      logger.info('Redis client initialized successfully', { url: REDIS_URL.replace(/:[^@]+@/, ':****@') });
+      logger.info('Redis client initialized successfully', { url: redisClient.options.url.replace(/:[^@]+@/, ':****@') });
       isRedisAvailable = true;
       break;
     } catch (err) {
@@ -100,13 +105,23 @@ let isRedisAvailable = false;
       logger.error(`Failed to connect to Redis on startup, attempt ${attempts}`, {
         error: err.message,
         stack: err.stack,
+        url: redisClient.options.url.replace(/:[^@]+@/, ':****@'),
       });
+
+      if (attempts === maxAttempts && REDIS_FALLBACK_URL && !usingFallback) {
+        logger.info('Switching to fallback Redis URL', { url: REDIS_FALLBACK_URL.replace(/:[^@]+@/, ':****@') });
+        redisClient = createRedisClient(REDIS_FALLBACK_URL);
+        attempts = 0;
+        usingFallback = true;
+        continue;
+      }
+
       if (attempts === maxAttempts) {
         logger.warn('Redis connection failed after max attempts, using in-memory cache');
         isRedisAvailable = false;
         break;
       }
-      await new Promise((resolve) => setTimeout(resolve, 1000 * attempts));
+      await new Promise((resolve) => setTimeout(resolve, 500 * attempts));
     }
   }
 })();
@@ -132,26 +147,41 @@ const delInMemory = (key) => {
   logger.info('In-memory cache del', { key });
 };
 
-// Redis operation with retry and fallback
-const withRetry = async (operation, maxRetries = 2) => {
+// In-memory queue operations (basic lpush/lrange fallback)
+const lpushInMemory = (key, value) => {
+  const queue = inMemoryQueues.get(key) || [];
+  queue.unshift(typeof value === 'string' ? value : JSON.stringify(value));
+  inMemoryQueues.set(key, queue.slice(0, 1000)); // Limit queue size
+  logger.info('In-memory queue lpush', { key });
+  return queue.length;
+};
+
+const lrangeInMemory = (key, start, stop) => {
+  const queue = inMemoryQueues.get(key) || [];
+  const end = stop < 0 ? queue.length + stop : stop;
+  const result = queue.slice(start, end + 1).map((item) => {
+    try {
+      return JSON.parse(item);
+    } catch {
+      return item;
+    }
+  });
+  logger.info('In-memory queue lrange', { key, start, stop });
+  return result;
+};
+
+// Redis operation with minimal retry
+const withRetry = async (operation) => {
   if (!isRedisAvailable) {
     logger.warn('Redis unavailable, using in-memory cache');
     return null;
   }
-  let attempt = 0;
-  while (attempt < maxRetries) {
-    try {
-      return await operation();
-    } catch (err) {
-      attempt++;
-      logger.error(`Redis operation failed, attempt ${attempt}`, { error: err.message });
-      if (attempt === maxRetries) {
-        logger.warn('Redis operation failed after max retries, using in-memory cache');
-        isRedisAvailable = false;
-        return null;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 50 * attempt)); // Reduced delay
-    }
+  try {
+    return await operation();
+  } catch (err) {
+    logger.error('Redis operation failed', { error: err.message });
+    isRedisAvailable = false;
+    return null;
   }
 };
 
@@ -159,9 +189,7 @@ module.exports = {
   client: redisClient,
   isAvailable: () => isRedisAvailable,
   get: async (key) => {
-    if (!isRedisAvailable) {
-      return getInMemory(key);
-    }
+    if (!isRedisAvailable) return getInMemory(key);
     return await withRetry(async () => {
       const result = await redisClient.get(key);
       logger.info('Redis get', { key, result: result ? 'found' : 'not found' });
@@ -202,22 +230,16 @@ module.exports = {
     }) || (delInMemory(key), null);
   },
   lpush: async (key, value) => {
-    if (!isRedisAvailable) {
-      logger.warn('In-memory cache does not support lpush', { key });
-      return null;
-    }
+    if (!isRedisAvailable) return lpushInMemory(key, value);
     return await withRetry(async () => {
       const stringValue = typeof value === 'string' ? value : JSON.stringify(value);
       const result = await redisClient.lPush(key, stringValue);
       logger.info('Redis lpush', { key });
       return result;
-    });
+    }) || lpushInMemory(key, value);
   },
   lrange: async (key, start, stop) => {
-    if (!isRedisAvailable) {
-      logger.warn('In-memory cache does not support lrange', { key });
-      return [];
-    }
+    if (!isRedisAvailable) return lrangeInMemory(key, start, stop);
     return await withRetry(async () => {
       const result = await redisClient.lRange(key, start, stop);
       logger.info('Redis lrange', { key, start, stop });
@@ -228,7 +250,7 @@ module.exports = {
           return item;
         }
       });
-    }) || [];
+    }) || lrangeInMemory(key, start, stop);
   },
   quit: async () => {
     try {

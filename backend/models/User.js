@@ -9,7 +9,7 @@ const userSchema = new mongoose.Schema({
     unique: true,
     lowercase: true,
     trim: true,
-    match: /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/,
+    match: /^[a-zA-Z0.9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/,
   },
   password: {
     type: String,
@@ -80,17 +80,73 @@ const userSchema = new mongoose.Schema({
 // Indexes for performance
 userSchema.index({ status: 1, lastSeen: -1 });
 
-// Middleware to delete associated messages when a user is deleted
+// Middleware for document-level deleteOne
 userSchema.pre('deleteOne', { document: true, query: false }, async function (next) {
   try {
     const userId = this._id;
-    // Delete all messages where the user is either sender or recipient
     await Message.deleteMany({
       $or: [
         { senderId: userId },
         { recipientId: userId },
       ],
     });
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Middleware for query-level deleteOne and deleteMany
+userSchema.pre('deleteOne', { document: false, query: true }, async function (next) {
+  try {
+    const filter = this.getFilter();
+    const users = await this.model.find(filter).select('_id');
+    const userIds = users.map(user => user._id);
+    if (userIds.length > 0) {
+      await Message.deleteMany({
+        $or: [
+          { senderId: { $in: userIds } },
+          { recipientId: { $in: userIds } },
+        ],
+      });
+    }
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
+
+userSchema.pre('deleteMany', async function (next) {
+  try {
+    const filter = this.getFilter();
+    const users = await this.model.find(filter).select('_id');
+    const userIds = users.map(user => user._id);
+    if (userIds.length > 0) {
+      await Message.deleteMany({
+        $or: [
+          { senderId: { $in: userIds } },
+          { recipientId: { $in: userIds } },
+        ],
+      });
+    }
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Middleware for findOneAndDelete
+userSchema.pre('findOneAndDelete', async function (next) {
+  try {
+    const user = await this.model.findOne(this.getFilter()).select('_id');
+    if (user) {
+      await Message.deleteMany({
+        $or: [
+          { senderId: user._id },
+          { recipientId: user._id },
+        ],
+      });
+    }
     next();
   } catch (error) {
     next(error);
