@@ -102,7 +102,7 @@ const registerSchema = Joi.object({
   password: Joi.string().min(6).required(),
   username: Joi.string().min(3).max(20).required(),
   country: Joi.string().length(2).uppercase().required(),
-  role: Joi.number().integer().min(0).max(1).optional().default(0), // Made role optional with default
+  role: Joi.number().integer().min(0).max(1).optional().default(0),
 });
 
 const loginSchema = Joi.object({
@@ -157,7 +157,7 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
       return res.status(400).json({ error: error.details[0].message });
     }
 
-    const { email, password, username, country, role = 0 } = req.body; // Default role to 0 if not provided
+    const { email, password, username, country, role = 0 } = req.body;
 
     logger.info('Checking for existing user', { email, username });
     const existingUser = await User.findOne({ $or: [{ email }, { username }] });
@@ -259,8 +259,13 @@ router.post('/login', authLimiter, async (req, res) => {
 
     const { email, password } = req.body;
     const user = await User.findOne({ email }).select('+privateKey');
-    if (!user || !(await bcrypt.compare(password, user.password))) {
-      return res.status(401).json({ error: 'Invalid email or password' });
+    if (!user) {
+      logger.warn('Login attempt with unregistered email', { email });
+      return res.status(401).json({ error: 'Email not registered' });
+    }
+    if (!(await bcrypt.compare(password, user.password))) {
+      logger.warn('Login attempt with wrong password', { email });
+      return res.status(401).json({ error: 'Wrong password' });
     }
 
     const token = jwt.sign(

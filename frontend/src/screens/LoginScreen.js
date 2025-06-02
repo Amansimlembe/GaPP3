@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import axios from 'axios';
 import { motion } from 'framer-motion';
 import { getCountries } from 'libphonenumber-js';
+import { Eye, EyeOff } from 'lucide-react';
 
 const LoginScreen = ({ setAuth }) => {
   const [email, setEmail] = useState('');
@@ -13,6 +14,8 @@ const LoginScreen = ({ setAuth }) => {
   const [selectedCountry, setSelectedCountry] = useState('');
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
 
   let countries = [];
   try {
@@ -56,7 +59,7 @@ const LoginScreen = ({ setAuth }) => {
   };
 
   const checkLocation = async (selectedCountry) => {
-    if (isLogin) return true; // Skip for login
+    if (isLogin) return true;
     try {
       const position = await new Promise((resolve, reject) => {
         navigator.geolocation.getCurrentPosition(resolve, reject);
@@ -159,6 +162,18 @@ const LoginScreen = ({ setAuth }) => {
     }
   };
 
+  const resetInputs = () => {
+    setEmail('');
+    setPassword('');
+    setConfirmPassword('');
+    setUsername('');
+    setSelectedCountry('');
+    setSearch('');
+    setError('');
+    setShowPassword(false);
+    setShowConfirmPassword(false);
+  };
+
   return (
     <motion.div
       initial={{ opacity: 0, y: -50 }}
@@ -196,7 +211,7 @@ const LoginScreen = ({ setAuth }) => {
                 className="w-full p-2 border rounded-lg max-h-40 overflow-y-auto dark:bg-gray-700 dark:text-white dark:border-gray-600"
                 disabled={loading}
               >
-                <option value="">Select a country</option>
+                <option value="">{search || 'Select a country'}</option>
                 {filteredCountries.map((c) => (
                   <option key={c.code} value={c.code}>
                     {c.name}
@@ -214,25 +229,45 @@ const LoginScreen = ({ setAuth }) => {
             required
             disabled={loading}
           />
-          <input
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            className="w-full p-2 border rounded-md dark:bg-gray-700 dark:text-white dark:border-gray-600"
-            placeholder="Password (min 6 characters)"
-            required
-            disabled={loading}
-          />
-          {!isLogin && (
+          <div className="relative">
             <input
-              type="password"
-              value={confirmPassword}
-              onChange={(e) => setConfirmPassword(e.target.value)}
+              type={showPassword ? 'text' : 'password'}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
               className="w-full p-2 border rounded-md dark:bg-gray-700 dark:text-white dark:border-gray-600"
-              placeholder="Confirm Password"
+              placeholder="Password (min 6 characters)"
               required
               disabled={loading}
             />
+            <button
+              type="button"
+              onClick={() => setShowPassword(!showPassword)}
+              className="absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-500 dark:text-gray-300"
+              disabled={loading}
+            >
+              {showPassword ? <EyeOff size={20} /> : <Eye size={20} />}
+            </button>
+          </div>
+          {!isLogin && (
+            <div className="relative">
+              <input
+                type={showConfirmPassword ? 'text' : 'password'}
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                className="w-full p-2 border rounded-md dark:bg-gray-700 dark:text-white dark:border-gray-600"
+                placeholder="Confirm Password"
+                required
+                disabled={loading}
+              />
+              <button
+                type="button"
+                onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+                className="absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-500 dark:text-gray-300"
+                disabled={loading}
+              >
+                {showConfirmPassword ? <EyeOff size={20} /> : <Eye size={20} />}
+              </button>
+            </div>
           )}
           <button
             type="submit"
@@ -245,7 +280,12 @@ const LoginScreen = ({ setAuth }) => {
         <p className="mt-4 text-center text-gray-600 dark:text-gray-300">
           {isLogin ? "Don't have an account?" : 'Already have an account?'}{' '}
           <span
-            onClick={() => !loading && setIsLogin(!isLogin)}
+            onClick={() => {
+              if (!loading) {
+                setIsLogin(!isLogin);
+                resetInputs();
+              }
+            }}
             className={`text-primary cursor-pointer hover:underline ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}
           >
             {isLogin ? 'Register' : 'Login'}

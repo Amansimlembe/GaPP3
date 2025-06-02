@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Route, Routes, Navigate, NavLink, useLocation } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { FaHome, FaBriefcase, FaComments, FaUser, FaMoon, FaSun } from 'react-icons/fa';
+import { FaHome, FaBriefcase, FaComments, FaUser } from 'react-icons/fa';
 import axios from 'axios';
 import io from 'socket.io-client';
 import { useSelector } from 'react-redux';
@@ -333,10 +333,6 @@ const AuthenticatedApp = ({
           <FaUser className="text-xl" />
           <span className="text-xs">Profile</span>
         </NavLink>
-        <div onClick={toggleTheme} className="flex flex-col items-center p-2 hover:bg-secondary rounded cursor-pointer">
-          {theme === 'light' ? <FaMoon className="text-xl" /> : <FaSun className="text-xl" />}
-          <span className="text-xs">{theme === 'light' ? 'Dark' : 'Light'}</span>
-        </div>
       </motion.div>
     </div>
   );
