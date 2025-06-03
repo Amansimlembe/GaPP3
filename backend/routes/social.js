@@ -233,83 +233,83 @@ module.exports = (io) => {
       logger.info('Chat list update propagated', { userId });
     });
 
-    socket.on('message', async (messageData, callback) => {
-      try {
-        const {
-          senderId,
-          recipientId,
-          content,
-          contentType,
-          plaintextContent,
-          caption,
-          replyTo,
-          originalFilename,
-          clientMessageId,
-          senderVirtualNumber,
-          senderUsername,
-          senderPhoto,
-        } = messageData;
+   socket.on('message', async (messageData, callback) => {
+  try {
+    const {
+      senderId,
+      recipientId,
+      content,
+      contentType,
+      plaintextContent,
+      caption,
+      replyTo,
+      originalFilename,
+      clientMessageId,
+      senderVirtualNumber,
+      senderUsername,
+      senderPhoto,
+    } = messageData;
 
-        if (
-          !mongoose.isValidObjectId(senderId) ||
-          !mongoose.isValidObjectId(recipientId) ||
-          !content ||
-          !contentType
-        ) {
-          logger.warn('Missing or invalid message fields', { messageData });
-          return callback({ error: 'Missing required fields: senderId, recipientId, content, contentType' });
-        }
+    if (
+      !mongoose.isValidObjectId(senderId) ||
+      !mongoose.isValidObjectId(recipientId) ||
+      !content ||
+      !contentType ||
+      !clientMessageId
+    ) {
+      logger.warn('Missing or invalid message fields', { messageData });
+      return callback({ error: 'Missing required fields: senderId, recipientId, content, contentType, clientMessageId' });
+    }
 
-        if (!validContentTypes.includes(contentType)) {
-          logger.warn('Invalid contentType', { contentType });
-          return callback({ error: `Invalid contentType. Must be one of: ${validContentTypes.join(', ')}` });
-        }
+    if (!validContentTypes.includes(contentType)) {
+      logger.warn('Invalid contentType', { contentType });
+      return callback({ error: `Invalid contentType. Must be one of: ${validContentTypes.join(', ')}` });
+    }
 
-        const sender = await User.findById(senderId);
-        const recipient = await User.findById(recipientId);
-        if (!sender || !recipient) {
-          logger.warn('Sender or recipient not found', { senderId, recipientId });
-          return callback({ error: 'Sender or recipient not found' });
-        }
+    const sender = await User.findById(senderId);
+    const recipient = await User.findById(recipientId);
+    if (!sender || !recipient) {
+      logger.warn('Sender or recipient not found', { senderId, recipientId });
+      return callback({ error: 'Sender or recipient not found' });
+    }
 
-        const existingMessage = await Message.findOne({ clientMessageId });
-        if (existingMessage) {
-          logger.info('Duplicate message found', { clientMessageId });
-          return callback({ message: existingMessage.toObject() });
-        }
+    const existingMessage = await Message.findOne({ clientMessageId });
+    if (existingMessage) {
+      logger.info('Duplicate message found', { clientMessageId });
+      return callback({ message: existingMessage.toObject() });
+    }
 
-        const message = new Message({
-          senderId,
-          recipientId,
-          content,
-          contentType,
-          plaintextContent: plaintextContent || '',
-          status: 'sent',
-          caption: caption || undefined,
-          replyTo: replyTo || undefined,
-          originalFilename: originalFilename || undefined,
-          clientMessageId: clientMessageId || `${senderId}-${Date.now()}`,
-          senderVirtualNumber: senderVirtualNumber || sender.virtualNumber,
-          senderUsername: senderUsername || sender.username,
-          senderPhoto: senderPhoto || sender.photo,
-        });
-
-        await message.save();
-        io.to(recipientId).emit('message', message.toObject());
-        io.to(senderId).emit('message', message.toObject());
-        emitUpdatedChatList(senderId); // Update chat list for sender
-        emitUpdatedChatList(recipientId); // Update chat list for recipient
-        logger.info('Message sent', { messageId: message._id, senderId, recipientId });
-        callback({ message: message.toObject() });
-
-        // Invalidate chat-list cache for both users
-        await redis.del(`:chat-list:${senderId}`);
-        await redis.del(`:chat-list:${recipientId}`);
-      } catch (error) {
-        logger.error('Socket message failed', { error: error.message, stack: error.stack });
-        callback({ error: 'Failed to send message', details: error.message });
-      }
+    const message = new Message({
+      senderId,
+      recipientId,
+      content,
+      contentType,
+      plaintextContent: plaintextContent || '',
+      status: 'sent',
+      caption: caption || undefined,
+      replyTo: replyTo && mongoose.isValidObjectId(replyTo) ? replyTo : undefined,
+      originalFilename: originalFilename || undefined,
+      clientMessageId,
+      senderVirtualNumber: senderVirtualNumber || sender.virtualNumber,
+      senderUsername: senderUsername || sender.username,
+      senderPhoto: senderPhoto || sender.photo,
     });
+
+    await message.save();
+    io.to(recipientId).emit('message', message.toObject());
+    io.to(senderId).emit('message', message.toObject());
+    emitUpdatedChatList(senderId);
+    emitUpdatedChatList(recipientId);
+    logger.info('Message sent', { messageId: message._id, senderId, recipientId });
+    callback({ message: message.toObject() });
+
+    await redis.del(`:chat-list:${senderId}`);
+    await redis.del(`:chat-list:${recipientId}`);
+  } catch (error) {
+    logger.error('Socket message failed', { error: error.message, stack: error.stack });
+    callback({ error: 'Failed to send message', details: error.message });
+  }
+});
 
     socket.on('editMessage', async ({ messageId, newContent, plaintextContent }, callback) => {
       try {

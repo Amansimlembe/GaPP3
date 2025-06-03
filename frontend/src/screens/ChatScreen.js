@@ -489,7 +489,6 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   }, [newContactNumber, userId, token, socket, handleLogout, initializeChat]);
 
 
-
 const sendMessage = useCallback(async () => {
   if ((!message.trim() && !files.length) || !selectedChat || !chats[selectedChat]) return;
   const recipientId = selectedChat;
@@ -537,11 +536,14 @@ const sendMessage = useCallback(async () => {
 
     socket.emit('message', messageData, async (ack) => {
       if (ack.error) {
-        setPendingMessages((prev) => {
-          const updatedPending = [...prev, { tempId: clientMessageId, recipientId, messageData }];
-          savePendingMessages(updatedPending); // Save immediately to avoid async issues
-          return updatedPending;
-        });
+        setPendingMessages((prev) => [
+          ...prev,
+          { tempId: clientMessageId, recipientId, messageData },
+        ]);
+        await savePendingMessages([
+          ...pendingMessages,
+          { tempId: clientMessageId, recipientId, messageData },
+        ]);
         setError('Failed to send message');
         return;
       }
@@ -556,7 +558,6 @@ const sendMessage = useCallback(async () => {
       await saveMessages([{ ...sentMessage, content: plaintextContent }]);
     });
 
-    // Reset state after sending to prevent re-render issues
     setMessage('');
     setReplyTo(null);
     setShowEmojiPicker(false);
@@ -564,14 +565,24 @@ const sendMessage = useCallback(async () => {
     inputRef.current?.focus();
   } catch (err) {
     console.error('Send message error:', err);
-    setPendingMessages((prev) => {
-      const updatedPending = [
-        ...prev,
-        { tempId: clientMessageId, recipientId, messageData: { ...messageData } },
-      ];
-      savePendingMessages(updatedPending); // Save immediately
-      return updatedPending;
-    });
+    const pendingMessage = {
+      tempId: clientMessageId,
+      recipientId,
+      messageData: {
+        senderId: userId,
+        recipientId,
+        content: plaintextContent, // Fallback to plaintext if encryption fails
+        contentType: 'text',
+        plaintextContent,
+        clientMessageId,
+        senderVirtualNumber: virtualNumber,
+        senderUsername: username,
+        senderPhoto: photo,
+        replyTo: replyTo ? replyTo._id : undefined,
+      },
+    };
+    setPendingMessages((prev) => [...prev, pendingMessage]);
+    await savePendingMessages([...pendingMessages, pendingMessage]);
     setError('Failed to send message');
   }
 }, [
@@ -588,10 +599,9 @@ const sendMessage = useCallback(async () => {
   photo,
   replyTo,
   files,
+  pendingMessages,
   chats,
 ]);
-
-
 
 
 
