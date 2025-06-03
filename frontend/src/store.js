@@ -48,7 +48,14 @@ const messageSlice = createSlice({
       }
     },
     setSelectedChat: (state, action) => {
-      state.selectedChat = action.payload;
+      const recipientId = action.payload;
+      // Only set selectedChat if recipientId exists in chats or is null
+      if (recipientId === null || state.chats[recipientId]) {
+        state.selectedChat = recipientId;
+      } else {
+        console.warn(`Attempted to set selectedChat to invalid recipientId: ${recipientId}`);
+        state.selectedChat = null; // Fallback to null to prevent invalid state
+      }
     },
     resetState: () => ({
       chats: {},
@@ -75,7 +82,10 @@ const persistenceMiddleware = (store) => (next) => (action) => {
     requestAnimationFrame(() => {
       const state = store.getState().messages;
       try {
-        const serializableState = { selectedChat: state.selectedChat };
+        // Only persist selectedChat if it's valid (null or exists in chats)
+        const serializableState = {
+          selectedChat: state.chats[state.selectedChat] || state.selectedChat === null ? state.selectedChat : null,
+        };
         localStorage.setItem('reduxState', JSON.stringify(serializableState));
       } catch (error) {
         console.error('Failed to persist state:', error);
@@ -85,6 +95,7 @@ const persistenceMiddleware = (store) => (next) => (action) => {
   }
   return result;
 };
+
 const loadPersistedState = () => {
   const persistedState = localStorage.getItem('reduxState');
   if (persistedState) {

@@ -200,6 +200,10 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
 
   const fetchMessages = useCallback(
     debounce(async (recipientId, retryCount = 3) => {
+      if (!recipientId) {
+        console.warn('fetchMessages called with undefined recipientId');
+        return;
+      }
       const localMessages = await getMessages(recipientId);
       if (localMessages.length) {
         dispatch(setMessages({ recipientId, messages: localMessages }));
@@ -251,7 +255,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         }
       }
     }, 500),
-    [token, userId, dispatch, decryptMessage]
+    [token, userId, dispatch, decryptMessage, handleLogout]
   );
 
   const sendPendingMessages = useCallback(async () => {
@@ -291,7 +295,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   const handleFileChange = useCallback(
     async (e, type) => {
       const selectedFiles = Array.from(e.target.files);
-      if (!selectedFiles.length) return;
+      if (!selectedFiles.length || !selectedChat || !chats[selectedChat]) return;
 
       const compressedFiles = await Promise.all(
         selectedFiles.map((file) => (file.type.startsWith('image') ? compressImage(file) : file))
@@ -304,7 +308,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       setShowPicker(false);
 
       const tempMessages = compressedFiles.map((file) => {
-        const clientMessageId = `${userId}-${Date.now()}-${Math.random().toString(36).substring(2)}`;
+        const clientMessageId = `${userId}_${Date.now()}_${Math.random().toString(36).substring(2)}`;
         return {
           _id: clientMessageId,
           senderId: userId,
@@ -323,7 +327,9 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       });
 
       tempMessages.forEach((msg) => dispatch(addMessage({ recipientId: selectedChat, message: msg })));
-      if (isAtBottomRef.current) listRef.current?.scrollToRow((chats[selectedChat] || []).length - 1);
+      if (isAtBottomRef.current && chats[selectedChat]?.length > 0) {
+        listRef.current?.scrollToRow(chats[selectedChat].length - 1);
+      }
 
       for (const [index, file] of compressedFiles.entries()) {
         const clientMessageId = tempMessages[index]._id;
@@ -400,7 +406,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       setReplyTo(null);
       inputRef.current?.focus();
     },
-    [selectedChat, userId, token, socket, dispatch, virtualNumber, username, photo, captions]
+    [selectedChat, userId, token, socket, dispatch, virtualNumber, username, photo, captions, chats, handleLogout]
   );
 
   const handleAddContact = useCallback(async () => {
@@ -412,7 +418,6 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     const maxRetries = 3;
     let attempt = 0;
     let success = false;
-    let lastError = null;
 
     while (attempt < maxRetries && !success) {
       try {
@@ -441,7 +446,6 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         success = true;
       } catch (err) {
         attempt++;
-        lastError = err;
         console.error(`Add contact attempt ${attempt} failed:`, err.message);
         if (err.response?.status === 401) {
           setError('Session expired, please log in again');
@@ -460,9 +464,9 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   }, [newContactNumber, userId, token, socket, handleLogout]);
 
   const sendMessage = useCallback(async () => {
-    if ((!message.trim() && !files.length) || !selectedChat) return;
+    if ((!message.trim() && !files.length) || !selectedChat || !chats[selectedChat]) return;
     const recipientId = selectedChat;
-    const clientMessageId = `${userId}-${Date.now()}-${Math.random().toString(36).substring(2)}`;
+    const clientMessageId = `${userId}_${Date.now()}_${Math.random().toString(36).substring(2)}`;
     const plaintextContent = message.trim();
 
     try {
@@ -487,7 +491,9 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
 
       dispatch(addMessage({ recipientId, message: tempMessage }));
       await saveMessages([tempMessage]);
-      if (isAtBottomRef.current) listRef.current?.scrollToRow((chats[recipientId] || []).length - 1);
+      if (isAtBottomRef.current && chats[recipientId]?.length > 0) {
+        listRef.current?.scrollToRow(chats[recipientId].length - 1);
+      }
 
       const messageData = {
         senderId: userId,
@@ -546,11 +552,12 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     replyTo,
     files,
     pendingMessages,
+    chats
   ]);
 
   const handleEditMessage = useCallback(
     async (messageId, newContent) => {
-      if (!newContent.trim()) return;
+      if (!newContent.trim() || !selectedChat || !chats[selectedChat]) return;
       try {
         const recipientPublicKey = await getPublicKey(selectedChat);
         const encryptedContent = await encryptMessage(newContent, recipientPublicKey);
@@ -576,16 +583,17 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         setError('Failed to edit message');
       }
     },
-    [selectedChat, socket, dispatch, encryptMessage, getPublicKey]
+    [selectedChat, socket, dispatch, encryptMessage, getPublicKey, chats]
   );
 
   const handleDeleteMessage = useCallback(
     async (messageId) => {
+      if (!selectedChat || !chats[selectedChat]) return;
       try {
         socket.emit('deleteMessage', { messageId, recipientId: selectedChat }, async (ack) => {
           if (ack.error) throw new Error(ack.error);
           dispatch(deleteMessage({ recipientId: selectedChat, messageId }));
-          await saveMessages(chats[selectedChat].filter((msg) => msg._id !== messageId));
+          await saveMessages(chats[selectedChat]?.filter((msg) => msg._id !== messageId) || []);
         });
       } catch (err) {
         console.error('Delete message error:', err);
@@ -597,7 +605,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
 
   const handleTyping = useCallback(
     debounce(() => {
-      if (!selectedChat || !message.trim()) return;
+      if (!selectedChat || !message.trim() || !chats[selectedChat]) return;
       socket.emit('typing', { userId, recipientId: selectedChat });
       clearTimeout(typingTimeoutRef.current);
       typingTimeoutRef.current = setTimeout(
@@ -605,21 +613,23 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         2000
       );
     }, 500),
-    [selectedChat, userId, socket]
+    [selectedChat, userId, socket, message, chats]
   );
 
   const handleScroll = useCallback(
     ({ scrollTop, scrollHeight, clientHeight }) => {
       const isAtBottom = scrollTop + clientHeight >= scrollHeight - 10;
       isAtBottomRef.current = isAtBottom;
-      setShowJumpToBottom(!isAtBottom && (chats[selectedChat] || []).length > 20);
+      setShowJumpToBottom(!isAtBottom && (chats[selectedChat]?.length || 0) > 20);
     },
     [selectedChat, chats]
   );
 
   const jumpToBottom = useCallback(() => {
-    listRef.current?.scrollToRow((chats[selectedChat] || []).length - 1);
-    setShowJumpToBottom(false);
+    if (chats[selectedChat]?.length > 0) {
+      listRef.current?.scrollToRow(chats[selectedChat].length - 1);
+      setShowJumpToBottom(false);
+    }
   }, [selectedChat, chats]);
 
   const handleSwipe = useCallback(
@@ -637,7 +647,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         const pending = await loadPendingMessages();
         setPendingMessages(pending);
       } catch (err) {
-        console.error('Chat initialization error:', err);
+        console.error('Chat initialization error:', err.message);
         if (err.name === 'VersionError') {
           console.warn('IndexedDB VersionError, clearing database');
           await clearDatabase();
@@ -654,11 +664,14 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   }, [fetchChatList, sendPendingMessages]);
 
   useEffect(() => {
-    if (selectedChat) fetchMessages(selectedChat);
-  }, [selectedChat, fetchMessages]);
+    if (selectedChat && !chats[selectedChat]) {
+      console.log(`Fetching messages for recipientId: ${selectedChat}`);
+      fetchMessages(selectedChat);
+    }
+  }, [selectedChat, fetchMessages, chats]);
 
   useEffect(() => {
-    socket.on('message', async (msg) => {
+    const handleMessage = async (msg) => {
       if (chats[selectedChat]?.some((m) => m.clientMessageId === msg.clientMessageId)) return;
       const privateKeyPem = localStorage.getItem('privateKey');
       const decryptedContent =
@@ -666,19 +679,25 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
           ? await decryptMessage(msg.content, privateKeyPem)
           : msg.content;
       const newMessage = { ...msg, content: decryptedContent };
-      dispatch(addMessage({ recipientId: msg.senderId === userId ? msg.recipientId : msg.senderId, message: newMessage }));
+      const recipientId = msg.senderId === userId ? msg.recipientId : msg.senderId;
+      dispatch(addMessage({ recipientId, message: newMessage }));
       await saveMessages([newMessage]);
-      if (msg.recipientId === userId && selectedChat === msg.senderId && isAtBottomRef.current) {
-        listRef.current?.scrollToRow((chats[msg.senderId] || []).length - 1);
+      if (
+        msg.recipientId === userId &&
+        selectedChat === msg.senderId &&
+        isAtBottomRef.current &&
+        chats[selectedChat]?.length > 0
+      ) {
+        listRef.current?.scrollToRow(chats[selectedChat].length - 1);
         socket.emit('batchMessageStatus', {
           messageIds: [msg._id],
           status: 'read',
           recipientId: msg.senderId,
         });
       }
-    });
+    };
 
-    socket.on('editMessage', async (updatedMessage) => {
+    const handleEditMessage = async (updatedMessage) => {
       const privateKeyPem = localStorage.getItem('privateKey');
       const decryptedContent =
         updatedMessage.contentType === 'text' && updatedMessage.recipientId === userId
@@ -692,13 +711,16 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         })
       );
       await saveMessages([{ ...updatedMessage, content: decryptedContent }]);
-    });
+    };
 
-    socket.on('deleteMessage', ({ messageId, recipientId }) => {
+    const handleDeleteMessage = ({ messageId, recipientId }) => {
       dispatch(deleteMessage({ recipientId, messageId }));
-      saveMessages(chats[recipientId].filter((msg) => msg._id !== messageId));
-    });
+      saveMessages(chats[recipientId]?.filter((msg) => msg._id !== messageId) || []);
+    };
 
+    socket.on('message', handleMessage);
+    socket.on('editMessage', handleEditMessage);
+    socket.on('deleteMessage', handleDeleteMessage);
     socket.on('typing', ({ userId: typerId }) =>
       setIsTyping((prev) => ({ ...prev, [typerId]: true }))
     );
@@ -725,9 +747,9 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     });
 
     return () => {
-      socket.off('message');
-      socket.off('editMessage');
-      socket.off('deleteMessage');
+      socket.off('message', handleMessage);
+      socket.off('editMessage', handleEditMessage);
+      socket.off('deleteMessage', handleDeleteMessage);
       socket.off('typing');
       socket.off('stopTyping');
       socket.off('messageStatus');
@@ -737,13 +759,13 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   }, [socket, selectedChat, userId, dispatch, decryptMessage, users, chats]);
 
   useEffect(() => {
-    if (selectedChat && chats[selectedChat]) {
+    if (selectedChat && chats[selectedChat]?.length > 0) {
       const unreadMessages = chats[selectedChat].filter(
         (msg) => msg.recipientId === userId && msg.status !== 'read'
       );
       setUnreadCount(unreadMessages.length);
       setFirstUnreadMessageId(unreadMessages[0]?._id || null);
-      if (isAtBottomRef.current && unreadMessages.length) {
+      if (isAtBottomRef.current && unreadMessages.length > 0) {
         socket.emit('batchMessageStatus', {
           messageIds: unreadMessages.map((msg) => msg._id),
           status: 'read',
@@ -755,11 +777,15 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
 
   const getRowHeight = useCallback(
     ({ index }) => {
-      const msg = (chats[selectedChat] || [])[index];
-      if (!msg) return 100;
+      const messages = chats[selectedChat] || [];
+      const msg = messages[index];
+      if (!msg) {
+        console.warn(`No message at index ${index} for selectedChat ${selectedChat}`);
+        return 100;
+      }
       const baseHeight = 60;
       const contentHeight =
-        msg.contentType === 'text' ? Math.min(msg.content.length / 50, 4) * 20 : 200;
+        msg.contentType === 'text' ? Math.min((msg.content?.length || 0) / 50, 4) * 20 : 200;
       const replyHeight = msg.replyTo ? 40 : 0;
       const captionHeight = msg.caption ? 20 : 0;
       return baseHeight + contentHeight + replyHeight + captionHeight;
@@ -769,10 +795,19 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
 
   const renderMessage = useCallback(
     ({ index, key, style }) => {
+      if (!selectedChat || !chats[selectedChat] || !chats[selectedChat][index]) {
+        console.warn(`Invalid state in renderMessage: selectedChat=${selectedChat}, chats[${selectedChat}]=${JSON.stringify(chats[selectedChat])}, index=${index}`);
+        return null;
+      }
+
       const messages = chats[selectedChat] || [];
       const msg = messages[index];
-      if (!msg) return null;
-      const prevMsg = messages[index - 1];
+      if (!msg) {
+        console.error(`Message undefined at index ${index} for selectedChat ${selectedChat}`);
+        return null;
+      }
+
+      const prevMsg = index > 0 ? messages[index - 1] : null;
       const isMine = msg.senderId === userId;
       const showDate = !prevMsg || formatDateHeader(prevMsg.createdAt) !== formatDateHeader(msg.createdAt);
       const isFirstUnread = msg._id === firstUnreadMessageId;
@@ -799,12 +834,12 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
           <div className={`message ${isMine ? 'mine' : 'other'} ${replyTo?._id === msg._id ? 'swiped' : ''}`}>
             {msg.replyTo && (
               <div className="reply-preview">
-                <p>{msg.replyTo.content.slice(0, 50)}...</p>
+                <p>{msg.replyTo.content?.slice(0, 50) || '[Content unavailable]'}</p>
               </div>
             )}
-            {msg.contentType === 'text' && <p className="message-content">{msg.content}</p>}
+            {msg.contentType === 'text' && <p className="message-content">{msg.content || '[Empty message]'}</p>}
             {msg.contentType === 'image' && (
-              <img src={msg.content} alt="Sent image" className="message-media" />
+              <img src={msg.content} alt="Sent image" className="message-media" onError={() => console.error(`Failed to load image: ${msg.content}`)} />
             )}
             {msg.contentType === 'video' && (
               <video controls className="message-media">
@@ -853,7 +888,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
                   className="action-icon"
                   onClick={() => {
                     setEditingMessage(msg);
-                    setMessage(msg.content);
+                    setMessage(msg.content || '');
                     inputRef.current?.focus();
                   }}
                 />
@@ -873,6 +908,10 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   const chatListRowRenderer = useCallback(
     ({ index, key, style }) => {
       const user = users[index];
+      if (!user) {
+        console.warn(`User undefined at index ${index}`);
+        return null;
+      }
       return (
         <div
           key={key}
@@ -966,12 +1005,12 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
                 onClick={() => dispatch(setSelectedChat(null))}
               />
               <img
-                src={users.find((u) => u.id === selectedChat)?.photo}
+                src={users.find((u) => u.id === selectedChat)?.photo || 'default-avatar.png'}
                 alt="User"
                 className="conversation-avatar"
               />
               <div className="conversation-info">
-                <h2>{users.find((u) => u.id === selectedChat)?.username}</h2>
+                <h2>{users.find((u) => u.id === selectedChat)?.username || 'Unknown User'}</h2>
                 {isTyping[selectedChat] ? (
                   <motion.span
                     initial={{ opacity: 0 }}
@@ -984,25 +1023,29 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
                   <span className="status-indicator">
                     {users.find((u) => u.id === selectedChat)?.status === 'online'
                       ? 'Online'
-                      : `Last seen ${formatTime(users.find((u) => u.id === selectedChat)?.lastSeen)}`}
+                      : `Last seen ${formatTime(users.find((u) => u.id === selectedChat)?.lastSeen || new Date())}`}
                   </span>
                 )}
               </div>
             </div>
             <div className="conversation-messages" ref={chatRef}>
-              <AutoSizer>
-                {({ width, height }) => (
-                  <List
-                    ref={listRef}
-                    width={width}
-                    height={height}
-                    rowCount={(chats[selectedChat] || []).length}
-                    rowHeight={getRowHeight}
-                    rowRenderer={renderMessage}
-                    onScroll={handleScroll}
-                  />
-                )}
-              </AutoSizer>
+              {!chats[selectedChat] ? (
+                <div className="loading-messages">Loading messages...</div>
+              ) : (
+                <AutoSizer>
+                  {({ width, height }) => (
+                    <List
+                      ref={listRef}
+                      width={width}
+                      height={height}
+                      rowCount={chats[selectedChat]?.length || 0}
+                      rowHeight={getRowHeight}
+                      rowRenderer={renderMessage}
+                      onScroll={handleScroll}
+                    />
+                  )}
+                </AutoSizer>
+              )}
               {showJumpToBottom && (
                 <button onClick={jumpToBottom} className="jump-to-bottom">
                   <FaArrowDown />
@@ -1011,7 +1054,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
             </div>
             {replyTo && (
               <div className="reply-bar">
-                <span>Replying to: {replyTo.content.slice(0, 50)}...</span>
+                <span>Replying to: {replyTo.content?.slice(0, 50) || '[Content unavailable]'}</span>
                 <FaTrash onClick={() => setReplyTo(null)} />
               </div>
             )}
@@ -1122,8 +1165,9 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
                       : sendMessage();
                   }
                 }}
-                placeholder={editingMessage ? 'Edit message...' : 'Type a message...'}
+                placeholder={editingMessage ? 'Edit message...' : 'Message...'}
                 className="message-input"
+                disabled={!chats[selectedChat]}
               />
               <FaPaperPlane
                 className="send-icon"
