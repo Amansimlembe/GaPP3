@@ -963,7 +963,6 @@ const sendMessage = useCallback(async () => {
 
 
 
-
 const chatListRowRenderer = useCallback(
   ({ index, key, style }) => {
     const user = users[index];
@@ -975,7 +974,7 @@ const chatListRowRenderer = useCallback(
       <div
         key={key}
         style={style}
-        className={`chat-list-item ${selectedChat === user.id ? 'selected' : ''}`}
+        className={`chat-list-item ${selectedChat === user.id ? 'selected' : ''}`} // Fixed: selectedChatMessages -> selectedChat
         onClick={() => {
           if (!user.id) {
             console.warn(`Invalid user ID: ${user.id}`);
@@ -998,15 +997,17 @@ const chatListRowRenderer = useCallback(
           {user.unreadCount > 0 && (
             <span className="chat-list-unread">{user.unreadCount}</span>
           )}
-          <span className="chat-list-status">
-            {user.status === 'online' ? 'Online' : `Last seen ${formatTime(user.lastSeen)}`}
-          </span>
+          <span className="chat-list-status">{user.status === 'online' ? 'Online' : `Last seen ${formatTime(user.lastSeen)}`}</span>
         </div>
       </div>
     );
   },
-  [users, selectedChat, dispatch, initializeChat, fetchMessages] // Removed `chats` from dependencies to prevent unnecessary re-renders
+  [users, selectedChat, dispatch, chats, initializeChat, fetchMessages]
 );
+
+
+
+
 
   return (
     <div className="chat-screen">
