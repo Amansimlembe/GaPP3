@@ -922,7 +922,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
                   onClick={() => setReplyTo(msg)}
                 />
                 <FaEdit
-                  className="action-icon">
+                  className="action-icon"
                   onClick={() => {
                     setEditingMessage(msg);
                     setMessage(msg.content || '');
@@ -1205,7 +1205,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
                     <input
                       type="file"
                       accept="audio/*"
-                      onChange={(e) => handleFileChange(e, 'audio')))
+                      onChange={(e) => handleFileChange(e, 'audio')}
                       hidden
                     />
                   </label>
