@@ -7,6 +7,7 @@ const winston = require('winston');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
 const Joi = require('joi');
+const mongoose = require('mongoose'); // Added for ObjectId validation
 
 const logger = winston.createLogger({
   level: 'info',
@@ -71,24 +72,87 @@ const upload = multer({
 const validContentTypes = ['text', 'image', 'video', 'audio', 'document'];
 
 const addContactSchema = Joi.object({
-  userId: Joi.string().required(),
+  userId: Joi.string()
+    .custom((value, helpers) => {
+      if (!mongoose.isValidObjectId(value)) {
+        return helpers.error('any.invalid');
+      }
+      return value;
+    }, 'ObjectId validation')
+    .required(),
   virtualNumber: Joi.string().required(),
 });
 
 const deleteUserSchema = Joi.object({
-  userId: Joi.string().required(),
+  userId: Joi.string()
+    .custom((value, helpers) => {
+      if (!mongoose.isValidObjectId(value)) {
+        return helpers.error('any.invalid');
+      }
+      return value;
+    }, 'ObjectId validation')
+    .required(),
 });
 
 module.exports = (io) => {
   const router = express.Router();
 
+  // Helper function to fetch and emit updated chat list
+  const emitUpdatedChatList = async (userId) => {
+    try {
+      const contacts = await User.find({ contacts: userId }).select(
+        'username virtualNumber photo status lastSeen'
+      );
+      const chatList = await Promise.all(
+        contacts.map(async (contact) => {
+          const latestMessage = await Message.findOne({
+            $or: [
+              { senderId: userId, recipientId: contact._id },
+              { senderId: contact._id, recipientId: userId },
+            ],
+          })
+            .sort({ createdAt: -1 })
+            .select('content contentType senderId recipientId createdAt plaintextContent');
+
+          const unreadCount = await Message.countDocuments({
+            senderId: contact._id,
+            recipientId: userId,
+            status: { $ne: 'read' },
+          });
+
+          return {
+            id: contact._id.toString(),
+            username: contact.username,
+            virtualNumber: contact.virtualNumber,
+            photo: contact.photo,
+            status: contact.status,
+            lastSeen: contact.lastSeen,
+            latestMessage: latestMessage ? latestMessage.toObject() : null,
+            unreadCount,
+          };
+        })
+      );
+
+      io.to(userId).emit('chatListUpdated', { userId, users: chatList });
+      await redis.setex(`:chat-list:${userId}`, 300, JSON.stringify(chatList));
+      logger.info('Emitted updated chat list', { userId });
+    } catch (error) {
+      logger.error('Failed to emit updated chat list', { error: error.message, userId });
+    }
+  };
+
   io.on('connection', (socket) => {
     socket.on('join', (userId) => {
+      if (!mongoose.isValidObjectId(userId)) {
+        logger.warn('Invalid userId in join', { userId });
+        return;
+      }
       socket.join(userId);
       User.findByIdAndUpdate(userId, { status: 'online', lastSeen: new Date() }, { new: true })
         .then((user) => {
           if (user) {
             io.to(userId).emit('userStatus', { userId, status: 'online', lastSeen: user.lastSeen });
+            emitUpdatedChatList(userId); // Emit updated chat list on join
             logger.info('User joined', { userId });
           }
         })
@@ -98,6 +162,10 @@ module.exports = (io) => {
     });
 
     socket.on('leave', (userId) => {
+      if (!mongoose.isValidObjectId(userId)) {
+        logger.warn('Invalid userId in leave', { userId });
+        return;
+      }
       User.findByIdAndUpdate(userId, { status: 'offline', lastSeen: new Date() }, { new: true })
         .then((user) => {
           if (user) {
@@ -112,19 +180,31 @@ module.exports = (io) => {
     });
 
     socket.on('typing', ({ userId, recipientId }) => {
+      if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId)) {
+        logger.warn('Invalid IDs in typing', { userId, recipientId });
+        return;
+      }
       io.to(recipientId).emit('typing', { userId });
     });
 
     socket.on('stopTyping', ({ userId, recipientId }) => {
+      if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId)) {
+        logger.warn('Invalid IDs in stopTyping', { userId, recipientId });
+        return;
+      }
       io.to(recipientId).emit('stopTyping', { userId });
     });
 
     socket.on('newContact', ({ userId, contactData }) => {
+      if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(contactData.id)) {
+        logger.warn('Invalid IDs in newContact', { userId, contactId: contactData.id });
+        return;
+      }
       User.findById(contactData.id)
         .then((contact) => {
           if (contact) {
             const contactObj = {
-              id: contact._id,
+              id: contact._id.toString(),
               username: contact.username,
               virtualNumber: contact.virtualNumber,
               photo: contact.photo,
@@ -133,12 +213,24 @@ module.exports = (io) => {
             };
             io.to(userId).emit('newContact', { userId, contactData: contactObj });
             io.to(contactData.id).emit('newContact', { userId: contactData.id, contactData: contactObj });
+            // Emit updated chat list for both users
+            emitUpdatedChatList(userId);
+            emitUpdatedChatList(contactData.id);
             logger.info('New contact emitted', { userId, contactId: contactData.id });
           }
         })
         .catch((err) => {
           logger.error('New contact emission failed', { error: err.message, userId, contactId: contactData.id });
         });
+    });
+
+    socket.on('chatListUpdated', ({ userId, users }) => {
+      if (!mongoose.isValidObjectId(userId)) {
+        logger.warn('Invalid userId in chatListUpdated', { userId });
+        return;
+      }
+      io.to(userId).emit('chatListUpdated', { userId, users });
+      logger.info('Chat list update propagated', { userId });
     });
 
     socket.on('message', async (messageData, callback) => {
@@ -158,8 +250,13 @@ module.exports = (io) => {
           senderPhoto,
         } = messageData;
 
-        if (!senderId || !recipientId || !content || !contentType) {
-          logger.warn('Missing required message fields', { messageData });
+        if (
+          !mongoose.isValidObjectId(senderId) ||
+          !mongoose.isValidObjectId(recipientId) ||
+          !content ||
+          !contentType
+        ) {
+          logger.warn('Missing or invalid message fields', { messageData });
           return callback({ error: 'Missing required fields: senderId, recipientId, content, contentType' });
         }
 
@@ -200,6 +297,8 @@ module.exports = (io) => {
         await message.save();
         io.to(recipientId).emit('message', message.toObject());
         io.to(senderId).emit('message', message.toObject());
+        emitUpdatedChatList(senderId); // Update chat list for sender
+        emitUpdatedChatList(recipientId); // Update chat list for recipient
         logger.info('Message sent', { messageId: message._id, senderId, recipientId });
         callback({ message: message.toObject() });
 
@@ -214,6 +313,10 @@ module.exports = (io) => {
 
     socket.on('editMessage', async ({ messageId, newContent, plaintextContent }, callback) => {
       try {
+        if (!mongoose.isValidObjectId(messageId)) {
+          logger.warn('Invalid messageId in editMessage', { messageId });
+          return callback({ error: 'Invalid messageId' });
+        }
         const message = await Message.findById(messageId);
         if (!message) {
           logger.warn('Message not found for edit', { messageId });
@@ -237,6 +340,11 @@ module.exports = (io) => {
 
     socket.on('deleteMessage', async ({ messageId, recipientId }, callback) => {
       try {
+        if (!mongoose.isValidObjectId(messageId) || !mongoose.isValidObjectId(recipientId)) {
+          logger.warn('Invalid IDs in deleteMessage', { messageId, recipientId });
+          return callback({ error: 'Invalid messageId or recipientId' });
+        }
+
         const message = await Message.findById(messageId);
         if (!message) {
           logger.warn('Message not found for deletion', { messageId });
@@ -256,6 +364,10 @@ module.exports = (io) => {
 
     socket.on('messageStatus', async ({ messageId, status, recipientId }) => {
       try {
+        if (!mongoose.isValidObjectId(messageId) || !mongoose.isValidObjectId(recipientId)) {
+          logger.warn('Invalid IDs in messageStatus', { messageId, recipientId });
+          return;
+        }
         const message = await Message.findById(messageId);
         if (!message) {
           logger.warn('Message not found for status update', { messageId });
@@ -276,6 +388,13 @@ module.exports = (io) => {
 
     socket.on('batchMessageStatus', async ({ messageIds, status, recipientId }) => {
       try {
+        if (
+          !messageIds.every((id) => mongoose.isValidObjectId(id)) ||
+          !mongoose.isValidObjectId(recipientId)
+        ) {
+          logger.warn('Invalid IDs in batchMessageStatus', { messageIds, recipientId });
+          return;
+        }
         const messages = await Message.find({ _id: { $in: messageIds } });
         if (!messages.length) {
           logger.warn('No messages found for batch status update', { messageIds });
@@ -301,9 +420,9 @@ module.exports = (io) => {
   // GET /social/chat-list
   router.get('/chat-list', authMiddleware, async (req, res) => {
     const { userId } = req.query;
-    if (!userId) {
-      logger.warn('Missing userId in chat-list request');
-      return res.status(400).json({ error: 'userId is required' });
+    if (!mongoose.isValidObjectId(userId)) {
+      logger.warn('Invalid userId in chat-list request', { userId });
+      return res.status(400).json({ error: 'Invalid userId' });
     }
 
     const cacheKey = `:chat-list:${userId}`;
@@ -335,7 +454,7 @@ module.exports = (io) => {
           });
 
           return {
-            id: contact._id,
+            id: contact._id.toString(),
             username: contact.username,
             virtualNumber: contact.virtualNumber,
             photo: contact.photo,
@@ -359,9 +478,9 @@ module.exports = (io) => {
   // GET /social/messages
   router.get('/messages', authMiddleware, async (req, res) => {
     const { userId, recipientId, limit = 50, skip = 0 } = req.query;
-    if (!userId || !recipientId) {
-      logger.warn('Missing userId or recipientId in messages request');
-      return res.status(400).json({ error: 'userId and recipientId are required' });
+    if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId)) {
+      logger.warn('Invalid userId or recipientId in messages request', { userId, recipientId });
+      return res.status(400).json({ error: 'Invalid userId or recipientId' });
     }
 
     const cacheKey = `:messages:${userId}:${recipientId}:${limit}:${skip}`;
@@ -419,7 +538,7 @@ module.exports = (io) => {
       const contact = await User.findOne({ virtualNumber });
       if (!contact) {
         logger.warn('Contact not found', { virtualNumber });
-        return res.status(404).json({ error: 'Contact not found' });
+        return res.status(400).json({ error: 'Contact not found' }); // Changed from 404 to 400
       }
 
       if (contact._id.toString() === userId) {
@@ -442,7 +561,7 @@ module.exports = (io) => {
       }
 
       const contactData = {
-        id: contact._id,
+        id: contact._id.toString(),
         username: contact.username,
         virtualNumber: contact.virtualNumber,
         photo: contact.photo,
@@ -450,9 +569,11 @@ module.exports = (io) => {
         lastSeen: contact.lastSeen,
       };
 
-      // Emit newContact event to both users
+      // Emit newContact and chatListUpdated events to both users
       io.to(userId).emit('newContact', { userId, contactData });
       io.to(contact._id.toString()).emit('newContact', { userId: contact._id.toString(), contactData });
+      emitUpdatedChatList(userId);
+      emitUpdatedChatList(contact._id.toString());
 
       // Invalidate caches for both users
       await redis.del(`:chat-list:${userId}`);
@@ -472,8 +593,13 @@ module.exports = (io) => {
   router.post('/upload', authMiddleware, upload.single('file'), async (req, res) => {
     try {
       const { userId, recipientId, clientMessageId, senderVirtualNumber, senderUsername, senderPhoto, caption } = req.body;
-      if (!userId || !recipientId || !clientMessageId || !req.file) {
-        logger.warn('Missing required fields in upload request');
+      if (
+        !mongoose.isValidObjectId(userId) ||
+        !mongoose.isValidObjectId(recipientId) ||
+        !clientMessageId ||
+        !req.file
+      ) {
+        logger.warn('Missing or invalid fields in upload request', { userId, recipientId });
         return res.status(400).json({ error: 'userId, recipientId, clientMessageId, and file are required' });
       }
 
@@ -517,6 +643,8 @@ module.exports = (io) => {
           await message.save();
           io.to(recipientId).emit('message', message.toObject());
           io.to(userId).emit('message', message.toObject());
+          emitUpdatedChatList(userId); // Update chat list for sender
+          emitUpdatedChatList(recipientId); // Update chat list for recipient
           logger.info('Media message uploaded and sent', { messageId: message._id, userId, recipientId });
 
           // Invalidate chat-list cache for both users
@@ -552,7 +680,7 @@ module.exports = (io) => {
 
       // Get user's contacts to notify them
       const contacts = await User.find({ contacts: userId }).select('_id');
-      const contactIds = contacts.map(contact => contact._id.toString());
+      const contactIds = contacts.map((contact) => contact._id.toString());
 
       // Delete the user (triggers pre middleware for messages and contacts)
       await User.deleteOne({ _id: userId });
@@ -563,6 +691,7 @@ module.exports = (io) => {
       for (const contactId of contactIds) {
         await redis.del(`:chat-list:${contactId}`);
         await redis.del(`:contacts:${contactId}`);
+        emitUpdatedChatList(contactId); // Update chat list for contacts
       }
 
       // Emit userDeleted event to contacts

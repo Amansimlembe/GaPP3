@@ -87,11 +87,16 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     const cacheKey = `publicKey:${recipientId}`;
     const cachedKey = localStorage.getItem(cacheKey);
     if (cachedKey) return cachedKey;
-    const { data } = await axios.get(`${BASE_URL}/auth/public_key/${recipientId}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    localStorage.setItem(cacheKey, data.publicKey);
-    return data.publicKey;
+    try {
+      const { data } = await axios.get(`${BASE_URL}/auth/public_key/${recipientId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      localStorage.setItem(cacheKey, data.publicKey);
+      return data.publicKey;
+    } catch (err) {
+      console.error(`Failed to fetch public key for ${recipientId}:`, err);
+      throw err;
+    }
   }, [token]);
 
   const compressImage = async (file) => {
@@ -175,6 +180,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
           setUsers(processedUsers);
           localStorage.setItem('cachedUsers', JSON.stringify(processedUsers));
           setError('');
+          socket.emit('chatListUpdated', { userId, users: processedUsers }); // Sync chat list
           return;
         } catch (err) {
           attempt++;
@@ -195,7 +201,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         }
       }
     }, 500),
-    [token, userId, handleLogout, decryptMessage]
+    [token, userId, handleLogout, decryptMessage, socket]
   );
 
   const fetchMessages = useCallback(
@@ -432,7 +438,10 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
 
         setUsers((prev) => {
           const exists = prev.some((u) => u.id === data.id);
-          if (exists) return prev;
+          if (exists) {
+            setError('Contact already exists');
+            return prev;
+          }
           const updatedUsers = [...prev, data];
           localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
           return updatedUsers;
@@ -447,6 +456,10 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       } catch (err) {
         attempt++;
         console.error(`Add contact attempt ${attempt} failed:`, err.message);
+        if (err.response?.status === 400) {
+          setError('Contact does not exist. Please check the virtual number.');
+          return;
+        }
         if (err.response?.status === 401) {
           setError('Session expired, please log in again');
           setTimeout(() => handleLogout(), 2000);
@@ -718,6 +731,11 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       saveMessages(chats[recipientId]?.filter((msg) => msg._id !== messageId) || []);
     };
 
+    const handleChatListUpdate = ({ users }) => {
+      setUsers(users);
+      localStorage.setItem('cachedUsers', JSON.stringify(users));
+    };
+
     socket.on('message', handleMessage);
     socket.on('editMessage', handleEditMessage);
     socket.on('deleteMessage', handleDeleteMessage);
@@ -739,6 +757,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         return updatedUsers;
       });
     });
+    socket.on('chatListUpdated', handleChatListUpdate);
     socket.on('userStatus', ({ userId, status, lastSeen }) => {
       setUsers((prev) =>
         prev.map((u) => (u.id === userId ? { ...u, status, lastSeen } : u))
@@ -754,6 +773,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       socket.off('stopTyping');
       socket.off('messageStatus');
       socket.off('newContact');
+      socket.off('chatListUpdated');
       socket.off('userStatus');
     };
   }, [socket, selectedChat, userId, dispatch, decryptMessage, users, chats]);
@@ -917,7 +937,13 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
           key={key}
           style={style}
           className={`chat-list-item ${selectedChat === user.id ? 'selected' : ''}`}
-          onClick={() => dispatch(setSelectedChat(user.id))}
+          onClick={() => {
+            if (chats[user.id] || user.id) {
+              dispatch(setSelectedChat(user.id));
+            } else {
+              console.warn(`Cannot select chat for user ${user.id}: no chat exists`);
+            }
+          }}
         >
           <img src={user.photo} alt={user.username} className="chat-list-avatar" />
           <div className="chat-list-info">
@@ -936,7 +962,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         </div>
       );
     },
-    [users, selectedChat, dispatch]
+    [users, selectedChat, dispatch, chats]
   );
 
   return (

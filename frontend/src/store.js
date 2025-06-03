@@ -49,7 +49,7 @@ const messageSlice = createSlice({
     },
     setSelectedChat: (state, action) => {
       const recipientId = action.payload;
-      // Only set selectedChat if recipientId exists in chats or is null
+      // Validate recipientId before setting
       if (recipientId === null || state.chats[recipientId]) {
         state.selectedChat = recipientId;
       } else {
