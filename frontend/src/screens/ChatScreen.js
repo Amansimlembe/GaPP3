@@ -488,97 +488,112 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     }
   }, [newContactNumber, userId, token, socket, handleLogout, initializeChat]);
 
-  const sendMessage = useCallback(async () => {
-    if ((!message.trim() && !files.length) || !selectedChat || !chats[selectedChat]) return;
-    const recipientId = selectedChat;
-    const clientMessageId = `${userId}_${Date.now()}_${Math.random().toString(36).substring(2)}`;
-    const plaintextContent = message.trim();
 
-    try {
-      const recipientPublicKey = await getPublicKey(recipientId);
-      const encryptedContent = await encryptMessage(plaintextContent, recipientPublicKey);
 
-      const tempMessage = {
-        _id: clientMessageId,
-        senderId: userId,
-        recipientId,
-        content: plaintextContent,
-        contentType: 'text',
-        plaintextContent,
-        status: 'pending',
-        createdAt: new Date().toISOString(),
-        clientMessageId,
-        senderVirtualNumber: virtualNumber,
-        senderUsername: username,
-        senderPhoto: photo,
-        replyTo: replyTo ? { ...replyTo, content: replyTo.content } : undefined,
-      };
+const sendMessage = useCallback(async () => {
+  if ((!message.trim() && !files.length) || !selectedChat || !chats[selectedChat]) return;
+  const recipientId = selectedChat;
+  const clientMessageId = `${userId}_${Date.now()}_${Math.random().toString(36).substring(2)}`;
+  const plaintextContent = message.trim();
 
-      dispatch(addMessage({ recipientId, message: tempMessage }));
-      await saveMessages([tempMessage]);
-      if (isAtBottomRef.current && chats[recipientId]?.length > 0) {
-        listRef.current?.scrollToRow(chats[recipientId].length - 1);
-      }
+  try {
+    const recipientPublicKey = await getPublicKey(recipientId);
+    const encryptedContent = await encryptMessage(plaintextContent, recipientPublicKey);
 
-      const messageData = {
-        senderId: userId,
-        recipientId,
-        content: encryptedContent,
-        contentType: 'text',
-        plaintextContent,
-        clientMessageId,
-        senderVirtualNumber: virtualNumber,
-        senderUsername: username,
-        senderPhoto: photo,
-        replyTo: replyTo ? replyTo._id : undefined,
-      };
+    const tempMessage = {
+      _id: clientMessageId,
+      senderId: userId,
+      recipientId,
+      content: plaintextContent,
+      contentType: 'text',
+      plaintextContent,
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+      clientMessageId,
+      senderVirtualNumber: virtualNumber,
+      senderUsername: username,
+      senderPhoto: photo,
+      replyTo: replyTo ? { ...replyTo, content: replyTo.content } : undefined,
+    };
 
-      socket.emit('message', messageData, async (ack) => {
-        if (ack.error) {
-          setPendingMessages((prev) => [...prev, { tempId: clientMessageId, recipientId, messageData }]);
-          await savePendingMessages([...pendingMessages, { tempId: clientMessageId, recipientId, messageData }]);
-          setError('Failed to send message');
-          return;
-        }
-        const { message: sentMessage } = ack;
-        dispatch(
-          replaceMessage({
-            recipientId,
-            message: { ...sentMessage, content: plaintextContent },
-            replaceId: clientMessageId,
-          })
-        );
-        await saveMessages([{ ...sentMessage, content: plaintextContent }]);
-      });
-
-      setMessage('');
-      setReplyTo(null);
-      setShowEmojiPicker(false);
-      socket.emit('stopTyping', { userId, recipientId });
-      inputRef.current?.focus();
-    } catch (err) {
-      console.error('Send message error:', err);
-      setPendingMessages((prev) => [...prev, { tempId: clientMessageId, recipientId, messageData: { ...messageData } }]);
-      await savePendingMessages([...pendingMessages, { tempId: clientMessageId, recipientId, messageData: { ...messageData } }]);
-      setError('Failed to send message');
+    dispatch(addMessage({ recipientId, message: tempMessage }));
+    await saveMessages([tempMessage]);
+    if (isAtBottomRef.current && chats[recipientId]?.length > 0) {
+      listRef.current?.scrollToRow(chats[recipientId].length - 1);
     }
-  }, [
-    message,
-    selectedChat,
-    userId,
-    token,
-    socket,
-    dispatch,
-    encryptMessage,
-    getPublicKey,
-    virtualNumber,
-    username,
-    photo,
-    replyTo,
-    files,
-    pendingMessages,
-    chats
-  ]);
+
+    const messageData = {
+      senderId: userId,
+      recipientId,
+      content: encryptedContent,
+      contentType: 'text',
+      plaintextContent,
+      clientMessageId,
+      senderVirtualNumber: virtualNumber,
+      senderUsername: username,
+      senderPhoto: photo,
+      replyTo: replyTo ? replyTo._id : undefined,
+    };
+
+    socket.emit('message', messageData, async (ack) => {
+      if (ack.error) {
+        setPendingMessages((prev) => {
+          const updatedPending = [...prev, { tempId: clientMessageId, recipientId, messageData }];
+          savePendingMessages(updatedPending); // Save immediately to avoid async issues
+          return updatedPending;
+        });
+        setError('Failed to send message');
+        return;
+      }
+      const { message: sentMessage } = ack;
+      dispatch(
+        replaceMessage({
+          recipientId,
+          message: { ...sentMessage, content: plaintextContent },
+          replaceId: clientMessageId,
+        })
+      );
+      await saveMessages([{ ...sentMessage, content: plaintextContent }]);
+    });
+
+    // Reset state after sending to prevent re-render issues
+    setMessage('');
+    setReplyTo(null);
+    setShowEmojiPicker(false);
+    socket.emit('stopTyping', { userId, recipientId });
+    inputRef.current?.focus();
+  } catch (err) {
+    console.error('Send message error:', err);
+    setPendingMessages((prev) => {
+      const updatedPending = [
+        ...prev,
+        { tempId: clientMessageId, recipientId, messageData: { ...messageData } },
+      ];
+      savePendingMessages(updatedPending); // Save immediately
+      return updatedPending;
+    });
+    setError('Failed to send message');
+  }
+}, [
+  message,
+  selectedChat,
+  userId,
+  token,
+  socket,
+  dispatch,
+  encryptMessage,
+  getPublicKey,
+  virtualNumber,
+  username,
+  photo,
+  replyTo,
+  files,
+  chats,
+]);
+
+
+
+
 
   const handleEditMessage = useCallback(
     async (messageId, newContent) => {
@@ -948,6 +963,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
 
 
 
+
 const chatListRowRenderer = useCallback(
   ({ index, key, style }) => {
     const user = users[index];
@@ -959,7 +975,7 @@ const chatListRowRenderer = useCallback(
       <div
         key={key}
         style={style}
-        className={`chat-list-item ${selectedChat === user.id ? 'selected' : ''}`} // Fixed: selectedChatMessages -> selectedChat
+        className={`chat-list-item ${selectedChat === user.id ? 'selected' : ''}`}
         onClick={() => {
           if (!user.id) {
             console.warn(`Invalid user ID: ${user.id}`);
@@ -982,15 +998,15 @@ const chatListRowRenderer = useCallback(
           {user.unreadCount > 0 && (
             <span className="chat-list-unread">{user.unreadCount}</span>
           )}
-          <span className="chat-list-status">{user.status === 'online' ? 'Online' : `Last seen ${formatTime(user.lastSeen)}`}</span>
+          <span className="chat-list-status">
+            {user.status === 'online' ? 'Online' : `Last seen ${formatTime(user.lastSeen)}`}
+          </span>
         </div>
       </div>
     );
   },
-  [users, selectedChat, dispatch, chats, initializeChat, fetchMessages]
+  [users, selectedChat, dispatch, initializeChat, fetchMessages] // Removed `chats` from dependencies to prevent unnecessary re-renders
 );
-
-
 
   return (
     <div className="chat-screen">
