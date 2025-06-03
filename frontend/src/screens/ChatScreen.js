@@ -143,111 +143,116 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   };
   const formatTime = (date) => format(parseISO(date), 'hh:mm a');
 
-  const fetchChatList = useCallback(async (retryCount = 3) => {
-    const cached = localStorage.getItem('cachedUsers');
-    if (cached) {
-      setUsers(JSON.parse(cached));
-      return;
-    }
-    let attempt = 0;
-    while (attempt < retryCount) {
-      try {
-        const { data } = await axios.get(`${BASE_URL}/social/chat-list`, {
-          headers: { Authorization: `Bearer ${token}` },
-          params: { userId },
-          timeout: 10000,
-        });
-        const privateKeyPem = localStorage.getItem('privateKey');
-        const processedUsers = await Promise.all(
-          data.map(async (user) => {
-            if (user.latestMessage) {
-              user.latestMessage.content =
-                user.latestMessage.senderId === userId
-                  ? `You: ${user.latestMessage.plaintextContent || '[Media]'}` 
-                  : user.latestMessage.recipientId === userId && user.latestMessage.contentType === 'text'
-                  ? await decryptMessage(user.latestMessage.content, privateKeyPem)
-                  : `[${user.latestMessage.contentType}]`;
-            }
-            return user;
-          })
-        );
-        setUsers(processedUsers);
-        localStorage.setItem('cachedUsers', JSON.stringify(processedUsers));
-        setError('');
+  const fetchChatList = useCallback(
+    debounce(async (retryCount = 3) => {
+      const cached = localStorage.getItem('cachedUsers');
+      if (cached) {
+        setUsers(JSON.parse(cached));
         return;
-      } catch (err) {
-        attempt++;
-        console.error(`Fetch chat list attempt ${attempt} failed:`, err.message);
-        if (err.response?.status === 401) {
-          console.warn('Unauthorized, attempting token refresh');
-          // Trigger token refresh via App.js (handled in parent component)
-          setError('Session expired, please log in again');
-          setTimeout(() => handleLogout(), 2000); // Delay logout to allow refresh
+      }
+      let attempt = 0;
+      while (attempt < retryCount) {
+        try {
+          const { data } = await axios.get(`${BASE_URL}/social/chat-list`, {
+            headers: { Authorization: `Bearer ${token}` },
+            params: { userId },
+            timeout: 10000,
+          });
+          const privateKeyPem = localStorage.getItem('privateKey');
+          const processedUsers = await Promise.all(
+            data.map(async (user) => {
+              if (user.latestMessage) {
+                user.latestMessage.content =
+                  user.latestMessage.senderId === userId
+                    ? `You: ${user.latestMessage.plaintextContent || '[Media]'}` 
+                    : user.latestMessage.recipientId === userId && user.latestMessage.contentType === 'text'
+                    ? await decryptMessage(user.latestMessage.content, privateKeyPem)
+                    : `[${user.latestMessage.contentType}]`;
+              }
+              return user;
+            })
+          );
+          setUsers(processedUsers);
+          localStorage.setItem('cachedUsers', JSON.stringify(processedUsers));
+          setError('');
           return;
-        }
-        if (err.response?.status === 429) {
-          const delay = Math.pow(2, attempt) * 1000; // Exponential backoff: 1s, 2s, 4s
-          await new Promise((resolve) => setTimeout(resolve, delay));
-        }
-        if (attempt === retryCount) {
-          setError(`Failed to load chat list after ${retryCount} attempts: ${err.message}`);
+        } catch (err) {
+          attempt++;
+          console.error(`Fetch chat list attempt ${attempt} failed:`, err.message);
+          if (err.response?.status === 401) {
+            console.warn('Unauthorized, attempting token refresh');
+            setError('Session expired, please log in again');
+            setTimeout(() => handleLogout(), 2000);
+            return;
+          }
+          if (err.response?.status === 429) {
+            const delay = Math.pow(2, attempt) * 1000;
+            await new Promise((resolve) => setTimeout(resolve, delay));
+          }
+          if (attempt === retryCount) {
+            setError(`Failed to load chat list after ${retryCount} attempts: ${err.message}`);
+          }
         }
       }
-    }
-  }, [token, userId, handleLogout, decryptMessage]);
+    }, 500),
+    [token, userId, handleLogout, decryptMessage]
+  );
 
-  const fetchMessages = useCallback(async (recipientId, retryCount = 3) => {
-    const localMessages = await getMessages(recipientId);
-    if (localMessages.length) {
-      dispatch(setMessages({ recipientId, messages: localMessages }));
-      listRef.current?.scrollToRow(localMessages.length - 1);
-      return;
-    }
-    let attempt = 0;
-    while (attempt < retryCount) {
-      try {
-        const { data } = await axios.get(`${BASE_URL}/social/messages`, {
-          headers: { Authorization: `Bearer ${token}` },
-          params: { userId, recipientId, limit: 50, skip: 0 },
-          timeout: 10000,
-        });
-        const privateKeyPem = localStorage.getItem('privateKey');
-        const messages = await Promise.all(
-          data.messages.map(async (msg) => {
-            const newMsg = { ...msg };
-            if (msg.senderId === userId) {
-              newMsg.content = msg.plaintextContent || msg.content;
-            } else if (msg.recipientId === userId) {
-              newMsg.content =
-                msg.contentType === 'text' ? await decryptMessage(msg.content, privateKeyPem) : msg.content;
-            }
-            return newMsg;
-          })
-        );
-        dispatch(setMessages({ recipientId, messages }));
-        await saveMessages(messages);
-        listRef.current?.scrollToRow(messages.length - 1);
-        setError('');
+  const fetchMessages = useCallback(
+    debounce(async (recipientId, retryCount = 3) => {
+      const localMessages = await getMessages(recipientId);
+      if (localMessages.length) {
+        dispatch(setMessages({ recipientId, messages: localMessages }));
+        listRef.current?.scrollToRow(localMessages.length - 1);
         return;
-      } catch (err) {
-        attempt++;
-        console.error(`Fetch messages attempt ${attempt} failed:`, err.message);
-        if (err.response?.status === 401) {
-          console.warn('Unauthorized, attempting token refresh');
-          setError('Session expired, please log in again');
-          setTimeout(() => handleLogout(), 2000);
+      }
+      let attempt = 0;
+      while (attempt < retryCount) {
+        try {
+          const { data } = await axios.get(`${BASE_URL}/social/messages`, {
+            headers: { Authorization: `Bearer ${token}` },
+            params: { userId, recipientId, limit: 50, skip: 0 },
+            timeout: 10000,
+          });
+          const privateKeyPem = localStorage.getItem('privateKey');
+          const messages = await Promise.all(
+            data.messages.map(async (msg) => {
+              const newMsg = { ...msg };
+              if (msg.senderId === userId) {
+                newMsg.content = msg.plaintextContent || msg.content;
+              } else if (msg.recipientId === userId) {
+                newMsg.content =
+                  msg.contentType === 'text' ? await decryptMessage(msg.content, privateKeyPem) : msg.content;
+              }
+              return newMsg;
+            })
+          );
+          dispatch(setMessages({ recipientId, messages }));
+          await saveMessages(messages);
+          listRef.current?.scrollToRow(messages.length - 1);
+          setError('');
           return;
-        }
-        if (err.response?.status === 429) {
-          const delay = Math.pow(2, attempt) * 1000;
-          await new Promise((resolve) => setTimeout(resolve, delay));
-        }
-        if (attempt === retryCount) {
-          setError(`Failed to load messages: ${err.message}`);
+        } catch (err) {
+          attempt++;
+          console.error(`Fetch messages attempt ${attempt} failed:`, err.message);
+          if (err.response?.status === 401) {
+            console.warn('Unauthorized, attempting token refresh');
+            setError('Session expired, please log in again');
+            setTimeout(() => handleLogout(), 2000);
+            return;
+          }
+          if (err.response?.status === 429) {
+            const delay = Math.pow(2, attempt) * 1000;
+            await new Promise((resolve) => setTimeout(resolve, delay));
+          }
+          if (attempt === retryCount) {
+            setError(`Failed to load messages: ${err.message}`);
+          }
         }
       }
-    }
-  }, [token, userId, dispatch, decryptMessage]);
+    }, 500),
+    [token, userId, dispatch, decryptMessage]
+  );
 
   const sendPendingMessages = useCallback(async () => {
     if (!navigator.onLine || !pendingMessages.length) return;
@@ -637,7 +642,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
           console.warn('IndexedDB VersionError, clearing database');
           await clearDatabase();
           setPendingMessages([]);
-          await fetchChatList(); // Retry after clearing
+          await fetchChatList();
         } else {
           setError('Failed to initialize chat: ' + err.message);
         }
@@ -766,6 +771,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     ({ index, key, style }) => {
       const messages = chats[selectedChat] || [];
       const msg = messages[index];
+      if (!msg) return null;
       const prevMsg = messages[index - 1];
       const isMine = msg.senderId === userId;
       const showDate = !prevMsg || formatDateHeader(prevMsg.createdAt) !== formatDateHeader(msg.createdAt);
@@ -1130,7 +1136,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         )}
       </div>
     </div>
-  )
+  );
 });
 
 export default ChatScreen;

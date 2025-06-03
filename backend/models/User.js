@@ -1,6 +1,17 @@
 const mongoose = require('mongoose');
 const { getCountries } = require('libphonenumber-js');
-const Message = require('./Message'); // Import Message model
+const Message = require('./Message');
+const winston = require('winston');
+
+const logger = winston.createLogger({
+  level: 'info',
+  format: winston.format.combine(winston.format.timestamp(), winston.format.json()),
+  transports: [
+    new winston.transports.Console(),
+    new winston.transports.File({ filename: 'logs/user-error.log', level: 'error' }),
+    new winston.transports.File({ filename: 'logs/user-combined.log' }),
+  ],
+});
 
 const userSchema = new mongoose.Schema({
   email: {
@@ -79,58 +90,96 @@ const userSchema = new mongoose.Schema({
 
 // Indexes for performance
 userSchema.index({ status: 1, lastSeen: -1 });
+userSchema.index({ contacts: 1 });
 
 // Middleware for document-level deleteOne
 userSchema.pre('deleteOne', { document: true, query: false }, async function (next) {
   try {
     const userId = this._id;
-    await Message.deleteMany({
-      $or: [
-        { senderId: userId },
-        { recipientId: userId },
-      ],
+    logger.info('Deleting user and related data', { userId });
+
+    // Delete messages
+    const messageResult = await Message.deleteMany({
+      $or: [{ senderId: userId }, { recipientId: userId }],
     });
+    logger.info('Messages deleted for user', { userId, deletedCount: messageResult.deletedCount });
+
+    // Remove user from other users' contact lists
+    const contactResult = await mongoose.model('User').updateMany(
+      { contacts: userId },
+      { $pull: { contacts: userId } }
+    );
+    logger.info('User removed from contacts', { userId, modifiedCount: contactResult.modifiedCount });
+
     next();
   } catch (error) {
+    logger.error('User deletion middleware failed', { error: error.message, stack: error.stack });
     next(error);
   }
 });
 
-// Middleware for query-level deleteOne and deleteMany
+// Middleware for query-level deleteOne
 userSchema.pre('deleteOne', { document: false, query: true }, async function (next) {
   try {
     const filter = this.getFilter();
     const users = await this.model.find(filter).select('_id');
     const userIds = users.map(user => user._id);
-    if (userIds.length > 0) {
-      await Message.deleteMany({
-        $or: [
-          { senderId: { $in: userIds } },
-          { recipientId: { $in: userIds } },
-        ],
-      });
+    if (!userIds.length) {
+      logger.info('No users found for deletion', { filter });
+      return next();
     }
+
+    logger.info('Deleting users and related data', { userIds });
+
+    // Delete messages
+    const messageResult = await Message.deleteMany({
+      $or: [{ senderId: { $in: userIds } }, { recipientId: { $in: userIds } }],
+    });
+    logger.info('Messages deleted for users', { userIds, deletedCount: messageResult.deletedCount });
+
+    // Remove users from other users' contact lists
+    const contactResult = await this.model.updateMany(
+      { contacts: { $in: userIds } },
+      { $pull: { contacts: { $in: userIds } } }
+    );
+    logger.info('Users removed from contacts', { userIds, modifiedCount: contactResult.modifiedCount });
+
     next();
   } catch (error) {
+    logger.error('Query deleteOne middleware failed', { error: error.message, stack: error.stack });
     next(error);
   }
 });
 
+// Middleware for deleteMany
 userSchema.pre('deleteMany', async function (next) {
   try {
     const filter = this.getFilter();
     const users = await this.model.find(filter).select('_id');
     const userIds = users.map(user => user._id);
-    if (userIds.length > 0) {
-      await Message.deleteMany({
-        $or: [
-          { senderId: { $in: userIds } },
-          { recipientId: { $in: userIds } },
-        ],
-      });
+    if (!userIds.length) {
+      logger.info('No users found for deletion', { filter });
+      return next();
     }
+
+    logger.info('Deleting multiple users and related data', { userIds });
+
+    // Delete messages
+    const messageResult = await Message.deleteMany({
+      $or: [{ senderId: { $in: userIds } }, { recipientId: { $in: userIds } }],
+    });
+    logger.info('Messages deleted for users', { userIds, deletedCount: messageResult.deletedCount });
+
+    // Remove users from other users' contact lists
+    const contactResult = await this.model.updateMany(
+      { contacts: { $in: userIds } },
+      { $pull: { contacts: { $in: userIds } } }
+    );
+    logger.info('Users removed from contacts', { userIds, modifiedCount: contactResult.modifiedCount });
+
     next();
   } catch (error) {
+    logger.error('DeleteMany middleware failed', { error: error.message, stack: error.stack });
     next(error);
   }
 });
@@ -139,16 +188,30 @@ userSchema.pre('deleteMany', async function (next) {
 userSchema.pre('findOneAndDelete', async function (next) {
   try {
     const user = await this.model.findOne(this.getFilter()).select('_id');
-    if (user) {
-      await Message.deleteMany({
-        $or: [
-          { senderId: user._id },
-          { recipientId: user._id },
-        ],
-      });
+    if (!user) {
+      logger.info('No user found for findOneAndDelete', { filter: this.getFilter() });
+      return next();
     }
+
+    const userId = user._id;
+    logger.info('Deleting user and related data via findOneAndDelete', { userId });
+
+    // Delete messages
+    const messageResult = await Message.deleteMany({
+      $or: [{ senderId: userId }, { recipientId: userId }],
+    });
+    logger.info('Messages deleted for user', { userId, deletedCount: messageResult.deletedCount });
+
+    // Remove user from other users' contact lists
+    const contactResult = await this.model.updateMany(
+      { contacts: userId },
+      { $pull: { contacts: userId } }
+    );
+    logger.info('User removed from contacts', { userId, modifiedCount: contactResult.modifiedCount });
+
     next();
   } catch (error) {
+    logger.error('FindOneAndDelete middleware failed', { error: error.message, stack: error.stack });
     next(error);
   }
 });

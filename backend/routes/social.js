@@ -18,7 +18,7 @@ const logger = winston.createLogger({
   ],
 });
 
-// Initialize Cloudinary once
+// Initialize Cloudinary
 const configureCloudinary = () => {
   let cloudinaryConfig = {};
   if (process.env.CLOUDINARY_URL) {
@@ -75,29 +75,39 @@ const addContactSchema = Joi.object({
   virtualNumber: Joi.string().required(),
 });
 
+const deleteUserSchema = Joi.object({
+  userId: Joi.string().required(),
+});
+
 module.exports = (io) => {
   const router = express.Router();
 
   io.on('connection', (socket) => {
     socket.on('join', (userId) => {
       socket.join(userId);
-      User.findByIdAndUpdate(userId, { status: 'online', lastSeen: new Date() }, { new: true }).then((user) => {
-        if (user) {
-          io.to(userId).emit('userStatus', { userId, status: 'online', lastSeen: user.lastSeen });
-        }
-      }).catch((err) => {
-        logger.error('User join failed:', { error: err.message });
-      });
+      User.findByIdAndUpdate(userId, { status: 'online', lastSeen: new Date() }, { new: true })
+        .then((user) => {
+          if (user) {
+            io.to(userId).emit('userStatus', { userId, status: 'online', lastSeen: user.lastSeen });
+            logger.info('User joined', { userId });
+          }
+        })
+        .catch((err) => {
+          logger.error('User join failed', { error: err.message, userId });
+        });
     });
 
     socket.on('leave', (userId) => {
-      User.findByIdAndUpdate(userId, { status: 'offline', lastSeen: new Date() }, { new: true }).then((user) => {
-        if (user) {
-          io.to(userId).emit('userStatus', { userId, status: 'offline', lastSeen: user.lastSeen });
-        }
-      }).catch((err) => {
-        logger.error('User leave failed:', { error: err.message });
-      });
+      User.findByIdAndUpdate(userId, { status: 'offline', lastSeen: new Date() }, { new: true })
+        .then((user) => {
+          if (user) {
+            io.to(userId).emit('userStatus', { userId, status: 'offline', lastSeen: user.lastSeen });
+            logger.info('User left', { userId });
+          }
+        })
+        .catch((err) => {
+          logger.error('User leave failed', { error: err.message, userId });
+        });
       socket.leave(userId);
     });
 
@@ -110,14 +120,25 @@ module.exports = (io) => {
     });
 
     socket.on('newContact', ({ userId, contactData }) => {
-      User.findById(contactData.id).then((contact) => {
-        if (contact) {
-          io.to(userId).emit('newContact', contact.toObject());
-          io.to(contactData.id).emit('newContact', contact.toObject());
-        }
-      }).catch((err) => {
-        logger.error('New contact failed:', { error: err.message });
-      });
+      User.findById(contactData.id)
+        .then((contact) => {
+          if (contact) {
+            const contactObj = {
+              id: contact._id,
+              username: contact.username,
+              virtualNumber: contact.virtualNumber,
+              photo: contact.photo,
+              status: contact.status,
+              lastSeen: contact.lastSeen,
+            };
+            io.to(userId).emit('newContact', { userId, contactData: contactObj });
+            io.to(contactData.id).emit('newContact', { userId: contactData.id, contactData: contactObj });
+            logger.info('New contact emitted', { userId, contactId: contactData.id });
+          }
+        })
+        .catch((err) => {
+          logger.error('New contact emission failed', { error: err.message, userId, contactId: contactData.id });
+        });
     });
 
     socket.on('message', async (messageData, callback) => {
@@ -138,21 +159,25 @@ module.exports = (io) => {
         } = messageData;
 
         if (!senderId || !recipientId || !content || !contentType) {
+          logger.warn('Missing required message fields', { messageData });
           return callback({ error: 'Missing required fields: senderId, recipientId, content, contentType' });
         }
 
         if (!validContentTypes.includes(contentType)) {
+          logger.warn('Invalid contentType', { contentType });
           return callback({ error: `Invalid contentType. Must be one of: ${validContentTypes.join(', ')}` });
         }
 
         const sender = await User.findById(senderId);
         const recipient = await User.findById(recipientId);
         if (!sender || !recipient) {
+          logger.warn('Sender or recipient not found', { senderId, recipientId });
           return callback({ error: 'Sender or recipient not found' });
         }
 
         const existingMessage = await Message.findOne({ clientMessageId });
         if (existingMessage) {
+          logger.info('Duplicate message found', { clientMessageId });
           return callback({ message: existingMessage.toObject() });
         }
 
@@ -175,9 +200,14 @@ module.exports = (io) => {
         await message.save();
         io.to(recipientId).emit('message', message.toObject());
         io.to(senderId).emit('message', message.toObject());
-        callback({ message });
+        logger.info('Message sent', { messageId: message._id, senderId, recipientId });
+        callback({ message: message.toObject() });
+
+        // Invalidate chat-list cache for both users
+        await redis.del(`:chat-list:${senderId}`);
+        await redis.del(`:chat-list:${recipientId}`);
       } catch (error) {
-        logger.error('Socket message failed:', { error: error.message, stack: error.stack });
+        logger.error('Socket message failed', { error: error.message, stack: error.stack });
         callback({ error: 'Failed to send message', details: error.message });
       }
     });
@@ -185,7 +215,10 @@ module.exports = (io) => {
     socket.on('editMessage', async ({ messageId, newContent, plaintextContent }, callback) => {
       try {
         const message = await Message.findById(messageId);
-        if (!message) return callback({ error: 'Message not found' });
+        if (!message) {
+          logger.warn('Message not found for edit', { messageId });
+          return callback({ error: 'Message not found' });
+        }
 
         message.content = newContent;
         message.plaintextContent = plaintextContent;
@@ -194,9 +227,10 @@ module.exports = (io) => {
 
         io.to(message.recipientId).emit('editMessage', message.toObject());
         io.to(message.senderId).emit('editMessage', message.toObject());
-        callback({ message });
+        logger.info('Message edited', { messageId });
+        callback({ message: message.toObject() });
       } catch (error) {
-        logger.error('Edit message failed:', { error: error.message, stack: error.stack });
+        logger.error('Edit message failed', { error: error.message, stack: error.stack });
         callback({ error: 'Failed to edit message', details: error.message });
       }
     });
@@ -204,14 +238,18 @@ module.exports = (io) => {
     socket.on('deleteMessage', async ({ messageId, recipientId }, callback) => {
       try {
         const message = await Message.findById(messageId);
-        if (!message) return callback({ error: 'Message not found' });
+        if (!message) {
+          logger.warn('Message not found for deletion', { messageId });
+          return callback({ error: 'Message not found' });
+        }
 
         await Message.deleteOne({ _id: messageId });
         io.to(recipientId).emit('deleteMessage', { messageId, recipientId });
         io.to(message.senderId).emit('deleteMessage', { messageId, recipientId: message.senderId });
+        logger.info('Message deleted', { messageId });
         callback({});
       } catch (error) {
-        logger.error('Delete message failed:', { error: error.message, stack: error.stack });
+        logger.error('Delete message failed', { error: error.message, stack: error.stack });
         callback({ error: 'Failed to delete message', details: error.message });
       }
     });
@@ -219,47 +257,68 @@ module.exports = (io) => {
     socket.on('messageStatus', async ({ messageId, status, recipientId }) => {
       try {
         const message = await Message.findById(messageId);
-        if (!message) return;
+        if (!message) {
+          logger.warn('Message not found for status update', { messageId });
+          return;
+        }
 
-        message.status = status;
-        await message.save();
-        io.to(recipientId).emit('messageStatus', { messageId, status });
+        if (['sent', 'delivered', 'read'].includes(status)) {
+          message.status = status;
+          await message.save();
+          io.to(message.senderId).emit('messageStatus', { messageId, status });
+          io.to(recipientId).emit('messageStatus', { messageId, status });
+          logger.info('Message status updated', { messageId, status });
+        }
       } catch (error) {
-        logger.error('Message status update failed:', { error: error.message, stack: error.stack });
+        logger.error('Message status update failed', { error: error.message, stack: error.stack });
       }
     });
 
     socket.on('batchMessageStatus', async ({ messageIds, status, recipientId }) => {
       try {
         const messages = await Message.find({ _id: { $in: messageIds } });
-        for (const message of messages) {
-          message.status = status;
-          await message.save();
-          io.to(recipientId).emit('messageStatus', { messageId: message._id, status });
+        if (!messages.length) {
+          logger.warn('No messages found for batch status update', { messageIds });
+          return;
         }
+
+        await Message.updateMany(
+          { _id: { $in: messageIds } },
+          { $set: { status, updatedAt: new Date() } }
+        );
+
+        messages.forEach((message) => {
+          io.to(message.senderId).emit('messageStatus', { messageId: message._id, status });
+          io.to(recipientId).emit('messageStatus', { messageId: message._id, status });
+        });
+        logger.info('Batch message status updated', { messageIds, status });
       } catch (error) {
-        logger.error('Batch message status update failed:', { error: error.message, stack: error.stack });
+        logger.error('Batch message status update failed', { error: error.message, stack: error.stack });
       }
     });
   });
 
+  // GET /social/chat-list
   router.get('/chat-list', authMiddleware, async (req, res) => {
+    const { userId } = req.query;
+    if (!userId) {
+      logger.warn('Missing userId in chat-list request');
+      return res.status(400).json({ error: 'userId is required' });
+    }
+
+    const cacheKey = `:chat-list:${userId}`;
     try {
-      const { userId } = req.query;
-      if (!userId) return res.status(400).json({ error: 'userId is required' });
-
-      const cacheKey = `chat-list:${userId}`;
       const cached = await redis.get(cacheKey);
-      if (cached) return res.json(JSON.parse(cached));
+      if (cached) {
+        logger.info('Chat list served from cache', { userId });
+        return res.json(JSON.parse(cached));
+      }
 
-      const user = await User.findById(userId).populate(
-        'contacts',
+      const contacts = await User.find({ contacts: userId }).select(
         'username virtualNumber photo status lastSeen'
       );
-      if (!user) return res.status(404).json({ error: 'User not found' });
-
       const chatList = await Promise.all(
-        user.contacts.map(async (contact) => {
+        contacts.map(async (contact) => {
           const latestMessage = await Message.findOne({
             $or: [
               { senderId: userId, recipientId: contact._id },
@@ -267,262 +326,253 @@ module.exports = (io) => {
             ],
           })
             .sort({ createdAt: -1 })
-            .select('content contentType plaintextContent senderId recipientId createdAt');
+            .select('content contentType senderId recipientId createdAt plaintextContent');
+
+          const unreadCount = await Message.countDocuments({
+            senderId: contact._id,
+            recipientId: userId,
+            status: { $ne: 'read' },
+          });
 
           return {
-            id: contact._id.toString(),
+            id: contact._id,
             username: contact.username,
             virtualNumber: contact.virtualNumber,
             photo: contact.photo,
-            status: contact.status || 'offline',
+            status: contact.status,
             lastSeen: contact.lastSeen,
-            latestMessage: latestMessage
-              ? {
-                  ...latestMessage.toObject(),
-                  senderId: latestMessage.senderId.toString(),
-                  recipientId: latestMessage.recipientId.toString(),
-                }
-              : null,
-            unreadCount: await Message.countDocuments({
-              senderId: contact._id,
-              recipientId: userId,
-              status: { $ne: 'read' },
-            }),
+            latestMessage: latestMessage ? latestMessage.toObject() : null,
+            unreadCount,
           };
         })
       );
 
-      const sortedChatList = chatList.sort(
-        (a, b) => new Date(b.latestMessage?.createdAt || 0) - new Date(a.latestMessage?.createdAt || 0)
-      );
-      await redis.setex(cacheKey, 60 * 60, JSON.stringify(sortedChatList));
-      res.json(sortedChatList);
+      await redis.setex(cacheKey, 300, JSON.stringify(chatList));
+      logger.info('Chat list fetched and cached', { userId });
+      res.json(chatList);
     } catch (error) {
-      logger.error('Chat list fetch failed:', { error: error.message, stack: error.stack });
+      logger.error('Chat list fetch failed', { error: error.message, stack: error.stack });
       res.status(500).json({ error: 'Failed to fetch chat list', details: error.message });
     }
   });
 
+  // GET /social/messages
   router.get('/messages', authMiddleware, async (req, res) => {
+    const { userId, recipientId, limit = 50, skip = 0 } = req.query;
+    if (!userId || !recipientId) {
+      logger.warn('Missing userId or recipientId in messages request');
+      return res.status(400).json({ error: 'userId and recipientId are required' });
+    }
+
+    const cacheKey = `:messages:${userId}:${recipientId}:${limit}:${skip}`;
     try {
-      const { userId, recipientId, limit = 50, skip = 0, since } = req.query;
-      if (!userId || !recipientId) return res.status(400).json({ error: 'userId and recipientId are required' });
-
-      const cacheKey = `messages:${userId}:${recipientId}:${skip}:${limit}`;
       const cached = await redis.get(cacheKey);
-      if (cached) return res.json(JSON.parse(cached));
+      if (cached) {
+        logger.info('Messages served from cache', { userId, recipientId });
+        return res.json(JSON.parse(cached));
+      }
 
-      const query = {
+      const messages = await Message.find({
         $or: [
           { senderId: userId, recipientId },
           { senderId: recipientId, recipientId: userId },
         ],
-      };
-      if (since) query.createdAt = { $gt: new Date(since) };
+      })
+        .sort({ createdAt: -1 })
+        .skip(parseInt(skip))
+        .limit(parseInt(limit))
+        .select('senderId recipientId content contentType status createdAt updatedAt caption replyTo originalFilename clientMessageId senderVirtualNumber senderUsername senderPhoto plaintextContent');
 
-      const messages = await Message.find(query)
-        .sort({ createdAt: 1 })
-        .skip(Number(skip))
-        .limit(Number(limit) + 1)
-        .select(
-          'senderId recipientId content contentType plaintextContent status createdAt replyTo originalFilename clientMessageId senderVirtualNumber senderUsername senderPhoto caption'
-        );
+      const total = await Message.countDocuments({
+        $or: [
+          { senderId: userId, recipientId },
+          { senderId: recipientId, recipientId: userId },
+        ],
+      });
 
-      const hasMore = messages.length > Number(limit);
-      if (hasMore) messages.pop();
-
-      const response = { messages, hasMore };
-      await redis.setex(cacheKey, 60 * 60, JSON.stringify(response));
+      const response = { messages: messages.reverse(), total };
+      await redis.setex(cacheKey, 300, JSON.stringify(response));
+      logger.info('Messages fetched and cached', { userId, recipientId });
       res.json(response);
     } catch (error) {
-      logger.error('Messages fetch failed:', { error: error.message, stack: error.stack });
+      logger.error('Messages fetch failed', { error: error.message, stack: error.stack });
       res.status(500).json({ error: 'Failed to fetch messages', details: error.message });
     }
   });
 
-  router.post('/message', authMiddleware, async (req, res) => {
-    try {
-      const {
-        senderId,
-        recipientId,
-        content,
-        contentType,
-        plaintextContent,
-        caption,
-        replyTo,
-        originalFilename,
-        clientMessageId,
-        senderVirtualNumber,
-        senderUsername,
-        senderPhoto,
-      } = req.body;
-
-      if (!senderId || !recipientId || !content || !contentType) {
-        return res.status(400).json({ error: 'Missing required fields: senderId, recipientId, content, contentType' });
-      }
-
-      if (!validContentTypes.includes(contentType)) {
-        return res.status(400).json({ error: `Invalid contentType. Must be one of: ${validContentTypes.join(', ')}` });
-      }
-
-      const sender = await User.findById(senderId);
-      const recipient = await User.findById(recipientId);
-      if (!sender || !recipient) {
-        return res.status(404).json({ error: 'Sender or recipient not found' });
-      }
-
-      const message = new Message({
-        senderId,
-        recipientId,
-        content,
-        contentType,
-        plaintextContent: plaintextContent || '',
-        status: 'sent',
-        caption: caption || undefined,
-        replyTo: replyTo || undefined,
-        originalFilename: originalFilename || undefined,
-        clientMessageId: clientMessageId || `${senderId}-${Date.now()}`,
-        senderVirtualNumber: senderVirtualNumber || sender.virtualNumber,
-        senderUsername: senderUsername || sender.username,
-        senderPhoto: senderPhoto || sender.photo,
-      });
-
-      await message.save();
-      io.to(recipientId).emit('message', message.toObject());
-      io.to(senderId).emit('message', message.toObject());
-
-      res.status(201).json({ message });
-    } catch (error) {
-      logger.error('Message send failed:', { error: error.message, stack: error.stack, body: req.body });
-      res.status(500).json({ error: 'Failed to send message', details: error.message });
-    }
-  });
-
-  router.post('/upload', upload.single('file'), authMiddleware, async (req, res) => {
-    try {
-      const { userId, recipientId, clientMessageId, caption, senderVirtualNumber, senderUsername, senderPhoto } = req.body;
-      const file = req.file;
-
-      if (!userId || !recipientId || !file) {
-        return res.status(400).json({ error: 'Missing required fields: userId, recipientId, or file' });
-      }
-
-      const sender = await User.findById(userId);
-      if (!sender) return res.status(404).json({ error: 'Sender not found' });
-
-      const result = await new Promise((resolve, reject) => {
-        const stream = cloudinary.uploader.upload_stream(
-          {
-            resource_type: file.mimetype.startsWith('video')
-              ? 'video'
-              : file.mimetype.startsWith('audio')
-              ? 'auto'
-              : 'image',
-            folder: 'gapp_media',
-          },
-          (error, result) => (error ? reject(error) : resolve(result))
-        );
-        stream.end(file.buffer);
-      });
-
-      const contentType = file.mimetype.startsWith('image')
-        ? 'image'
-        : file.mimetype.startsWith('video')
-        ? 'video'
-        : file.mimetype.startsWith('audio')
-        ? 'audio'
-        : 'document';
-      const message = new Message({
-        senderId: userId,
-        recipientId,
-        content: result.secure_url,
-        contentType,
-        status: 'sent',
-        caption: caption || undefined,
-        originalFilename: file.originalname,
-        clientMessageId: clientMessageId || `${userId}-${Date.now()}`,
-        senderVirtualNumber: senderVirtualNumber || sender.virtualNumber,
-        senderUsername: senderUsername || sender.username,
-        senderPhoto: senderPhoto || sender.photo,
-      });
-
-      await message.save();
-      io.to(recipientId).emit('message', message.toObject());
-      io.to(senderId).emit('message', message.toObject());
-
-      res.status(201).json({ message });
-    } catch (error) {
-      logger.error('File upload failed:', { error: error.message, stack: error.stack, body: req.body });
-      if (error.message.includes('Invalid file type')) {
-        return res.status(400).json({ error: 'Invalid file type', details: 'Supported types: image, video, audio, document' });
-      }
-      if (error.message.includes('File too large')) {
-        return res.status(400).json({ error: 'File too large', details: 'Maximum file size is 50MB' });
-      }
-      res.status(500).json({ error: 'Failed to upload file', details: error.message });
-    }
-  });
-
+  // POST /social/add_contact
   router.post('/add_contact', authMiddleware, async (req, res) => {
     try {
       const { error } = addContactSchema.validate(req.body);
-      if (error) return res.status(400).json({ error: error.details[0].message });
+      if (error) {
+        logger.warn('Invalid add contact request', { error: error.details });
+        return res.status(400).json({ error: error.details[0].message });
+      }
 
       const { userId, virtualNumber } = req.body;
-      if (userId !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
-
       const user = await User.findById(userId);
-      if (!user) return res.status(404).json({ error: 'User not found' });
+      if (!user) {
+        logger.warn('User not found for add contact', { userId });
+        return res.status(404).json({ error: 'User not found' });
+      }
 
       const contact = await User.findOne({ virtualNumber });
-      if (!contact) return res.status(404).json({ error: 'Contact not found' });
-      if (user.contacts.includes(contact._id)) return res.status(400).json({ error: 'Contact already added' });
+      if (!contact) {
+        logger.warn('Contact not found', { virtualNumber });
+        return res.status(404).json({ error: 'Contact not found' });
+      }
 
-      // Add contact to user's contact list
+      if (contact._id.toString() === userId) {
+        logger.warn('Cannot add self as contact', { userId });
+        return res.status(400).json({ error: 'Cannot add yourself as a contact' });
+      }
+
+      if (user.contacts.includes(contact._id)) {
+        logger.info('Contact already exists', { userId, contactId: contact._id });
+        return res.status(400).json({ error: 'Contact already exists' });
+      }
+
       user.contacts.push(contact._id);
       await user.save();
 
-      // Mutual contact addition: add user to contact's contact list
+      // Add the user to the contact's contacts list (mutual contact addition)
       if (!contact.contacts.includes(user._id)) {
         contact.contacts.push(user._id);
         await contact.save();
       }
 
-      // Prepare contact data for user
       const contactData = {
         id: contact._id,
         username: contact.username,
         virtualNumber: contact.virtualNumber,
-        photo: contact.photo || 'https://placehold.co/40x40',
+        photo: contact.photo,
         status: contact.status,
         lastSeen: contact.lastSeen,
       };
 
-      // Prepare user data for contact
-      const userData = {
-        id: user._id,
-        username: user.username,
-        virtualNumber: user.virtualNumber,
-        photo: user.photo || 'https://placehold.co/40x40',
-        status: user.status,
-        lastSeen: user.lastSeen,
-      };
+      // Emit newContact event to both users
+      io.to(userId).emit('newContact', { userId, contactData });
+      io.to(contact._id.toString()).emit('newContact', { userId: contact._id.toString(), contactData });
 
       // Invalidate caches for both users
-      await redis.del(`contacts:${userId}`);
-      await redis.del(`chat-list:${userId}`);
-      await redis.del(`contacts:${contact._id}`);
-      await redis.del(`chat-list:${contact._id}`);
+      await redis.del(`:chat-list:${userId}`);
+      await redis.del(`:chat-list:${contact._id}`);
+      await redis.del(`:contacts:${userId}`);
+      await redis.del(`:contacts:${contact._id}`);
 
-      // Emit newContact events to both users
-      io.to(userId).emit('newContact', { userId, contactData });
-      io.to(contact._id).emit('newContact', { userId: contact._id, contactData: userData });
-
-      logger.info('Contact added mutually', { userId, contactId: contact._id });
+      logger.info('Contact added successfully', { userId, contactId: contact._id });
       res.json(contactData);
     } catch (error) {
-      logger.error('Add contact error:', { error: error.message, stack: error.stack, userId: req.body.userId });
+      logger.error('Add contact failed', { error: error.message, stack: error.stack });
       res.status(500).json({ error: 'Failed to add contact', details: error.message });
+    }
+  });
+
+  // POST /social/upload
+  router.post('/upload', authMiddleware, upload.single('file'), async (req, res) => {
+    try {
+      const { userId, recipientId, clientMessageId, senderVirtualNumber, senderUsername, senderPhoto, caption } = req.body;
+      if (!userId || !recipientId || !clientMessageId || !req.file) {
+        logger.warn('Missing required fields in upload request');
+        return res.status(400).json({ error: 'userId, recipientId, clientMessageId, and file are required' });
+      }
+
+      const sender = await User.findById(userId);
+      const recipient = await User.findById(recipientId);
+      if (!sender || !recipient) {
+        logger.warn('Sender or recipient not found', { userId, recipientId });
+        return res.status(404).json({ error: 'Sender or recipient not found' });
+      }
+
+      const contentType = req.file.mimetype.startsWith('image/')
+        ? 'image'
+        : req.file.mimetype.startsWith('video/')
+        ? 'video'
+        : req.file.mimetype.startsWith('audio/')
+        ? 'audio'
+        : 'document';
+
+      const uploadStream = cloudinary.uploader.upload_stream(
+        { resource_type: contentType === 'document' ? 'raw' : contentType },
+        async (error, result) => {
+          if (error) {
+            logger.error('Cloudinary upload failed', { error: error.message });
+            return res.status(500).json({ error: 'Failed to upload file', details: error.message });
+          }
+
+          const message = new Message({
+            senderId: userId,
+            recipientId,
+            content: result.secure_url,
+            contentType,
+            status: 'sent',
+            caption: caption || undefined,
+            originalFilename: req.file.originalname,
+            clientMessageId,
+            senderVirtualNumber: senderVirtualNumber || sender.virtualNumber,
+            senderUsername: senderUsername || sender.username,
+            senderPhoto: senderPhoto || sender.photo,
+          });
+
+          await message.save();
+          io.to(recipientId).emit('message', message.toObject());
+          io.to(userId).emit('message', message.toObject());
+          logger.info('Media message uploaded and sent', { messageId: message._id, userId, recipientId });
+
+          // Invalidate chat-list cache for both users
+          await redis.del(`:chat-list:${userId}`);
+          await redis.del(`:chat-list:${recipientId}`);
+
+          res.json({ message: message.toObject() });
+        }
+      );
+
+      require('stream').Readable.from(req.file.buffer).pipe(uploadStream);
+    } catch (error) {
+      logger.error('Upload failed', { error: error.message, stack: error.stack });
+      res.status(500).json({ error: 'Failed to upload file', details: error.message });
+    }
+  });
+
+  // POST /social/delete_user
+  router.post('/delete_user', authMiddleware, async (req, res) => {
+    try {
+      const { error } = deleteUserSchema.validate(req.body);
+      if (error) {
+        logger.warn('Invalid delete user request', { error: error.details });
+        return res.status(400).json({ error: error.details[0].message });
+      }
+
+      const { userId } = req.body;
+      const user = await User.findById(userId);
+      if (!user) {
+        logger.warn('User not found for deletion', { userId });
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      // Get user's contacts to notify them
+      const contacts = await User.find({ contacts: userId }).select('_id');
+      const contactIds = contacts.map(contact => contact._id.toString());
+
+      // Delete the user (triggers pre middleware for messages and contacts)
+      await User.deleteOne({ _id: userId });
+
+      // Invalidate caches
+      await redis.del(`:chat-list:${userId}`);
+      await redis.del(`:contacts:${userId}`);
+      for (const contactId of contactIds) {
+        await redis.del(`:chat-list:${contactId}`);
+        await redis.del(`:contacts:${contactId}`);
+      }
+
+      // Emit userDeleted event to contacts
+      io.to(contactIds).emit('userDeleted', { userId });
+      logger.info('User deleted successfully', { userId, notifiedContacts: contactIds.length });
+
+      res.json({ message: 'User deleted successfully' });
+    } catch (error) {
+      logger.error('Delete user failed', { error: error.message, stack: error.stack });
+      res.status(500).json({ error: 'Failed to delete user', details: error.message });
     }
   });
 
