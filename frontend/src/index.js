@@ -24,7 +24,8 @@ class ErrorBoundary extends React.Component {
 
   handleRetry = () => {
     this.setState({ error: null, errorInfo: null });
-    window.location.reload(); // Reload without clearing localStorage
+    localStorage.clear();
+    window.location.reload();
   };
 
   render() {
@@ -69,3 +70,6 @@ if (!rootElement) {
     </React.StrictMode>
   );
 }
+
+
+
