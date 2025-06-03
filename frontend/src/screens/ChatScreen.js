@@ -6,7 +6,7 @@ import { List, AutoSizer } from 'react-virtualized';
 import { format, isToday, isYesterday, parseISO } from 'date-fns';
 import {
   FaPaperPlane, FaPaperclip, FaTrash, FaArrowLeft, FaReply, FaEllipsisH, FaFileAlt,
-  FaPlay, FaArrowDown, FaUserPlus, FaSignOutAlt, FaUser, FaCamera, FaVideo, FaMicrophone, FaEdit, FaSmile
+  FaPlay, FaArrowDown, FaUserPlus, FaSignOutAlt, FaUser, FaCamera, FaVideo, FaMicrophone, FaEdit, FaSmile, FaTimes
 } from 'react-icons/fa';
 import { useDispatch, useSelector } from 'react-redux';
 import EmojiPicker from 'emoji-picker-react';
@@ -41,6 +41,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   const [pendingMessages, setPendingMessages] = useState([]);
   const [uploadProgress, setUploadProgress] = useState({});
   const [editingMessage, setEditingMessage] = useState(null);
+  const [isAddingContact, setIsAddingContact] = useState(false); // New: Loading state for contact addition
   const chatRef = useRef(null);
   const inputRef = useRef(null);
   const listRef = useRef(null);
@@ -147,6 +148,14 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     return format(parsed, 'MMM d, yyyy');
   };
   const formatTime = (date) => format(parseISO(date), 'hh:mm a');
+
+  // New: Initialize empty chat for new contacts
+  const initializeChat = useCallback((recipientId) => {
+    if (!chats[recipientId]) {
+      dispatch(setMessages({ recipientId, messages: [] }));
+      console.log(`Initialized empty chat for recipientId: ${recipientId}`);
+    }
+  }, [dispatch, chats]);
 
   const fetchChatList = useCallback(
     debounce(async (retryCount = 3) => {
@@ -301,7 +310,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   const handleFileChange = useCallback(
     async (e, type) => {
       const selectedFiles = Array.from(e.target.files);
-      if (!selectedFiles.length || !selectedChat || !chats[selectedChat]) return;
+      if (!selectedFiles.length || !selectedChat) return;
 
       const compressedFiles = await Promise.all(
         selectedFiles.map((file) => (file.type.startsWith('image') ? compressImage(file) : file))
@@ -421,6 +430,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       return;
     }
 
+    setIsAddingContact(true); // Set loading state
     const maxRetries = 3;
     let attempt = 0;
     let success = false;
@@ -444,6 +454,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
           }
           const updatedUsers = [...prev, data];
           localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
+          initializeChat(data.id); // Initialize empty chat for new contact
           return updatedUsers;
         });
 
@@ -472,9 +483,11 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         if (attempt === maxRetries) {
           setError(`Failed to add contact: ${err.response?.data?.error || err.message}`);
         }
+      } finally {
+        setIsAddingContact(false); // Reset loading state
       }
     }
-  }, [newContactNumber, userId, token, socket, handleLogout]);
+  }, [newContactNumber, userId, token, socket, handleLogout, initializeChat]);
 
   const sendMessage = useCallback(async () => {
     if ((!message.trim() && !files.length) || !selectedChat || !chats[selectedChat]) return;
@@ -678,10 +691,10 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
 
   useEffect(() => {
     if (selectedChat && !chats[selectedChat]) {
-      console.log(`Fetching messages for recipientId: ${selectedChat}`);
+      initializeChat(selectedChat);
       fetchMessages(selectedChat);
     }
-  }, [selectedChat, fetchMessages, chats]);
+  }, [selectedChat, fetchMessages, initializeChat, chats]);
 
   useEffect(() => {
     const handleMessage = async (msg) => {
@@ -693,6 +706,9 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
           : msg.content;
       const newMessage = { ...msg, content: decryptedContent };
       const recipientId = msg.senderId === userId ? msg.recipientId : msg.senderId;
+      if (!chats[recipientId]) {
+        initializeChat(recipientId); // Initialize chat if it doesn't exist
+      }
       dispatch(addMessage({ recipientId, message: newMessage }));
       await saveMessages([newMessage]);
       if (
@@ -754,6 +770,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         if (exists) return prev;
         const updatedUsers = [...prev, contactData];
         localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
+        initializeChat(contactData.id); // Initialize chat for new contact
         return updatedUsers;
       });
     });
@@ -776,7 +793,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       socket.off('chatListUpdated');
       socket.off('userStatus');
     };
-  }, [socket, selectedChat, userId, dispatch, decryptMessage, users, chats]);
+  }, [socket, selectedChat, userId, dispatch, decryptMessage, users, chats, initializeChat]);
 
   useEffect(() => {
     if (selectedChat && chats[selectedChat]?.length > 0) {
@@ -895,7 +912,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
             </div>
             {msg.status === 'uploading' && (
               <div className="upload-progress">
-                <div style={{ width: `${uploadProgress[msg.clientMessageId] || 0}%` }}></div>
+                <div style={{ width: `${uploadProgress}%` }}></div>
               </div>
             )}
             {isMine && msg.status !== 'uploading' && (
@@ -905,7 +922,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
                   onClick={() => setReplyTo(msg)}
                 />
                 <FaEdit
-                  className="action-icon"
+                  className="action-icon">
                   onClick={() => {
                     setEditingMessage(msg);
                     setMessage(msg.content || '');
@@ -936,13 +953,15 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         <div
           key={key}
           style={style}
-          className={`chat-list-item ${selectedChat === user.id ? 'selected' : ''}`}
+          className={`chat-list-item ${selectedChatMessages === user.id ? 'selected' : ''}`}
           onClick={() => {
-            if (chats[user.id] || user.id) {
-              dispatch(setSelectedChat(user.id));
-            } else {
-              console.warn(`Cannot select chat for user ${user.id}: no chat exists`);
+            if (!user.id) {
+              console.warn(`Invalid user ID: ${user.id}`);
+              return;
             }
+            initializeChat(user.id); // Ensure chat is initialized
+            dispatch(setSelectedChat(user.id));
+            fetchMessages(user.id); // Pre-fetch messages
           }}
         >
           <img src={user.photo} alt={user.username} className="chat-list-avatar" />
@@ -953,7 +972,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
                 <span className="chat-list-time">{formatChatListDate(user.latestMessage.createdAt)}</span>
               )}
             </div>
-            <div className="chat-list-preview">{user.latestMessage?.content || 'No messages yet'}</div>
+            <div className="chat-list-preview">{user.latestMessage?.content || 'No messages'}</div>
             {user.unreadCount > 0 && (
               <span className="chat-list-unread">{user.unreadCount}</span>
             )}
@@ -962,7 +981,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         </div>
       );
     },
-    [users, selectedChat, dispatch, chats]
+    [users, selectedChat, dispatch, chats, initializeChat, fetchMessages]
   );
 
   return (
@@ -974,33 +993,56 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
           <AnimatePresence>
             {showMenu && (
               <motion.div
-                initial={{ opacity: 0, y: -10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -10 }}
+                initial={{ opacity: 0, y: -10, scale: 0.8 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: -10, scale: 0.8 }}
+                transition={{ duration: 0.3, ease: 'easeInOut' }}
                 className="menu-dropdown"
               >
                 <div
                   className="menu-item"
                   onClick={() => setMenuTab(menuTab === 'add' ? '' : 'add')}
                 >
-                  <FaUserPlus /> Add Contact
+                  <FaUserPlus className="menu-item-icon" /> Add Contact
                 </div>
                 <div className="menu-item logout" onClick={handleLogout}>
-                  <FaSignOutAlt /> Logout
+                  <FaSignOutAlt className="menu-item-icon" /> Logout
                 </div>
                 {menuTab === 'add' && (
-                  <div className="menu-add-contact">
-                    <input
-                      type="text"
-                      value={newContactNumber}
-                      onChange={(e) => setNewContactNumber(e.target.value)}
-                      placeholder="Virtual Number"
-                      className="menu-input"
-                    />
-                    <button onClick={handleAddContact} className="menu-button">
-                      Add
+                  <motion.div
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: 'auto', opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    transition={{ duration: 0.3 }}
+                    className="menu-add-contact"
+                  >
+                    <div className="contact-input-group">
+                      <input
+                        type="text"
+                        value={newContactNumber}
+                        onChange={(e) => setNewContactNumber(e.target.value)}
+                        placeholder="Enter virtual number"
+                        className={`contact-input ${error ? 'error' : ''}`}
+                      />
+                      {newContactNumber && (
+                        <FaTimes
+                          className="clear-input-icon"
+                          onClick={() => setNewContactNumber('')}
+                        />
+                      )}
+                    </div>
+                    <button
+                      onClick={handleAddContact}
+                      className="contact-button"
+                      disabled={isAddingContact}
+                    >
+                      {isAddingContact ? (
+                        <span className="loading-spinner">Adding...</span>
+                      ) : (
+                        'Add Contact'
+                      )}
                     </button>
-                  </div>
+                  </motion.div>
                 )}
               </motion.div>
             )}
@@ -1036,15 +1078,15 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
                 className="conversation-avatar"
               />
               <div className="conversation-info">
-                <h2>{users.find((u) => u.id === selectedChat)?.username || 'Unknown User'}</h2>
+                <h2>{users.find((u) => u.id === selectedChat)?.username || 'Unknown'}</h2>
                 {isTyping[selectedChat] ? (
-                  <motion.span
+                  <motion-span
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
                     className="typing-indicator"
                   >
                     Typing...
-                  </motion.span>
+                  </motion-span>
                 ) : (
                   <span className="status-indicator">
                     {users.find((u) => u.id === selectedChat)?.status === 'online'
@@ -1055,8 +1097,10 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
               </div>
             </div>
             <div className="conversation-messages" ref={chatRef}>
-              {!chats[selectedChat] ? (
+              {chats[selectedChat] === undefined ? (
                 <div className="loading-messages">Loading messages...</div>
+              ) : chats[selectedChat]?.length === 0 ? (
+                <div className="no-messages">No messages yet. Start chatting!</div>
               ) : (
                 <AutoSizer>
                   {({ width, height }) => (
@@ -1128,13 +1172,13 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
               {showEmojiPicker && (
                 <div className="emoji-picker">
                   <EmojiPicker
-                    onEmojiClick={(emoji) => setMessage((prev) => prev + emoji.emoji)}
+                    onEmojiClick={(emoji) => setMessage((prev) => prev + emoji.emotion)}
                   />
                 </div>
               )}
               <FaPaperclip
                 className="attachment-icon"
-                onClick={() => setShowPicker(!showPicker)}
+                onClick={() => setShowAction(!showAction)}
               />
               {showPicker && (
                 <div className="attachment-picker">
@@ -1161,7 +1205,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
                     <input
                       type="file"
                       accept="audio/*"
-                      onChange={(e) => handleFileChange(e, 'audio')}
+                      onChange={(e) => handleFileChange(e, 'audio')))
                       hidden
                     />
                   </label>
@@ -1191,15 +1235,14 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
                       : sendMessage();
                   }
                 }}
-                placeholder={editingMessage ? 'Edit message...' : 'Message...'}
+                placeholder={editingMessage ? 'Edit message...' : 'Type a message...'}
                 className="message-input"
-                disabled={!chats[selectedChat]}
+                disabled={!selectedChatMessages}
               />
               <FaPaperPlane
                 className="send-icon"
                 onClick={() =>
-                  editingMessage ? handleEditMessage(editingMessage._id, message) : sendMessage()
-                }
+                  editingMessage ? handleEditMessage(editingMessage._id, message) : sendMessage()}
               />
             </div>
           </div>
