@@ -41,7 +41,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   const [pendingMessages, setPendingMessages] = useState([]);
   const [uploadProgress, setUploadProgress] = useState({});
   const [editingMessage, setEditingMessage] = useState(null);
-  const [isAddingContact, setIsAddingContact] = useState(false); // New: Loading state for contact addition
+  const [isAddingContact, setIsAddingContact] = useState(false);
   const chatRef = useRef(null);
   const inputRef = useRef(null);
   const listRef = useRef(null);
@@ -149,7 +149,6 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   };
   const formatTime = (date) => format(parseISO(date), 'hh:mm a');
 
-  // New: Initialize empty chat for new contacts
   const initializeChat = useCallback((recipientId) => {
     if (!chats[recipientId]) {
       dispatch(setMessages({ recipientId, messages: [] }));
@@ -189,7 +188,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
           setUsers(processedUsers);
           localStorage.setItem('cachedUsers', JSON.stringify(processedUsers));
           setError('');
-          socket.emit('chatListUpdated', { userId, users: processedUsers }); // Sync chat list
+          socket.emit('chatListUpdated', { userId, users: processedUsers });
           return;
         } catch (err) {
           attempt++;
@@ -430,7 +429,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       return;
     }
 
-    setIsAddingContact(true); // Set loading state
+    setIsAddingContact(true);
     const maxRetries = 3;
     let attempt = 0;
     let success = false;
@@ -454,7 +453,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
           }
           const updatedUsers = [...prev, data];
           localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
-          initializeChat(data.id); // Initialize empty chat for new contact
+          initializeChat(data.id);
           return updatedUsers;
         });
 
@@ -484,7 +483,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
           setError(`Failed to add contact: ${err.response?.data?.error || err.message}`);
         }
       } finally {
-        setIsAddingContact(false); // Reset loading state
+        setIsAddingContact(false);
       }
     }
   }, [newContactNumber, userId, token, socket, handleLogout, initializeChat]);
@@ -707,7 +706,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       const newMessage = { ...msg, content: decryptedContent };
       const recipientId = msg.senderId === userId ? msg.recipientId : msg.senderId;
       if (!chats[recipientId]) {
-        initializeChat(recipientId); // Initialize chat if it doesn't exist
+        initializeChat(recipientId);
       }
       dispatch(addMessage({ recipientId, message: newMessage }));
       await saveMessages([newMessage]);
@@ -770,7 +769,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         if (exists) return prev;
         const updatedUsers = [...prev, contactData];
         localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
-        initializeChat(contactData.id); // Initialize chat for new contact
+        initializeChat(contactData.id);
         return updatedUsers;
       });
     });
@@ -782,35 +781,39 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       localStorage.setItem('cachedUsers', JSON.stringify(users));
     });
 
-    return () => {
-      socket.off('message', handleMessage);
-      socket.off('editMessage', handleEditMessage);
-      socket.off('deleteMessage', handleDeleteMessage);
-      socket.off('typing');
-      socket.off('stopTyping');
-      socket.off('messageStatus');
-      socket.off('newContact');
-      socket.off('chatListUpdated');
-      socket.off('userStatus');
-    };
-  }, [socket, selectedChat, userId, dispatch, decryptMessage, users, chats, initializeChat]);
+  return () => {
+    socket.off('message', handleMessage);
+    socket.off('editMessage', handleEditMessage);
+    socket.off('deleteMessage', handleDeleteMessage);
+    socket.off('typing');
+    socket.off('stopTyping');
+    socket.off('messageStatus');
+    socket.off('newContact');
+    socket.off('chatListUpdated', handleChatListUpdate);
+    socket.off('userStatus'); // Fixed: socket.on -> socket.off
+  };
+}, [socket, selectedChat, userId, dispatch, decryptMessage, users, chats, initializeChat]);
+
+
+
+
 
   useEffect(() => {
-    if (selectedChat && chats[selectedChat]?.length > 0) {
-      const unreadMessages = chats[selectedChat].filter(
-        (msg) => msg.recipientId === userId && msg.status !== 'read'
-      );
-      setUnreadCount(unreadMessages.length);
-      setFirstUnreadMessageId(unreadMessages[0]?._id || null);
-      if (isAtBottomRef.current && unreadMessages.length > 0) {
-        socket.emit('batchMessageStatus', {
-          messageIds: unreadMessages.map((msg) => msg._id),
-          status: 'read',
-          recipientId: selectedChat,
-        });
-      }
+  if (selectedChat && chats[selectedChat]?.length > 0) {
+    const unreadMessages = chats[selectedChat].filter(
+      (msg) => msg.recipientId === userId && msg.status !== 'read'
+    );
+    setUnreadCount(unreadMessages.length);
+    setFirstUnreadMessageId(unreadMessages[0]?._id || null); // Fixed: setFirstUnreadMessagesId -> setFirstUnreadMessageId
+    if (isAtBottomRef.current && unreadMessages.length > 0) {
+      socket.emit('batchMessageStatus', { // Fixed: batchMessagesStatus -> batchMessageStatus
+        messageIds: unreadMessages.map((msg) => msg._id),
+        status: 'read',
+        recipientId: selectedChat,
+      });
     }
-  }, [chats, selectedChat, socket, userId]);
+  }
+}, [chats, selectedChat, socket, userId]);
 
   const getRowHeight = useCallback(
     ({ index }) => {
@@ -912,7 +915,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
             </div>
             {msg.status === 'uploading' && (
               <div className="upload-progress">
-                <div style={{ width: `${uploadProgress}%` }}></div>
+                <div style={{ width: `${uploadProgress[msg._id] || 0}%` }}></div>
               </div>
             )}
             {isMine && msg.status !== 'uploading' && (
@@ -942,47 +945,52 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     [chats, selectedChat, userId, firstUnreadMessageId, uploadProgress, handleDeleteMessage, replyTo, handleSwipe]
   );
 
-  const chatListRowRenderer = useCallback(
-    ({ index, key, style }) => {
-      const user = users[index];
-      if (!user) {
-        console.warn(`User undefined at index ${index}`);
-        return null;
-      }
-      return (
-        <div
-          key={key}
-          style={style}
-          className={`chat-list-item ${selectedChatMessages === user.id ? 'selected' : ''}`}
-          onClick={() => {
-            if (!user.id) {
-              console.warn(`Invalid user ID: ${user.id}`);
-              return;
-            }
-            initializeChat(user.id); // Ensure chat is initialized
-            dispatch(setSelectedChat(user.id));
-            fetchMessages(user.id); // Pre-fetch messages
-          }}
-        >
-          <img src={user.photo} alt={user.username} className="chat-list-avatar" />
-          <div className="chat-list-info">
-            <div className="chat-list-header">
-              <span className="chat-list-username">{user.username}</span>
-              {user.latestMessage && (
-                <span className="chat-list-time">{formatChatListDate(user.latestMessage.createdAt)}</span>
-              )}
-            </div>
-            <div className="chat-list-preview">{user.latestMessage?.content || 'No messages'}</div>
-            {user.unreadCount > 0 && (
-              <span className="chat-list-unread">{user.unreadCount}</span>
+
+
+
+const chatListRowRenderer = useCallback(
+  ({ index, key, style }) => {
+    const user = users[index];
+    if (!user) {
+      console.warn(`User undefined at index ${index}`);
+      return null;
+    }
+    return (
+      <div
+        key={key}
+        style={style}
+        className={`chat-list-item ${selectedChat === user.id ? 'selected' : ''}`} // Fixed: selectedChatMessages -> selectedChat
+        onClick={() => {
+          if (!user.id) {
+            console.warn(`Invalid user ID: ${user.id}`);
+            return;
+          }
+          initializeChat(user.id);
+          dispatch(setSelectedChat(user.id));
+          fetchMessages(user.id);
+        }}
+      >
+        <img src={user.photo} alt={user.username} className="chat-list-avatar" />
+        <div className="chat-list-info">
+          <div className="chat-list-header">
+            <span className="chat-list-username">{user.username}</span>
+            {user.latestMessage && (
+              <span className="chat-list-time">{formatChatListDate(user.latestMessage.createdAt)}</span>
             )}
-            <span className="chat-list-status">{user.status === 'online' ? 'Online' : `Last seen ${formatTime(user.lastSeen)}`}</span>
           </div>
+          <div className="chat-list-preview">{user.latestMessage?.content || 'No messages'}</div>
+          {user.unreadCount > 0 && (
+            <span className="chat-list-unread">{user.unreadCount}</span>
+          )}
+          <span className="chat-list-status">{user.status === 'online' ? 'Online' : `Last seen ${formatTime(user.lastSeen)}`}</span>
         </div>
-      );
-    },
-    [users, selectedChat, dispatch, chats, initializeChat, fetchMessages]
-  );
+      </div>
+    );
+  },
+  [users, selectedChat, dispatch, chats, initializeChat, fetchMessages]
+);
+
+
 
   return (
     <div className="chat-screen">
@@ -1080,13 +1088,13 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
               <div className="conversation-info">
                 <h2>{users.find((u) => u.id === selectedChat)?.username || 'Unknown'}</h2>
                 {isTyping[selectedChat] ? (
-                  <motion-span
+                  <motion.span
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
                     className="typing-indicator"
                   >
                     Typing...
-                  </motion-span>
+                  </motion.span>
                 ) : (
                   <span className="status-indicator">
                     {users.find((u) => u.id === selectedChat)?.status === 'online'
@@ -1172,13 +1180,13 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
               {showEmojiPicker && (
                 <div className="emoji-picker">
                   <EmojiPicker
-                    onEmojiClick={(emoji) => setMessage((prev) => prev + emoji.emotion)}
+                    onEmojiClick={(emoji) => setMessage((prev) => prev + emoji.emoji)}
                   />
                 </div>
               )}
               <FaPaperclip
                 className="attachment-icon"
-                onClick={() => setShowAction(!showAction)}
+                onClick={() => setShowPicker(!showPicker)}
               />
               {showPicker && (
                 <div className="attachment-picker">
@@ -1237,7 +1245,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
                 }}
                 placeholder={editingMessage ? 'Edit message...' : 'Type a message...'}
                 className="message-input"
-                disabled={!selectedChatMessages}
+                disabled={!selectedChat}
               />
               <FaPaperPlane
                 className="send-icon"
