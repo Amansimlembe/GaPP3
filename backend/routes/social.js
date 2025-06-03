@@ -7,7 +7,8 @@ const winston = require('winston');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
 const Joi = require('joi');
-const mongoose = require('mongoose'); // Added for ObjectId validation
+const mongoose = require('mongoose');
+const validator = require('validator'); // Added for URL validation
 
 const logger = winston.createLogger({
   level: 'info',
@@ -71,12 +72,60 @@ const upload = multer({
 
 const validContentTypes = ['text', 'image', 'video', 'audio', 'document'];
 
+// Enhanced message schema
+const messageSchema = Joi.object({
+  senderId: Joi.string()
+    .custom((value, helpers) => {
+      if (!mongoose.isValidObjectId(value)) return helpers.error('any.invalid');
+      return value;
+    }, 'ObjectId validation')
+    .required()
+    .messages({ 'any.invalid': 'Invalid senderId' }),
+  recipientId: Joi.string()
+    .custom((value, helpers) => {
+      if (!mongoose.isValidObjectId(value)) return helpers.error('any.invalid');
+      return value;
+    }, 'ObjectId validation')
+    .required()
+    .messages({ 'any.invalid': 'Invalid recipientId' }),
+  content: Joi.string()
+    .required()
+    .when('contentType', {
+      is: 'text',
+      then: Joi.string().pattern(/^[A-Za-z0-9+/=]+\|[A-Za-z0-9+/=]+\|[A-Za-z0-9+/=]+$/, 'encrypted content format'),
+      otherwise: Joi.string().custom((value, helpers) => {
+        if (!validator.isURL(value)) return helpers.error('any.invalid');
+        return value;
+      }, 'URL validation'),
+    })
+    .messages({
+      'string.pattern.name': 'Text content must be in encrypted format (data|iv|key)',
+      'any.invalid': 'Media content must be a valid URL',
+    }),
+  contentType: Joi.string()
+    .valid(...validContentTypes)
+    .required()
+    .messages({ 'any.only': `contentType must be one of: ${validContentTypes.join(', ')}` }),
+  plaintextContent: Joi.string().allow('').optional(),
+  caption: Joi.string().optional(),
+  replyTo: Joi.string()
+    .custom((value, helpers) => {
+      if (value && !mongoose.isValidObjectId(value)) return helpers.error('any.invalid');
+      return value;
+    }, 'ObjectId validation')
+    .optional()
+    .messages({ 'any.invalid': 'Invalid replyTo ID' }),
+  originalFilename: Joi.string().optional(),
+  clientMessageId: Joi.string().required().messages({ 'string.empty': 'clientMessageId is required' }),
+  senderVirtualNumber: Joi.string().optional(),
+  senderUsername: Joi.string().optional(),
+  senderPhoto: Joi.string().optional(),
+});
+
 const addContactSchema = Joi.object({
   userId: Joi.string()
     .custom((value, helpers) => {
-      if (!mongoose.isValidObjectId(value)) {
-        return helpers.error('any.invalid');
-      }
+      if (!mongoose.isValidObjectId(value)) return helpers.error('any.invalid');
       return value;
     }, 'ObjectId validation')
     .required(),
@@ -86,9 +135,7 @@ const addContactSchema = Joi.object({
 const deleteUserSchema = Joi.object({
   userId: Joi.string()
     .custom((value, helpers) => {
-      if (!mongoose.isValidObjectId(value)) {
-        return helpers.error('any.invalid');
-      }
+      if (!mongoose.isValidObjectId(value)) return helpers.error('any.invalid');
       return value;
     }, 'ObjectId validation')
     .required(),
@@ -97,41 +144,90 @@ const deleteUserSchema = Joi.object({
 module.exports = (io) => {
   const router = express.Router();
 
-  // Helper function to fetch and emit updated chat list
+  // Optimized emitUpdatedChatList
   const emitUpdatedChatList = async (userId) => {
     try {
       const contacts = await User.find({ contacts: userId }).select(
         'username virtualNumber photo status lastSeen'
       );
-      const chatList = await Promise.all(
-        contacts.map(async (contact) => {
-          const latestMessage = await Message.findOne({
+
+      // Batch fetch latest messages
+      const contactIds = contacts.map((c) => c._id);
+      const latestMessages = await Message.aggregate([
+        {
+          $match: {
             $or: [
-              { senderId: userId, recipientId: contact._id },
-              { senderId: contact._id, recipientId: userId },
+              { senderId: new mongoose.Types.ObjectId(userId), recipientId: { $in: contactIds } },
+              { senderId: { $in: contactIds }, recipientId: new mongoose.Types.ObjectId(userId) },
             ],
-          })
-            .sort({ createdAt: -1 })
-            .select('content contentType senderId recipientId createdAt plaintextContent');
+          },
+        },
+        {
+          $sort: { createdAt: -1 },
+        },
+        {
+          $group: {
+            _id: {
+              $cond: [
+                { $eq: ['$senderId', new mongoose.Types.ObjectId(userId)] },
+                '$recipientId',
+                '$senderId',
+              ],
+            },
+            latestMessage: { $first: '$$ROOT' },
+          },
+        },
+        {
+          $project: {
+            _id: 0,
+            contactId: '$_id',
+            latestMessage: {
+              content: 1,
+              contentType: 1,
+              senderId: 1,
+              recipientId: 1,
+              createdAt: 1,
+              plaintextContent: 1,
+            },
+          },
+        },
+      ]);
 
-          const unreadCount = await Message.countDocuments({
-            senderId: contact._id,
-            recipientId: userId,
+      // Batch fetch unread counts
+      const unreadCounts = await Message.aggregate([
+        {
+          $match: {
+            senderId: { $in: contactIds },
+            recipientId: new mongoose.Types.ObjectId(userId),
             status: { $ne: 'read' },
-          });
+          },
+        },
+        {
+          $group: {
+            _id: '$senderId',
+            unreadCount: { $sum: 1 },
+          },
+        },
+      ]);
 
-          return {
-            id: contact._id.toString(),
-            username: contact.username,
-            virtualNumber: contact.virtualNumber,
-            photo: contact.photo,
-            status: contact.status,
-            lastSeen: contact.lastSeen,
-            latestMessage: latestMessage ? latestMessage.toObject() : null,
-            unreadCount,
-          };
-        })
-      );
+      const chatList = contacts.map((contact) => {
+        const messageData = latestMessages.find(
+          (m) => m.contactId.toString() === contact._id.toString()
+        );
+        const unreadData = unreadCounts.find(
+          (u) => u._id.toString() === contact._id.toString()
+        );
+        return {
+          id: contact._id.toString(),
+          username: contact.username,
+          virtualNumber: contact.virtualNumber,
+          photo: contact.photo,
+          status: contact.status,
+          lastSeen: contact.lastSeen,
+          latestMessage: messageData ? messageData.latestMessage : null,
+          unreadCount: unreadData ? unreadData.unreadCount : 0,
+        };
+      });
 
       io.to(userId).emit('chatListUpdated', { userId, users: chatList });
       await redis.setex(`:chat-list:${userId}`, 300, JSON.stringify(chatList));
@@ -152,7 +248,7 @@ module.exports = (io) => {
         .then((user) => {
           if (user) {
             io.to(userId).emit('userStatus', { userId, status: 'online', lastSeen: user.lastSeen });
-            emitUpdatedChatList(userId); // Emit updated chat list on join
+            emitUpdatedChatList(userId);
             logger.info('User joined', { userId });
           }
         })
@@ -213,7 +309,6 @@ module.exports = (io) => {
             };
             io.to(userId).emit('newContact', { userId, contactData: contactObj });
             io.to(contactData.id).emit('newContact', { userId: contactData.id, contactData: contactObj });
-            // Emit updated chat list for both users
             emitUpdatedChatList(userId);
             emitUpdatedChatList(contactData.id);
             logger.info('New contact emitted', { userId, contactId: contactData.id });
@@ -233,83 +328,74 @@ module.exports = (io) => {
       logger.info('Chat list update propagated', { userId });
     });
 
-   socket.on('message', async (messageData, callback) => {
-  try {
-    const {
-      senderId,
-      recipientId,
-      content,
-      contentType,
-      plaintextContent,
-      caption,
-      replyTo,
-      originalFilename,
-      clientMessageId,
-      senderVirtualNumber,
-      senderUsername,
-      senderPhoto,
-    } = messageData;
+    socket.on('message', async (messageData, callback) => {
+      try {
+        // Validate messageData
+        const { error } = messageSchema.validate(messageData);
+        if (error) {
+          logger.warn('Invalid message data', { error: error.details, messageData });
+          return callback({ error: error.details[0].message });
+        }
 
-    if (
-      !mongoose.isValidObjectId(senderId) ||
-      !mongoose.isValidObjectId(recipientId) ||
-      !content ||
-      !contentType ||
-      !clientMessageId
-    ) {
-      logger.warn('Missing or invalid message fields', { messageData });
-      return callback({ error: 'Missing required fields: senderId, recipientId, content, contentType, clientMessageId' });
-    }
+        const {
+          senderId,
+          recipientId,
+          content,
+          contentType,
+          plaintextContent,
+          caption,
+          replyTo,
+          originalFilename,
+          clientMessageId,
+          senderVirtualNumber,
+          senderUsername,
+          senderPhoto,
+        } = messageData;
 
-    if (!validContentTypes.includes(contentType)) {
-      logger.warn('Invalid contentType', { contentType });
-      return callback({ error: `Invalid contentType. Must be one of: ${validContentTypes.join(', ')}` });
-    }
+        const sender = await User.findById(senderId);
+        const recipient = await User.findById(recipientId);
+        if (!sender || !recipient) {
+          logger.warn('Sender or recipient not found', { senderId, recipientId });
+          return callback({ error: 'Sender or recipient not found' });
+        }
 
-    const sender = await User.findById(senderId);
-    const recipient = await User.findById(recipientId);
-    if (!sender || !recipient) {
-      logger.warn('Sender or recipient not found', { senderId, recipientId });
-      return callback({ error: 'Sender or recipient not found' });
-    }
+        const existingMessage = await Message.findOne({ clientMessageId });
+        if (existingMessage) {
+          logger.info('Duplicate message found', { clientMessageId, messageData });
+          return callback({ message: existingMessage.toObject() });
+        }
 
-    const existingMessage = await Message.findOne({ clientMessageId });
-    if (existingMessage) {
-      logger.info('Duplicate message found', { clientMessageId });
-      return callback({ message: existingMessage.toObject() });
-    }
+        const message = new Message({
+          senderId,
+          recipientId,
+          content,
+          contentType,
+          plaintextContent: plaintextContent || '',
+          status: 'sent',
+          caption: caption || undefined,
+          replyTo: replyTo && mongoose.isValidObjectId(replyTo) ? replyTo : undefined,
+          originalFilename: originalFilename || undefined,
+          clientMessageId,
+          senderVirtualNumber: senderVirtualNumber || sender.virtualNumber,
+          senderUsername: senderUsername || sender.username,
+          senderPhoto: senderPhoto || sender.photo,
+        });
 
-    const message = new Message({
-      senderId,
-      recipientId,
-      content,
-      contentType,
-      plaintextContent: plaintextContent || '',
-      status: 'sent',
-      caption: caption || undefined,
-      replyTo: replyTo && mongoose.isValidObjectId(replyTo) ? replyTo : undefined,
-      originalFilename: originalFilename || undefined,
-      clientMessageId,
-      senderVirtualNumber: senderVirtualNumber || sender.virtualNumber,
-      senderUsername: senderUsername || sender.username,
-      senderPhoto: senderPhoto || sender.photo,
+        await message.save();
+        io.to(recipientId).emit('message', message.toObject());
+        io.to(senderId).emit('message', message.toObject());
+        emitUpdatedChatList(senderId);
+        emitUpdatedChatList(recipientId);
+        logger.info('Message sent', { messageId: message._id, senderId, recipientId });
+        callback({ message: message.toObject() });
+
+        await redis.del(`:chat-list:${senderId}`);
+        await redis.del(`:chat-list:${recipientId}`);
+      } catch (error) {
+        logger.error('Socket message failed', { error: error.message, stack: error.stack, messageData });
+        callback({ error: 'Failed to send message', details: error.message });
+      }
     });
-
-    await message.save();
-    io.to(recipientId).emit('message', message.toObject());
-    io.to(senderId).emit('message', message.toObject());
-    emitUpdatedChatList(senderId);
-    emitUpdatedChatList(recipientId);
-    logger.info('Message sent', { messageId: message._id, senderId, recipientId });
-    callback({ message: message.toObject() });
-
-    await redis.del(`:chat-list:${senderId}`);
-    await redis.del(`:chat-list:${recipientId}`);
-  } catch (error) {
-    logger.error('Socket message failed', { error: error.message, stack: error.stack });
-    callback({ error: 'Failed to send message', details: error.message });
-  }
-});
 
     socket.on('editMessage', async ({ messageId, newContent, plaintextContent }, callback) => {
       try {
@@ -538,7 +624,7 @@ module.exports = (io) => {
       const contact = await User.findOne({ virtualNumber });
       if (!contact) {
         logger.warn('Contact not found', { virtualNumber });
-        return res.status(400).json({ error: 'Contact not found' }); // Changed from 404 to 400
+        return res.status(400).json({ error: 'Contact not found' });
       }
 
       if (contact._id.toString() === userId) {
@@ -554,7 +640,6 @@ module.exports = (io) => {
       user.contacts.push(contact._id);
       await user.save();
 
-      // Add the user to the contact's contacts list (mutual contact addition)
       if (!contact.contacts.includes(user._id)) {
         contact.contacts.push(user._id);
         await contact.save();
@@ -569,13 +654,11 @@ module.exports = (io) => {
         lastSeen: contact.lastSeen,
       };
 
-      // Emit newContact and chatListUpdated events to both users
       io.to(userId).emit('newContact', { userId, contactData });
       io.to(contact._id.toString()).emit('newContact', { userId: contact._id.toString(), contactData });
       emitUpdatedChatList(userId);
       emitUpdatedChatList(contact._id.toString());
 
-      // Invalidate caches for both users
       await redis.del(`:chat-list:${userId}`);
       await redis.del(`:chat-list:${contact._id}`);
       await redis.del(`:contacts:${userId}`);
@@ -643,11 +726,10 @@ module.exports = (io) => {
           await message.save();
           io.to(recipientId).emit('message', message.toObject());
           io.to(userId).emit('message', message.toObject());
-          emitUpdatedChatList(userId); // Update chat list for sender
-          emitUpdatedChatList(recipientId); // Update chat list for recipient
+          emitUpdatedChatList(userId);
+          emitUpdatedChatList(recipientId);
           logger.info('Media message uploaded and sent', { messageId: message._id, userId, recipientId });
 
-          // Invalidate chat-list cache for both users
           await redis.del(`:chat-list:${userId}`);
           await redis.del(`:chat-list:${recipientId}`);
 
@@ -678,23 +760,19 @@ module.exports = (io) => {
         return res.status(404).json({ error: 'User not found' });
       }
 
-      // Get user's contacts to notify them
       const contacts = await User.find({ contacts: userId }).select('_id');
       const contactIds = contacts.map((contact) => contact._id.toString());
 
-      // Delete the user (triggers pre middleware for messages and contacts)
       await User.deleteOne({ _id: userId });
 
-      // Invalidate caches
       await redis.del(`:chat-list:${userId}`);
       await redis.del(`:contacts:${userId}`);
       for (const contactId of contactIds) {
         await redis.del(`:chat-list:${contactId}`);
         await redis.del(`:contacts:${contactId}`);
-        emitUpdatedChatList(contactId); // Update chat list for contacts
+        emitUpdatedChatList(contactId);
       }
 
-      // Emit userDeleted event to contacts
       io.to(contactIds).emit('userDeleted', { userId });
       logger.info('User deleted successfully', { userId, notifiedContacts: contactIds.length });
 

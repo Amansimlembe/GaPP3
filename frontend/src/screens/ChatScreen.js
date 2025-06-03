@@ -68,21 +68,30 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     )}`;
   }, []);
 
+
   const decryptMessage = useCallback(async (encryptedContent, privateKeyPem, isMedia = false) => {
-    try {
-      const [encryptedData, iv, encryptedAesKey] = encryptedContent.split('|').map(forge.util.decode64);
-      const privateKey = forge.pki.privateKeyFromPem(privateKeyPem);
-      const aesKey = privateKey.decrypt(encryptedAesKey, 'RSA-OAEP', { md: forge.md.sha256.create() });
-      const decipher = forge.cipher.createDecipher('AES-CBC', aesKey);
-      decipher.start({ iv });
-      decipher.update(forge.util.createBuffer(encryptedData));
-      decipher.finish();
-      return isMedia ? decipher.output.getBytes() : forge.util.decodeUtf8(decipher.output.getBytes());
-    } catch (err) {
-      console.error('Decryption error:', err);
-      return 'Unable to display message';
+  try {
+    // Validate encryptedContent is a string
+    if (typeof encryptedContent !== 'string' || !encryptedContent.includes('|')) {
+      console.error('Invalid encryptedContent format:', encryptedContent);
+      return isMedia ? null : 'Unable to display message';
     }
-  }, []);
+    const [encryptedData, iv, encryptedAesKey] = encryptedContent.split('|').map(forge.util.decode64);
+    const privateKey = forge.pki.privateKeyFromPem(privateKeyPem);
+    const aesKey = privateKey.decrypt(encryptedAesKey, 'RSA-OAEP', { md: forge.md.sha256.create() });
+    const decipher = forge.cipher.createDecipher('AES-CBC', aesKey);
+    decipher.start({ iv });
+    decipher.update(forge.util.createBuffer(encryptedData));
+    decipher.finish();
+    return isMedia ? decipher.output.getBytes() : forge.util.decodeUtf8(decipher.output.getBytes());
+  } catch (err) {
+    console.error('Decryption error:', err);
+    return isMedia ? null : 'Unable to display message';
+  }
+}, []);
+
+
+
 
   const getPublicKey = useCallback(async (recipientId) => {
     const cacheKey = `publicKey:${recipientId}`;
@@ -720,35 +729,45 @@ const sendMessage = useCallback(async () => {
     }
   }, [selectedChat, fetchMessages, initializeChat, chats]);
 
-  useEffect(() => {
-    const handleMessage = async (msg) => {
-      if (chats[selectedChat]?.some((m) => m.clientMessageId === msg.clientMessageId)) return;
-      const privateKeyPem = localStorage.getItem('privateKey');
-      const decryptedContent =
-        msg.contentType === 'text' && msg.recipientId === userId
-          ? await decryptMessage(msg.content, privateKeyPem)
-          : msg.content;
-      const newMessage = { ...msg, content: decryptedContent };
-      const recipientId = msg.senderId === userId ? msg.recipientId : msg.senderId;
-      if (!chats[recipientId]) {
-        initializeChat(recipientId);
-      }
-      dispatch(addMessage({ recipientId, message: newMessage }));
-      await saveMessages([newMessage]);
-      if (
-        msg.recipientId === userId &&
-        selectedChat === msg.senderId &&
-        isAtBottomRef.current &&
-        chats[selectedChat]?.length > 0
-      ) {
-        listRef.current?.scrollToRow(chats[selectedChat].length - 1);
-        socket.emit('batchMessageStatus', {
-          messageIds: [msg._id],
-          status: 'read',
-          recipientId: msg.senderId,
-        });
-      }
-    };
+// Line ~1100: Updated useEffect with handleMessage
+useEffect(() => {
+  const handleMessage = async (msg) => {
+    if (chats[selectedChat]?.some((m) => m.clientMessageId === msg.clientMessageId)) return;
+    const privateKeyPem = localStorage.getItem('privateKey');
+
+    let decryptedContent = msg.content;
+    // Only attempt decryption for text messages with valid content
+    if (msg.contentType === 'text' && msg.recipientId === userId && typeof msg.content === 'string') {
+      decryptedContent = await decryptMessage(msg.content, privateKeyPem);
+    } else if (msg.contentType !== 'text') {
+      // For media, content is a URL, no decryption needed
+      decryptedContent = msg.content;
+    } else {
+      console.warn('Invalid message content or type:', msg);
+      decryptedContent = '[Invalid message]';
+    }
+
+    const newMessage = { ...msg, content: decryptedContent };
+    const recipientId = msg.senderId === userId ? msg.recipientId : msg.senderId;
+    if (!chats[recipientId]) {
+      initializeChat(recipientId);
+    }
+    dispatch(addMessage({ recipientId, message: newMessage }));
+    await saveMessages([newMessage]);
+    if (
+      msg.recipientId === userId &&
+      selectedChat === msg.senderId &&
+      isAtBottomRef.current &&
+      chats[selectedChat]?.length > 0
+    ) {
+      listRef.current?.scrollToRow(chats[selectedChat].length - 1);
+      socket.emit('batchMessageStatus', {
+        messageIds: [msg._id],
+        status: 'read',
+        recipientId: msg.senderId,
+      });
+    }
+  };
 
     const handleEditMessage = async (updatedMessage) => {
       const privateKeyPem = localStorage.getItem('privateKey');
@@ -776,35 +795,38 @@ const sendMessage = useCallback(async () => {
       localStorage.setItem('cachedUsers', JSON.stringify(users));
     };
 
-    socket.on('message', handleMessage);
-    socket.on('editMessage', handleEditMessage);
-    socket.on('deleteMessage', handleDeleteMessage);
-    socket.on('typing', ({ userId: typerId }) =>
-      setIsTyping((prev) => ({ ...prev, [typerId]: true }))
-    );
-    socket.on('stopTyping', ({ userId: typerId }) =>
-      setIsTyping((prev) => ({ ...prev, [typerId]: false }))
-    );
-    socket.on('messageStatus', ({ messageId, status }) =>
-      dispatch(updateMessageStatus({ recipientId: selectedChat, messageId, status }))
-    );
-    socket.on('newContact', ({ userId: emitterId, contactData }) => {
-      setUsers((prev) => {
-        const exists = prev.some((u) => u.id === contactData.id);
-        if (exists) return prev;
-        const updatedUsers = [...prev, contactData];
-        localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
-        initializeChat(contactData.id);
-        return updatedUsers;
-      });
+   
+  // ... (other socket handlers remain unchanged)
+
+  socket.on('message', handleMessage);
+  socket.on('editMessage', handleEditMessage);
+  socket.on('deleteMessage', handleDeleteMessage);
+  socket.on('typing', ({ userId: typerId }) =>
+    setIsTyping((prev) => ({ ...prev, [typerId]: true }))
+  );
+  socket.on('stopTyping', ({ userId: typerId }) =>
+    setIsTyping((prev) => ({ ...prev, [typerId]: false }))
+  );
+  socket.on('messageStatus', ({ messageId, status }) =>
+    dispatch(updateMessageStatus({ recipientId: selectedChat, messageId, status }))
+  );
+  socket.on('newContact', ({ userId: emitterId, contactData }) => {
+    setUsers((prev) => {
+      const exists = prev.some((u) => u.id === contactData.id);
+      if (exists) return prev;
+      const updatedUsers = [...prev, contactData];
+      localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
+      initializeChat(contactData.id);
+      return updatedUsers;
     });
-    socket.on('chatListUpdated', handleChatListUpdate);
-    socket.on('userStatus', ({ userId, status, lastSeen }) => {
-      setUsers((prev) =>
-        prev.map((u) => (u.id === userId ? { ...u, status, lastSeen } : u))
-      );
-      localStorage.setItem('cachedUsers', JSON.stringify(users));
-    });
+  });
+  socket.on('chatListUpdated', handleChatListUpdate);
+  socket.on('userStatus', ({ userId, status, lastSeen }) => {
+    setUsers((prev) =>
+      prev.map((u) => (u.id === userId ? { ...u, status, lastSeen } : u))
+    );
+    localStorage.setItem('cachedUsers', JSON.stringify(users));
+  });
 
   return () => {
     socket.off('message', handleMessage);
@@ -815,9 +837,12 @@ const sendMessage = useCallback(async () => {
     socket.off('messageStatus');
     socket.off('newContact');
     socket.off('chatListUpdated', handleChatListUpdate);
-    socket.off('userStatus'); // Fixed: socket.on -> socket.off
+    socket.off('userStatus');
   };
 }, [socket, selectedChat, userId, dispatch, decryptMessage, users, chats, initializeChat]);
+
+// ... (rest of the component remains unchanged)
+
 
 
 
