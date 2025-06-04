@@ -2,7 +2,7 @@ const express = require('express');
 const { authMiddleware } = require('./auth');
 const Message = require('../models/Message');
 const User = require('../models/User');
-const memcached = require('../memcached'); // Changed from redis to memcached
+const memcached = require('../memcached');
 const winston = require('winston');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
@@ -52,7 +52,7 @@ const configureCloudinary = () => {
   cloudinary.config(cloudinaryConfig);
   logger.info('Cloudinary configured', {
     cloud_name: cloudinaryConfig.cloud_name,
-    api_key: cloudinaryConfig.api_key ? '****' : undefined, // Mask sensitive data
+    api_key: cloudinaryConfig.api_key ? '****' : undefined,
   });
 };
 configureCloudinary();
@@ -72,7 +72,6 @@ const upload = multer({
 
 const validContentTypes = ['text', 'image', 'video', 'audio', 'document'];
 
-// Enhanced message schema
 const messageSchema = Joi.object({
   senderId: Joi.string()
     .custom((value, helpers) => {
@@ -92,7 +91,7 @@ const messageSchema = Joi.object({
     .required()
     .when('contentType', {
       is: 'text',
-      then: Joi.string().pattern(/^[A-Za-z0-9+/=]+\|[A-Za-z0-9+/=]+\|[A-Za-z0-9+/=]+$/, 'encrypted content format'),
+      then: Joi.string().pattern(/^[A-Za-z0-9+/=]+\|[A-Za-z0-9+/=]+\|[A-Za-z0-9+/=]+$/, 'encrypted format'),
       otherwise: Joi.string().custom((value, helpers) => {
         if (!validator.isURL(value)) return helpers.error('any.invalid');
         return value;
@@ -116,7 +115,7 @@ const messageSchema = Joi.object({
     .optional()
     .messages({ 'any.invalid': 'Invalid replyTo ID' }),
   originalFilename: Joi.string().optional(),
-  clientMessageId: Joi.string().required().messages({ 'string.empty': 'clientMessageId is required' }),
+  clientMessageId: Joi.string().required().messages({ 'string.empty': 'clientMessageId required' }),
   senderVirtualNumber: Joi.string().optional(),
   senderUsername: Joi.string().optional(),
   senderPhoto: Joi.string().optional(),
@@ -144,7 +143,6 @@ const deleteUserSchema = Joi.object({
 module.exports = (io) => {
   const router = express.Router();
 
-  // Optimized emitUpdatedChatList
   const emitUpdatedChatList = async (userId) => {
     try {
       if (!mongoose.isValidObjectId(userId)) {
@@ -155,7 +153,6 @@ module.exports = (io) => {
         'username virtualNumber photo status lastSeen'
       );
 
-      // Batch fetch latest messages
       const contactIds = contacts.map((c) => c._id);
       const latestMessages = await Message.aggregate([
         {
@@ -192,12 +189,14 @@ module.exports = (io) => {
               recipientId: 1,
               createdAt: 1,
               plaintextContent: 1,
+              senderVirtualNumber: 1,
+              senderUsername: 1,
+              senderPhoto: 1,
             },
           },
         },
       ]);
 
-      // Batch fetch unread counts
       const unreadCounts = await Message.aggregate([
         {
           $match: {
@@ -234,7 +233,7 @@ module.exports = (io) => {
       });
 
       io.to(userId).emit('chatListUpdated', { userId, users: chatList });
-      await memcached.setex(`:chat-list:${userId}`, 300, JSON.stringify(chatList)); // Changed to memcached
+      await memcached.setex(`:chat-list:${userId}`, 300, JSON.stringify(chatList));
       logger.info('Emitted updated chat list', { userId });
     } catch (error) {
       logger.error('Failed to emit updated chat list', { error: error.message, stack: error.stack, userId });
@@ -333,11 +332,13 @@ module.exports = (io) => {
     });
 
     socket.on('message', async (messageData, callback) => {
+      const session = await mongoose.startSession();
+      session.startTransaction();
       try {
-        // Validate messageData
         const { error } = messageSchema.validate(messageData);
         if (error) {
-          logger.warn('Invalid message data', { error: error.details, messageData });
+          logger.warn('Invalid message data', { error: error.details });
+          await session.abortTransaction();
           return callback({ error: error.details[0].message });
         }
 
@@ -349,23 +350,24 @@ module.exports = (io) => {
           plaintextContent,
           caption,
           replyTo,
-          originalFilename,
           clientMessageId,
           senderVirtualNumber,
           senderUsername,
           senderPhoto,
         } = messageData;
 
-        const sender = await User.findById(senderId);
-        const recipient = await User.findById(recipientId);
+        const sender = await User.findById(senderId).session(session);
+        const recipient = await User.findById(recipientId).session(session);
         if (!sender || !recipient) {
           logger.warn('Sender or recipient not found', { senderId, recipientId });
+          await session.abortTransaction();
           return callback({ error: 'Sender or recipient not found' });
         }
 
-        const existingMessage = await Message.findOne({ clientMessageId });
+        const existingMessage = await Message.findOne({ clientMessageId }).session(session);
         if (existingMessage) {
-          logger.info('Duplicate message found', { clientMessageId, messageData });
+          logger.info('Duplicate message found', { clientMessageId });
+          await session.commitTransaction();
           return callback({ message: existingMessage.toObject() });
         }
 
@@ -378,289 +380,418 @@ module.exports = (io) => {
           status: 'sent',
           caption: caption || undefined,
           replyTo: replyTo && mongoose.isValidObjectId(replyTo) ? replyTo : undefined,
-          originalFilename: originalFilename || undefined,
+          originalFilename: messageData.originalFilename || undefined,
           clientMessageId,
           senderVirtualNumber: senderVirtualNumber || sender.virtualNumber,
           senderUsername: senderUsername || sender.username,
           senderPhoto: senderPhoto || sender.photo,
         });
 
-        await message.save();
-        io.to(recipientId).emit('message', message.toObject());
-        io.to(senderId).emit('message', message.toObject());
+        await message.save({ session });
+
+        const populatedMessage = await Message.findById(message._id)
+          .session(session)
+          .populate('senderId', 'username virtualNumber photo')
+          .populate('recipientId', 'username virtualNumber photo')
+          .populate('replyTo', 'content contentType senderId recipientId createdAt');
+
+        await session.commitTransaction();
+
+        io.to(recipientId).emit('message', populatedMessage.toObject());
+        io.to(senderId).emit('message', populatedMessage.toObject());
+
+        await memcached.setex(`:message:${clientMessageId}`, 3600, JSON.stringify(populatedMessage.toObject()));
+        await memcached.del(`:chat-list:${senderId}`);
+        await memcached.del(`:chat-list:${recipientId}`);
+
         emitUpdatedChatList(senderId);
         emitUpdatedChatList(recipientId);
-        logger.info('Message sent', { messageId: message._id, senderId, recipientId });
-        callback({ message: message.toObject() });
 
-        await memcached.del(`:chat-list:${senderId}`); // Changed to memcached
-        await memcached.del(`:chat-list:${recipientId}`); // Changed to memcached
-      } catch (error) {
-        logger.error('Socket message failed', { error: error.message, stack: error.stack, messageData });
-        callback({ error: 'Failed to send message', details: error.message });
+        logger.info('Message sent successfully', { messageId: message._id, clientMessageId, senderId, recipientId });
+
+        callback({ message: populatedMessage.toObject() });
+      } catch (err) {
+        await session.abortTransaction();
+        logger.error('Message send failed', { error: err.message, stack: err.stack, clientMessageId: messageData.clientMessageId });
+        callback({ error: err.message });
+      } finally {
+        session.endSession();
       }
     });
 
     socket.on('editMessage', async ({ messageId, newContent, plaintextContent }, callback) => {
+      const session = await mongoose.startSession();
+      session.startTransaction();
       try {
         if (!mongoose.isValidObjectId(messageId)) {
           logger.warn('Invalid messageId in editMessage', { messageId });
+          await session.abortTransaction();
           return callback({ error: 'Invalid messageId' });
         }
-        const message = await Message.findById(messageId);
+
+        const message = await Message.findById(messageId).session(session);
         if (!message) {
           logger.warn('Message not found for edit', { messageId });
+          await session.abortTransaction();
           return callback({ error: 'Message not found' });
         }
 
         message.content = newContent;
-        message.plaintextContent = plaintextContent;
+        message.plaintextContent = plaintextContent || '';
         message.updatedAt = new Date();
-        await message.save();
+        await message.save({ session });
 
-        io.to(message.recipientId).emit('editMessage', message.toObject());
-        io.to(message.senderId).emit('editMessage', message.toObject());
-        logger.info('Message edited', { messageId });
-        callback({ message: message.toObject() });
-      } catch (error) {
-        logger.error('Edit message failed', { error: error.message, stack: error.stack });
-        callback({ error: 'Failed to edit message', details: error.message });
+        const populatedMessage = await Message.findById(message._id)
+          .session(session)
+          .populate('senderId', 'username virtualNumber photo')
+          .populate('recipientId', 'username virtualNumber photo')
+          .populate('replyTo', 'content contentType senderId recipientId createdAt');
+
+        await session.commitTransaction();
+
+        io.to(message.recipientId.toString()).emit('editMessage', populatedMessage.toObject());
+        io.to(message.senderId.toString()).emit('editMessage', populatedMessage.toObject());
+
+        await memcached.setex(`:message:${message.clientMessageId}`, 3600, JSON.stringify(populatedMessage.toObject()));
+        await memcached.del(`:chat-list:${message.senderId}`);
+        await memcached.del(`:chat-list:${message.recipientId}`);
+
+        logger.info('Message edited successfully', { messageId });
+
+        callback({ message: populatedMessage.toObject() });
+      } catch (err) {
+        await session.abortTransaction();
+        logger.error('Edit message failed', { error: err.message, stack: err.stack, messageId });
+        callback({ error: err.message });
+      } finally {
+        session.endSession();
       }
     });
 
     socket.on('deleteMessage', async ({ messageId, recipientId }, callback) => {
+      const session = await mongoose.startSession();
+      session.startTransaction();
       try {
         if (!mongoose.isValidObjectId(messageId) || !mongoose.isValidObjectId(recipientId)) {
           logger.warn('Invalid IDs in deleteMessage', { messageId, recipientId });
+          await session.abortTransaction();
           return callback({ error: 'Invalid messageId or recipientId' });
         }
 
-        const message = await Message.findById(messageId);
+        const message = await Message.findById(messageId).session(session);
         if (!message) {
-          logger.warn('Message not found for deletion', { messageId });
+          logger.warn('Message not found for delete', { messageId });
+          await session.abortTransaction();
           return callback({ error: 'Message not found' });
         }
 
-        await Message.deleteOne({ _id: messageId });
+        await Message.findByIdAndDelete(messageId, { session });
+
+        await session.commitTransaction();
+
         io.to(recipientId).emit('deleteMessage', { messageId, recipientId });
-        io.to(message.senderId).emit('deleteMessage', { messageId, recipientId: message.senderId });
-        logger.info('Message deleted', { messageId });
+        io.to(message.senderId.toString()).emit('deleteMessage', { messageId, recipientId: message.senderId.toString() });
+
+        await memcached.del(`:message:${message.clientMessageId}`);
+        await memcached.del(`:chat-list:${message.senderId}`);
+        await memcached.del(`:chat-list:${message.recipientId}`);
+
+        emitUpdatedChatList(message.senderId.toString());
+        emitUpdatedChatList(recipientId);
+
+        logger.info('Message deleted successfully', { messageId, recipientId });
+
         callback({});
-      } catch (error) {
-        logger.error('Delete message failed', { error: error.message, stack: error.stack });
-        callback({ error: 'Failed to delete message', details: error.message });
+      } catch (err) {
+        await session.abortTransaction();
+        logger.error('Delete message failed', { error: err.message, stack: err.stack, messageId, recipientId });
+        callback({ error: err.message });
+      } finally {
+        session.endSession();
       }
     });
 
-    socket.on('messageStatus', async ({ messageId, status, recipientId }) => {
+    socket.on('messageStatus', async ({ messageId, status }) => {
+      const session = await mongoose.startSession();
+      session.startTransaction();
       try {
-        if (!mongoose.isValidObjectId(messageId) || !mongoose.isValidObjectId(recipientId)) {
-          logger.warn('Invalid IDs in messageStatus', { messageId, recipientId });
-          return;
-        }
-        const message = await Message.findById(messageId);
-        if (!message) {
-          logger.warn('Message not found for status update', { messageId });
+        if (!mongoose.isValidObjectId(messageId)) {
+          logger.warn('Invalid messageId in messageStatus', { messageId });
+          await session.abortTransaction();
           return;
         }
 
-        if (['sent', 'delivered', 'read'].includes(status)) {
-          message.status = status;
-          await message.save();
-          io.to(message.senderId).emit('messageStatus', { messageId, status });
-          io.to(recipientId).emit('messageStatus', { messageId, status });
-          logger.info('Message status updated', { messageId, status });
+        const message = await Message.findById(messageId).session(session);
+        if (!message || !['sent', 'delivered', 'read'].includes(status)) {
+          logger.warn('Invalid message or status', { messageId, status });
+          await session.abortTransaction();
+          return;
         }
-      } catch (error) {
-        logger.error('Message status update failed', { error: error.message, stack: error.stack });
+
+        message.status = status;
+        await message.save({ session });
+
+        await session.commitTransaction();
+
+        io.to(message.senderId.toString()).emit('messageStatus', { messageId, status });
+
+        await memcached.setex(`:message:${message.clientMessageId}`, 3600, JSON.stringify(message.toObject()));
+
+        logger.info('Message status updated', { messageId, status });
+      } catch (err) {
+        await session.abortTransaction();
+        logger.error('Message status update failed', { error: err.message, stack: err.stack, messageId });
+      } finally {
+        session.endSession();
       }
     });
 
     socket.on('batchMessageStatus', async ({ messageIds, status, recipientId }) => {
+      const session = await mongoose.startSession();
+      session.startTransaction();
       try {
-        if (
-          !messageIds.every((id) => mongoose.isValidObjectId(id)) ||
-          !mongoose.isValidObjectId(recipientId)
-        ) {
+        if (!messageIds.every((id) => mongoose.isValidObjectId(id)) || !mongoose.isValidObjectId(recipientId)) {
           logger.warn('Invalid IDs in batchMessageStatus', { messageIds, recipientId });
+          await session.abortTransaction();
           return;
         }
-        const messages = await Message.find({ _id: { $in: messageIds } });
+
+        const messages = await Message.find({ _id: { $in: messageIds }, recipientId }).session(session);
         if (!messages.length) {
           logger.warn('No messages found for batch status update', { messageIds });
+          await session.abortTransaction();
           return;
         }
 
         await Message.updateMany(
-          { _id: { $in: messageIds } },
-          { $set: { status, updatedAt: new Date() } }
+          { _id: { $in: messageIds }, recipientId },
+          { status, updatedAt: new Date() },
+          { session }
         );
 
-        messages.forEach((message) => {
-          io.to(message.senderId).emit('messageStatus', { messageId: message._id, status });
-          io.to(recipientId).emit('messageStatus', { messageId: message._id, status });
+        await session.commitTransaction();
+
+        const senderIds = [...new Set(messages.map((msg) => msg.senderId.toString()))];
+        senderIds.forEach((senderId) => {
+          io.to(senderId).emit('messageStatus', { messageIds, status });
         });
-        logger.info('Batch message status updated', { messageIds, status });
-      } catch (error) {
-        logger.error('Batch message status update failed', { error: error.message, stack: error.stack });
+
+        for (const message of messages) {
+          await memcached.setex(`:message:${message.clientMessageId}`, 3600, JSON.stringify(message.toObject()));
+        }
+
+        logger.info('Batch message status updated', { messageIds, status, recipientId });
+      } catch (err) {
+        await session.abortTransaction();
+        logger.error('Batch message status update failed', { error: err.message, stack: err.stack, messageIds });
+      } finally {
+        session.endSession();
       }
     });
   });
 
-  // GET /social/chat-list
   router.get('/chat-list', authMiddleware, async (req, res) => {
     const { userId } = req.query;
-    if (!mongoose.isValidObjectId(userId)) {
-      logger.warn('Invalid userId in chat-list request', { userId });
-      return res.status(400).json({ error: 'Invalid userId' });
-    }
-
-    const cacheKey = `:chat-list:${userId}`;
     try {
-      const cached = await memcached.get(cacheKey); // Changed to memcached
-      if (cached) {
+      if (!mongoose.isValidObjectId(userId)) {
+        logger.warn('Invalid userId in chat-list', { userId });
+        return res.status(400).json({ error: 'Invalid userId' });
+      }
+
+      const cacheKey = `:chat-list:${userId}`;
+      const cachedChatList = await memcached.get(cacheKey);
+      if (cachedChatList) {
         logger.info('Chat list served from cache', { userId });
-        return res.json(JSON.parse(cached));
+        return res.json(JSON.parse(cachedChatList));
       }
 
       const contacts = await User.find({ contacts: userId }).select(
         'username virtualNumber photo status lastSeen'
       );
-      const chatList = await Promise.all(
-        contacts.map(async (contact) => {
-          const latestMessage = await Message.findOne({
+
+      const contactIds = contacts.map((c) => c._id);
+      const latestMessages = await Message.aggregate([
+        {
+          $match: {
             $or: [
-              { senderId: userId, recipientId: contact._id },
-              { senderId: contact._id, recipientId: userId },
+              { senderId: new mongoose.Types.ObjectId(userId), recipientId: { $in: contactIds } },
+              { senderId: { $in: contactIds }, recipientId: new mongoose.Types.ObjectId(userId) },
             ],
-          })
-            .sort({ createdAt: -1 })
-            .select('content contentType senderId recipientId createdAt plaintextContent');
+          },
+        },
+        {
+          $sort: { createdAt: -1 },
+        },
+        {
+          $group: {
+            _id: {
+              $cond: [
+                { $eq: ['$senderId', new mongoose.Types.ObjectId(userId)] },
+                '$recipientId',
+                '$senderId',
+              ],
+            },
+            latestMessage: { $first: '$$ROOT' },
+          },
+        },
+        {
+          $project: {
+            _id: 0,
+            contactId: '$_id',
+            latestMessage: {
+              content: 1,
+              contentType: 1,
+              senderId: 1,
+              recipientId: 1,
+              createdAt: 1,
+              plaintextContent: 1,
+              senderVirtualNumber: 1,
+              senderUsername: 1,
+              senderPhoto: 1,
+            },
+          },
+        },
+      ]);
 
-          const unreadCount = await Message.countDocuments({
-            senderId: contact._id,
-            recipientId: userId,
+      const unreadCounts = await Message.aggregate([
+        {
+          $match: {
+            senderId: { $in: contactIds },
+            recipientId: new mongoose.Types.ObjectId(userId),
             status: { $ne: 'read' },
-          });
+          },
+        },
+        {
+          $group: {
+            _id: '$senderId',
+            unreadCount: { $sum: 1 },
+          },
+        },
+      ]);
 
-          return {
-            id: contact._id.toString(),
-            username: contact.username,
-            virtualNumber: contact.virtualNumber,
-            photo: contact.photo,
-            status: contact.status,
-            lastSeen: contact.lastSeen,
-            latestMessage: latestMessage ? latestMessage.toObject() : null,
-            unreadCount,
-          };
-        })
-      );
+      const chatList = contacts.map((contact) => {
+        const messageData = latestMessages.find(
+          (m) => m.contactId.toString() === contact._id.toString()
+        );
+        const unreadData = unreadCounts.find(
+          (u) => u._id.toString() === contact._id.toString()
+        );
+        return {
+          id: contact._id.toString(),
+          username: contact.username,
+          virtualNumber: contact.virtualNumber,
+          photo: contact.photo,
+          status: contact.status,
+          lastSeen: contact.lastSeen,
+          latestMessage: messageData ? messageData.latestMessage : null,
+          unreadCount: unreadData ? unreadData.unreadCount : 0,
+        };
+      });
 
-      await memcached.setex(cacheKey, 300, JSON.stringify(chatList)); // Changed to memcached
-      logger.info('Chat list fetched and cached', { userId });
+      await memcached.setex(cacheKey, 300, JSON.stringify(chatList));
+      logger.info('Chat list fetched', { userId });
+
       res.json(chatList);
-    } catch (error) {
-      logger.error('Chat list fetch failed', { error: error.message, stack: error.stack });
-      res.status(500).json({ error: 'Failed to fetch chat list', details: error.message });
+    } catch (err) {
+      logger.error('Chat list fetch failed', { error: err.message, stack: err.stack, userId });
+      res.status(500).json({ error: err.message });
     }
   });
 
-
-// GET /social/messages
-router.get('/messages', authMiddleware, async (req, res) => {
-  const { userId, recipientId, limit = 50, skip = 0 } = req.query;
-  if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId)) {
-    logger.warn('Invalid userId or recipientId in messages request', { userId, recipientId });
-    return res.status(400).json({ error: 'Invalid userId or recipientId' });
-  }
-
-  const cacheKey = `:messages:${userId}:${recipientId}:${limit}:${skip}`;
-  try {
-    let response;
+  router.get('/messages', authMiddleware, async (req, res) => {
+    const { userId, recipientId, limit = 50, skip = 0 } = req.query;
     try {
-      const cached = await memcached.get(cacheKey);
-      if (cached) {
-        logger.info('Messages served from cache', { userId, recipientId });
-        return res.json(JSON.parse(cached));
+      if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId)) {
+        logger.warn('Invalid IDs in messages', { userId, recipientId });
+        return res.status(400).json({ error: 'Invalid userId or recipientId' });
       }
-    } catch (cacheErr) {
-      logger.warn('Cache fetch failed, proceeding with MongoDB', { cacheKey, error: cacheErr.message });
-    }
 
-    const messages = await Message.find({
-      $or: [
-        { senderId: userId, recipientId },
-        { senderId: recipientId, recipientId: userId },
-      ],
-    })
-      .sort({ createdAt: -1 })
-      .skip(parseInt(skip))
-      .limit(parseInt(limit))
-      .select('senderId recipientId content contentType status createdAt updatedAt caption replyTo originalFilename clientMessageId senderVirtualNumber senderUsername senderPhoto plaintextContent');
+      const cacheKey = `:messages:${userId}:${recipientId}:${limit}:${skip}`;
+      const cachedMessages = await memcached.get(cacheKey);
+      if (cachedMessages) {
+        logger.info('Messages served from cache', { userId, recipientId });
+        return res.json(JSON.parse(cachedMessages));
+      }
 
-    const total = await Message.countDocuments({
-      $or: [
-        { senderId: userId, recipientId },
-        { senderId: recipientId, recipientId: userId },
-      ],
-    });
+      const messages = await Message.find({
+        $or: [
+          { senderId: userId, recipientId },
+          { senderId: recipientId, recipientId: userId },
+        ],
+      })
+        .sort({ createdAt: -1 })
+        .skip(parseInt(skip))
+        .limit(parseInt(limit))
+        .populate('senderId', 'username virtualNumber photo')
+        .populate('recipientId', 'username virtualNumber photo')
+        .populate('replyTo', 'content contentType senderId recipientId createdAt');
 
-    response = { messages: messages.reverse(), total };
-    try {
+      const response = {
+        messages: messages.map((msg) => msg.toObject()).reverse(),
+        total: await Message.countDocuments({
+          $or: [
+            { senderId: userId, recipientId },
+            { senderId: recipientId, recipientId: userId },
+          ],
+        }),
+      };
+
       await memcached.setex(cacheKey, 300, JSON.stringify(response));
-      logger.info('Messages fetched and cached', { userId, recipientId });
-    } catch (cacheErr) {
-      logger.warn('Failed to cache messages', { cacheKey, error: cacheErr.message });
+      logger.info('Messages fetched', { userId, recipientId, count: messages.length });
+
+      res.json(response);
+    } catch (err) {
+      logger.error('Messages fetch failed', { error: err.message, stack: err.stack, userId, recipientId });
+      res.status(500).json({ error: err.message });
     }
+  });
 
-    res.json(response);
-  } catch (error) {
-    logger.error('Messages fetch failed', { error: error.message, stack: error.stack });
-    res.status(500).json({ error: 'Failed to fetch messages', details: error.message });
-  }
-});
-
-
-
-  // POST /social/add_contact
   router.post('/add_contact', authMiddleware, async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
     try {
       const { error } = addContactSchema.validate(req.body);
       if (error) {
         logger.warn('Invalid add contact request', { error: error.details });
+        await session.abortTransaction();
         return res.status(400).json({ error: error.details[0].message });
       }
 
       const { userId, virtualNumber } = req.body;
-      const user = await User.findById(userId);
+      const user = await User.findById(userId).session(session);
       if (!user) {
         logger.warn('User not found for add contact', { userId });
+        await session.abortTransaction();
         return res.status(404).json({ error: 'User not found' });
       }
 
-      const contact = await User.findOne({ virtualNumber });
+      const contact = await User.findOne({ virtualNumber }).session(session);
       if (!contact) {
         logger.warn('Contact not found', { virtualNumber });
+        await session.abortTransaction();
         return res.status(400).json({ error: 'Contact not found' });
       }
 
       if (contact._id.toString() === userId) {
         logger.warn('Cannot add self as contact', { userId });
+        await session.abortTransaction();
         return res.status(400).json({ error: 'Cannot add yourself as a contact' });
       }
 
       if (user.contacts.includes(contact._id)) {
         logger.info('Contact already exists', { userId, contactId: contact._id });
+        await session.commitTransaction();
         return res.status(400).json({ error: 'Contact already exists' });
       }
 
       user.contacts.push(contact._id);
-      await user.save();
-
       if (!contact.contacts.includes(user._id)) {
         contact.contacts.push(user._id);
-        await contact.save();
       }
+      await user.save({ session });
+      await contact.save({ session });
+
+      await session.commitTransaction();
 
       const contactData = {
         id: contact._id.toString(),
@@ -673,41 +804,51 @@ router.get('/messages', authMiddleware, async (req, res) => {
 
       io.to(userId).emit('newContact', { userId, contactData });
       io.to(contact._id.toString()).emit('newContact', { userId: contact._id.toString(), contactData });
+
+      await memcached.del(`:chat-list:${userId}`);
+      await memcached.del(`:chat-list:${contact._id}`);
+      await memcached.del(`:contacts:${userId}`);
+      await memcached.del(`:contacts:${contact._id}`);
+
       emitUpdatedChatList(userId);
       emitUpdatedChatList(contact._id.toString());
 
-      await memcached.del(`:chat-list:${userId}`); // Changed to memcached
-      await memcached.del(`:chat-list:${contact._id}`); // Changed to memcached
-      await memcached.del(`:contacts:${userId}`); // Changed to memcached
-      await memcached.del(`:contacts:${contact._id}`); // Changed to memcached
+      logger.info('Contact added', { userId, contactId: contact._id });
 
-      logger.info('Contact added successfully', { userId, contactId: contact._id });
       res.json(contactData);
-    } catch (error) {
-      logger.error('Add contact failed', { error: error.message, stack: error.stack });
-      res.status(500).json({ error: 'Failed to add contact', details: error.message });
+    } catch (err) {
+      await session.abortTransaction();
+      logger.error('Add contact failed', { error: err.message, stack: err.stack, userId });
+      res.status(500).json({ error: err.message });
+    } finally {
+      session.endSession();
     }
   });
 
-  // POST /social/upload
   router.post('/upload', authMiddleware, upload.single('file'), async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
     try {
       const { userId, recipientId, clientMessageId, senderVirtualNumber, senderUsername, senderPhoto, caption } = req.body;
-      if (
-        !mongoose.isValidObjectId(userId) ||
-        !mongoose.isValidObjectId(recipientId) ||
-        !clientMessageId ||
-        !req.file
-      ) {
-        logger.warn('Missing or invalid fields in upload request', { userId, recipientId });
-        return res.status(400).json({ error: 'userId, recipientId, clientMessageId, and file are required' });
+      if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId) || !clientMessageId || !req.file) {
+        logger.warn('Invalid upload parameters', { userId, recipientId, clientMessageId });
+        await session.abortTransaction();
+        return res.status(400).json({ error: 'Invalid parameters' });
       }
 
-      const sender = await User.findById(userId);
-      const recipient = await User.findById(recipientId);
+      const sender = await User.findById(userId).session(session);
+      const recipient = await User.findById(recipientId).session(session);
       if (!sender || !recipient) {
         logger.warn('Sender or recipient not found', { userId, recipientId });
-        return res.status(404).json({ error: 'Sender or recipient not found' });
+        await session.abortTransaction();
+        return res.status(400).json({ error: 'Sender or recipient not found' });
+      }
+
+      const existingMessage = await Message.findOne({ clientMessageId }).session(session);
+      if (existingMessage) {
+        logger.info('Duplicate upload message', { clientMessageId });
+        await session.commitTransaction();
+        return res.json({ message: existingMessage.toObject() });
       }
 
       const contentType = req.file.mimetype.startsWith('image/')
@@ -718,85 +859,120 @@ router.get('/messages', authMiddleware, async (req, res) => {
         ? 'audio'
         : 'document';
 
-      const uploadStream = cloudinary.uploader.upload_stream(
-        { resource_type: contentType === 'document' ? 'raw' : contentType },
-        async (error, result) => {
-          if (error) {
-            logger.error('Cloudinary upload failed', { error: error.message, stack: error.stack });
-            return res.status(500).json({ error: 'Failed to upload file', details: error.message });
+      const uploadResult = await new Promise((resolve, reject) => {
+        const uploadStream = cloudinary.uploader.upload_stream(
+          { resource_type: contentType === 'document' ? 'raw' : contentType },
+          (error, result) => {
+            if (error) reject(error);
+            else resolve(result);
           }
+        );
+        require('stream').Readable.from(req.file.buffer).pipe(uploadStream);
+      });
 
-          const message = new Message({
-            senderId: userId,
-            recipientId,
-            content: result.secure_url,
-            contentType,
-            status: 'sent',
-            caption: caption || undefined,
-            originalFilename: req.file.originalname,
-            clientMessageId,
-            senderVirtualNumber: senderVirtualNumber || sender.virtualNumber,
-            senderUsername: senderUsername || sender.username,
-            senderPhoto: senderPhoto || sender.photo,
-          });
+      const message = new Message({
+        senderId: userId,
+        recipientId,
+        content: uploadResult.secure_url,
+        contentType,
+        status: 'sent',
+        caption: caption || undefined,
+        originalFilename: req.file.originalname,
+        clientMessageId,
+        senderVirtualNumber: senderVirtualNumber || sender.virtualNumber,
+        senderUsername: senderUsername || sender.username,
+        senderPhoto: senderPhoto || sender.photo,
+      });
 
-          await message.save();
-          io.to(recipientId).emit('message', message.toObject());
-          io.to(userId).emit('message', message.toObject());
-          emitUpdatedChatList(userId);
-          emitUpdatedChatList(recipientId);
-          logger.info('Media message uploaded and sent', { messageId: message._id, userId, recipientId });
+      await message.save({ session });
 
-          await memcached.del(`:chat-list:${userId}`); // Changed to memcached
-          await memcached.del(`:chat-list:${recipientId}`); // Changed to memcached
+      const populatedMessage = await Message.findById(message._id)
+        .session(session)
+        .populate('senderId', 'username virtualNumber photo')
+        .populate('recipientId', 'username virtualNumber photo')
+        .populate('replyTo', 'content contentType senderId recipientId createdAt');
 
-          res.json({ message: message.toObject() });
-        }
-      );
+      await session.commitTransaction();
 
-      require('stream').Readable.from(req.file.buffer).pipe(uploadStream);
-    } catch (error) {
-      logger.error('Upload failed', { error: error.message, stack: error.stack });
-      res.status(500).json({ error: 'Failed to upload file', details: error.message });
+      io.to(recipientId).emit('message', populatedMessage.toObject());
+      io.to(userId).emit('message', populatedMessage.toObject());
+
+      await memcached.setex(`:message:${clientMessageId}`, 3600, JSON.stringify(populatedMessage.toObject()));
+      await memcached.del(`:chat-list:${userId}`);
+      await memcached.del(`:chat-list:${recipientId}`);
+
+      emitUpdatedChatList(userId);
+      emitUpdatedChatList(recipientId);
+
+      logger.info('Media uploaded and message sent', { messageId: message._id, clientMessageId });
+
+      res.json({ message: populatedMessage.toObject() });
+    } catch (err) {
+      await session.abortTransaction();
+      logger.error('Media upload failed', { error: err.message, stack: err.stack, clientMessageId: req.body.clientMessageId });
+      res.status(500).json({ error: err.message });
+    } finally {
+      session.endSession();
     }
   });
 
-  // POST /social/delete_user
   router.post('/delete_user', authMiddleware, async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
     try {
       const { error } = deleteUserSchema.validate(req.body);
       if (error) {
         logger.warn('Invalid delete user request', { error: error.details });
+        await session.abortTransaction();
         return res.status(400).json({ error: error.details[0].message });
       }
 
       const { userId } = req.body;
-      const user = await User.findById(userId);
+      const user = await User.findById(userId).session(session);
       if (!user) {
         logger.warn('User not found for deletion', { userId });
+        await session.abortTransaction();
         return res.status(404).json({ error: 'User not found' });
       }
 
-      const contacts = await User.find({ contacts: userId }).select('_id');
+      const contacts = await User.find({ contacts: userId }).select('_id').session(session);
       const contactIds = contacts.map((contact) => contact._id.toString());
 
-      await User.deleteOne({ _id: userId });
+      await Message.deleteMany(
+        { $or: [{ senderId: userId }, { recipientId: userId }] },
+        { session }
+      );
 
-      await memcached.del(`:chat-list:${userId}`); // Changed to memcached
-      await memcached.del(`:contacts:${userId}`); // Changed to memcached
+      await User.updateMany(
+        { contacts: userId },
+        { $pull: { contacts: userId } },
+        { session }
+      );
+
+      await User.findByIdAndDelete(userId, { session });
+
+      await session.commitTransaction();
+
+      io.to(userId).emit('userStatus', { userId, status: 'offline', lastSeen: new Date() });
+      io.to(contactIds).emit('userDeleted', { userId });
+
+      await memcached.del(`:chat-list:${userId}`);
+      await memcached.del(`:contacts:${userId}`);
       for (const contactId of contactIds) {
-        await memcached.del(`:chat-list:${contactId}`); // Changed to memcached
-        await memcached.del(`:contacts:${contactId}`); // Changed to memcached
+        await memcached.del(`:chat-list:${contactId}`);
+        await memcached.del(`:contacts:${contactId}`);
         emitUpdatedChatList(contactId);
       }
 
-      io.to(contactIds).emit('userDeleted', { userId });
-      logger.info('User deleted successfully', { userId, notifiedContacts: contactIds.length });
+      logger.info('User deleted', { userId });
 
       res.json({ message: 'User deleted successfully' });
-    } catch (error) {
-      logger.error('Delete user failed', { error: error.message, stack: error.stack });
-      res.status(500).json({ error: 'Failed to delete user', details: error.message });
+    } catch (err) {
+      await session.abortTransaction();
+      logger.error('User deletion failed', { error: err.message, stack: err.stack, userId });
+      res.status(500).json({ error: err.message });
+    } finally {
+      session.endSession();
     }
   });
 

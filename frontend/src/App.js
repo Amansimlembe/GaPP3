@@ -15,19 +15,36 @@ import CountrySelector from './components/CountrySelector';
 
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
 
-const socket = io(BASE_URL, {
-  reconnection: true,
-  reconnectionAttempts: 10,
-  reconnectionDelay: 1000,
-  reconnectionDelayMax: 10000,
-  randomizationFactor: 0.5,
-  withCredentials: true,
-  autoConnect: false,
-  transports: ['websocket', 'polling'],
-  auth: { token: localStorage.getItem('token') },
-});
+class ErrorBoundary extends React.Component {
+  state = { hasError: false, error: null };
 
-// Updated getTokenExpiration with improved error handling
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.error('ErrorBoundary caught:', error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="error-screen p-4 text-center">
+          <h2 className="text-xl font-bold">Something went wrong</h2>
+          <p className="my-2">{this.state.error?.message || 'Unknown error'}</p>
+          <button
+            className="bg-primary text-white px-4 py-2 rounded"
+            onClick={() => window.location.reload()}
+          >
+            Reload
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 const getTokenExpiration = (token) => {
   try {
     if (!token || typeof token !== 'string' || !token.includes('.')) {
@@ -35,10 +52,6 @@ const getTokenExpiration = (token) => {
       return null;
     }
     const base64Url = token.split('.')[1];
-    if (!base64Url) {
-      console.warn('Token payload missing');
-      return null;
-    }
     const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
     const jsonPayload = decodeURIComponent(
       atob(base64)
@@ -47,11 +60,7 @@ const getTokenExpiration = (token) => {
         .join('')
     );
     const decoded = JSON.parse(jsonPayload);
-    if (!decoded.exp) {
-      console.warn('Token missing exp claim');
-      return null;
-    }
-    return decoded.exp * 1000;
+    return decoded.exp ? decoded.exp * 1000 : null;
   } catch (error) {
     console.error('Error decoding token:', error.message);
     return null;
@@ -67,7 +76,7 @@ const App = () => {
   const [username, setUsername] = useState(localStorage.getItem('username') || '');
   const [chatNotifications, setChatNotifications] = useState(0);
   const [isAuthenticated, setIsAuthenticated] = useState(!!localStorage.getItem('token'));
-  const [isLoadingAuth, setIsLoadingAuth] = useState(false);
+  const [socket, setSocket] = useState(null);
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
   const { selectedChat } = useSelector((state) => state.messages);
 
@@ -94,63 +103,55 @@ const App = () => {
       localStorage.setItem('virtualNumber', virtualNumber);
       localStorage.setItem('username', username);
       setIsAuthenticated(true);
-      if (!socket.connected) socket.connect();
     } else {
       localStorage.clear();
-      socket.emit('leave', userId);
-      socket.disconnect();
       setIsAuthenticated(false);
       setChatNotifications(0);
     }
   };
 
-  // Updated refreshToken to handle specific 401 errors
+  useEffect(() => {
+    if (token && userId) {
+      const newSocket = io(BASE_URL, {
+        auth: { token },
+        reconnectionAttempts: 5,
+        reconnectionDelay: 1000,
+        transports: ['websocket', 'polling'],
+      });
+      setSocket(newSocket);
+
+      return () => {
+        newSocket.emit('leave', userId);
+        newSocket.disconnect();
+        console.log('Socket cleanup');
+      };
+    }
+  }, [token, userId]);
+
   const refreshToken = async () => {
-    const maxRetries = 3;
-    let attempt = 0;
-    while (attempt < maxRetries) {
-      try {
-        console.log(`Refresh token attempt ${attempt + 1}`);
-        const response = await axios.post(
-          `${BASE_URL}/auth/refresh`,
-          { userId },
-          {
-            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-            timeout: 10000,
-            withCredentials: true,
-          }
-        );
-        const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername, privateKey } = response.data;
-        setAuth(newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername);
-        localStorage.setItem('privateKey', privateKey);
-        console.log('Token refreshed successfully');
-        return newToken;
-      } catch (error) {
-        attempt++;
-        console.error(`Token refresh attempt ${attempt} failed:`, error.response?.data || error.message);
-        // Stop retries for specific login-related errors
-        if (error.response?.status === 401 && 
-            (error.response?.data?.error === 'Email not registered' || 
-             error.response?.data?.error === 'Wrong password')) {
-          console.warn('Stopping token refresh for login error:', error.response.data.error);
-          throw error; // Exit retry loop
+    try {
+      const response = await axios.post(
+        `${BASE_URL}/auth/refresh`,
+        { userId },
+        {
+          headers: { Authorization: `Bearer ${token}` },
+          timeout: 10000,
         }
-        if (error.response?.status === 429) {
-          console.warn('Rate limit hit, waiting before retry');
-          await new Promise((resolve) => setTimeout(resolve, 1000 * attempt * 5));
-        } else if (attempt === maxRetries) {
-          console.warn('Token refresh failed after max attempts, clearing auth');
-          setAuth('', '', '', '', '', '');
-          return null;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
-      }
+      );
+      const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername, privateKey } = response.data;
+      setAuth(newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername);
+      localStorage.setItem('privateKey', privateKey);
+      console.log('Token refreshed');
+      return newToken;
+    } catch (error) {
+      console.error('Token refresh failed:', error.response?.data || error.message);
+      setAuth('', '', '', '', '', '');
+      return null;
     }
   };
 
-  // Updated useEffect with delayed initial token check
   useEffect(() => {
-    if (!isAuthenticated || !token || !userId) return;
+    if (!isAuthenticated || !token || !userId || !socket) return;
 
     let isRefreshing = false;
     const checkTokenExpiration = async () => {
@@ -158,72 +159,33 @@ const App = () => {
       isRefreshing = true;
       try {
         const expTime = getTokenExpiration(token);
-        const now = Date.now();
-        const bufferTime = 5 * 60 * 1000;
-
-        if (expTime && expTime - now < bufferTime) {
-          const newToken = await refreshToken();
-          if (!newToken) console.warn('Periodic token refresh failed');
+        if (expTime && expTime - Date.now() < 5 * 60 * 1000) {
+          await refreshToken();
         }
       } finally {
         isRefreshing = false;
       }
     };
 
-    // Delay initial check to avoid race condition
-    const initialCheck = setTimeout(checkTokenExpiration, 5000); // Wait 5 seconds
+    checkTokenExpiration();
     const interval = setInterval(checkTokenExpiration, 60 * 1000);
-    return () => {
-      clearTimeout(initialCheck);
-      clearInterval(interval);
-    };
-  }, [isAuthenticated, token, userId]);
+    return () => clearInterval(interval);
+  }, [isAuthenticated, token, userId, socket]);
 
   useEffect(() => {
-    const interceptor = axios.interceptors.response.use(
-      (response) => response,
-      async (error) => {
-        const originalRequest = error.config;
-        // Skip token refresh for specific login errors
-        if (error.response?.status === 401 && 
-            (error.response?.data?.error === 'Email not registered' || 
-             error.response?.data?.error === 'Wrong password')) {
-          return Promise.reject(error);
-        }
-        if (error.response?.status === 401 && !originalRequest._retry) {
-          originalRequest._retry = true;
-          const newToken = await refreshToken();
-          if (newToken) {
-            originalRequest.headers['Authorization'] = `Bearer ${newToken}`;
-            return axios(originalRequest);
-          }
-        }
-        return Promise.reject(error);
-      }
-    );
-    return () => axios.interceptors.response.eject(interceptor);
-  }, [token]);
-
-  useEffect(() => {
-    document.documentElement.className = theme === 'dark' ? 'dark' : '';
-    localStorage.setItem('theme', theme);
-  }, [theme]);
-
-  useEffect(() => {
-    if (!isAuthenticated || !token || !userId) return;
+    if (!socket) return;
 
     socket.on('connect', () => {
       socket.emit('join', userId);
       console.log('Socket connected:', socket.id);
     });
 
-    socket.on('connect_error', (error) => console.error('Socket connection error:', error.message));
-    socket.on('reconnect_attempt', (attempt) => console.log(`Reconnection attempt #${attempt}`));
-    socket.on('reconnect_failed', () => {
-      console.error('Reconnection failed after max attempts');
-      setAuth('', '', '', '', '', '');
+    socket.on('connect_error', (error) => {
+      console.error('Socket connect error:', error.message);
+      if (error.message.includes('invalid token')) {
+        setAuth('', '', '', '', '', '');
+      }
     });
-    socket.on('disconnect', (reason) => console.log('Socket disconnected:', reason));
 
     socket.on('message', (msg) => {
       if (msg.recipientId === userId && (!selectedChat || selectedChat !== msg.senderId)) {
@@ -231,55 +193,56 @@ const App = () => {
       }
     });
 
-    socket.on('newContact', (contactData) => console.log('New contact added via socket:', contactData));
+    socket.on('newContact', (contactData) => {
+      console.log('New contact:', contactData);
+    });
 
     return () => {
       socket.off('connect');
       socket.off('connect_error');
-      socket.off('reconnect_attempt');
-      socket.off('reconnect_failed');
       socket.off('message');
       socket.off('newContact');
-      socket.off('disconnect');
     };
-  }, [isAuthenticated, userId, token, selectedChat]);
+  }, [socket, userId, selectedChat]);
 
-  const toggleTheme = () => setTheme((prevTheme) => (prevTheme === 'light' ? 'dark' : 'light'));
+  useEffect(() => {
+    document.documentElement.className = theme === 'dark' ? 'dark' : '';
+    localStorage.setItem('theme', theme);
+  }, [theme]);
+
+  const toggleTheme = () => setTheme(theme === 'light' ? 'dark' : 'light');
   const handleChatNavigation = () => setChatNotifications(0);
 
-  // Render LoginScreen instantly if not authenticated and no token
-  if (!isAuthenticated && !localStorage.getItem('token')) {
-    return <LoginScreen setAuth={setAuth} />;
-  }
-
-  // Render nothing during auth check to avoid flicker
-  if (isLoadingAuth) {
-    return null;
+  if (!isAuthenticated) {
+    return (
+      <ErrorBoundary>
+        <LoginScreen setAuth={setAuth} />
+      </ErrorBoundary>
+    );
   }
 
   return (
-    <Router>
-      <AuthenticatedApp
-        token={token}
-        userId={userId}
-        role={role}
-        photo={photo}
-        virtualNumber={virtualNumber}
-        username={username}
-        chatNotifications={chatNotifications}
-        setAuth={setAuth}
-        socket={socket}
-        toggleTheme={toggleTheme}
-        handleChatNavigation={handleChatNavigation}
-        theme={theme}
-        setTheme={setTheme}
-        selectedChat={selectedChat}
-      />
-    </Router>
+    <ErrorBoundary>
+      <Router>
+        <AuthenticatedApp
+          token={token}
+          userId={userId}
+          role={role}
+          photo={photo}
+          virtualNumber={virtualNumber}
+          username={username}
+          chatNotifications={chatNotifications}
+          setAuth={setAuth}
+          socket={socket}
+          toggleTheme={toggleTheme}
+          handleChatNavigation={handleChatNavigation}
+          theme={theme}
+        />
+      </Router>
+    </ErrorBoundary>
   );
 };
 
-// Separate component for authenticated routes to use useLocation
 const AuthenticatedApp = ({
   token,
   userId,
@@ -293,10 +256,9 @@ const AuthenticatedApp = ({
   toggleTheme,
   handleChatNavigation,
   theme,
-  setTheme,
-  selectedChat,
 }) => {
   const location = useLocation();
+  const { selectedChat } = useSelector((state) => state.messages);
   const isChatRouteWithSelectedChat = location.pathname === '/chat' && selectedChat;
 
   return (
@@ -311,6 +273,7 @@ const AuthenticatedApp = ({
       )}
       <div className="flex-1 p-0 relative">
         <Routes>
+          <Route path="/jobs" element={<RoleBasedScreen role={role} />}/>
           <Route path="/jobs" element={role === 0 ? <JobSeekerScreen token={token} userId={userId} /> : <EmployerScreen token={token} userId={userId} />} />
           <Route path="/feed" element={<FeedScreen token={token} userId={userId} />} />
           <Route path="/chat" element={<ChatScreen token={token} userId={userId} setAuth={setAuth} socket={socket} username={username} virtualNumber={virtualNumber} photo={photo} />} />
@@ -319,34 +282,38 @@ const AuthenticatedApp = ({
           <Route path="*" element={<Navigate to="/feed" replace />} />
         </Routes>
       </div>
-      <motion.div
+      <motion.nav
         initial={{ y: 0 }}
-        animate={{ y: isChatRouteWithSelectedChat ? 100 : 0 }}
-        transition={{ duration: 0.5 }}
+        animate={{ y: isChatRouteWithSelectedChat ? 200 : 0 }}
+        transition={{ duration: 0.3 }}
         className="fixed bottom-0 left-0 right-0 bg-primary text-white p-2 flex justify-around items-center shadow-lg z-20"
       >
         <NavLink to="/feed" className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}>
-          <FaHome className="text-xl" />
+          <FaHome className="text-xl"/>
           <span className="text-xs">Feed</span>
         </NavLink>
-        <NavLink to="/jobs" className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}>
+        <NavLink to="/jobs" className="flex flex-col items-center p-2 rounded">
           <FaBriefcase className="text-xl" />
           <span className="text-xs">Jobs</span>
         </NavLink>
-        <NavLink to="/chat" onClick={handleChatNavigation} className={({ isActive }) => `flex flex-col items-center p-2 rounded relative ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}>
-          <FaComments className="text-xl" />
+        <NavLink
+          to="/chat"
+          onClick={handleChatNavigation}
+          className={({ isActive }) => `flex flex-col items-center p-2 rounded relative ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}
+        >
+          <FaComments className="text-xl"/>
           {chatNotifications > 0 && (
-            <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
+            <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-1 bg-primary text-xs rounded-circle w-5 h-5 flex items-center justify-center">
               {chatNotifications}
             </span>
           )}
           <span className="text-xs">Chat</span>
         </NavLink>
-        <NavLink to="/profile" className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}>
-          <FaUser className="text-xl" />
+        <NavLink to="/profile" className="flex flex-col items-center p-2">
+          <FaUser className="text-xl"/>
           <span className="text-xs">Profile</span>
         </NavLink>
-      </motion.div>
+      </motion.nav>
     </div>
   );
 };

@@ -52,8 +52,6 @@
   position: relative;
 }
 
-
-
 .menu-item {
   display: flex;
   align-items: center;
@@ -84,31 +82,31 @@
   font-size: 1.1rem;
 }
 
-
-/* Update menu-dropdown for responsiveness and click-outside behavior */
+/* Updated menu-dropdown for responsiveness and background */
 .menu-dropdown {
-  background: white;
+  background: #f5f5f5; /* Changed from white to light gray */
   border-radius: 12px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
   width: 280px;
-  max-width: 90vw; /* Ensure it fits on small screens */
+  max-width: calc(100vw - 20px); /* Improved responsiveness */
   padding: 12px;
-  position: absolute;
-  right: 10px; /* Adjusted for better alignment on small screens */
-  top: 40px;
-  z-index: 1000;
-  overflow: hidden;
+  position: fixed; /* Changed to fixed for better positioning */
+  right: 10px;
+  top: 60px; /* Adjusted to align below header */
+  z-index: 1001;
+  overflow: auto;
+  max-height: calc(100vh - 80px); /* Prevent overflow on small screens */
 }
 
 .dark .menu-dropdown {
-  background: #212121;
+  background: #2a2a2a; /* Dark theme background */
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
 }
 
-/* Update menu-add-contact for better visibility and responsiveness */
+/* Updated menu-add-contact for background and responsiveness */
 .menu-add-contact {
   padding: 12px;
-  background: linear-gradient(to bottom, #ffffff, #e8f0fe);
+  background: #e8ecef; /* Changed from white gradient to light gray */
   border-radius: 12px;
   margin-top: 12px;
   display: flex;
@@ -118,11 +116,16 @@
 }
 
 .dark .menu-add-contact {
-  background: linear-gradient(to bottom, #2a2a2a, #1c2526);
+  background: #333333; /* Dark theme background */
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
 }
 
-/* Update contact-input for better visibility in dark mode */
+.contact-input-group {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
 .contact-input {
   width: 100%;
   padding: 10px 36px 10px 12px;
@@ -136,69 +139,10 @@
 }
 
 .dark .contact-input {
-  background: #333;
-  border-color: #444;
-  color: #e0e0e0; /* Ensure text is visible in dark mode */
+  background: #444;
+  border-color: #555;
+  color: #e0e0e0;
 }
-
-/* Update responsive styles */
-@media (max-width: 768px) {
-  .menu-dropdown {
-    width: 100%;
-    max-width: 90vw;
-    right: 5px;
-    top: 50px;
-  }
-
-  .menu-add-contact {
-    padding: 10px;
-  }
-
-  .contact-input {
-    font-size: 0.85rem;
-    padding: 8px 32px 8px 10px;
-  }
-
-  .contact-button {
-    font-size: 0.85rem;
-    padding: 8px;
-  }
-}
-
-@media (max-width: 480px) {
-  .menu-dropdown {
-    right: 5px;
-    top: 45px;
-  }
-
-  .menu-add-contact {
-    gap: 10px;
-  }
-
-  .contact-input {
-    font-size: 0.8rem;
-    padding: 8px 30px 8px 10px;
-  }
-
-  .contact-button {
-    font-size: 0.8rem;
-    padding: 8px;
-  }
-}
-
-
-
-
-
-
-.contact-input-group {
-  position: relative;
-  display: flex;
-  align-items: center;
-}
-
-
-
 
 .contact-input:focus {
   border-color: #4caf50;
@@ -274,20 +218,31 @@
   to { transform: rotate(360deg); }
 }
 
+/* Updated error-message as overlay */
 .error-message {
+  position: fixed;
+  top: 70px; /* Below header */
+  left: 50%;
+  transform: translateX(-50%);
   background: #e53935;
   color: white;
-  padding: 10px;
+  padding: 10px 20px;
   border-radius: 8px;
-  margin: 10px 20px;
   font-size: 0.9rem;
   text-align: center;
-  animation: fadeIn 0.3s ease;
+  z-index: 1002;
+  max-width: calc(100vw - 40px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  animation: slideIn 0.3s ease forwards, fadeOut 3s ease 2s forwards; /* Auto-dismiss after 5s */
 }
 
-@keyframes fadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
+@keyframes slideIn {
+  from { transform: translateX(-50%) translateY(-20px); opacity: 0; }
+  to { transform: translateX(-50%) translateY(0); opacity: 1; }
+}
+
+@keyframes fadeOut {
+  to { opacity: 0; }
 }
 
 .chat-content {
@@ -392,7 +347,7 @@
   flex: 1;
   display: flex;
   flex-direction: column;
-  background: #efeae2;
+  background: #efeae2; /* Ensure consistent background */
 }
 
 .dark .chat-conversation {
@@ -454,6 +409,11 @@
   overflow-y: auto;
   padding: 20px;
   position: relative;
+  background: #efeae2; /* Reinforce background */
+}
+
+.dark .conversation-messages {
+  background: #121212;
 }
 
 .loading-messages, .no-messages {
@@ -791,8 +751,25 @@
     width: 100%;
   }
 
- 
+  .menu-dropdown {
+    width: calc(100vw - 20px);
+    right: 10px;
+    top: 60px;
+  }
 
+  .menu-add-contact {
+    padding: 10px;
+  }
+
+  .contact-input {
+    font-size: 0.85rem;
+    padding: 8px 32px 8px 10px;
+  }
+
+  .contact-button {
+    font-size: 0.85rem;
+    padding: 8px;
+  }
 }
 
 @media (max-width: 480px) {
@@ -820,15 +797,23 @@
     max-width: 80%;
   }
 
+  .menu-dropdown {
+    right: 10px;
+    top: 55px;
+  }
+
   .menu-add-contact {
-    gap: 12px;
+    gap: 10px;
+    padding: 8px;
   }
 
   .contact-input {
-    font-size: 0.85rem;
+    font-size: 0.8rem;
+    padding: 8px 30px 8px 10px;
   }
 
   .contact-button {
-    font-size: 0.85rem;
+    font-size: 0.8rem;
+    padding: 8px;
   }
 }
