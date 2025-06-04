@@ -15,14 +15,16 @@ const logger = winston.createLogger({
 const memcachedConfig = {
   servers: process.env.MEMCACHED_SERVERS || 'localhost:11211',
   options: {
-    timeout: 0.5, // Connection timeout in seconds
-    retries: 5,   // Increased retries
-    retry: 2000,  // Increased retry delay in ms
-    remove: true, // Remove failed servers from pool
+    timeout: 1, // Increased timeout
+    retries: 10, // More retries
+    retry: 3000, // Longer retry delay
+    remove: true,
     username: process.env.MEMCACHED_USERNAME,
     password: process.env.MEMCACHED_PASSWORD,
-    reconnect: true, // Enable automatic reconnection
-    maxExpiration: 2592000, // 30 days max expiration
+    reconnect: true,
+    maxExpiration: 2592000,
+    failover: true, // Enable failover to other servers
+    failoverTime: 60, // Seconds before retrying failed server
   },
 };
 
@@ -42,10 +44,14 @@ memcached.on('reconnect', (details) => {
 
 const get = (key) => {
   return new Promise((resolve) => {
+    if (!key) {
+      logger.warn('Invalid key provided', { key });
+      resolve(null);
+      return;
+    }
     memcached.get(key, (err, data) => {
       if (err) {
         logger.error('Memcached get failed', { key, error: err.message });
-        // Fallback to memory-cache
         const fallback = cache.get(key);
         if (fallback) {
           logger.info('Served from memory-cache fallback', { key });
@@ -58,6 +64,7 @@ const get = (key) => {
       }
       if (data) {
         logger.info('Memcached get success', { key });
+        cache.put(key, data, 3600 * 1000); // Cache in memory for 1 hour
         resolve(data);
       } else {
         const fallback = cache.get(key);
@@ -75,14 +82,21 @@ const get = (key) => {
 
 const setex = (key, lifetime, value) => {
   return new Promise((resolve, reject) => {
+    if (!key || !value || lifetime <= 0) {
+      logger.warn('Invalid setex parameters', { key, lifetime });
+      reject(new Error('Invalid parameters'));
+      return;
+    }
     memcached.set(key, value, lifetime, (err) => {
       if (err) {
         logger.error('Memcached setex failed', { key, error: err.message });
-        cache.put(key, value, lifetime * 1000); // Fallback to memory-cache
-        return reject(err);
+        cache.put(key, value, lifetime * 1000);
+        logger.info('Stored in memory-cache fallback', { key });
+        resolve(); // Resolve to avoid blocking
+        return;
       }
       logger.info('Memcached setex success', { key, lifetime });
-      cache.put(key, value, lifetime * 1000); // Sync with memory-cache
+      cache.put(key, value, lifetime * 1000);
       resolve();
     });
   });
@@ -90,14 +104,21 @@ const setex = (key, lifetime, value) => {
 
 const del = (key) => {
   return new Promise((resolve, reject) => {
+    if (!key) {
+      logger.warn('Invalid key provided', { key });
+      reject(new Error('Invalid key'));
+      return;
+    }
     memcached.del(key, (err) => {
       if (err) {
         logger.error('Memcached del failed', { key, error: err.message });
-        cache.del(key); // Fallback to memory-cache
-        return reject(err);
+        cache.del(key);
+        logger.info('Deleted from memory-cache fallback', { key });
+        resolve(); // Resolve to avoid blocking
+        return;
       }
       logger.info('Memcached del success', { key });
-      cache.del(key); // Sync with memory-cache
+      cache.del(key);
       resolve();
     });
   });
