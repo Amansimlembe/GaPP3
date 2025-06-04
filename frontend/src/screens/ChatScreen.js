@@ -921,8 +921,12 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         preventDefaultTouchmoveEvent: true,
       });
 
-      return (
-        <div key={msg._id || key} style={style} className="message-container" {...swipeHandlers}>
+      
+
+        const ref = swipeHandlers.ref;
+return (
+  <div key={msg._id || key} style={style} className="message-container" ref={ref} {...swipeHandlers}>
+
           {showDate && (
             <div className="date-header">
               <span>{formatDateHeader(msg.createdAt)}</span>
