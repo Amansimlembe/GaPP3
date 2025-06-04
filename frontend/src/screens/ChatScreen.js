@@ -499,7 +499,11 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
 
 
 const sendMessage = useCallback(async () => {
-  if ((!message.trim() && !files.length) || !selectedChat || !chats[selectedChat]) return;
+  if (!message.trim() || !selectedChat || !chats[selectedChat]) {
+    setError('Cannot send empty message or no chat selected');
+    return;
+  }
+
   const recipientId = selectedChat;
   const clientMessageId = `${userId}_${Date.now()}_${Math.random().toString(36).substring(2)}`;
   const plaintextContent = message.trim();
@@ -526,8 +530,9 @@ const sendMessage = useCallback(async () => {
 
     dispatch(addMessage({ recipientId, message: tempMessage }));
     await saveMessages([tempMessage]);
+
     if (isAtBottomRef.current && chats[recipientId]?.length > 0) {
-      listRef.current?.scrollToRow(chats[recipientId].length - 1);
+      listRef.current?.scrollToRow(chats[recipientId].length);
     }
 
     const messageData = {
@@ -545,6 +550,8 @@ const sendMessage = useCallback(async () => {
 
     socket.emit('message', messageData, async (ack) => {
       if (ack.error) {
+        console.error('Message send error:', ack.error);
+        setError(`Failed to send message: ${ack.error}`);
         setPendingMessages((prev) => [
           ...prev,
           { tempId: clientMessageId, recipientId, messageData },
@@ -553,7 +560,6 @@ const sendMessage = useCallback(async () => {
           ...pendingMessages,
           { tempId: clientMessageId, recipientId, messageData },
         ]);
-        setError('Failed to send message');
         return;
       }
       const { message: sentMessage } = ack;
@@ -574,13 +580,14 @@ const sendMessage = useCallback(async () => {
     inputRef.current?.focus();
   } catch (err) {
     console.error('Send message error:', err);
+    setError(`Failed to send message: ${err.message}`);
     const pendingMessage = {
       tempId: clientMessageId,
       recipientId,
       messageData: {
         senderId: userId,
         recipientId,
-        content: plaintextContent, // Fallback to plaintext if encryption fails
+        content: plaintextContent,
         contentType: 'text',
         plaintextContent,
         clientMessageId,
@@ -592,13 +599,11 @@ const sendMessage = useCallback(async () => {
     };
     setPendingMessages((prev) => [...prev, pendingMessage]);
     await savePendingMessages([...pendingMessages, pendingMessage]);
-    setError('Failed to send message');
   }
 }, [
   message,
   selectedChat,
   userId,
-  token,
   socket,
   dispatch,
   encryptMessage,
@@ -607,11 +612,9 @@ const sendMessage = useCallback(async () => {
   username,
   photo,
   replyTo,
-  files,
   pendingMessages,
   chats,
 ]);
-
 
 
   const handleEditMessage = useCallback(
@@ -729,38 +732,52 @@ const sendMessage = useCallback(async () => {
     }
   }, [selectedChat, fetchMessages, initializeChat, chats]);
 
-// Line ~1100: Updated useEffect with handleMessage
-useEffect(() => {
-  const handleMessage = async (msg) => {
-    if (chats[selectedChat]?.some((m) => m.clientMessageId === msg.clientMessageId)) return;
-    const privateKeyPem = localStorage.getItem('privateKey');
 
+  useEffect(() => {
+  if (!selectedChat || !chats) return;
+
+  const handleMessage = async (msg) => {
+    // Prevent duplicate messages
+    if (msg.clientMessageId && chats[selectedChat]?.some((m) => m.clientMessageId === msg.clientMessageId)) {
+      console.warn('Duplicate message received:', msg.clientMessageId);
+      return;
+    }
+
+    const privateKeyPem = localStorage.getItem('privateKey');
     let decryptedContent = msg.content;
-    // Only attempt decryption for text messages with valid content
-    if (msg.contentType === 'text' && msg.recipientId === userId && typeof msg.content === 'string') {
-      decryptedContent = await decryptMessage(msg.content, privateKeyPem);
-    } else if (msg.contentType !== 'text') {
-      // For media, content is a URL, no decryption needed
-      decryptedContent = msg.content;
-    } else {
-      console.warn('Invalid message content or type:', msg);
-      decryptedContent = '[Invalid message]';
+
+    try {
+      if (msg.contentType === 'text' && msg.recipientId === userId && typeof msg.content === 'string') {
+        decryptedContent = await decryptMessage(msg.content, privateKeyPem);
+      } else if (msg.contentType !== 'text') {
+        decryptedContent = msg.content; // Media URLs don't need decryption
+      } else {
+        console.warn('Invalid message content or type:', msg);
+        decryptedContent = '[Invalid message]';
+      }
+    } catch (err) {
+      console.error('Message decryption failed:', err);
+      decryptedContent = '[Decryption failed]';
     }
 
     const newMessage = { ...msg, content: decryptedContent };
     const recipientId = msg.senderId === userId ? msg.recipientId : msg.senderId;
+
+    // Ensure chat is initialized
     if (!chats[recipientId]) {
       initializeChat(recipientId);
     }
+
     dispatch(addMessage({ recipientId, message: newMessage }));
     await saveMessages([newMessage]);
+
     if (
       msg.recipientId === userId &&
       selectedChat === msg.senderId &&
       isAtBottomRef.current &&
       chats[selectedChat]?.length > 0
     ) {
-      listRef.current?.scrollToRow(chats[selectedChat].length - 1);
+      listRef.current?.scrollToRow(chats[selectedChat].length);
       socket.emit('batchMessageStatus', {
         messageIds: [msg._id],
         status: 'read',
@@ -769,34 +786,41 @@ useEffect(() => {
     }
   };
 
-    const handleEditMessage = async (updatedMessage) => {
-      const privateKeyPem = localStorage.getItem('privateKey');
-      const decryptedContent =
-        updatedMessage.contentType === 'text' && updatedMessage.recipientId === userId
-          ? await decryptMessage(updatedMessage.content, privateKeyPem)
-          : updatedMessage.content;
-      dispatch(
-        replaceMessage({
-          recipientId: selectedChat,
-          message: { ...updatedMessage, content: decryptedContent },
-          replaceId: updatedMessage._id,
-        })
-      );
-      await saveMessages([{ ...updatedMessage, content: decryptedContent }]);
-    };
+  const handleEditMessage = async (updatedMessage) => {
+    if (!selectedChat || !chats[selectedChat]) return;
 
-    const handleDeleteMessage = ({ messageId, recipientId }) => {
-      dispatch(deleteMessage({ recipientId, messageId }));
-      saveMessages(chats[recipientId]?.filter((msg) => msg._id !== messageId) || []);
-    };
+    const privateKeyPem = localStorage.getItem('privateKey');
+    let decryptedContent = updatedMessage.content;
 
-    const handleChatListUpdate = ({ users }) => {
-      setUsers(users);
-      localStorage.setItem('cachedUsers', JSON.stringify(users));
-    };
+    try {
+      if (updatedMessage.contentType === 'text' && updatedMessage.recipientId === userId) {
+        decryptedContent = await decryptMessage(updatedMessage.content, privateKeyPem);
+      }
+    } catch (err) {
+      console.error('Edit message decryption failed:', err);
+      decryptedContent = '[Decryption failed]';
+    }
 
-   
-  // ... (other socket handlers remain unchanged)
+    dispatch(
+      replaceMessage({
+        recipientId: selectedChat,
+        message: { ...updatedMessage, content: decryptedContent },
+        replaceId: updatedMessage._id,
+      })
+    );
+    await saveMessages([{ ...updatedMessage, content: decryptedContent }]);
+  };
+
+  const handleDeleteMessage = ({ messageId, recipientId }) => {
+    if (!chats[recipientId]) return;
+    dispatch(deleteMessage({ recipientId, messageId }));
+    saveMessages(chats[recipientId]?.filter((msg) => msg._id !== messageId) || []);
+  };
+
+  const handleChatListUpdate = ({ users }) => {
+    setUsers(users);
+    localStorage.setItem('cachedUsers', JSON.stringify(users));
+  };
 
   socket.on('message', handleMessage);
   socket.on('editMessage', handleEditMessage);
@@ -808,12 +832,12 @@ useEffect(() => {
     setIsTyping((prev) => ({ ...prev, [typerId]: false }))
   );
   socket.on('messageStatus', ({ messageId, status }) =>
+    selectedChat &&
     dispatch(updateMessageStatus({ recipientId: selectedChat, messageId, status }))
   );
-  socket.on('newContact', ({ userId: emitterId, contactData }) => {
+  socket.on('newContact', ({ contactData }) => {
     setUsers((prev) => {
-      const exists = prev.some((u) => u.id === contactData.id);
-      if (exists) return prev;
+      if (prev.some((u) => u.id === contactData.id)) return prev;
       const updatedUsers = [...prev, contactData];
       localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
       initializeChat(contactData.id);
@@ -821,9 +845,9 @@ useEffect(() => {
     });
   });
   socket.on('chatListUpdated', handleChatListUpdate);
-  socket.on('userStatus', ({ userId, status, lastSeen }) => {
+  socket.on('userStatus', ({ userId: statusUserId, status, lastSeen }) => {
     setUsers((prev) =>
-      prev.map((u) => (u.id === userId ? { ...u, status, lastSeen } : u))
+      prev.map((u) => (u.id === statusUserId ? { ...u, status, lastSeen } : u))
     );
     localStorage.setItem('cachedUsers', JSON.stringify(users));
   });
@@ -840,10 +864,6 @@ useEffect(() => {
     socket.off('userStatus');
   };
 }, [socket, selectedChat, userId, dispatch, decryptMessage, users, chats, initializeChat]);
-
-// ... (rest of the component remains unchanged)
-
-
 
 
 
