@@ -413,83 +413,81 @@ const tempMessages = compressedFiles.map((file) => {
 
         for (let [index, file] of compressedFiles.entries()) {
           const clientMessageId = tempMessages[index]._id;
-          const retryUpload = async (retryCount = 3) => {
-            let attempt = 0;
-            while (attempt < retryCount) {
-              const formData = new FormData();
-              try {
-                formData.append(fileFormData, file);
-                formData.append('userId', userId);
-                formData.append('recipientId', selectedChatRef.current);
-                formData.append('clientMessageId', clientMessageId);
-                formData.append('senderVirtualNumber', virtualNumber);
-                formData.append('senderUsername', username);
-                formData.append('senderPhoto', photo);
-                if (captions[clientMessageId]) {
-                  formData.append('caption', captions[clientMessageId]);
-                }
 
-                const response = await axios.post(`${BASE_URL}/social/upload`, formData, {
-                  headers: {
-                    Authorization: `Bearer ${token}`,
-                    'Content-Type': 'multipart/form-data',
-                  },
-                 onUploadProgress: (data) => {
-  const percentCompleted = Math.round((data.loaded * 100) / data.total);
-  setUploadProgress((prev) => ({ ...prev, [clientMessageId]: percentCompleted }));
-  dispatch(
-    updateMessageStatus({
-      recipientId: selectedChat,
-      messageId: clientMessageId,
-      status: 'uploading',
-      uploadProgress: percentCompleted,
-    })
-  );
-  console.log(`Upload progress for ${clientMessageId}: ${percentCompleted}%`);
-}
+const retryUpload = async (retryCount = 3) => {
+  let attempt = 0;
+  while (attempt < retryCount) {
+    const formData = new FormData();
+    try {
+      formData.append('file', file); // Correct key expected by the backend
+      formData.append('userId', userId);
+      formData.append('recipientId', selectedChatRef.current);
+      formData.append('clientMessageId', clientMessageId);
+      formData.append('senderVirtualNumber', virtualNumber);
+      formData.append('senderUsername', username);
+      formData.append('senderPhoto', photo);
+      if (captions[clientMessageId]) {
+        formData.append('caption', captions[clientMessageId]);
+      }
 
-                
-                });
+      const response = await axios.post(`${BASE_URL}/social/upload`, formData, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'multipart/form-data',
+        },
+        onUploadProgress: (data) => {
+          const percentCompleted = Math.round((data.loaded * 100) / data.total);
+          setUploadProgress((prev) => ({ ...prev, [clientMessageId]: percentCompleted }));
+          dispatch(
+            updateMessageStatus({
+              recipientId: selectedChat,
+              messageId: clientMessageId,
+              status: 'uploading',
+              uploadProgress: percentCompleted,
+            })
+          );
+          console.log(`Upload progress for ${clientMessageId}: ${percentCompleted}%`);
+        },
+      });
 
-                const { message: uploadedMessage } = response.data;
-                dispatch(
-                  updateMessage({
-                    recipientId: selectedChatRef.current,
-                    message: uploadedMessage,
-                    replaceId: clientMessageId
-                  })
-                );
-                socket.emit('messageStatus', uploadedMessage);
-                await saveMessages([uploadedMessage]);
-                console.log('Media uploaded successfully:', uploadedMessage._id);
-                return;
-              } catch (error) {
-                console.error(`Media upload attempt ${attempt + 1} failed:`, error);
-                attempt++;
-                if (error.response?.status === 401) {
-                  setError('Session expired, please log in again');
-                  setTimeout(() => handleLogout(), 1000);
-                  return;
-                }
-                if (error.response?.status === 429) {
-                  await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * 1000));
-                }
-                if (attempt === retryCount) {
-                  dispatch(
-                    updateMessageStatus({
-                      recipientId: selectedChatRef.current,
-                      messageId: clientMessageId,
-                      status: 'failed',
-                      uploadProgress: false,
-                    })
-                  );
-                  setError('Failed to upload media');
-                  console.log(`Media upload failed for ${clientMessageId}`);
-                }
-              }
-            }
-          };
-
+      const { message: uploadedMessage } = response.data;
+      dispatch(
+        updateMessage({
+          recipientId: selectedChatRef.current,
+          message: uploadedMessage,
+          replaceId: clientMessageId,
+        })
+      );
+      socket.emit('messageStatus', uploadedMessage);
+      await saveMessages([uploadedMessage]);
+      console.log('Media uploaded successfully:', uploadedMessage._id);
+      return;
+    } catch (error) {
+      console.error(`Media upload attempt ${attempt + 1} failed:`, error);
+      attempt++;
+      if (error.response?.status === 401) {
+        setError('Session expired, please log in again');
+        setTimeout(() => handleLogout(), 1000);
+        return;
+      }
+      if (error.response?.status === 429) {
+        await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * 1000));
+      }
+      if (attempt === retryCount) {
+        dispatch(
+          updateMessageStatus({
+            recipientId: selectedChatRef.current,
+            messageId: clientMessageId,
+            status: 'failed',
+            uploadProgress: false,
+          })
+        );
+        setError('Failed to upload media');
+        console.log(`Media upload failed for ${clientMessageId}`);
+      }
+    }
+  }
+};
           retryUpload();
         }
 
@@ -592,43 +590,38 @@ const tempMessages = compressedFiles.map((file) => {
       const recipientPublicKey = await getPublicKey(recipientId);
       const encryptedContent = await encryptMessage(plaintextContent, recipientPublicKey);
 
-      const tempMessage = {
-        _id: clientMessageId,
-        senderId: userId,
-        recipientId,
-        content: plaintextContent,
-        contentType: 'text',
-        plaintextContent,
-        status: 'pending',
-        createdAt: new Date().toISOString(),
-        clientMessageId,
-        senderVirtualNumber,
-        senderUsername,
-        senderPhoto,
-        replyTo: replyTo ? { ...replyTo, content: replyTo.content } : undefined,
-      };
+      
 
-      dispatch(addMessage({ recipientId, message: tempMessage }));
-      await saveMessages([tempMessage]);
-      console.log('Added temporary message:', clientMessageId);
 
-      if (listRef.current && chats[recipientId]?.length) {
-        listRef.current.scrollToRow(chats[recipientId].length);
-        console.log(`Scrolled to row ${chats[recipientId].length} for ${recipientId}`);
-      }
+const tempMessage = {
+  _id: clientMessageId,
+  senderId: userId,
+  recipientId,
+  content: plaintextContent,
+  contentType: 'text',
+  plaintextContent,
+  status: 'pending',
+  createdAt: new Date().toISOString(),
+  clientMessageId,
+  senderVirtualNumber: virtualNumber, // Use virtualNumber prop
+  senderUsername: username,
+  senderPhoto: photo,
+  replyTo: replyTo ? { ...replyTo, content: replyTo.content } : undefined,
+};
 
-      const messageData = {
-        senderId: userId,
-        recipientId,
-        content: encryptedContent,
-        contentType: 'text',
-        plaintextContent,
-        clientMessageId,
-        senderVirtualNumber,
-        senderUsername,
-        senderPhoto,
-        replyTo: replyTo ? replyTo._id : undefined,
-      };
+const messageData = {
+  senderId: userId,
+  recipientId,
+  content: encryptedContent,
+  contentType: 'text',
+  plaintextContent,
+  clientMessageId,
+  senderVirtualNumber: virtualNumber, // Use virtualNumber prop
+  senderUsername: username,
+  senderPhoto: photo,
+  replyTo: replyTo ? replyTo._id : undefined,
+};
+        
 
       socket.emit('message', messageData, async (ack) => {
         if (ack?.error) {
