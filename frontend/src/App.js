@@ -273,7 +273,6 @@ const AuthenticatedApp = ({
       )}
       <div className="flex-1 p-0 relative">
         <Routes>
-          <Route path="/jobs" element={<RoleBasedScreen role={role} />}/>
           <Route path="/jobs" element={role === 0 ? <JobSeekerScreen token={token} userId={userId} /> : <EmployerScreen token={token} userId={userId} />} />
           <Route path="/feed" element={<FeedScreen token={token} userId={userId} />} />
           <Route path="/chat" element={<ChatScreen token={token} userId={userId} setAuth={setAuth} socket={socket} username={username} virtualNumber={virtualNumber} photo={photo} />} />
