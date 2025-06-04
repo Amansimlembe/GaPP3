@@ -96,6 +96,8 @@ export const clearDatabase = async () => {
   }
 };
 
+
+
 export const saveMessages = async (messages) => {
   if (!Array.isArray(messages) || !messages.length) {
     console.warn('No messages to save');
@@ -110,9 +112,9 @@ export const saveMessages = async (messages) => {
 
       await Promise.all(
         messages.map((msg) => {
-          if (!msg._id || !msg.clientMessageId || !msg.recipientId || !msg.senderId) {
-            console.warn('Invalid message:', msg);
-            throw new Error('Missing required message fields');
+          if (!msg._id || !msg.clientMessageId || !msg.recipientId || !msg.senderId || !isValidObjectId(msg.recipientId) || !isValidObjectId(msg.senderId)) {
+            console.warn('Invalid message skipped:', msg);
+            return Promise.resolve();
           }
           return store.put({
             ...msg,
@@ -143,6 +145,8 @@ export const saveMessages = async (messages) => {
     throw error;
   }
 };
+
+
 
 export const getMessages = async (recipientId) => {
   try {

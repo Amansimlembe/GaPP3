@@ -249,116 +249,127 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     [token, userId, handleLogout, decryptMessage, socket]
   );
 
+
   const fetchMessages = useCallback(
-    debounce(async (recipientId, retryCount = 3) => {
-      if (!recipientId || !isValidObjectId(recipientId)) {
-        console.warn('Invalid recipientId:', recipientId);
-        dispatch(setMessages({ recipientId, messages: [] }));
-        setError('Invalid chat selected');
+  debounce(async (recipientId, retryCount = 3) => {
+    if (!recipientId || !isValidObjectId(recipientId)) {
+      console.warn('Invalid recipientId:', recipientId);
+      dispatch(setMessages({ recipientId, messages: [] }));
+      setError('Invalid chat selected');
+      return;
+    }
+    try {
+      const localMessages = await getMessages(recipientId);
+      if (localMessages.length) {
+        dispatch(setMessages({ recipientId, messages: localMessages }));
+        listRef.current?.scrollToRow(localMessages.length - 1);
+        console.log(`Loaded ${localMessages.length} messages from IndexedDB for ${recipientId}`);
         return;
+      } else {
+        console.log(`No local messages found for ${recipientId}, fetching from server`);
       }
+    } catch (err) {
+      console.error('Failed to load local messages:', err);
+    }
+    let attempt = 0;
+    while (attempt < retryCount) {
       try {
-        const localMessages = await getMessages(recipientId);
-        if (localMessages.length) {
-          dispatch(setMessages({ recipientId, messages: localMessages }));
-          listRef.current?.scrollToRow(localMessages.length - 1);
-          console.log(`Loaded ${localMessages.length} messages from IndexedDB for ${recipientId}`);
+        const { data } = await axios.get(`${BASE_URL}/social/messages`, {
+          headers: { Authorization: `Bearer ${token}` },
+          params: { userId, recipientId, limit: 50, skip: 0 },
+          timeout: 10000,
+        });
+        const privateKeyPem = localStorage.getItem('privateKey');
+        const messages = await Promise.all(
+          data.messages.map(async (msg) => {
+            const newMsg = { ...msg };
+            if (msg.senderId === userId) {
+              newMsg.content = msg.plaintextContent || msg.content;
+            } else if (msg.recipientId === userId) {
+              newMsg.content =
+                msg.contentType === 'text' ? await decryptMessage(msg.content, privateKeyPem) : msg.content;
+            }
+            return newMsg;
+          })
+        );
+        dispatch(setMessages({ recipientId, messages }));
+        await saveMessages(messages);
+        listRef.current?.scrollToRow(messages.length - 1);
+        console.log(`Fetched ${messages.length} messages for ${recipientId}`);
+        setError('');
+        return;
+      } catch (err) {
+        attempt++;
+        console.error(`Fetch messages attempt ${attempt} failed:`, err);
+        if (err.response?.status === 401) {
+          setError('Session expired, please log in again');
+          setTimeout(() => handleLogout(), 2000);
           return;
         }
-      } catch (err) {
-        console.error('Failed to load local messages:', err);
+        if (err.response?.status === 429) {
+          await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * 1000));
+        }
+        if (attempt === retryCount) {
+          setError('Failed to load messages');
+          dispatch(setMessages({ recipientId, messages: [] }));
+          console.warn(`No messages fetched for ${recipientId} after ${retryCount} attempts`);
+        }
       }
-      let attempt = 0;
-      while (attempt < retryCount) {
-        try {
-          const { data } = await axios.get(`${BASE_URL}/social/messages`, {
-            headers: { Authorization: `Bearer ${token}` },
-            params: { userId, recipientId, limit: 50, skip: 0 },
-            timeout: 10000,
-          });
-          const privateKeyPem = localStorage.getItem('privateKey');
-          const messages = await Promise.all(
-            data.messages.map(async (msg) => {
-              const newMsg = { ...msg };
-              if (msg.senderId === userId) {
-                newMsg.content = msg.plaintextContent || msg.content;
-              } else if (msg.recipientId === userId) {
-                newMsg.content =
-                  msg.contentType === 'text' ? await decryptMessage(msg.content, privateKeyPem) : msg.content;
-              }
-              return newMsg;
+    }
+  }, 500),
+  [token, userId, dispatch, decryptMessage, handleLogout]
+);
+
+
+
+
+const sendPendingMessages = useCallback(async () => {
+  if (!navigator.onLine || !pendingMessages.length) {
+    console.log(`Skipping sendPendingMessages: online=${navigator.onLine}, pending=${pendingMessages.length}`);
+    return;
+  }
+  const successfulSends = [];
+  for (const { tempId, recipientId, messageData } of pendingMessages) {
+    if (!isValidObjectId(recipientId)) {
+      console.warn('Invalid recipientId in pending message:', recipientId);
+      continue;
+    }
+    try {
+      await new Promise((resolve, reject) => {
+        socket.emit('message', messageData, (ack) => {
+          if (ack.error) {
+            console.error('Pending message send error:', ack.error);
+            return reject(new Error(ack.error));
+          }
+          const { message: sentMessage } = ack;
+          dispatch(
+            replaceMessage({
+              recipientId,
+              message: { ...sentMessage, content: sentMessage.plaintextContent || sentMessage.content },
+              replaceId: tempId,
             })
           );
-          dispatch(setMessages({ recipientId, messages }));
-          await saveMessages(messages);
-          listRef.current?.scrollToRow(messages.length - 1);
-          console.log(`Fetched ${messages.length} messages for ${recipientId}`);
-          setError('');
-          return;
-        } catch (err) {
-          attempt++;
-          console.error(`Fetch messages attempt ${attempt} failed:`, err);
-          if (err.response?.status === 401) {
-            setError('Session expired, please log in again');
-            setTimeout(() => handleLogout(), 2000);
-            return;
-          }
-          if (err.response?.status === 429) {
-            await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * 1000));
-          }
-          if (attempt === retryCount) {
-            setError('Failed to load messages');
-            dispatch(setMessages({ recipientId, messages: [] }));
-          }
-        }
-      }
-    }, 500),
-    [token, userId, dispatch, decryptMessage, handleLogout]
-  );
-
-  const sendPendingMessages = useCallback(async () => {
-    if (!navigator.onLine || !pendingMessages.length) return;
-    const successfulSends = [];
-    for (const { tempId, recipientId, messageData } of pendingMessages) {
-      if (!isValidObjectId(recipientId)) {
-        console.warn('Invalid recipientId in pending message:', recipientId);
-        continue;
-      }
-      try {
-        await new Promise((resolve, reject) => {
-          socket.emit('message', messageData, (ack) => {
-            if (ack.error) {
-              console.error('Pending message send error:', ack.error);
-              return reject(new Error(ack.error));
-            }
-            const { message: sentMessage } = ack;
-            dispatch(
-              replaceMessage({
-                recipientId,
-                message: { ...sentMessage, content: sentMessage.plaintextContent || sentMessage.content },
-                replaceId: tempId,
-              })
-            );
-            saveMessages([{ ...sentMessage, content: sentMessage.plaintextContent || sentMessage.content }])
-              .then(() => successfulSends.push(tempId))
-              .catch((err) => console.error('Failed to save pending message:', err));
-            resolve();
-          });
+          saveMessages([{ ...sentMessage, content: sentMessage.plaintextContent || sentMessage.content }])
+            .then(() => successfulSends.push(tempId))
+            .catch((err) => console.error('Failed to save pending message:', err));
+          resolve();
         });
-      } catch (err) {
-        console.error('Pending message send error:', err);
-      }
+      });
+    } catch (err) {
+      console.error('Pending message send error:', err);
     }
-    if (successfulSends.length) {
-      const updatedPending = pendingMessages.filter((p) => !successfulSends.includes(p.tempId));
-      setPendingMessages(updatedPending);
-      await savePendingMessages(updatedPending);
-      if (!updatedPending.length) {
-        await clearPendingMessages();
-      }
-      console.log(`Sent ${successfulSends.length} pending messages`);
+  }
+  if (successfulSends.length) {
+    const updatedPending = pendingMessages.filter((p) => !successfulSends.includes(p.tempId));
+    setPendingMessages(updatedPending);
+    await savePendingMessages(updatedPending);
+    if (!updatedPending.length) {
+      await clearPendingMessages();
     }
-  }, [pendingMessages, socket, dispatch]);
+    console.log(`Sent ${successfulSends.length} pending messages`);
+  }
+}, [pendingMessages, socket, dispatch]);
+
 
   const handleFileChange = useCallback(
     async (e, type) => {
@@ -575,167 +586,175 @@ const retryUpload = async (retryCount = 3) => {
     }
   }, [newContactNumber, userId, token, socket, handleLogout, initializeChat]);
 
+
+
   const sendMessage = useCallback(async () => {
-    if (!message.trim() || !selectedChat || !isValidObjectId(selectedChat)) {
-      setError('Cannot send empty message or invalid chat');
-      console.warn('Invalid message or chat:', { message, selectedChat });
-      return;
-    }
+  if (!message.trim() || !selectedChat || !isValidObjectId(selectedChat)) {
+    setError('Cannot send empty message or invalid chat');
+    console.warn('Invalid message or chat:', { message, selectedChat });
+    return;
+  }
 
-    const recipientId = selectedChat;
-    const clientMessageId = generateClientMessageId();
-    const plaintextContent = message.trim();
+  const recipientId = selectedChat;
+  const clientMessageId = generateClientMessageId();
+  const plaintextContent = message.trim();
 
-    try {
-      const recipientPublicKey = await getPublicKey(recipientId);
-      const encryptedContent = await encryptMessage(plaintextContent, recipientPublicKey);
+  try {
+    const recipientPublicKey = await getPublicKey(recipientId);
+    const encryptedContent = await encryptMessage(plaintextContent, recipientPublicKey);
 
-      
+    const tempMessage = {
+      _id: clientMessageId,
+      senderId: userId,
+      recipientId,
+      content: plaintextContent,
+      contentType: 'text',
+      plaintextContent,
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+      clientMessageId,
+      senderVirtualNumber: virtualNumber,
+      senderUsername: username,
+      senderPhoto: photo,
+      replyTo: replyTo ? { ...replyTo, content: replyTo.content } : undefined,
+    };
 
+    // Add temporary message to Redux
+    dispatch(addMessage({ recipientId, message: tempMessage }));
 
-const tempMessage = {
-  _id: clientMessageId,
-  senderId: userId,
-  recipientId,
-  content: plaintextContent,
-  contentType: 'text',
-  plaintextContent,
-  status: 'pending',
-  createdAt: new Date().toISOString(),
-  clientMessageId,
-  senderVirtualNumber: virtualNumber, // Use virtualNumber prop
-  senderUsername: username,
-  senderPhoto: photo,
-  replyTo: replyTo ? { ...replyTo, content: replyTo.content } : undefined,
-};
+    const messageData = {
+      senderId: userId,
+      recipientId,
+      content: encryptedContent,
+      contentType: 'text',
+      plaintextContent,
+      clientMessageId,
+      senderVirtualNumber: virtualNumber,
+      senderUsername: username,
+      senderPhoto: photo,
+      replyTo: replyTo ? replyTo._id : undefined,
+    };
 
-const messageData = {
-  senderId: userId,
-  recipientId,
-  content: encryptedContent,
-  contentType: 'text',
-  plaintextContent,
-  clientMessageId,
-  senderVirtualNumber: virtualNumber, // Use virtualNumber prop
-  senderUsername: username,
-  senderPhoto: photo,
-  replyTo: replyTo ? replyTo._id : undefined,
-};
-        
-
-      socket.emit('message', messageData, async (ack) => {
-        if (ack?.error) {
-          console.error('Socket acknowledgment error:', ack.error);
-          setError(`Failed to send message: ${ack.error}`);
-          dispatch(updateMessageStatus({
-            recipientId,
-            messageId: clientMessageId,
-            status: 'failed',
-          }));
-          setPendingMessages((prev) => [
-            ...prev,
-            { tempId: clientMessageId, recipientId, messageData },
-          ]);
-          await savePendingMessages([
-            ...pendingMessages,
-            { tempId: clientMessageId, recipientId, messageData },
-          ]);
-          return;
-        }
-        if (!ack?.message?._id) {
-          console.error('Invalid acknowledgment:', ack);
-          setError('Invalid server response');
-          dispatch(updateMessageStatus({
-            recipientId,
-            messageId: clientMessageId,
-            status: 'failed',
-          }));
-          return;
-        }
-        const { message: sentMessage } = ack;
+    socket.emit('message', messageData, async (ack) => {
+      if (ack?.error) {
+        console.error('Socket acknowledgment error:', ack.error);
+        setError(`Failed to send message: ${ack.error}`);
         dispatch(
-          replaceMessage({
+          updateMessageStatus({
             recipientId,
-            message: { ...sentMessage, content: plaintextContent },
-            replaceId: clientMessageId,
+            messageId: clientMessageId,
+            status: 'failed',
           })
         );
-        await saveMessages([{ ...sentMessage, content: plaintextContent }]);
-        if (listRef.current && chats[recipientId]?.length) {
-          listRef.current.scrollToRow(chats[recipientId].length);
-          console.log(`Scrolled to row ${chats[recipientId].length} after replacing message`);
-        }
-        console.log('Message sent and replaced:', sentMessage._id);
-      });
+        setPendingMessages((prev) => [
+          ...prev,
+          { tempId: clientMessageId, recipientId, messageData },
+        ]);
+        await savePendingMessages([
+          ...pendingMessages,
+          { tempId: clientMessageId, recipientId, messageData },
+        ]);
+        return;
+      }
+      if (!ack?.message?._id || !ack.message.clientMessageId) {
+        console.error('Invalid acknowledgment:', ack);
+        setError('Invalid server response');
+        dispatch(
+          updateMessageStatus({
+            recipientId,
+            messageId: clientMessageId,
+            status: 'failed',
+          })
+        );
+        return;
+      }
+      const { message: sentMessage } = ack;
+      dispatch(
+        replaceMessage({
+          recipientId,
+          message: { ...sentMessage, content: plaintextContent },
+          replaceId: clientMessageId,
+        })
+      );
+      await saveMessages([{ ...sentMessage, content: plaintextContent }]);
+      if (listRef.current && chats[recipientId]?.length) {
+        listRef.current.scrollToRow(chats[recipientId].length);
+        console.log(`Scrolled to row ${chats[recipientId].length} after replacing message`);
+      }
+      console.log('Message sent and replaced:', sentMessage._id);
+    });
 
-      setMessage('');
-      setReplyTo(null);
-      setShowEmojiPicker(false);
-      socket.emit('stopTyping', { userId, recipientId });
-      inputRef.current?.focus();
-    } catch (err) {
-      console.error('Send message error:', err);
-      setError(`Failed to send message: ${err.message}`);
-      dispatch(updateMessageStatus({
+    setMessage('');
+    setReplyTo(null);
+    setShowEmojiPicker(false);
+    socket.emit('stopTyping', { userId, recipientId });
+    inputRef.current?.focus();
+  } catch (err) {
+    console.error('Send message error:', err);
+    setError(`Failed to send message: ${err.message}`);
+    dispatch(
+      updateMessageStatus({
         recipientId,
         messageId: clientMessageId,
         status: 'failed',
-      }));
-      setPendingMessages((prev) => [
-        ...prev,
-        {
-          tempId: clientMessageId,
+      })
+    );
+    setPendingMessages((prev) => [
+      ...prev,
+      {
+        tempId: clientMessageId,
+        recipientId,
+        messageData: {
+          senderId: userId,
           recipientId,
-          messageData: {
-            senderId: userId,
-            recipientId,
-            content: plaintextContent,
-            contentType: 'text',
-            plaintextContent,
-            clientMessageId,
-            senderVirtualNumber,
-            senderUsername,
-            senderPhoto,
-            replyTo: replyTo ? replyTo._id : undefined,
-          },
+          content: plaintextContent,
+          contentType: 'text',
+          plaintextContent,
+          clientMessageId,
+          senderVirtualNumber,
+          senderUsername,
+          senderPhoto,
+          replyTo: replyTo ? replyTo._id : undefined,
         },
-      ]);
-      await savePendingMessages([
-        ...pendingMessages,
-        {
-          tempId: clientMessageId,
+      },
+    ]);
+    await savePendingMessages([
+      ...pendingMessages,
+      {
+        tempId: clientMessageId,
+        recipientId,
+        messageData: {
+          senderId: userId,
           recipientId,
-          messageData: {
-            senderId: userId,
-            recipientId,
-            content: plaintextContent,
-            contentType: 'text',
-            plaintextContent,
-            clientMessageId,
-            senderVirtualNumber,
-            senderUsername,
-            senderPhoto,
-            replyTo: replyTo ? replyTo._id : undefined,
-          },
+          content: plaintextContent,
+          contentType: 'text',
+          plaintextContent,
+          clientMessageId,
+          senderVirtualNumber,
+          senderUsername,
+          senderPhoto,
+          replyTo: replyTo ? replyTo._id : undefined,
         },
-      ]);
-      console.log('Message marked as failed:', clientMessageId);
-    }
-  }, [
-    message,
-    selectedChat,
-    userId,
-    socket,
-    dispatch,
-    encryptMessage,
-    getPublicKey,
-    virtualNumber,
-    username,
-    photo,
-    replyTo,
-    pendingMessages,
-    chats,
-  ]);
+      },
+    ]);
+    console.log('Message marked as failed:', clientMessageId);
+  }
+}, [
+  message,
+  selectedChat,
+  userId,
+  socket,
+  dispatch,
+  encryptMessage,
+  getPublicKey,
+  virtualNumber,
+  username,
+  photo,
+  replyTo,
+  pendingMessages,
+  chats,
+]);
+
 
   const handleEditMessage = useCallback(
     async (messageId, newContent) => {
@@ -880,52 +899,62 @@ const messageData = {
     if (!socket || !userId) return;
 
     const handleMessage = async (msg) => {
-      try {
-        if (!msg?.clientMessageId || !msg?.recipientId || !msg?.senderId || !isValidObjectId(msg.recipientId) || !isValidObjectId(msg.senderId)) {
-          console.warn('Invalid message received:', msg);
-          return;
-        }
+  try {
+    // Extract string IDs from potential objects
+    const senderId = typeof msg.senderId === 'object' ? msg.senderId?._id?.toString() : msg.senderId;
+    const recipientId = typeof msg.recipientId === 'object' ? msg.recipientId?._id?.toString() : msg.recipientId;
 
-        const recipientId = msg.senderId === userId ? msg.recipientId : msg.senderId;
-        if (!chats[recipientId] && selectedChat !== recipientId) {
-          dispatch(setMessages({ recipientId, messages: [] }));
-        }
+    if (
+      !msg?.clientMessageId ||
+      !recipientId ||
+      !senderId ||
+      !isValidObjectId(recipientId) ||
+      !isValidObjectId(senderId)
+    ) {
+      console.warn('Invalid message received:', msg);
+      return;
+    }
 
-        if (chats[recipientId]?.some((m) => m.clientMessageId === msg.clientMessageId)) {
-          console.warn('Duplicate message:', msg.clientMessageId);
-          return;
-        }
+    const chatRecipientId = senderId === userId ? recipientId : senderId;
+    if (!chats[chatRecipientId] && selectedChat !== chatRecipientId) {
+      dispatch(setMessages({ recipientId: chatRecipientId, messages: [] }));
+    }
 
-        const privateKeyPem = localStorage.getItem('privateKey') || '';
-        let decryptedContent = msg.content;
+    if (chats[chatRecipientId]?.some((m) => m.clientMessageId === msg.clientMessageId)) {
+      console.warn('Duplicate message:', msg.clientMessageId);
+      return;
+    }
 
-        if (msg.contentType === 'text' && msg.recipientId === userId && privateKeyPem) {
-          decryptedContent = await decryptMessage(msg.content, privateKeyPem);
-        } else if (msg.contentType !== 'text') {
-          decryptedContent = msg.content;
-        } else {
-          decryptedContent = '[Invalid message]';
-        }
+    const privateKeyPem = localStorage.getItem('privateKey') || '';
+    let decryptedContent = msg.content;
 
-        const newMessage = { ...msg, content: decryptedContent };
-        dispatch(addMessage({ recipientId, message: newMessage }));
-        await saveMessages([newMessage]);
-        console.log('Received and added message:', newMessage._id);
+    if (msg.contentType === 'text' && recipientId === userId && privateKeyPem) {
+      decryptedContent = await decryptMessage(msg.content, privateKeyPem);
+    } else if (msg.contentType !== 'text') {
+      decryptedContent = msg.content;
+    } else {
+      decryptedContent = '[Invalid message]';
+    }
 
-        if (msg.recipientId === userId && selectedChat === msg.senderId && isAtBottomRef.current) {
-          listRef.current?.scrollToRow(chats[recipientId]?.length || 0);
-          socket.emit('batchMessageStatus', {
-            messageIds: [msg._id],
-            status: 'read',
-            recipientId: msg.senderId,
-          });
-          console.log('Marked message as read:', msg._id);
-        }
-      } catch (err) {
-        console.error('Handle message error:', err);
-        setError('Failed to process message');
-      }
-    };
+    const newMessage = { ...msg, content: decryptedContent, senderId, recipientId };
+    dispatch(addMessage({ recipientId: chatRecipientId, message: newMessage }));
+    await saveMessages([newMessage]);
+    console.log('Received and added message:', newMessage._id);
+
+    if (recipientId === userId && selectedChat === senderId && isAtBottomRef.current) {
+      listRef.current?.scrollToRow(chats[chatRecipientId]?.length || 0);
+      socket.emit('batchMessageStatus', {
+        messageIds: [msg._id],
+        status: 'read',
+        recipientId: senderId,
+      });
+      console.log('Marked message as read:', msg._id);
+    }
+  } catch (err) {
+    console.error('Handle message error:', err);
+    setError('Failed to process message');
+  }
+};
 
     const handleEditMessage = async (updatedMessage) => {
       try {

@@ -45,22 +45,33 @@ const messageSlice = createSlice({
       state.chats[recipientId] = [...state.chats[recipientId], { ...message }];
       console.log(`Added message ${message._id} to ${recipientId}`);
     },
-    replaceMessage: (state, action) => {
-      const { recipientId, message, replaceId } = action.payload;
-      if (!recipientId || !message || !replaceId || !message._id || !message.clientMessageId) {
-        console.warn('Invalid replaceMessage payload:', action.payload);
-        return;
-      }
-      const index = state.chats[recipientId]?.findIndex((msg) =>
-        msg._id === replaceId || msg.clientMessageId === replaceId
-      );
-      if (index !== -1) {
-        state.chats[recipientId][index] = { ...message };
-        console.log(`Replaced message ${replaceId} with ${message._id} in ${recipientId}`);
-      } else {
-        console.warn(`Message ${replaceId} not found for replacement in ${recipientId}`);
-      }
-    },
+
+
+replaceMessage: (state, action) => {
+  const { recipientId, message, replaceId } = action.payload;
+  if (!recipientId || !message || !replaceId || !message._id || !message.clientMessageId) {
+    console.warn('Invalid replaceMessage payload:', action.payload);
+    return;
+  }
+  if (!state.chats[recipientId]) {
+    console.warn(`No chat found for recipientId ${recipientId}`);
+    state.chats[recipientId] = [];
+  }
+  const index = state.chats[recipientId]?.findIndex(
+    (msg) => msg._id === replaceId || msg.clientMessageId === replaceId
+  );
+  if (index !== -1) {
+    state.chats[recipientId][index] = { ...message };
+    console.log(`Replaced message ${replaceId} with ${message._id} in ${recipientId}`);
+  } else {
+    console.warn(`Message ${replaceId} not found for replacement in ${recipientId}, adding as new`);
+    state.chats[recipientId].push({ ...message });
+  }
+},
+
+
+
+
     updateMessageStatus: (state, action) => {
       const { recipientId, messageId, status, uploadProgress } = action.payload;
       if (!recipientId || !messageId || !state.chats[recipientId]) {
