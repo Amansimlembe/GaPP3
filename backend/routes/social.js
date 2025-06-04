@@ -2,13 +2,13 @@ const express = require('express');
 const { authMiddleware } = require('./auth');
 const Message = require('../models/Message');
 const User = require('../models/User');
-const redis = require('../redis');
+const memcached = require('../memcached'); // Changed from redis to memcached
 const winston = require('winston');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
 const Joi = require('joi');
 const mongoose = require('mongoose');
-const validator = require('validator'); // Added for URL validation
+const validator = require('validator');
 
 const logger = winston.createLogger({
   level: 'info',
@@ -52,7 +52,7 @@ const configureCloudinary = () => {
   cloudinary.config(cloudinaryConfig);
   logger.info('Cloudinary configured', {
     cloud_name: cloudinaryConfig.cloud_name,
-    api_key: cloudinaryConfig.api_key,
+    api_key: cloudinaryConfig.api_key ? '****' : undefined, // Mask sensitive data
   });
 };
 configureCloudinary();
@@ -147,6 +147,10 @@ module.exports = (io) => {
   // Optimized emitUpdatedChatList
   const emitUpdatedChatList = async (userId) => {
     try {
+      if (!mongoose.isValidObjectId(userId)) {
+        logger.warn('Invalid userId in emitUpdatedChatList', { userId });
+        return;
+      }
       const contacts = await User.find({ contacts: userId }).select(
         'username virtualNumber photo status lastSeen'
       );
@@ -230,10 +234,10 @@ module.exports = (io) => {
       });
 
       io.to(userId).emit('chatListUpdated', { userId, users: chatList });
-      await redis.setex(`:chat-list:${userId}`, 300, JSON.stringify(chatList));
+      await memcached.setex(`:chat-list:${userId}`, 300, JSON.stringify(chatList)); // Changed to memcached
       logger.info('Emitted updated chat list', { userId });
     } catch (error) {
-      logger.error('Failed to emit updated chat list', { error: error.message, userId });
+      logger.error('Failed to emit updated chat list', { error: error.message, stack: error.stack, userId });
     }
   };
 
@@ -253,7 +257,7 @@ module.exports = (io) => {
           }
         })
         .catch((err) => {
-          logger.error('User join failed', { error: err.message, userId });
+          logger.error('User join failed', { error: err.message, stack: err.stack, userId });
         });
     });
 
@@ -270,7 +274,7 @@ module.exports = (io) => {
           }
         })
         .catch((err) => {
-          logger.error('User leave failed', { error: err.message, userId });
+          logger.error('User leave failed', { error: err.message, stack: err.stack, userId });
         });
       socket.leave(userId);
     });
@@ -315,7 +319,7 @@ module.exports = (io) => {
           }
         })
         .catch((err) => {
-          logger.error('New contact emission failed', { error: err.message, userId, contactId: contactData.id });
+          logger.error('New contact emission failed', { error: err.message, stack: err.stack, userId, contactId: contactData.id });
         });
     });
 
@@ -389,8 +393,8 @@ module.exports = (io) => {
         logger.info('Message sent', { messageId: message._id, senderId, recipientId });
         callback({ message: message.toObject() });
 
-        await redis.del(`:chat-list:${senderId}`);
-        await redis.del(`:chat-list:${recipientId}`);
+        await memcached.del(`:chat-list:${senderId}`); // Changed to memcached
+        await memcached.del(`:chat-list:${recipientId}`); // Changed to memcached
       } catch (error) {
         logger.error('Socket message failed', { error: error.message, stack: error.stack, messageData });
         callback({ error: 'Failed to send message', details: error.message });
@@ -513,7 +517,7 @@ module.exports = (io) => {
 
     const cacheKey = `:chat-list:${userId}`;
     try {
-      const cached = await redis.get(cacheKey);
+      const cached = await memcached.get(cacheKey); // Changed to memcached
       if (cached) {
         logger.info('Chat list served from cache', { userId });
         return res.json(JSON.parse(cached));
@@ -552,7 +556,7 @@ module.exports = (io) => {
         })
       );
 
-      await redis.setex(cacheKey, 300, JSON.stringify(chatList));
+      await memcached.setex(cacheKey, 300, JSON.stringify(chatList)); // Changed to memcached
       logger.info('Chat list fetched and cached', { userId });
       res.json(chatList);
     } catch (error) {
@@ -571,7 +575,7 @@ module.exports = (io) => {
 
     const cacheKey = `:messages:${userId}:${recipientId}:${limit}:${skip}`;
     try {
-      const cached = await redis.get(cacheKey);
+      const cached = await memcached.get(cacheKey); // Changed to memcached
       if (cached) {
         logger.info('Messages served from cache', { userId, recipientId });
         return res.json(JSON.parse(cached));
@@ -596,7 +600,7 @@ module.exports = (io) => {
       });
 
       const response = { messages: messages.reverse(), total };
-      await redis.setex(cacheKey, 300, JSON.stringify(response));
+      await memcached.setex(cacheKey, 300, JSON.stringify(response)); // Changed to memcached
       logger.info('Messages fetched and cached', { userId, recipientId });
       res.json(response);
     } catch (error) {
@@ -659,10 +663,10 @@ module.exports = (io) => {
       emitUpdatedChatList(userId);
       emitUpdatedChatList(contact._id.toString());
 
-      await redis.del(`:chat-list:${userId}`);
-      await redis.del(`:chat-list:${contact._id}`);
-      await redis.del(`:contacts:${userId}`);
-      await redis.del(`:contacts:${contact._id}`);
+      await memcached.del(`:chat-list:${userId}`); // Changed to memcached
+      await memcached.del(`:chat-list:${contact._id}`); // Changed to memcached
+      await memcached.del(`:contacts:${userId}`); // Changed to memcached
+      await memcached.del(`:contacts:${contact._id}`); // Changed to memcached
 
       logger.info('Contact added successfully', { userId, contactId: contact._id });
       res.json(contactData);
@@ -705,7 +709,7 @@ module.exports = (io) => {
         { resource_type: contentType === 'document' ? 'raw' : contentType },
         async (error, result) => {
           if (error) {
-            logger.error('Cloudinary upload failed', { error: error.message });
+            logger.error('Cloudinary upload failed', { error: error.message, stack: error.stack });
             return res.status(500).json({ error: 'Failed to upload file', details: error.message });
           }
 
@@ -730,8 +734,8 @@ module.exports = (io) => {
           emitUpdatedChatList(recipientId);
           logger.info('Media message uploaded and sent', { messageId: message._id, userId, recipientId });
 
-          await redis.del(`:chat-list:${userId}`);
-          await redis.del(`:chat-list:${recipientId}`);
+          await memcached.del(`:chat-list:${userId}`); // Changed to memcached
+          await memcached.del(`:chat-list:${recipientId}`); // Changed to memcached
 
           res.json({ message: message.toObject() });
         }
@@ -765,11 +769,11 @@ module.exports = (io) => {
 
       await User.deleteOne({ _id: userId });
 
-      await redis.del(`:chat-list:${userId}`);
-      await redis.del(`:contacts:${userId}`);
+      await memcached.del(`:chat-list:${userId}`); // Changed to memcached
+      await memcached.del(`:contacts:${userId}`); // Changed to memcached
       for (const contactId of contactIds) {
-        await redis.del(`:chat-list:${contactId}`);
-        await redis.del(`:contacts:${contactId}`);
+        await memcached.del(`:chat-list:${contactId}`); // Changed to memcached
+        await memcached.del(`:contacts:${contactId}`); // Changed to memcached
         emitUpdatedChatList(contactId);
       }
 
