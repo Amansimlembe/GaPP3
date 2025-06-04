@@ -3,16 +3,14 @@ import { openDB } from 'idb';
 const DB_NAME = 'ChatDB';
 const MESSAGE_STORE_NAME = 'messages';
 const PENDING_STORE_NAME = 'pendingMessages';
-const VERSION = 9; // Incremented to 9 to force clean upgrade
+const VERSION = 10; // Incremented to force clean upgrade
 
-// Singleton to manage single openDB instance
 let dbInstance = null;
 
 const getDB = async () => {
   if (dbInstance) {
     try {
-      // Verify connection is still valid
-      await dbInstance.transaction(MESSAGE_STORE_NAME).objectStore(MESSAGE_STORE_NAME).getAll();
+      await dbInstance.transaction(MESSAGE_STORE_NAME).objectStore(MESSAGE_STORE_NAME).count();
       return dbInstance;
     } catch (err) {
       console.warn('Existing DB connection invalid, reopening:', err.message);
@@ -26,7 +24,6 @@ const getDB = async () => {
       console.log(`Upgrading database from version ${oldVersion} to ${newVersion}`);
 
       try {
-        // Create 'messages' store if it doesn't exist
         if (!db.objectStoreNames.contains(MESSAGE_STORE_NAME)) {
           const messageStore = db.createObjectStore(MESSAGE_STORE_NAME, { keyPath: '_id' });
           messageStore.createIndex('byRecipientId', 'recipientId');
@@ -35,36 +32,32 @@ const getDB = async () => {
           messageStore.createIndex('byRecipientAndTime', ['recipientId', 'createdAt']);
           messageStore.createIndex('byStatus', 'status', { unique: false });
         } else {
-          // Update existing 'messages' store safely
           const messageStore = transaction.objectStore(MESSAGE_STORE_NAME);
-          if (!messageStore.indexNames.contains('byStatus') && oldVersion < 8) {
+          if (!messageStore.indexNames.contains('byStatus')) {
             messageStore.createIndex('byStatus', 'status', { unique: false });
           }
         }
 
-        // Create 'pendingMessages' store if it doesn't exist
         if (!db.objectStoreNames.contains(PENDING_STORE_NAME)) {
           const pendingStore = db.createObjectStore(PENDING_STORE_NAME, { keyPath: 'tempId' });
           pendingStore.createIndex('byRecipientId', 'recipientId');
         }
       } catch (err) {
         console.error('Error in upgradeneeded handler:', err);
-        throw err; // Let transaction abort naturally
+        throw err;
       }
     },
-    blocked(currentVersion, blockedVersion, event) {
-      console.error(`Database upgrade blocked by open connection (current: ${currentVersion}, blocked: ${blockedVersion})`);
-      // Attempt to close all connections
+    blocked(currentVersion, blockedVersion) {
+      console.error(`Database upgrade blocked: current v${currentVersion}, blocked v${blockedVersion}`);
       dbInstance?.close();
-      // Notify user to close other tabs
-      alert('Please close other tabs or instances of the app to allow database upgrade.');
+      alert('Please close other tabs to allow database upgrade.');
     },
-    blocking(currentVersion, blockedVersion, event) {
-      console.warn(`Current connection (v${currentVersion}) is blocking upgrade to v${blockedVersion}`);
+    blocking(currentVersion, blockedVersion) {
+      console.warn(`Current connection v${currentVersion} blocking upgrade to v${blockedVersion}`);
       dbInstance?.close();
     },
     terminated() {
-      console.warn('Database connection terminated unexpectedly');
+      console.warn('Database connection terminated');
       dbInstance = null;
     },
   });
@@ -76,24 +69,23 @@ const withRetry = async (operation, maxRetries = 3) => {
   let attempt = 0;
   while (attempt < maxRetries) {
     try {
-      return await operation();
+      const result = await operation();
+      return result;
     } catch (error) {
       attempt++;
       console.error(`Database operation failed, attempt ${attempt}:`, error.message);
-      if (error.name === 'AbortError' && attempt === 1) {
-        console.warn('AbortError detected, closing connection and retrying');
+      if (error.name === 'AbortError' || error.name === 'VersionError') {
         dbInstance?.close();
         dbInstance = null;
       }
       if (attempt === maxRetries) {
         throw error;
       }
-      await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
+      await new Promise((resolve) => setTimeout(resolve, 200 * attempt));
     }
   }
 };
 
-// Utility to clear the database for debugging or recovery
 export const clearDatabase = async () => {
   try {
     dbInstance?.close();
@@ -106,31 +98,41 @@ export const clearDatabase = async () => {
 };
 
 export const saveMessages = async (messages) => {
+  if (!messages || !Array.isArray(messages) || messages.length === 0) {
+    console.warn('No valid messages to save');
+    return;
+  }
+
   try {
-    return await withRetry(async () => {
+    await withRetry(async () => {
       const db = await getDB();
       const tx = db.transaction(MESSAGE_STORE_NAME, 'readwrite');
       const store = tx.objectStore(MESSAGE_STORE_NAME);
-      await Promise.all(
-        messages.map((msg) =>
-          store.put({
-            ...msg,
-            _id: msg._id || `${msg.clientMessageId}`,
-            content: msg.content || '',
-            plaintextContent: msg.plaintextContent || '',
-            status: msg.status || 'pending',
-            contentType: msg.contentType || 'text',
-            caption: msg.caption || '',
-            createdAt: msg.createdAt || new Date().toISOString(),
-            senderVirtualNumber: msg.senderVirtualNumber || '',
-            senderUsername: msg.senderUsername || '',
-            senderPhoto: msg.senderPhoto || 'https://placehold.co/40x40',
-            replyTo: msg.replyTo || undefined,
-            originalFilename: msg.originalFilename || undefined,
-            clientMessageId: msg.clientMessageId || `${msg.senderId}-${Date.now()}`,
-          })
-        )
-      );
+
+      await Promise.all(messages.map((msg) => {
+        if (!msg._id && !msg.clientMessageId) {
+          throw new Error('Message missing _id or clientMessageId');
+        }
+        return store.put({
+          ...msg,
+          _id: msg._id || `${msg.clientMessageId}`,
+          content: msg.content || '',
+          plaintextContent: msg.plaintextContent || '',
+          status: msg.status || 'pending',
+          contentType: msg.contentType || 'text',
+          caption: msg.caption || '',
+          createdAt: msg.createdAt || new Date().toISOString(),
+          senderVirtualNumber: msg.senderVirtualNumber || '',
+          senderUsername: msg.senderUsername || '',
+          senderPhoto: msg.senderPhoto || 'https://placehold.co/40x40',
+          replyTo: msg.replyTo || undefined,
+          originalFilename: msg.originalFilename || undefined,
+          clientMessageId: msg.clientMessageId || `${msg.senderId || 'unknown'}-${Date.now()}`,
+          recipientId: msg.recipientId || '',
+          senderId: msg.senderId || '',
+        });
+      }));
+
       await tx.done;
     });
   } catch (error) {
@@ -145,11 +147,13 @@ export const getMessages = async (recipientId = null) => {
       const db = await getDB();
       const tx = db.transaction(MESSAGE_STORE_NAME, 'readonly');
       const store = tx.objectStore(MESSAGE_STORE_NAME);
+
       if (recipientId) {
         const index = store.index('byRecipientAndTime');
         const messages = await index.getAll([recipientId]);
-        return messages;
+        return messages.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
       }
+
       const allMessages = await store.getAll();
       return allMessages.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
     });
@@ -160,8 +164,13 @@ export const getMessages = async (recipientId = null) => {
 };
 
 export const deleteMessage = async (messageId) => {
+  if (!messageId) {
+    console.warn('No messageId provided for deletion');
+    return;
+  }
+
   try {
-    return await withRetry(async () => {
+    await withRetry(async () => {
       const db = await getDB();
       const tx = db.transaction(MESSAGE_STORE_NAME, 'readwrite');
       const store = tx.objectStore(MESSAGE_STORE_NAME);
@@ -183,13 +192,16 @@ export const clearOldMessages = async (daysToKeep = 30) => {
       const index = store.index('byCreatedAt');
       const cutoff = new Date(Date.now() - daysToKeep * 24 * 60 * 60 * 1000);
       let count = 0;
-      const cursor = await index.openCursor(IDBKeyRange.upperBound(cutoff.toISOString()));
+
+      let cursor = await index.openCursor(IDBKeyRange.upperBound(cutoff.toISOString()));
       while (cursor) {
         await cursor.delete();
         count++;
-        await cursor.continue();
+        cursor = await cursor.continue();
       }
+
       await tx.done;
+      console.log(`Cleared ${count} old messages`);
       return count;
     });
   } catch (error) {
@@ -199,26 +211,42 @@ export const clearOldMessages = async (daysToKeep = 30) => {
 };
 
 export const savePendingMessages = async (pendingMessages) => {
+  if (!pendingMessages || !Array.isArray(pendingMessages)) {
+    console.warn('No valid pending messages to save');
+    return;
+  }
+
   try {
-    return await withRetry(async () => {
+    await withRetry(async () => {
       const db = await getDB();
       const tx = db.transaction(PENDING_STORE_NAME, 'readwrite');
       const store = tx.objectStore(PENDING_STORE_NAME);
       await store.clear();
-      await Promise.all(
-        pendingMessages.map((msg) => {
-          if (!msg.tempId || typeof msg.tempId !== 'string') {
-            throw new Error('Invalid tempId in pending message');
-          }
-          return store.put({
-            ...msg,
-            plaintextContent: msg.plaintextContent || '',
-            senderVirtualNumber: msg.senderVirtualNumber || '',
-            senderUsername: msg.senderUsername || '',
-            senderPhoto: msg.senderPhoto || 'https://placehold.co/40x40',
-          });
-        })
-      );
+
+      await Promise.all(pendingMessages.map((msg) => {
+        if (!msg.tempId || typeof msg.tempId !== 'string') {
+          throw new Error('Invalid tempId in pending message');
+        }
+        return store.put({
+          ...msg,
+          tempId: msg.tempId,
+          recipientId: msg.recipientId || msg.messageData?.recipientId || '',
+          messageData: {
+            ...msg.messageData,
+            content: msg.messageData?.content || '',
+            plaintextContent: msg.messageData?.plaintextContent || '',
+            contentType: msg.messageData?.contentType || 'text',
+            clientMessageId: msg.messageData?.clientMessageId || msg.tempId,
+            senderId: msg.messageData?.senderId || '',
+            recipientId: msg.messageData?.recipientId || '',
+            senderVirtualNumber: msg.messageData?.senderVirtualNumber || '',
+            senderUsername: msg.messageData?.senderUsername || '',
+            senderPhoto: msg.messageData?.senderPhoto || 'https://placehold.co/40x40',
+            replyTo: msg.messageData?.replyTo || undefined,
+          },
+        });
+      }));
+
       await tx.done;
     });
   } catch (error) {
@@ -233,7 +261,8 @@ export const loadPendingMessages = async () => {
       const db = await getDB();
       const tx = db.transaction(PENDING_STORE_NAME, 'readonly');
       const store = tx.objectStore(PENDING_STORE_NAME);
-      return await store.getAll();
+      const messages = await store.getAll();
+      return messages.filter((msg) => msg.tempId && msg.recipientId && msg.messageData);
     });
   } catch (error) {
     console.error('Error loading pending messages from IndexedDB:', error);
@@ -243,7 +272,7 @@ export const loadPendingMessages = async () => {
 
 export const clearPendingMessages = async () => {
   try {
-    return await withRetry(async () => {
+    await withRetry(async () => {
       const db = await getDB();
       const tx = db.transaction(PENDING_STORE_NAME, 'readwrite');
       const store = tx.objectStore(PENDING_STORE_NAME);

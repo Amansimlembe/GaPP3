@@ -9,10 +9,13 @@ const messageSlice = createSlice({
   reducers: {
     setMessages: (state, action) => {
       const { recipientId, messages } = action.payload;
-      state.chats[recipientId] = messages;
+      if (recipientId && Array.isArray(messages)) {
+        state.chats[recipientId] = messages;
+      }
     },
     addMessage: (state, action) => {
       const { recipientId, message } = action.payload;
+      if (!recipientId || !message) return;
       state.chats[recipientId] = state.chats[recipientId] || [];
       if (!state.chats[recipientId].some((msg) => msg._id === message._id || msg.clientMessageId === message.clientMessageId)) {
         state.chats[recipientId].push(message);
@@ -20,6 +23,7 @@ const messageSlice = createSlice({
     },
     replaceMessage: (state, action) => {
       const { recipientId, message, replaceId } = action.payload;
+      if (!recipientId || !message || !replaceId) return;
       state.chats[recipientId] = state.chats[recipientId] || [];
       const index = state.chats[recipientId].findIndex((msg) => msg._id === replaceId || msg.clientMessageId === replaceId);
       if (index !== -1) {
@@ -30,31 +34,31 @@ const messageSlice = createSlice({
     },
     updateMessageStatus: (state, action) => {
       const { recipientId, messageId, status, uploadProgress } = action.payload;
-      if (state.chats[recipientId]) {
-        const msgIndex = state.chats[recipientId].findIndex((msg) => msg._id === messageId || msg.clientMessageId === messageId);
-        if (msgIndex !== -1) {
-          state.chats[recipientId][msgIndex] = {
-            ...state.chats[recipientId][msgIndex],
-            status,
-            ...(uploadProgress !== undefined && { uploadProgress }),
-          };
-        }
+      if (!recipientId || !messageId || !state.chats[recipientId]) return;
+      const msgIndex = state.chats[recipientId].findIndex((msg) => msg._id === messageId || msg.clientMessageId === messageId);
+      if (msgIndex !== -1) {
+        state.chats[recipientId][msgIndex] = {
+          ...state.chats[recipientId][msgIndex],
+          status,
+          ...(uploadProgress !== undefined && { uploadProgress }),
+        };
       }
     },
     deleteMessage: (state, action) => {
       const { recipientId, messageId } = action.payload;
-      if (state.chats[recipientId]) {
-        state.chats[recipientId] = state.chats[recipientId].filter((msg) => msg._id !== messageId);
-      }
+      if (!recipientId || !messageId || !state.chats[recipientId]) return;
+      state.chats[recipientId] = state.chats[recipientId].filter((msg) => msg._id !== messageId);
     },
     setSelectedChat: (state, action) => {
       const recipientId = action.payload;
-      // Validate recipientId before setting
-      if (recipientId === null || state.chats[recipientId]) {
+      if (recipientId === null) {
+        state.selectedChat = null;
+      } else if (typeof recipientId === 'string') {
+        state.chats[recipientId] = state.chats[recipientId] || [];
         state.selectedChat = recipientId;
       } else {
-        console.warn(`Attempted to set selectedChat to invalid recipientId: ${recipientId}`);
-        state.selectedChat = null; // Fallback to null to prevent invalid state
+        console.warn(`Invalid recipientId: ${recipientId}`);
+        state.selectedChat = null;
       }
     },
     resetState: () => ({
@@ -76,15 +80,14 @@ export const {
 
 const persistenceMiddleware = (store) => (next) => (action) => {
   const result = next(action);
-  const actionsToPersist = [setSelectedChat.type, resetState.type];
+  const actionsToPersist = [setSelectedChat.type, resetState.type, setMessages.type];
 
   if (actionsToPersist.includes(action.type)) {
     requestAnimationFrame(() => {
       const state = store.getState().messages;
       try {
-        // Only persist selectedChat if it's valid (null or exists in chats)
         const serializableState = {
-          selectedChat: state.chats[state.selectedChat] || state.selectedChat === null ? state.selectedChat : null,
+          selectedChat: typeof state.selectedChat === 'string' && state.chats[state.selectedChat] ? state.selectedChat : null,
         };
         localStorage.setItem('reduxState', JSON.stringify(serializableState));
       } catch (error) {
@@ -102,7 +105,7 @@ const loadPersistedState = () => {
     try {
       const parsedState = JSON.parse(persistedState);
       if (parsedState && (typeof parsedState.selectedChat === 'string' || parsedState.selectedChat === null)) {
-        return { selectedChat: parsedState.selectedChat };
+        return { selectedChat: parsedState.selectedChat, chats: {} }; // Initialize chats as empty
       }
       console.warn('Invalid persisted state format, clearing');
       localStorage.removeItem('reduxState');
@@ -126,7 +129,7 @@ export const store = configureStore({
   middleware: (getDefaultMiddleware) =>
     getDefaultMiddleware({
       serializableCheck: {
-        ignoredActions: [addMessage.type, replaceMessage.type, updateMessageStatus.type, deleteMessage.type],
+        ignoredActions: [addMessage.type, replaceMessage.type, updateMessageStatus.type, deleteMessage.type, setMessages.type],
         ignoredPaths: ['messages.chats'],
       },
     }).concat(persistenceMiddleware),
