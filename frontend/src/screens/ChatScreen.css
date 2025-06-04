@@ -52,23 +52,7 @@
   position: relative;
 }
 
-.menu-dropdown {
-  background: white;
-  border-radius: 12px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
-  width: 280px;
-  padding: 12px;
-  position: absolute;
-  right: 0;
-  top: 40px;
-  z-index: 1000;
-  overflow: hidden;
-}
 
-.dark .menu-dropdown {
-  background: #212121;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-}
 
 .menu-item {
   display: flex;
@@ -100,14 +84,36 @@
   font-size: 1.1rem;
 }
 
+
+/* Update menu-dropdown for responsiveness and click-outside behavior */
+.menu-dropdown {
+  background: white;
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+  width: 280px;
+  max-width: 90vw; /* Ensure it fits on small screens */
+  padding: 12px;
+  position: absolute;
+  right: 10px; /* Adjusted for better alignment on small screens */
+  top: 40px;
+  z-index: 1000;
+  overflow: hidden;
+}
+
+.dark .menu-dropdown {
+  background: #212121;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+/* Update menu-add-contact for better visibility and responsiveness */
 .menu-add-contact {
-  padding: 16px;
+  padding: 12px;
   background: linear-gradient(to bottom, #ffffff, #e8f0fe);
   border-radius: 12px;
   margin-top: 12px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
 }
 
@@ -116,19 +122,15 @@
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
 }
 
-.contact-input-group {
-  position: relative;
-  display: flex;
-  align-items: center;
-}
-
+/* Update contact-input for better visibility in dark mode */
 .contact-input {
   width: 100%;
-  padding: 12px 40px 12px 16px;
+  padding: 10px 36px 10px 12px;
   border: 2px solid #e0e0e0;
   border-radius: 8px;
-  font-size: 0.95rem;
+  font-size: 0.9rem;
   background: #fafafa;
+  color: #333;
   transition: all 0.3s ease;
   outline: none;
 }
@@ -136,8 +138,67 @@
 .dark .contact-input {
   background: #333;
   border-color: #444;
-  color: #e0e0e0;
+  color: #e0e0e0; /* Ensure text is visible in dark mode */
 }
+
+/* Update responsive styles */
+@media (max-width: 768px) {
+  .menu-dropdown {
+    width: 100%;
+    max-width: 90vw;
+    right: 5px;
+    top: 50px;
+  }
+
+  .menu-add-contact {
+    padding: 10px;
+  }
+
+  .contact-input {
+    font-size: 0.85rem;
+    padding: 8px 32px 8px 10px;
+  }
+
+  .contact-button {
+    font-size: 0.85rem;
+    padding: 8px;
+  }
+}
+
+@media (max-width: 480px) {
+  .menu-dropdown {
+    right: 5px;
+    top: 45px;
+  }
+
+  .menu-add-contact {
+    gap: 10px;
+  }
+
+  .contact-input {
+    font-size: 0.8rem;
+    padding: 8px 30px 8px 10px;
+  }
+
+  .contact-button {
+    font-size: 0.8rem;
+    padding: 8px;
+  }
+}
+
+
+
+
+
+
+.contact-input-group {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+
+
 
 .contact-input:focus {
   border-color: #4caf50;
@@ -730,25 +791,8 @@
     width: 100%;
   }
 
-  .menu-dropdown {
-    width: 100%;
-    max-width: 300px;
-    right: 10px;
-  }
+ 
 
-  .menu-add-contact {
-    padding: 12px;
-  }
-
-  .contact-input {
-    font-size: 0.9rem;
-    padding: 10px 36px 10px 12px;
-  }
-
-  .contact-button {
-    font-size: 0.9rem;
-    padding: 10px;
-  }
 }
 
 @media (max-width: 480px) {

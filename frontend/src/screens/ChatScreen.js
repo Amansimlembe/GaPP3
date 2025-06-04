@@ -215,69 +215,78 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     [token, userId, handleLogout, decryptMessage, socket]
   );
 
-  const fetchMessages = useCallback(
-    debounce(async (recipientId, retryCount = 3) => {
-      if (!recipientId || !mongoose.isValidObjectId(recipientId)) {
-        console.warn('fetchMessages called with invalid recipientId:', recipientId);
-        dispatch(setMessages({ recipientId, messages: [] }));
-        setError('Invalid chat selected');
-        return;
-      }
-      const localMessages = await getMessages(recipientId);
-      if (localMessages.length) {
-        dispatch(setMessages({ recipientId, messages: localMessages }));
-        listRef.current?.scrollToRow(localMessages.length - 1);
+  
+
+const isValidObjectId = (id) => {
+  return typeof id === 'string' && /^[0-9a-fA-F]{24}$/.test(id);
+};
+
+// Modified fetchMessages function
+const fetchMessages = useCallback(
+  debounce(async (recipientId, retryCount = 3) => {
+    if (!recipientId || !isValidObjectId(recipientId)) {
+      console.warn('fetchMessages called with invalid recipientId:', recipientId);
+      dispatch(setMessages({ recipientId, messages: [] }));
+      setError('Invalid chat selected');
+      return;
+    }
+    const localMessages = await getMessages(recipientId);
+    if (localMessages.length) {
+      dispatch(setMessages({ recipientId, messages: localMessages }));
+      listRef.current?.scrollToRow(localMessages.length - 1);
+      setError('');
+      return;
+    }
+    let attempt = 0;
+    while (attempt < retryCount) {
+      try {
+        const { data } = await axios.get(`${BASE_URL}/social/messages`, {
+          headers: { Authorization: `Bearer ${token}` },
+          params: { userId, recipientId, limit: 50, skip: 0 },
+          timeout: 10000,
+        });
+        const privateKeyPem = localStorage.getItem('privateKey');
+        const messages = await Promise.all(
+          data.messages.map(async (msg) => {
+            const newMsg = { ...msg };
+            if (msg.senderId === userId) {
+              newMsg.content = msg.plaintextContent || msg.content;
+            } else if (msg.recipientId === userId) {
+              newMsg.content =
+                msg.contentType === 'text' ? await decryptMessage(msg.content, privateKeyPem) : msg.content;
+            }
+            return newMsg;
+          })
+        );
+        dispatch(setMessages({ recipientId, messages }));
+        await saveMessages(messages);
+        listRef.current?.scrollToRow(messages.length - 1);
         setError('');
         return;
-      }
-      let attempt = 0;
-      while (attempt < retryCount) {
-        try {
-          const { data } = await axios.get(`${BASE_URL}/social/messages`, {
-            headers: { Authorization: `Bearer ${token}` },
-            params: { userId, recipientId, limit: 50, skip: 0 },
-            timeout: 10000,
-          });
-          const privateKeyPem = localStorage.getItem('privateKey');
-          const messages = await Promise.all(
-            data.messages.map(async (msg) => {
-              const newMsg = { ...msg };
-              if (msg.senderId === userId) {
-                newMsg.content = msg.plaintextContent || msg.content;
-              } else if (msg.recipientId === userId) {
-                newMsg.content =
-                  msg.contentType === 'text' ? await decryptMessage(msg.content, privateKeyPem) : msg.content;
-              }
-              return newMsg;
-            })
-          );
-          dispatch(setMessages({ recipientId, messages }));
-          await saveMessages(messages);
-          listRef.current?.scrollToRow(messages.length - 1);
-          setError('');
+      } catch (err) {
+        attempt++;
+        console.error(`Fetch messages attempt ${attempt} failed:`, err.message);
+        if (err.response?.status === 401) {
+          console.warn('Unauthorized, attempting token refresh');
+          setError('Session expired, please log in again');
+          setTimeout(() => handleLogout(), 2000);
           return;
-        } catch (err) {
-          attempt++;
-          console.error(`Fetch messages attempt ${attempt} failed:`, err.message);
-          if (err.response?.status === 401) {
-            console.warn('Unauthorized, attempting token refresh');
-            setError('Session expired, please log in again');
-            setTimeout(() => handleLogout(), 2000);
-            return;
-          }
-          if (err.response?.status === 429) {
-            const delay = Math.pow(2, attempt) * 1000;
-            await new Promise((resolve) => setTimeout(resolve, delay));
-          }
-          if (attempt === retryCount) {
-            setError(`Failed to load messages after ${retryCount} attempts: ${err.message}`);
-            dispatch(setMessages({ recipientId, messages: [] }));
-          }
+        }
+        if (err.response?.status === 429) {
+          const delay = Math.pow(2, attempt) * 1000;
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+        if (attempt === retryCount) {
+          setError(`Failed to load messages after ${retryCount} attempts: ${err.message}`);
+          dispatch(setMessages({ recipientId, messages: [] }));
         }
       }
-    }, 500),
-    [token, userId, dispatch, decryptMessage, handleLogout]
-  );
+    }
+  }, 500),
+  [token, userId, dispatch, decryptMessage, handleLogout]
+);
+
+
 
   const sendPendingMessages = useCallback(async () => {
     if (!navigator.onLine || !pendingMessages.length) return;
@@ -495,47 +504,106 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     }
   }, [newContactNumber, userId, token, socket, handleLogout, initializeChat]);
 
+  
+
+
+
+
   const sendMessage = useCallback(async () => {
-    if (!message.trim() || !selectedChat || !chats[selectedChat]) {
-      setError('Cannot send empty message or no chat selected');
-      return;
+  if (!message.trim() || !selectedChat || !chats[selectedChat]) {
+    setError('Cannot send empty message or no chat selected');
+    return;
+  }
+
+  const recipientId = selectedChat;
+  const clientMessageId = `${userId}_${Date.now()}_${Math.random().toString(36).substring(2)}`;
+  const plaintextContent = message.trim();
+
+  try {
+    const recipientPublicKey = await getPublicKey(recipientId);
+    const encryptedContent = await encryptMessage(plaintextContent, recipientPublicKey);
+
+    const tempMessage = {
+      _id: clientMessageId,
+      senderId: userId,
+      recipientId,
+      content: plaintextContent,
+      contentType: 'text',
+      plaintextContent,
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+      clientMessageId,
+      senderVirtualNumber: virtualNumber,
+      senderUsername: username,
+      senderPhoto: photo,
+      replyTo: replyTo ? { ...replyTo, content: replyTo.content } : undefined,
+    };
+
+    dispatch(addMessage({ recipientId, message: tempMessage }));
+    await saveMessages([tempMessage]);
+
+    // Force scroll to bottom immediately after adding the message
+    if (chats[recipientId]?.length > 0) {
+      listRef.current?.scrollToRow(chats[recipientId].length);
     }
 
-    const recipientId = selectedChat;
-    const clientMessageId = `${userId}_${Date.now()}_${Math.random().toString(36).substring(2)}`;
-    const plaintextContent = message.trim();
+    const messageData = {
+      senderId: userId,
+      recipientId,
+      content: encryptedContent,
+      contentType: 'text',
+      plaintextContent,
+      clientMessageId,
+      senderVirtualNumber: virtualNumber,
+      senderUsername: username,
+      senderPhoto: photo,
+      replyTo: replyTo ? replyTo._id : undefined,
+    };
 
-    try {
-      const recipientPublicKey = await getPublicKey(recipientId);
-      const encryptedContent = await encryptMessage(plaintextContent, recipientPublicKey);
+    socket.emit('message', messageData, async (ack) => {
+      if (ack.error) {
+        console.error('Message send error:', ack.error);
+        setError(`Failed to send message: ${ack.error}`);
+        setPendingMessages((prev) => [
+          ...prev,
+          { tempId: clientMessageId, recipientId, messageData },
+        ]);
+        await savePendingMessages([
+          ...pendingMessages,
+          { tempId: clientMessageId, recipientId, messageData },
+        ]);
+        return;
+      }
+      const { message: sentMessage } = ack;
+      dispatch(
+        replaceMessage({
+          recipientId,
+          message: { ...sentMessage, content: plaintextContent },
+          replaceId: clientMessageId,
+        })
+      );
+      await saveMessages([{ ...sentMessage, content: plaintextContent }]);
+      // Force scroll to bottom again after replacing the message
+      if (chats[recipientId]?.length > 0) {
+        listRef.current?.scrollToRow(chats[recipientId].length);
+      }
+    });
 
-      const tempMessage = {
-        _id: clientMessageId,
+    setMessage('');
+    setReplyTo(null);
+    setShowEmojiPicker(false);
+    socket.emit('stopTyping', { userId, recipientId });
+    inputRef.current?.focus();
+  } catch (err) {
+    console.error('Send message error:', err);
+    setError(`Failed to send message: ${err.message}`);
+    const pendingMessage = {
+      tempId: clientMessageId,
+      recipientId,
+      messageData: {
         senderId: userId,
         recipientId,
         content: plaintextContent,
-        contentType: 'text',
-        plaintextContent,
-        status: 'pending',
-        createdAt: new Date().toISOString(),
-        clientMessageId,
-        senderVirtualNumber: virtualNumber,
-        senderUsername: username,
-        senderPhoto: photo,
-        replyTo: replyTo ? { ...replyTo, content: replyTo.content } : undefined,
-      };
-
-      dispatch(addMessage({ recipientId, message: tempMessage }));
-      await saveMessages([tempMessage]);
-
-      if (isAtBottomRef.current && chats[recipientId]?.length > 0) {
-        listRef.current?.scrollToRow(chats[recipientId].length);
-      }
-
-      const messageData = {
-        senderId: userId,
-        recipientId,
-        content: encryptedContent,
         contentType: 'text',
         plaintextContent,
         clientMessageId,
@@ -543,75 +611,28 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         senderUsername: username,
         senderPhoto: photo,
         replyTo: replyTo ? replyTo._id : undefined,
-      };
+      },
+    };
+    setPendingMessages((prev) => [...prev, pendingMessage]);
+    await savePendingMessages([...pendingMessages, pendingMessage]);
+  }
+}, [
+  message,
+  selectedChat,
+  userId,
+  socket,
+  dispatch,
+  encryptMessage,
+  getPublicKey,
+  virtualNumber,
+  username,
+  photo,
+  replyTo,
+  pendingMessages,
+  chats,
+]);
 
-      socket.emit('message', messageData, async (ack) => {
-        if (ack.error) {
-          console.error('Message send error:', ack.error);
-          setError(`Failed to send message: ${ack.error}`);
-          setPendingMessages((prev) => [
-            ...prev,
-            { tempId: clientMessageId, recipientId, messageData },
-          ]);
-          await savePendingMessages([
-            ...pendingMessages,
-            { tempId: clientMessageId, recipientId, messageData },
-          ]);
-          return;
-        }
-        const { message: sentMessage } = ack;
-        dispatch(
-          replaceMessage({
-            recipientId,
-            message: { ...sentMessage, content: plaintextContent },
-            replaceId: clientMessageId,
-          })
-        );
-        await saveMessages([{ ...sentMessage, content: plaintextContent }]);
-      });
 
-      setMessage('');
-      setReplyTo(null);
-      setShowEmojiPicker(false);
-      socket.emit('stopTyping', { userId, recipientId });
-      inputRef.current?.focus();
-    } catch (err) {
-      console.error('Send message error:', err);
-      setError(`Failed to send message: ${err.message}`);
-      const pendingMessage = {
-        tempId: clientMessageId,
-        recipientId,
-        messageData: {
-          senderId: userId,
-          recipientId,
-          content: plaintextContent,
-          contentType: 'text',
-          plaintextContent,
-          clientMessageId,
-          senderVirtualNumber: virtualNumber,
-          senderUsername: username,
-          senderPhoto: photo,
-          replyTo: replyTo ? replyTo._id : undefined,
-        },
-      };
-      setPendingMessages((prev) => [...prev, pendingMessage]);
-      await savePendingMessages([...pendingMessages, pendingMessage]);
-    }
-  }, [
-    message,
-    selectedChat,
-    userId,
-    socket,
-    dispatch,
-    encryptMessage,
-    getPublicKey,
-    virtualNumber,
-    username,
-    photo,
-    replyTo,
-    pendingMessages,
-    chats,
-  ]);
 
   const handleEditMessage = useCallback(
     async (messageId, newContent) => {
@@ -897,110 +918,106 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     },
     [chats, selectedChat]
   );
+// Modified renderMessage function to fix swipe handler and React Error #321
+const renderMessage = useCallback(
+  ({ index, key, style }) => {
+    if (!selectedChat || !chats[selectedChat] || !Array.isArray(chats[selectedChat])) {
+      return <div key={key} style={style} />;
+    }
+    const messages = chats[selectedChat];
+    if (!messages[index]) {
+      console.warn(`No message at index ${index} for selectedChat ${selectedChat}`);
+      return <div key={key} style={style} />;
+    }
+    const msg = messages[index];
+    const prevMsg = index > 0 ? messages[index - 1] : null;
+    const isMine = msg.senderId === userId;
+    const showDate = !prevMsg || formatDateHeader(prevMsg.createdAt) !== formatDateHeader(msg.createdAt);
+    const isFirstUnread = msg._id === firstUnreadMessageId;
 
-  const renderMessage = useCallback(
-    ({ index, key, style }) => {
-      if (!selectedChat || !chats[selectedChat] || !Array.isArray(chats[selectedChat])) {
-        return <div key={key} style={style} />;
-      }
-      const messages = chats[selectedChat];
-      if (!messages[index]) {
-        console.warn(`No message at index ${index} for selectedChat ${selectedChat}`);
-        return <div key={key} style={style} />;
-      }
-      const msg = messages[index];
-      const prevMsg = index > 0 ? messages[index - 1] : null;
-      const isMine = msg.senderId === userId;
-      const showDate = !prevMsg || formatDateHeader(prevMsg.createdAt) !== formatDateHeader(msg.createdAt);
-      const isFirstUnread = msg._id === firstUnreadMessageId;
+    const swipeHandlers = useSwipeable({
+      onSwipedRight: () => isMine && handleSwipe(msg),
+      onSwipedLeft: () => !isMine && handleSwipe(msg),
+      delta: 50,
+      preventDefaultTouchmoveEvent: true,
+    });
 
-      const swipeHandlers = useSwipeable({
-        onSwipedRight: () => isMine && handleSwipe(msg),
-        onSwipedLeft: () => !isMine && handleSwipe(msg),
-        delta: 50,
-        preventDefaultTouchmoveEvent: true,
-      });
-
-      
-
-        const ref = swipeHandlers.ref;
-return (
-  <div key={msg._id || key} style={style} className="message-container" ref={ref} {...swipeHandlers}>
-
-          {showDate && (
-            <div className="date-header">
-              <span>{formatDateHeader(msg.createdAt)}</span>
+    return (
+      <div key={msg._id || key} style={style} className="message-container" {...swipeHandlers}>
+        {showDate && (
+          <div className="date-header">
+            <span>{formatDateHeader(msg.createdAt)}</span>
+          </div>
+        )}
+        {isFirstUnread && (
+          <div className="unread-divider">
+            <span>New Messages</span>
+          </div>
+        )}
+        <div className={`message ${isMine ? 'mine' : 'other'} ${replyTo?._id === msg._id ? 'swiped' : ''}`}>
+          {msg.replyTo && (
+            <div className="reply-preview">
+              <p>{msg.replyTo.content?.slice(0, 50) || '[Content unavailable]'}</p>
             </div>
           )}
-          {isFirstUnread && (
-            <div className="unread-divider">
-              <span>New Messages</span>
-            </div>
+          {msg.contentType === 'text' && <p className="message-content">{msg.content || '[Empty message]'}</p>}
+          {msg.contentType === 'image' && (
+            <img src={msg.content} alt="Sent image" className="message-media" onError={() => console.error(`Failed to load image: ${msg.content}`)} />
           )}
-          <div className={`message ${isMine ? 'mine' : 'other'} ${replyTo?._id === msg._id ? 'swiped' : ''}`}>
-            {msg.replyTo && (
-              <div className="reply-preview">
-                <p>{msg.replyTo.content?.slice(0, 50) || '[Content unavailable]'}</p>
-              </div>
-            )}
-            {msg.contentType === 'text' && <p className="message-content">{msg.content || '[Empty message]'}</p>}
-            {msg.contentType === 'image' && (
-              <img src={msg.content} alt="Sent image" className="message-media" onError={() => console.error(`Failed to load image: ${msg.content}`)} />
-            )}
-            {msg.contentType === 'video' && (
-              <video controls className="message-media">
-                <source src={msg.content} type="video/mp4" />
-              </video>
-            )}
-            {msg.contentType === 'audio' && (
-              <audio controls className="message-audio">
-                <source src={msg.content} type="audio/mpeg" />
-              </audio>
-            )}
-            {msg.contentType === 'document' && (
-              <a href={msg.content} target="_blank" rel="noopener noreferrer" className="message-document">
-                <FaFileAlt className="mr-2" /> {msg.originalFilename || 'Document'}
-              </a>
-            )}
-            {msg.caption && <p className="message-caption">{msg.caption}</p>}
-            <div className="message-meta">
-              <span>{formatTime(msg.createdAt)}</span>
-              {isMine && (
-                <span className="message-status">
-                  {msg.status === 'pending'
-                    ? 'Sending...'
-                    : msg.status === 'sent'
-                    ? '✓'
-                    : msg.status === 'delivered'
-                    ? '✓✓'
-                    : msg.status === 'read'
-                    ? '✓✓'
-                    : 'Failed'}
-                </span>
-              )}
-            </div>
-            {msg.status === 'uploading' && (
-              <div className="upload-progress">
-                <div style={{ width: `${uploadProgress[msg._id] || 0}%` }} />
-              </div>
-            )}
-            {isMine && msg.status !== 'uploading' && (
-              <div className="message-actions">
-                <FaReply className="action-icon" onClick={() => setReplyTo(msg)} />
-                <FaEdit className="action-icon" onClick={() => {
-                  setEditingMessage(msg);
-                  setMessage(msg.content || '');
-                  inputRef.current?.focus();
-                }} />
-                <FaTrash className="action-icon" onClick={() => handleDeleteMessage(msg._id)} />
-              </div>
+          {msg.contentType === 'video' && (
+            <video controls className="message-media">
+              <source src={msg.content} type="video/mp4" />
+            </video>
+          )}
+          {msg.contentType === 'audio' && (
+            <audio controls className="message-audio">
+              <source src={msg.content} type="audio/mpeg" />
+            </audio>
+          )}
+          {msg.contentType === 'document' && (
+            <a href={msg.content} target="_blank" rel="noopener noreferrer" className="message-document">
+              <FaFileAlt className="mr-2" /> {msg.originalFilename || 'Document'}
+            </a>
+          )}
+          {msg.caption && <p className="message-caption">{msg.caption}</p>}
+          <div className="message-meta">
+            <span>{formatTime(msg.createdAt)}</span>
+            {isMine && (
+              <span className="message-status">
+                {msg.status === 'pending'
+                  ? 'Sending...'
+                  : msg.status === 'sent'
+                  ? '✓'
+                  : msg.status === 'delivered'
+                  ? '✓✓'
+                  : msg.status === 'read'
+                  ? '✓✓'
+                  : 'Failed'}
+              </span>
             )}
           </div>
+          {msg.status === 'uploading' && (
+            <div className="upload-progress">
+              <div style={{ width: `${uploadProgress[msg._id] || 0}%` }} />
+            </div>
+          )}
+          {isMine && msg.status !== 'uploading' && (
+            <div className="message-actions">
+              <FaReply className="action-icon" onClick={() => setReplyTo(msg)} />
+              <FaEdit className="action-icon" onClick={() => {
+                setEditingMessage(msg);
+                setMessage(msg.content || '');
+                inputRef.current?.focus();
+              }} />
+              <FaTrash className="action-icon" onClick={() => handleDeleteMessage(msg._id)} />
+            </div>
+          )}
         </div>
-      );
-    },
-    [selectedChat, chats, userId, firstUnreadMessageId, uploadProgress, handleDeleteMessage, replyTo, handleSwipe]
-  );
+      </div>
+    );
+  },
+  [selectedChat, chats, userId, firstUnreadMessageId, uploadProgress, handleDeleteMessage, replyTo, handleSwipe]
+);
 
   const chatListRowRenderer = useCallback(
     ({ index, key, style }) => {
@@ -1040,71 +1057,94 @@ return (
     [users, selectedChat, dispatch, chats, initializeChat, fetchMessages]
   );
 
+
+
+// Add useEffect for click-outside to close menu
+useEffect(() => {
+  const handleClickOutside = (event) => {
+    if (showMenu && !event.target.closest('.chat-menu') && !event.target.closest('.menu-dropdown')) {
+      setShowMenu(false);
+      setMenuTab('');
+    }
+  };
+
+  document.addEventListener('click', handleClickOutside);
+  return () => document.removeEventListener('click', handleClickOutside);
+}, [showMenu]);
+
   return (
     <div className="chat-screen">
-      <div className="chat-header">
-        <h1>Chat</h1>
-        <div className="chat-menu">
-          <FaEllipsisH onClick={() => setShowMenu(!showMenu)} />
-          <AnimatePresence>
-            {showMenu && (
-              <motion.div
-                initial={{ opacity: 0, y: -10, scale: 0.8 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, y: -10, scale: 0.8 }}
-                transition={{ duration: 0.3, ease: 'easeInOut' }}
-                className="menu-dropdown"
-              >
-                <div
-                  className="menu-item"
-                  onClick={() => setMenuTab(menuTab === 'add' ? '' : 'add')}
-                >
-                  <FaUserPlus className="menu-item-icon" /> Add Contact
-                </div>
-                <div className="menu-item logout" onClick={handleLogout}>
-                  <FaSignOutAlt className="menu-item-icon" /> Logout
-                </div>
-                {menuTab === 'add' && (
-                  <motion.div
-                    initial={{ height: 0, opacity: 0 }}
-                    animate={{ height: 'auto', opacity: 1 }}
-                    exit={{ height: 0, opacity: 0 }}
-                    transition={{ duration: 0.3 }}
-                    className="menu-add-contact"
-                  >
-                    <div className="contact-input-group">
-                      <input
-                        type="text"
-                        value={newContactNumber}
-                        onChange={(e) => setNewContactNumber(e.target.value)}
-                        placeholder="Enter virtual number"
-                        className={`contact-input ${error ? 'error' : ''}`}
-                      />
-                      {newContactNumber && (
-                        <FaTimes
-                          className="clear-input-icon"
-                          onClick={() => setNewContactNumber('')}
-                        />
-                      )}
-                    </div>
-                    <button
-                      onClick={handleAddContact}
-                      className="contact-button"
-                      disabled={isAddingContact}
-                    >
-                      {isAddingContact ? (
-                        <span className="loading-spinner">Adding...</span>
-                      ) : (
-                        'Add Contact'
-                      )}
-                    </button>
-                  </motion.div>
+
+// Modified chat-header JSX to ensure proper click handling
+<div className="chat-header">
+  <h1>Chat</h1>
+  <div className="chat-menu">
+    <FaEllipsisH onClick={() => setShowMenu(!showMenu)} />
+    <AnimatePresence>
+      {showMenu && (
+        <motion.div
+          initial={{ opacity: 0, y: -10, scale: 0.8 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, y: -10, scale: 0.8 }}
+          transition={{ duration: 0.3, ease: 'easeInOut' }}
+          className="menu-dropdown"
+        >
+          <div
+            className="menu-item"
+            onClick={() => setMenuTab(menuTab === 'add' ? '' : 'add')}
+          >
+            <FaUserPlus className="menu-item-icon" /> Add Contact
+          </div>
+          <div className="menu-item logout" onClick={handleLogout}>
+            <FaSignOutAlt className="menu-item-icon" /> Logout
+          </div>
+          {menuTab === 'add' && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.3 }}
+              className="menu-add-contact"
+            >
+              <div className="contact-input-group">
+                <input
+                  type="text"
+                  value={newContactNumber}
+                  onChange={(e) => setNewContactNumber(e.target.value)}
+                  placeholder="Enter virtual number"
+                  className={`contact-input ${error ? 'error' : ''}`}
+                />
+                {newContactNumber && (
+                  <FaTimes
+                    className="clear-input-icon"
+                    onClick={() => setNewContactNumber('')}
+                  />
                 )}
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </div>
-      </div>
+              </div>
+              <button
+                onClick={handleAddContact}
+                className="contact-button"
+                disabled={isAddingContact}
+              >
+                {isAddingContact ? (
+                  <span className="loading-spinner">Adding...</span>
+                ) : (
+                  'Add Contact'
+                )}
+              </button>
+            </motion.div>
+          )}
+        </motion.div>
+      )}
+    </AnimatePresence>
+  </div>
+</div>
+
+
+
+
+
+
       {error && <div className="error-message">{error}</div>}
       <div className="chat-content">
         {!selectedChat ? (
