@@ -565,49 +565,62 @@ module.exports = (io) => {
     }
   });
 
-  // GET /social/messages
-  router.get('/messages', authMiddleware, async (req, res) => {
-    const { userId, recipientId, limit = 50, skip = 0 } = req.query;
-    if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId)) {
-      logger.warn('Invalid userId or recipientId in messages request', { userId, recipientId });
-      return res.status(400).json({ error: 'Invalid userId or recipientId' });
-    }
 
-    const cacheKey = `:messages:${userId}:${recipientId}:${limit}:${skip}`;
+// GET /social/messages
+router.get('/messages', authMiddleware, async (req, res) => {
+  const { userId, recipientId, limit = 50, skip = 0 } = req.query;
+  if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId)) {
+    logger.warn('Invalid userId or recipientId in messages request', { userId, recipientId });
+    return res.status(400).json({ error: 'Invalid userId or recipientId' });
+  }
+
+  const cacheKey = `:messages:${userId}:${recipientId}:${limit}:${skip}`;
+  try {
+    let response;
     try {
-      const cached = await memcached.get(cacheKey); // Changed to memcached
+      const cached = await memcached.get(cacheKey);
       if (cached) {
         logger.info('Messages served from cache', { userId, recipientId });
         return res.json(JSON.parse(cached));
       }
-
-      const messages = await Message.find({
-        $or: [
-          { senderId: userId, recipientId },
-          { senderId: recipientId, recipientId: userId },
-        ],
-      })
-        .sort({ createdAt: -1 })
-        .skip(parseInt(skip))
-        .limit(parseInt(limit))
-        .select('senderId recipientId content contentType status createdAt updatedAt caption replyTo originalFilename clientMessageId senderVirtualNumber senderUsername senderPhoto plaintextContent');
-
-      const total = await Message.countDocuments({
-        $or: [
-          { senderId: userId, recipientId },
-          { senderId: recipientId, recipientId: userId },
-        ],
-      });
-
-      const response = { messages: messages.reverse(), total };
-      await memcached.setex(cacheKey, 300, JSON.stringify(response)); // Changed to memcached
-      logger.info('Messages fetched and cached', { userId, recipientId });
-      res.json(response);
-    } catch (error) {
-      logger.error('Messages fetch failed', { error: error.message, stack: error.stack });
-      res.status(500).json({ error: 'Failed to fetch messages', details: error.message });
+    } catch (cacheErr) {
+      logger.warn('Cache fetch failed, proceeding with MongoDB', { cacheKey, error: cacheErr.message });
     }
-  });
+
+    const messages = await Message.find({
+      $or: [
+        { senderId: userId, recipientId },
+        { senderId: recipientId, recipientId: userId },
+      ],
+    })
+      .sort({ createdAt: -1 })
+      .skip(parseInt(skip))
+      .limit(parseInt(limit))
+      .select('senderId recipientId content contentType status createdAt updatedAt caption replyTo originalFilename clientMessageId senderVirtualNumber senderUsername senderPhoto plaintextContent');
+
+    const total = await Message.countDocuments({
+      $or: [
+        { senderId: userId, recipientId },
+        { senderId: recipientId, recipientId: userId },
+      ],
+    });
+
+    response = { messages: messages.reverse(), total };
+    try {
+      await memcached.setex(cacheKey, 300, JSON.stringify(response));
+      logger.info('Messages fetched and cached', { userId, recipientId });
+    } catch (cacheErr) {
+      logger.warn('Failed to cache messages', { cacheKey, error: cacheErr.message });
+    }
+
+    res.json(response);
+  } catch (error) {
+    logger.error('Messages fetch failed', { error: error.message, stack: error.stack });
+    res.status(500).json({ error: 'Failed to fetch messages', details: error.message });
+  }
+});
+
+
 
   // POST /social/add_contact
   router.post('/add_contact', authMiddleware, async (req, res) => {

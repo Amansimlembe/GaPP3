@@ -63,20 +63,23 @@ messageSchema.statics.cleanupOrphanedMessages = async function () {
     logger.info('Starting orphaned messages cleanup');
 
     // Get all message sender and recipient IDs
-    const messageUsers = await this.distinct('senderId').concat(await this.distinct('recipientId'));
-    const uniqueUserIds = [...new Set(messageUsers.map(id => id.toString()))];
+    const [senderIds, recipientIds] = await Promise.all([
+      this.distinct('senderId'),
+      this.distinct('recipientId'),
+    ]);
+    const messageUsers = [...new Set([...senderIds, ...recipientIds].map(id => id.toString()))];
 
-    if (!uniqueUserIds.length) {
+    if (!messageUsers.length) {
       logger.info('No messages found');
       return { deletedCount: 0, orphanedUserIds: 0 };
     }
 
     // Get existing user IDs
-    const existingUsers = await User.find({ _id: { $in: uniqueUserIds } }).select('_id');
+    const existingUsers = await User.find({ _id: { $in: messageUsers } }).select('_id');
     const existingUserIds = new Set(existingUsers.map(user => user._id.toString()));
 
     // Identify orphaned user IDs
-    const orphanedUserIds = uniqueUserIds.filter(id => !existingUserIds.has(id));
+    const orphanedUserIds = messageUsers.filter(id => !existingUserIds.has(id));
 
     if (orphanedUserIds.length === 0) {
       logger.info('No orphaned messages found');

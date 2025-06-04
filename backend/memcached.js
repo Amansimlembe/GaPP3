@@ -16,11 +16,13 @@ const memcachedConfig = {
   servers: process.env.MEMCACHED_SERVERS || 'localhost:11211',
   options: {
     timeout: 0.5, // Connection timeout in seconds
-    retries: 3,   // Number of retries on failure
-    retry: 1000,  // Retry delay in ms
+    retries: 5,   // Increased retries
+    retry: 2000,  // Increased retry delay in ms
     remove: true, // Remove failed servers from pool
     username: process.env.MEMCACHED_USERNAME,
     password: process.env.MEMCACHED_PASSWORD,
+    reconnect: true, // Enable automatic reconnection
+    maxExpiration: 2592000, // 30 days max expiration
   },
 };
 
@@ -34,12 +36,25 @@ memcached.on('reconnecting', (details) => {
   logger.info('Memcached reconnecting', { server: details.server, attempts: details.totalAttempts });
 });
 
+memcached.on('reconnect', (details) => {
+  logger.info('Memcached reconnected', { server: details.server });
+});
+
 const get = (key) => {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     memcached.get(key, (err, data) => {
       if (err) {
         logger.error('Memcached get failed', { key, error: err.message });
-        return reject(err);
+        // Fallback to memory-cache
+        const fallback = cache.get(key);
+        if (fallback) {
+          logger.info('Served from memory-cache fallback', { key });
+          resolve(fallback);
+        } else {
+          logger.warn('No cache hit, falling back to MongoDB', { key });
+          resolve(null);
+        }
+        return;
       }
       if (data) {
         logger.info('Memcached get success', { key });
@@ -50,6 +65,7 @@ const get = (key) => {
           logger.info('Served from memory-cache fallback', { key });
           resolve(fallback);
         } else {
+          logger.info('Cache miss, falling back to MongoDB', { key });
           resolve(null);
         }
       }
