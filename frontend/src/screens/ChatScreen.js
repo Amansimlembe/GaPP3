@@ -412,16 +412,17 @@ useEffect(() => {
   selectedChatRef.current = selectedChat;
 }, [selectedChat]);
 
-// Corrected handleFileChange function (starting around line 260)
+
 const handleFileChange = useCallback(
   async (e, type) => {
     try {
-      const selectedFiles = Array.from(e.target.files);
-      if (!selectedFiles.length || !selectedChatRef.current) {
-        setError('No files selected or no chat selected');
-        console.warn('No files or invalid chat:', { selectedChat: selectedChatRef.current });
-        return;
+      if (!e.target.files?.length || !selectedChatRef.current || !isValidObjectId(selectedChatRef.current)) {
+        throw new Error('No files selected, no chat selected, or invalid chat');
       }
+      if (!socket) {
+        throw new Error('Socket connection not established');
+      }
+      const selectedFiles = Array.from(e.target.files);
       const compressedFiles = await Promise.all(
         selectedFiles.map((file) => (file.type.startsWith('image') ? compressImage(file) : file))
       );
@@ -440,7 +441,7 @@ const handleFileChange = useCallback(
         return {
           _id: clientMessageId,
           senderId: userId,
-          recipientId: selectedChatRef.current, // Use ref here
+          recipientId: selectedChatRef.current,
           content: URL.createObjectURL(file),
           contentType: type,
           status: 'uploading',
@@ -453,7 +454,6 @@ const handleFileChange = useCallback(
           senderPhoto: photo,
         };
       });
-      
 
       tempMessages.forEach((msg) => {
         dispatch(addMessage({ recipientId: selectedChatRef.current, message: msg }));
@@ -466,7 +466,6 @@ const handleFileChange = useCallback(
 
       for (let [index, file] of compressedFiles.entries()) {
         const clientMessageId = tempMessages[index]._id;
-
         const retryUpload = async (retryCount = 3) => {
           let attempt = 0;
           while (attempt < retryCount) {
@@ -541,7 +540,7 @@ const handleFileChange = useCallback(
             }
           }
         };
-        retryUpload();
+        await retryUpload();
       }
 
       setFiles([]);
@@ -552,13 +551,12 @@ const handleFileChange = useCallback(
       inputRef.current?.focus();
       console.log('File change processed successfully');
     } catch (err) {
-      console.error('File change error:', err);
-      setError('Error processing file');
+      console.error('File change error:', err.message, err.stack);
+      setError(`Error processing file: ${err.message}`);
     }
   },
-  [selectedChat, userId, token, socket, dispatch, virtualNumber, username, photo, captions, chats]
+  [selectedChat, userId, token, socket, dispatch, virtualNumber, username, photo, captions, chats, handleLogout, compressImage]
 );
-
 
 
   
