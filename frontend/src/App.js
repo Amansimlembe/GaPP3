@@ -77,15 +77,25 @@ const getTokenExpiration = (token) => {
   }
 };
 
-const App = () => {
-  const [token, setToken] = useState(localStorage.getItem('token') || '');
-  const [userId, setUserId] = useState(localStorage.getItem('userId') || '');
+
+  const App = () => {
+  const isValidObjectId = (id) => /^[0-9a-fA-F]{24}$/.test(id); // Basic ObjectId validation
+  const storedToken = localStorage.getItem('token');
+  const storedUserId = localStorage.getItem('userId');
+  const [token, setToken] = useState(
+    storedToken && typeof storedToken === 'string' ? storedToken : ''
+  );
+  const [userId, setUserId] = useState(
+    storedUserId && isValidObjectId(storedUserId) ? storedUserId : ''
+  );
   const [role, setRole] = useState(Number(localStorage.getItem('role')) || 0);
   const [photo, setPhoto] = useState(localStorage.getItem('photo') || 'https://placehold.co/40x40');
   const [virtualNumber, setVirtualNumber] = useState(localStorage.getItem('virtualNumber') || '');
   const [username, setUsername] = useState(localStorage.getItem('username') || '');
   const [chatNotifications, setChatNotifications] = useState(0);
-  const [isAuthenticated, setIsAuthenticated] = useState(!!localStorage.getItem('token'));
+  const [isAuthenticated, setIsAuthenticated] = useState(
+    storedToken && isValidObjectId(storedUserId)
+  );
   const [socket, setSocket] = useState(null);
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
   const [error, setError] = useState(null);

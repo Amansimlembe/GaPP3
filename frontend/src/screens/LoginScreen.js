@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useDispatch } from 'react-redux';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
@@ -22,24 +22,27 @@ const LoginScreen = () => {
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [isCountryInputFocused, setIsCountryInputFocused] = useState(false);
-  const [bypassLocation, setBypassLocation] = useState(false); // New state for testing
+  const [bypassLocation, setBypassLocation] = useState(false);
   const countryInputRef = useRef(null);
 
-  let countries = [];
-  try {
-    countries = getCountries().map((code) => ({
-      code,
-      name: new Intl.DisplayNames(['en'], { type: 'region' }).of(code) || code,
-    }));
-  } catch (err) {
-    console.error('Error loading countries:', err);
-    setError('Failed to load countries, please try again');
-  }
+  // Initialize countries using useMemo to avoid re-computation
+  const countries = useMemo(() => {
+    try {
+      return getCountries().map((code) => ({
+        code,
+        name: new Intl.DisplayNames(['en'], { type: 'region' }).of(code) || code,
+      }));
+    } catch (err) {
+      console.error('Error loading countries:', err);
+      setError('Failed to load countries, please try again');
+      return [];
+    }
+  }, []);
 
   const filteredCountries = countries.filter((c) =>
     c.name.toLowerCase().includes(search.toLowerCase()) || c.code.toLowerCase().includes(search.toLowerCase())
   );
-
+  
   const validateForm = () => {
     if (!email || !/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(email)) {
       setError('Please enter a valid email');
