@@ -1,0 +1,10 @@
+services:
+  - type: web
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 443
+    healthCheckPath: /health
+    autoScaling:
+      enabled: false

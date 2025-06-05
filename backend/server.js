@@ -6,8 +6,8 @@ const cors = require('cors');
 const path = require('path');
 const mongoose = require('mongoose');
 const winston = require('winston');
-const fs = require('fs'); // Added to fix ReferenceError
-const Message = require('./models/Message'); // Import Message model for cleanup
+const fs = require('fs');
+const Message = require('./models/Message');
 
 const logger = winston.createLogger({
   level: 'info',
@@ -18,10 +18,11 @@ const logger = winston.createLogger({
   ],
 });
 
-let authRoutes, authMiddleware, socialRoutes, jobseekerRoutes, employerRoutes;
+let authRoutes, authMiddleware, socialRoutes, feedRoutes, jobseekerRoutes, employerRoutes;
 try {
   ({ router: authRoutes, authMiddleware } = require('./routes/auth'));
   socialRoutes = require('./routes/social');
+  feedRoutes = require('./routes/feed');
   jobseekerRoutes = require('./routes/jobseeker');
   employerRoutes = require('./routes/employer');
 } catch (err) {
@@ -84,7 +85,6 @@ const connectDB = async () => {
   try {
     await mongoose.connect(process.env.MONGO_URI);
     logger.info('MongoDB connected');
-    // Run initial cleanup of orphaned messages
     try {
       const result = await Message.cleanupOrphanedMessages();
       logger.info('Initial orphaned messages cleanup completed', {
@@ -94,7 +94,6 @@ const connectDB = async () => {
     } catch (err) {
       logger.error('Initial orphaned messages cleanup failed', { error: err.message });
     }
-    // Start periodic cleanup of orphaned messages
     setInterval(async () => {
       try {
         const result = await Message.cleanupOrphanedMessages();
@@ -105,7 +104,7 @@ const connectDB = async () => {
       } catch (err) {
         logger.error('Periodic orphaned messages cleanup failed', { error: err.message });
       }
-    }, 6 * 60 * 60 * 1000); // Run every 6 hours
+    }, 6 * 60 * 60 * 1000);
   } catch (err) {
     logger.error('MongoDB connection error:', { error: err.message, stack: err.stack });
     process.exit(1);
@@ -116,17 +115,19 @@ connectDB();
 // Register routes
 const routes = [
   { path: '/auth', handler: authRoutes, name: 'authRoutes' },
+  { path: '/feed', handler: feedRoutes, name: 'feedRoutes' },
+  { path: '/social', handler: socialRoutes(io), name: 'socialRoutes' },
   { path: '/jobseeker', handler: jobseekerRoutes, name: 'jobseekerRoutes' },
   { path: '/employer', handler: employerRoutes, name: 'employerRoutes' },
-  { path: '/social', handler: socialRoutes(io), name: 'socialRoutes' },
 ];
 
 logger.info('Inspecting route handlers:', {
   authRoutes: authRoutes ? 'defined' : 'undefined',
-  jobseekerRoutes: jobseekerRoutes ? 'defined' : 'undefined',
-  employerRoutes: employerRoutes ? 'defined' : 'undefined',
+  feedRoutes: feedRoutes ? 'defined' : 'undefined',
   socialRoutes: socialRoutes ? 'defined' : 'undefined',
   socialRoutesResult: socialRoutes(io) ? 'defined' : 'undefined',
+  jobseekerRoutes: jobseekerRoutes ? 'defined' : 'undefined',
+  employerRoutes: employerRoutes ? 'defined' : 'undefined',
 });
 
 routes.forEach(({ path, handler, name }) => {

@@ -15,36 +15,47 @@ const logger = winston.createLogger({
 const memcachedConfig = {
   servers: process.env.MEMCACHED_SERVERS || 'localhost:11211',
   options: {
-    timeout: 1, // Increased timeout
-    retries: 10, // More retries
-    retry: 3000, // Longer retry delay
+    timeout: 2, // Increased timeout to 2 seconds
+    retries: 15, // Increased retries
+    retry: 5000, // Increased retry delay
     remove: true,
     username: process.env.MEMCACHED_USERNAME,
     password: process.env.MEMCACHED_PASSWORD,
     reconnect: true,
     maxExpiration: 2592000,
-    failover: true, // Enable failover to other servers
-    failoverTime: 60, // Seconds before retrying failed server
+    failover: true,
+    failoverTime: 30, // Reduced failover time
   },
 };
 
 const memcached = new Memcached(memcachedConfig.servers, memcachedConfig.options);
 
 memcached.on('failure', (details) => {
-  logger.error('Memcached server failure', { server: details.server, error: details.message });
+  logger.error('Memcached server failure', {
+    server: details.server,
+    error: details.message,
+    timestamp: new Date().toISOString(),
+  });
 });
 
 memcached.on('reconnecting', (details) => {
-  logger.info('Memcached reconnecting', { server: details.server, attempts: details.totalAttempts });
+  logger.info('Memcached reconnecting', {
+    server: details.server,
+    attempts: details.totalAttempts,
+    timestamp: new Date().toISOString(),
+  });
 });
 
 memcached.on('reconnect', (details) => {
-  logger.info('Memcached reconnected', { server: details.server });
+  logger.info('Memcached reconnected', {
+    server: details.server,
+    timestamp: new Date().toISOString(),
+  });
 });
 
 const get = (key) => {
   return new Promise((resolve) => {
-    if (!key) {
+    if (!key || typeof key !== 'string') {
       logger.warn('Invalid key provided', { key });
       resolve(null);
       return;
@@ -82,7 +93,7 @@ const get = (key) => {
 
 const setex = (key, lifetime, value) => {
   return new Promise((resolve, reject) => {
-    if (!key || !value || lifetime <= 0) {
+    if (!key || !value || lifetime <= 0 || typeof key !== 'string') {
       logger.warn('Invalid setex parameters', { key, lifetime });
       reject(new Error('Invalid parameters'));
       return;
@@ -104,7 +115,7 @@ const setex = (key, lifetime, value) => {
 
 const del = (key) => {
   return new Promise((resolve, reject) => {
-    if (!key) {
+    if (!key || typeof key !== 'string') {
       logger.warn('Invalid key provided', { key });
       reject(new Error('Invalid key'));
       return;

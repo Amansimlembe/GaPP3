@@ -24,6 +24,12 @@ class ErrorBoundary extends React.Component {
 
   componentDidCatch(error, errorInfo) {
     console.error('ErrorBoundary caught:', error, errorInfo);
+    // Optionally send error to server for logging
+    axios.post(`${BASE_URL}/log-error`, {
+      error: error.message,
+      stack: errorInfo.componentStack,
+      timestamp: new Date().toISOString(),
+    }).catch((err) => console.warn('Failed to log error:', err.message));
   }
 
   render() {
@@ -52,6 +58,10 @@ const getTokenExpiration = (token) => {
       return null;
     }
     const base64Url = token.split('.')[1];
+    if (!base64Url) {
+      console.warn('Invalid JWT payload');
+      return null;
+    }
     const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
     const jsonPayload = decodeURIComponent(
       atob(base64)
@@ -78,6 +88,7 @@ const App = () => {
   const [isAuthenticated, setIsAuthenticated] = useState(!!localStorage.getItem('token'));
   const [socket, setSocket] = useState(null);
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
+  const [error, setError] = useState(null);
   const { selectedChat } = useSelector((state) => state.messages);
 
   const setAuth = (newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername) => {
@@ -107,25 +118,34 @@ const App = () => {
       localStorage.clear();
       setIsAuthenticated(false);
       setChatNotifications(0);
+      setSocket(null);
+      setError('Authentication failed, please log in again');
     }
   };
 
   useEffect(() => {
-    if (token && userId) {
-      const newSocket = io(BASE_URL, {
-        auth: { token },
-        reconnectionAttempts: 5,
-        reconnectionDelay: 1000,
-        transports: ['websocket', 'polling'],
-      });
-      setSocket(newSocket);
-
-      return () => {
-        newSocket.emit('leave', userId);
-        newSocket.disconnect();
-        console.log('Socket cleanup');
-      };
+    if (!token || !userId || typeof token !== 'string') {
+      console.warn('Invalid token or userId, skipping socket initialization');
+      setAuth(null, null, null, null, null, null);
+      return;
     }
+
+    const newSocket = io(BASE_URL, {
+      auth: { token,
+      },
+      transports: ['websocket', 'polling'],
+      reconnectionAttempts: 10, // Increased for Render stability
+      reconnectionDelay: 3000, // Increased delay
+      timeout: 10000, // Increased connection timeout
+    });
+    setSocket(newSocket);
+
+    return () => {
+      newSocket.emit('leave', userId);
+      newSocket.disconnect();
+      console.log('Socket cleanup');
+      setSocket(null);
+    };
   }, [token, userId]);
 
   const refreshToken = async () => {
@@ -135,7 +155,7 @@ const App = () => {
         { userId },
         {
           headers: { Authorization: `Bearer ${token}` },
-          timeout: 10000,
+          timeout: 15000, // Increased timeout
         }
       );
       const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername, privateKey } = response.data;
@@ -145,7 +165,8 @@ const App = () => {
       return newToken;
     } catch (error) {
       console.error('Token refresh failed:', error.response?.data || error.message);
-      setAuth('', '', '', '', '', '');
+      setAuth(null, null, null, null, null, null);
+      setError('Session expired, please log in again');
       return null;
     }
   };
@@ -159,16 +180,19 @@ const App = () => {
       isRefreshing = true;
       try {
         const expTime = getTokenExpiration(token);
-        if (expTime && expTime - Date.now() < 5 * 60 * 1000) {
+        if (expTime && expTime - Date.now() < 10 * 60 * 1000) { // Check 10 minutes before expiry
           await refreshToken();
         }
+      } catch (err) {
+        console.error('Token expiration check failed:', err.message);
+        setError('Authentication error, please log in again');
       } finally {
         isRefreshing = false;
       }
     };
 
     checkTokenExpiration();
-    const interval = setInterval(checkTokenExpiration, 60 * 1000);
+    const interval = setInterval(checkTokenExpiration, 5 * 60 * 1000); // Check every 5 minutes
     return () => clearInterval(interval);
   }, [isAuthenticated, token, userId, socket]);
 
@@ -180,10 +204,23 @@ const App = () => {
       console.log('Socket connected:', socket.id);
     });
 
-    socket.on('connect_error', (error) => {
+    socket.on('connect_error', async (error) => {
       console.error('Socket connect error:', error.message);
-      if (error.message.includes('invalid token')) {
-        setAuth('', '', '', '', '', '');
+      if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
+        const newToken = await refreshToken();
+        if (newToken) {
+          socket.auth.token = newToken;
+          socket.disconnect().connect();
+        } else {
+          setAuth(null, null, null, null, null, null);
+        }
+      }
+    });
+
+    socket.on('disconnect', (reason) => {
+      console.warn('Socket disconnected:', reason);
+      if (reason === 'io server disconnect') {
+        socket.connect();
       }
     });
 
@@ -200,6 +237,7 @@ const App = () => {
     return () => {
       socket.off('connect');
       socket.off('connect_error');
+      socket.off('disconnect');
       socket.off('message');
       socket.off('newContact');
     };
@@ -216,6 +254,11 @@ const App = () => {
   if (!isAuthenticated) {
     return (
       <ErrorBoundary>
+        {error && (
+          <div className="fixed top-0 left-0 right-0 bg-red-500 text-white p-2 text-center">
+            {error}
+          </div>
+        )}
         <LoginScreen setAuth={setAuth} />
       </ErrorBoundary>
     );
@@ -223,6 +266,11 @@ const App = () => {
 
   return (
     <ErrorBoundary>
+      {error && (
+        <div className="fixed top-0 left-0 right-0 bg-red-500 text-white p-2 text-center">
+          {error}
+        </div>
+      )}
       <Router>
         <AuthenticatedApp
           token={token}
@@ -302,7 +350,7 @@ const AuthenticatedApp = ({
         >
           <FaComments className="text-xl"/>
           {chatNotifications > 0 && (
-            <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-1 bg-primary text-xs rounded-circle w-5 h-5 flex items-center justify-center">
+            <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
               {chatNotifications}
             </span>
           )}

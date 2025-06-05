@@ -54,19 +54,8 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   // Validate ObjectId
   const isValidObjectId = (id) => /^[0-9a-fA-F]{24}$/.test(id);
 
-  const handleLogout = useCallback(() => {
-    try {
-      socket.emit('leave', userId);
-      dispatch(resetState());
-      localStorage.clear();
-      setUsers([]);
-      setAuth('', '', '', '', '');
-      console.log('Logged out successfully');
-    } catch (err) {
-      console.error('Logout error:', err);
-      setError('Failed to logout');
-    }
-  }, [dispatch, setAuth, userId, socket]);
+ 
+
 
   const encryptMessage = useCallback(async (content, recipientPublicKey, isMedia = false) => {
     try {
@@ -952,45 +941,85 @@ useEffect(() => {
   }, [selectedChat, fetchMessages, initializeChat, chats]);
 
 
-         
+    useEffect(() => {
+  socket.on('connect', () => {
+    console.log('Socket connected:', socket.id);
+    socket.emit('join', userId);
+  });
+  socket.on('disconnect', (reason) => {
+    console.warn('Socket disconnected:', reason);
+    if (reason === 'io server disconnect') {
+      socket.connect();
+    }
+  });
+  return () => {
+    socket.off('connect');
+    socket.off('disconnect');
+  };
+}, [socket, userId]);
+
+
 
 useEffect(() => {
-  socket.auth = { token: localStorage.getItem('token') };
-  // Remove socket.connect() as it's automatic
-
+  const token = localStorage.getItem('token');
+  if (!socket || !token) {
+    console.warn('Socket or token missing');
+    setError('Authentication error, please log in again');
+    return;
+  }
+  socket.auth = { token };
+  socket.on('connect', () => {
+    socket.emit('join', userId);
+  });
   socket.on('connect_error', async (err) => {
     console.error('Socket connect error:', err.message);
-    if (err.message === 'Invalid token') {
+    if (err.message === 'Invalid token' || err.message === 'No token provided') {
       try {
         const response = await fetch('/api/auth/refresh', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            Authorization: `Bearer ${localStorage.getItem('token')}`,
+            Authorization: `Bearer ${token}`,
           },
-          body: JSON.stringify({ userId: localStorage.getItem('userId') }),
+          body: JSON.stringify({ userId }),
         });
         const data = await response.json();
-        if (data.error) {
-          console.error('Token refresh failed:', data.error);
+        if (data.error || !data.token) {
           setError('Authentication failed, please log in again');
+          handleLogout();
           return;
         }
         localStorage.setItem('token', data.token);
         socket.auth.token = data.token;
         socket.disconnect().connect();
-        console.log('Token refreshed, reconnecting');
       } catch (refreshErr) {
-        console.error('Refresh error:', refreshErr);
         setError('Failed to refresh token, please log in again');
+        handleLogout();
       }
     }
   });
-
   return () => {
+    socket.off('connect');
     socket.off('connect_error');
   };
-}, [socket]);
+}, [socket, userId]);
+
+const handleLogout = useCallback(async () => {
+  try {
+    socket.emit('leave', userId);
+    dispatch(resetState());
+    await clearDatabase();
+    localStorage.clear();
+    setUsers([]);
+    setAuth('', '', '', '', '', '');
+    console.log('Logged out successfully');
+  } catch (err) {
+    console.error('Logout error:', err);
+    setError('Failed to logout');
+  }
+}, [dispatch, setAuth, userId, socket]);
+
+
 
 
 

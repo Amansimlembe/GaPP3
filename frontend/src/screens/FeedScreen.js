@@ -28,6 +28,9 @@ const FeedScreen = ({ token, userId }) => {
   const [playingPostId, setPlayingPostId] = useState(null);
   const [muted, setMuted] = useState(true);
   const [currentIndex, setCurrentIndex] = useState(0);
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(true);
+  const [loading, setLoading] = useState(false);
   const feedRef = useRef(null);
   const mediaRefs = useRef({});
   const observerRef = useRef(null);
@@ -55,7 +58,7 @@ const FeedScreen = ({ token, userId }) => {
             }
           });
         },
-        { threshold: 0.7 }
+        { threshold: 0.8 }
       );
 
       Object.values(mediaRefs.current).forEach((media) => media && observerRef.current.observe(media));
@@ -63,26 +66,31 @@ const FeedScreen = ({ token, userId }) => {
     []
   );
 
-  useEffect(() => {
-    const fetchFeed = async () => {
-      try {
-        const { data } = await axios.get('https://gapp-6yc3.onrender.com/social/feed', {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        const filteredPosts = data.filter((post) => !post.isStory);
-        setPosts(filteredPosts);
-        setError('');
-        if (filteredPosts.length > 0) {
-          setPlayingPostId(filteredPosts[0]._id);
-        }
-      } catch (error) {
-        console.error('Failed to fetch feed:', error);
-        setError(error.response?.data?.error || 'Failed to load feed');
+  const fetchFeed = useCallback(async (pageNum = 1) => {
+    if (!token || !userId || loading || !hasMore) return;
+    setLoading(true);
+    try {
+      const { data } = await axios.get(`https://gapp-6yc3.onrender.com/feed?page=${pageNum}&limit=10`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const filteredPosts = data.posts.filter((post) => !post.isStory);
+      setPosts((prev) => (pageNum === 1 ? filteredPosts : [...prev, ...filteredPosts]));
+      setHasMore(data.hasMore);
+      setError('');
+      if (filteredPosts.length > 0 && pageNum === 1) {
+        setPlayingPostId(filteredPosts[0]._id);
       }
-    };
+    } catch (error) {
+      console.error('Failed to fetch feed:', error);
+      setError(error.response?.data?.error || 'Failed to load feed');
+    } finally {
+      setLoading(false);
+    }
+  }, [token, userId, loading, hasMore]);
 
+  useEffect(() => {
+    fetchFeed();
     if (token && userId) {
-      fetchFeed();
       socket.emit('join', userId);
     }
 
@@ -106,7 +114,7 @@ const FeedScreen = ({ token, userId }) => {
       socket.off('postUpdate');
       socket.off('postDeleted');
     };
-  }, [token, userId]);
+  }, [token, userId, fetchFeed]);
 
   useEffect(() => {
     setupIntersectionObserver();
@@ -119,6 +127,23 @@ const FeedScreen = ({ token, userId }) => {
       }
     };
   }, [posts, currentIndex, setupIntersectionObserver]);
+
+  const handleScroll = useCallback(() => {
+    if (!feedRef.current || loading || !hasMore) return;
+    const { scrollTop, scrollHeight, clientHeight } = feedRef.current;
+    if (scrollTop + clientHeight >= scrollHeight - 50) {
+      setPage((prev) => prev + 1);
+      fetchFeed(page + 1);
+    }
+  }, [loading, hasMore, page, fetchFeed]);
+
+  useEffect(() => {
+    const feedElement = feedRef.current;
+    if (feedElement) {
+      feedElement.addEventListener('scroll', handleScroll);
+      return () => feedElement.removeEventListener('scroll', handleScroll);
+    }
+  }, [handleScroll]);
 
   const postContent = async () => {
     if (!userId || (!caption && !file && contentType !== 'text')) {
@@ -134,7 +159,7 @@ const FeedScreen = ({ token, userId }) => {
 
     try {
       setUploadProgress(0);
-      const { data } = await axios.post('https://gapp-6yc3.onrender.com/social/post', formData, {
+      const { data } = await axios.post('https://gapp-6yc3.onrender.com/feed', formData, {
         headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
         onUploadProgress: (progressEvent) =>
           setUploadProgress(Math.round((progressEvent.loaded * 100) / progressEvent.total)),
@@ -146,7 +171,7 @@ const FeedScreen = ({ token, userId }) => {
       setShowPostModal(false);
       setUploadProgress(null);
       setError('');
-      setCurrentIndex(0); // Jump to the new post
+      setCurrentIndex(0);
     } catch (error) {
       console.error('Post error:', error);
       setError(error.response?.data?.error || 'Failed to post');
@@ -158,7 +183,7 @@ const FeedScreen = ({ token, userId }) => {
     if (!playingPostId || postId !== playingPostId) return;
     try {
       const post = posts.find((p) => p._id === postId);
-      const action = post.likedBy?.includes(userId) ? '/social/unlike' : '/social/like';
+      const action = post.likedBy?.includes(userId) ? '/feed/unlike' : '/feed/like';
       const { data } = await axios.post(
         `https://gapp-6yc3.onrender.com${action}`,
         { postId, userId },
@@ -174,7 +199,7 @@ const FeedScreen = ({ token, userId }) => {
     if (!playingPostId || postId !== playingPostId || !comment.trim()) return;
     try {
       const { data } = await axios.post(
-        'https://gapp-6yc3.onrender.com/social/comment',
+        'https://gapp-6yc3.onrender.com/feed/comment',
         { postId, comment, userId },
         { headers: { Authorization: `Bearer ${token}` } }
       );
@@ -215,7 +240,7 @@ const FeedScreen = ({ token, userId }) => {
       if (!showComments && playingPostId) setShowComments(playingPostId);
     },
     trackMouse: true,
-    delta: 50, // Minimum swipe distance
+    delta: 50,
   });
 
   const handleDoubleTap = (postId) => {
@@ -229,8 +254,8 @@ const FeedScreen = ({ token, userId }) => {
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       transition={{ duration: 0.5 }}
-      className="h-screen overflow-y-auto bg-black"
-      style={{ scrollSnapType: 'none' }} // Remove snap-y for programmatic control
+      className="h-screen overflow-y-auto bg-black snap-y snap-mandatory"
+      style={{ scrollSnapType: 'y mandatory' }}
     >
       {/* Floating Post Button */}
       <div className="fixed bottom-20 right-4 z-20">
@@ -238,7 +263,7 @@ const FeedScreen = ({ token, userId }) => {
           whileHover={{ scale: 1.1, rotate: 90 }}
           whileTap={{ scale: 0.9 }}
           onClick={() => setShowPostModal(true)}
-          className="bg-primary text-white p-3 rounded-full shadow-lg"
+          className="bg-blue-500 text-white p-3 rounded-full shadow-lg"
         >
           <FaPlus className="text-xl" />
         </motion.button>
@@ -266,7 +291,7 @@ const FeedScreen = ({ token, userId }) => {
                         strokeWidth="3"
                       />
                       <path
-                        className="text-primary"
+                        className="text-blue-500"
                         d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831"
                         fill="none"
                         stroke="currentColor"
@@ -274,7 +299,7 @@ const FeedScreen = ({ token, userId }) => {
                         strokeDasharray={`${uploadProgress}, 100`}
                       />
                     </svg>
-                    <span className="absolute inset-0 flex items-center justify-center text-primary">
+                    <span className="absolute inset-0 flex items-center justify-center text-blue-500">
                       {uploadProgress}%
                     </span>
                   </div>
@@ -283,7 +308,7 @@ const FeedScreen = ({ token, userId }) => {
               <select
                 value={contentType}
                 onChange={(e) => setContentType(e.target.value)}
-                className="w-full p-2 mb-4 border rounded-lg dark:bg-gray-700 dark:text-white"
+                className="w-full p-2 mb-4 border rounded-lg dark:bg-gray-700 dark:text-white focus:ring-2 focus:ring-blue-500"
               >
                 <option value="text">Text</option>
                 <option value="image">Image</option>
@@ -296,7 +321,7 @@ const FeedScreen = ({ token, userId }) => {
                   <textarea
                     value={caption}
                     onChange={(e) => setCaption(e.target.value)}
-                    className="flex-1 p-2 border rounded-lg dark:bg-gray-700 dark:text-white focus:ring-2 focus:ring-primary"
+                    className="flex-1 p-2 border rounded-lg dark:bg-gray-700 dark:text-white focus:ring-2 focus:ring-blue-500"
                     placeholder="Write something..."
                   />
                 ) : (
@@ -317,7 +342,7 @@ const FeedScreen = ({ token, userId }) => {
                 )}
                 <FaPaperPlane
                   onClick={postContent}
-                  className="ml-2 text-xl text-primary cursor-pointer hover:text-secondary"
+                  className="ml-2 text-xl text-blue-500 cursor-pointer hover:text-blue-600"
                 />
               </div>
               {contentType !== 'text' && (
@@ -325,7 +350,7 @@ const FeedScreen = ({ token, userId }) => {
                   type="text"
                   value={caption}
                   onChange={(e) => setCaption(e.target.value)}
-                  className="w-full p-2 border rounded-lg dark:bg-gray-700 dark:text-white focus:ring-2 focus:ring-primary"
+                  className="w-full p-2 border rounded-lg dark:bg-gray-700 dark:text-white focus:ring-2 focus:ring-blue-500"
                   placeholder="Add a caption (optional)"
                 />
               )}
@@ -345,8 +370,15 @@ const FeedScreen = ({ token, userId }) => {
         <p className="text-red-500 text-center py-2 z-10 fixed top-0 w-full bg-black bg-opacity-75">{error}</p>
       )}
 
+      {/* Loading Indicator */}
+      {loading && (
+        <div className="fixed bottom-4 left-0 right-0 text-center text-white">
+          <div className="inline-block w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+        </div>
+      )}
+
       {/* TikTok-like Feed */}
-      {posts.length === 0 ? (
+      {posts.length === 0 && !loading ? (
         <div className="h-screen flex items-center justify-center text-white">
           <p>No posts available</p>
         </div>
@@ -357,7 +389,7 @@ const FeedScreen = ({ token, userId }) => {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             transition={{ duration: 0.3 }}
-            className="h-screen flex flex-col items-center justify-center text-white relative"
+            className="h-screen w-full flex flex-col items-center justify-center text-white relative snap-start"
             onDoubleClick={() => handleDoubleTap(post._id)}
           >
             {/* User Info */}
@@ -381,7 +413,7 @@ const FeedScreen = ({ token, userId }) => {
               <img
                 src={post.content}
                 alt="Post"
-                className="w-screen h-screen object-contain"
+                className="w-screen h-screen object-cover"
                 data-post-id={post._id}
                 ref={(el) => (mediaRefs.current[post._id] = el)}
               />
@@ -394,7 +426,7 @@ const FeedScreen = ({ token, userId }) => {
                 muted={muted}
                 loop
                 src={post.content}
-                className="w-screen h-screen object-contain"
+                className="w-screen h-screen object-cover"
               />
             )}
             {post.contentType === 'audio' && (
@@ -429,7 +461,7 @@ const FeedScreen = ({ token, userId }) => {
               <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
                 <FaComment
                   onClick={() => setShowComments(post._id)}
-                  className="text-3xl cursor-pointer text-white hover:text-primary"
+                  className="text-3xl cursor-pointer text-white hover:text-blue-500"
                 />
                 <span className="text-sm">{post.comments?.length || 0}</span>
               </motion.div>
@@ -440,7 +472,7 @@ const FeedScreen = ({ token, userId }) => {
                       .writeText(`${window.location.origin}/post/${post._id}`)
                       .then(() => alert('Link copied!'))
                   }
-                  className="text-3xl cursor-pointer text-white hover:text-primary"
+                  className="text-3xl cursor-pointer text-white hover:text-blue-500"
                 />
               </motion.div>
               {post.contentType === 'video' && (
@@ -448,12 +480,12 @@ const FeedScreen = ({ token, userId }) => {
                   {muted ? (
                     <FaVolumeMute
                       onClick={() => setMuted(false)}
-                      className="text-3xl cursor-pointer text-white hover:text-primary"
+                      className="text-3xl cursor-pointer text-white hover:text-blue-500"
                     />
                   ) : (
                     <FaVolumeUp
                       onClick={() => setMuted(true)}
-                      className="text-3xl cursor-pointer text-white hover:text-primary"
+                      className="text-3xl cursor-pointer text-white hover:text-blue-500"
                     />
                   )}
                 </motion.div>
@@ -476,7 +508,7 @@ const FeedScreen = ({ token, userId }) => {
                   exit={{ opacity: 0, y: 100 }}
                   className="fixed bottom-0 left-0 right-0 bg-white dark:bg-gray-800 p-4 rounded-t-lg shadow-lg h-1/2 overflow-y-auto z-50"
                 >
-                  <h3 className="text-lg font-bold text-primary dark:text-gray-100 mb-2">Comments</h3>
+                  <h3 className="text-lg font-bold text-blue-500 dark:text-gray-100 mb-2">Comments</h3>
                   {post.comments?.length === 0 ? (
                     <p className="text-gray-500 dark:text-gray-400">No comments yet</p>
                   ) : (
@@ -497,12 +529,12 @@ const FeedScreen = ({ token, userId }) => {
                     <input
                       value={comment}
                       onChange={(e) => setComment(e.target.value)}
-                      className="flex-1 p-2 border rounded-full dark:bg-gray-700 dark:text-white focus:ring-2 focus:ring-primary"
+                      className="flex-1 p-2 border rounded-full dark:bg-gray-700 dark:text-white focus:ring-2 focus:ring-blue-500"
                       placeholder="Add a comment..."
                     />
                     <FaPaperPlane
                       onClick={() => commentPost(post._id)}
-                      className="ml-2 text-xl text-primary cursor-pointer hover:text-secondary"
+                      className="ml-2 text-xl text-blue-500 cursor-pointer hover:text-blue-600"
                     />
                   </div>
                 </motion.div>
