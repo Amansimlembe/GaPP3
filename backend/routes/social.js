@@ -1,4 +1,5 @@
 const express = require('express');
+const jwt = require('jsonwebtoken'); // Add missing import
 const { authMiddleware } = require('./auth');
 const Message = require('../models/Message');
 const User = require('../models/User');
@@ -19,27 +20,6 @@ const logger = winston.createLogger({
     new winston.transports.File({ filename: 'logs/combined.log' }),
   ],
 });
-
-
-
-
-io.use(async (socket, next) => {
-  const token = socket.handshake.auth.token;
-  if (!token) {
-    logger.warn('No token provided for Socket.IO');
-    return next(new Error('No token provided'));
-  }
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
-    socket.user = decoded;
-    logger.info('Socket.IO authentication successful', { userId: decoded.id });
-    next();
-  } catch (err) {
-    logger.error('Socket.IO auth error:', { error: err.message, token: token.substring(0, 10) + '...' });
-    next(new Error('Invalid token'));
-  }
-});
-
 
 // Initialize Cloudinary
 const configureCloudinary = () => {
@@ -162,6 +142,24 @@ const deleteUserSchema = Joi.object({
 });
 
 module.exports = (io) => {
+  // Socket.IO middleware for authentication
+  io.use(async (socket, next) => {
+    const token = socket.handshake.auth.token;
+    if (!token) {
+      logger.warn('No token provided for Socket.IO');
+      return next(new Error('No token provided'));
+    }
+    try {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
+      socket.user = decoded;
+      logger.info('Socket.IO authentication successful', { userId: decoded.id });
+      next();
+    } catch (err) {
+      logger.error('Socket.IO auth error:', { error: err.message, token: token.substring(0, 10) + '...' });
+      return next(new Error('Invalid token'));
+    }
+  });
+
   const router = express.Router();
 
   const emitUpdatedChatList = async (userId) => {
@@ -352,106 +350,102 @@ module.exports = (io) => {
       logger.info('Chat list update propagated', { userId });
     });
 
-    
-
-
     socket.on('message', async (messageData, callback) => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
-  try {
-    const { error } = messageSchema.validate(messageData);
-    if (error) {
-      logger.warn('Invalid message data', { error: error.details });
-      await session.abortTransaction();
-      return callback({ error: error.details[0].message });
-    }
+      const session = await mongoose.startSession();
+      session.startTransaction();
+      try {
+        const { error } = messageSchema.validate(messageData);
+        if (error) {
+          logger.warn('Invalid message data', { error: error.details });
+          await session.abortTransaction();
+          return callback({ error: error.details[0].message });
+        }
 
-    const {
-      senderId,
-      recipientId,
-      content,
-      contentType,
-      plaintextContent,
-      caption,
-      replyTo,
-      clientMessageId,
-      senderVirtualNumber,
-      senderUsername,
-      senderPhoto,
-    } = messageData;
+        const {
+          senderId,
+          recipientId,
+          content,
+          contentType,
+          plaintextContent,
+          caption,
+          replyTo,
+          clientMessageId,
+          senderVirtualNumber,
+          senderUsername,
+          senderPhoto,
+        } = messageData;
 
-    logger.info('Processing message', { senderId, recipientId, clientMessageId });
+        logger.info('Processing message', { senderId, recipientId, clientMessageId });
 
-    const sender = await User.findById(senderId).session(session);
-    const recipient = await User.findById(recipientId).session(session);
-    if (!sender || !recipient) {
-      logger.warn('Sender or recipient not found', { senderId, recipientId });
-      await session.abortTransaction();
-      return callback({ error: 'Sender or recipient not found' });
-    }
+        const sender = await User.findById(senderId).session(session);
+        const recipient = await User.findById(recipientId).session(session);
+        if (!sender || !recipient) {
+          logger.warn('Sender or recipient not found', { senderId, recipientId });
+          await session.abortTransaction();
+          return callback({ error: 'Sender or recipient not found' });
+        }
 
-    const existingMessage = await Message.findOne({ clientMessageId }).session(session);
-    if (existingMessage) {
-      logger.info('Duplicate message found', { clientMessageId });
-      await session.commitTransaction();
-      return callback({ message: existingMessage.toObject() });
-    }
+        const existingMessage = await Message.findOne({ clientMessageId }).session(session);
+        if (existingMessage) {
+          logger.info('Duplicate message found', { clientMessageId });
+          await session.commitTransaction();
+          return callback({ message: existingMessage.toObject() });
+        }
 
-    const message = new Message({
-      senderId,
-      recipientId,
-      content,
-      contentType,
-      plaintextContent: plaintextContent || '',
-      status: 'sent',
-      caption: caption || undefined,
-      replyTo: replyTo && mongoose.isValidObjectId(replyTo) ? replyTo : undefined,
-      originalFilename: messageData.originalFilename || undefined,
-      clientMessageId,
-      senderVirtualNumber: senderVirtualNumber || sender.virtualNumber,
-      senderUsername: senderUsername || sender.username,
-      senderPhoto: senderPhoto || sender.photo,
+        const message = new Message({
+          senderId,
+          recipientId,
+          content,
+          contentType,
+          plaintextContent: plaintextContent || '',
+          status: 'sent',
+          caption: caption || undefined,
+          replyTo: replyTo && mongoose.isValidObjectId(replyTo) ? replyTo : undefined,
+          originalFilename: messageData.originalFilename || undefined,
+          clientMessageId,
+          senderVirtualNumber: senderVirtualNumber || sender.virtualNumber,
+          senderUsername: senderUsername || sender.username,
+          senderPhoto: senderPhoto || sender.photo,
+        });
+
+        await message.save({ session });
+
+        const populatedMessage = await Message.findById(message._id)
+          .session(session)
+          .populate('senderId', 'username virtualNumber photo')
+          .populate('recipientId', 'username virtualNumber photo')
+          .populate('replyTo', 'content contentType senderId recipientId createdAt');
+
+        await session.commitTransaction();
+
+        logger.info('Emitting message', {
+          messageId: populatedMessage._id,
+          senderId: populatedMessage.senderId,
+          recipientId: populatedMessage.recipientId,
+          clientMessageId,
+        });
+
+        io.to(recipientId).emit('message', populatedMessage.toObject());
+        io.to(senderId).emit('message', populatedMessage.toObject());
+
+        await memcached.setex(`:message:${clientMessageId}`, 3600, JSON.stringify(populatedMessage.toObject()));
+        await memcached.del(`:chat-list:${senderId}`);
+        await memcached.del(`:chat-list:${recipientId}`);
+
+        emitUpdatedChatList(senderId);
+        emitUpdatedChatList(recipientId);
+
+        logger.info('Message sent successfully', { messageId: message._id, clientMessageId, senderId, recipientId });
+
+        callback({ message: populatedMessage.toObject() });
+      } catch (err) {
+        await session.abortTransaction();
+        logger.error('Message send failed', { error: err.message, stack: err.stack, clientMessageId: messageData.clientMessageId });
+        callback({ error: err.message });
+      } finally {
+        session.endSession();
+      }
     });
-
-    await message.save({ session });
-
-    const populatedMessage = await Message.findById(message._id)
-      .session(session)
-      .populate('senderId', 'username virtualNumber photo')
-      .populate('recipientId', 'username virtualNumber photo')
-      .populate('replyTo', 'content contentType senderId recipientId createdAt');
-
-    await session.commitTransaction();
-
-    logger.info('Emitting message', {
-      messageId: populatedMessage._id,
-      senderId: populatedMessage.senderId,
-      recipientId: populatedMessage.recipientId,
-      clientMessageId,
-    });
-
-    io.to(recipientId).emit('message', populatedMessage.toObject());
-    io.to(senderId).emit('message', populatedMessage.toObject());
-
-    await memcached.setex(`:message:${clientMessageId}`, 3600, JSON.stringify(populatedMessage.toObject()));
-    await memcached.del(`:chat-list:${senderId}`);
-    await memcached.del(`:chat-list:${recipientId}`);
-
-    emitUpdatedChatList(senderId);
-    emitUpdatedChatList(recipientId);
-
-    logger.info('Message sent successfully', { messageId: message._id, clientMessageId, senderId, recipientId });
-
-    callback({ message: populatedMessage.toObject() });
-  } catch (err) {
-    await session.abortTransaction();
-    logger.error('Message send failed', { error: err.message, stack: err.stack, clientMessageId: messageData.clientMessageId });
-    callback({ error: err.message });
-  } finally {
-    session.endSession();
-  }
-});
-
 
     socket.on('editMessage', async ({ messageId, newContent, plaintextContent }, callback) => {
       const session = await mongoose.startSession();
@@ -479,7 +473,7 @@ module.exports = (io) => {
           .session(session)
           .populate('senderId', 'username virtualNumber photo')
           .populate('recipientId', 'username virtualNumber photo')
-         .populate('replyTo', 'content contentType senderId recipientId createdAt');
+          .populate('replyTo', 'content contentType senderId recipientId createdAt');
 
         await session.commitTransaction();
 

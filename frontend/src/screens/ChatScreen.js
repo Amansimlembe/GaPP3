@@ -952,9 +952,11 @@ useEffect(() => {
   }, [selectedChat, fetchMessages, initializeChat, chats]);
 
 
+         
+
 useEffect(() => {
   socket.auth = { token: localStorage.getItem('token') };
-  socket.connect();
+  // Remove socket.connect() as it's automatic
 
   socket.on('connect_error', async (err) => {
     console.error('Socket connect error:', err.message);
@@ -989,6 +991,7 @@ useEffect(() => {
     socket.off('connect_error');
   };
 }, [socket]);
+
 
 
   useEffect(() => {
