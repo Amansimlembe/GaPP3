@@ -1,7 +1,7 @@
 import { configureStore, createSlice } from '@reduxjs/toolkit';
 
 // Fallback ObjectId validation
-export const isValidObjectId = (id) => /^[0-9a-fA-F]{24}$/.test(id);
+const isValidObjectId = (id) => /^[0-9a-fA-F]{24}$/.test(id);
 
 const authSlice = createSlice({
   name: 'auth',
@@ -184,7 +184,7 @@ const persistenceMiddleware = (store) => (next) => (action) => {
             photo: state.auth.photo,
             virtualNumber: state.auth.virtualNumber,
             username: state.auth.username,
-            privateKey: null,
+            privateKey: null, // Exclude privateKey for security
           },
         };
         localStorage.setItem('reduxState', JSON.stringify(serializableState));

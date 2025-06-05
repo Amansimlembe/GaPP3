@@ -72,9 +72,10 @@ const upload = multer({
   },
 });
 
+
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 100,
+  max: 100, // Increased to 100
   message: { error: 'Too many requests, please try again later.' },
   handler: (req, res, next, options) => {
     logger.warn('Rate limit exceeded', { ip: req.ip, method: req.method, url: req.url });
@@ -82,6 +83,9 @@ const authLimiter = rateLimit({
   },
 });
 
+
+
+// Updated authMiddleware without Redis
 const authMiddleware = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -113,13 +117,15 @@ const loginSchema = Joi.object({
   password: Joi.string().min(6).required(),
 });
 
+
+
 const generateVirtualNumber = async (countryCode, userId) => {
   try {
     logger.info('Generating virtual number', { countryCode, userId });
     const countryCallingCode = getCountryCallingCode(countryCode.toUpperCase());
     let virtualNumber;
     let attempts = 0;
-    const maxAttempts = 20;
+    const maxAttempts = 20; // Increased attempts
 
     do {
       let firstFive = '';
@@ -146,6 +152,7 @@ const generateVirtualNumber = async (countryCode, userId) => {
     throw new Error(`Failed to generate virtual number: ${error.message}`);
   }
 };
+
 
 router.post('/register', authLimiter, upload.single('photo'), async (req, res) => {
   try {
@@ -275,15 +282,19 @@ router.post('/login', authLimiter, async (req, res) => {
     );
 
     logger.info('Login successful', { userId: user._id, email });
+    
+
     res.json({
-      token,
-      userId: user._id,
-      role: user.role,
-      photo: user.photo || 'https://placehold.co/40x40',
-      virtualNumber: user.virtualNumber || '',
-      username: user.username || '',
-      privateKey: user.privateKey,
-    });
+  token,
+  userId: user._id,
+  role: user.role,
+  photo: user.photo || 'https://placehold.co/40x40',
+  virtualNumber: user.virtualNumber || '',
+  username: user.username || '',
+  privateKey: user.privateKey,
+});
+
+
   } catch (error) {
     logger.error('Login error', { error: error.message, body: req.body });
     res.status(500).json({ error: 'Failed to login', details: error.message });
@@ -429,18 +440,18 @@ router.post('/refresh', authLimiter, authMiddleware, async (req, res) => {
       { expiresIn: '24h' }
     );
 
-    logger.info('Token refreshed successfully', { userId: user._id, ip: req.ip });
+    logger.info('Token refreshed successfully', { userId: user._id });
     res.json({
-      token: newToken,
-      userId: user._id,
-      role: user.role,
-      photo: user.photo || 'https://placehold.co/40x40',
-      virtualNumber: user.virtualNumber || '',
-      username: user.username || '',
-      privateKey: user.privateKey,
-    });
+  token: newToken,
+  userId: user._id,
+  role: user.role,
+  photo: user.photo || 'https://placehold.co/40x40',
+  virtualNumber: user.virtualNumber || '',
+  username: user.username || '',
+  privateKey: user.privateKey,
+});
   } catch (error) {
-    logger.error('Refresh token error:', { error: error.message, userId: req.user?.id, ip: req.ip, stack: error.stack });
+    logger.error('Refresh token error:', { error: error.message, userId: req.user?.id, ip: req.ip });
     res.status(500).json({ error: 'Failed to refresh token', details: error.message });
   }
 });

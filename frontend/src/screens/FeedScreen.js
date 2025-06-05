@@ -1,799 +1,678 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
-import forge from 'node-forge';
-import { List, AutoSizer } from 'react-virtualized';
-import { format, isToday, isYesterday, parseISO } from 'date-fns';
-import {
-  FaPaperPlane, FaPaperclip, FaTrash, FaArrowLeft, FaReply, FaEllipsisH, FaFileAlt,
-  FaPlay, FaArrowDown, FaUserPlus, FaSignOutAlt, FaUser, FaCamera, FaVideo, FaMicrophone, FaEdit, FaSmile, FaTimes
-} from 'react-icons/fa';
-import { useDispatch, useSelector } from 'react-redux';
-import EmojiPicker from 'emoji-picker-react';
-import { debounce } from 'lodash';
+import { FaPlus, FaPaperPlane, FaHeart, FaComment, FaShare, FaVolumeMute, FaVolumeUp, FaSyncAlt } from 'react-icons/fa';
 import { useSwipeable } from 'react-swipeable';
-import { setMessages, addMessage, updateMessageStatus, setSelectedChat, resetState, replaceMessage, deleteMessage } from '../store';
-import { saveMessages, getMessages, clearOldMessages, savePendingMessages, loadPendingMessages, clearPendingMessages, clearDatabase } from '../db';
-import './ChatScreen.css';
+import io from 'socket.io-client';
+import debounce from 'lodash/debounce';
 
-const BASE_URL = 'https://gapp-6yc3.onrender.com';
-
-const generateClientMessageId = () => `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-
-const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtualNumber, photo }) => {
-  const dispatch = useDispatch();
-  const { chats, selectedChat } = useSelector((state) => state.messages);
-  const selectedChatRef = useRef(selectedChat);
-  const [users, setUsers] = useState(() => JSON.parse(localStorage.getItem('cachedUsers')) || []);
-  const [message, setMessage] = useState('');
-  const [files, setFiles] = useState([]);
-  const [captions, setCaptions] = useState({});
-  const [contentType, setContentType] = useState('text');
-  const [isTyping, setIsTyping] = useState({});
-  const [replyTo, setReplyTo] = useState(null);
-  const [showMenu, setShowMenu] = useState(false);
-  const [menuTab, setMenuTab] = useState('');
-  const [newContactNumber, setNewContactNumber] = useState('');
-  const [error, setError] = useState('');
-  const [unreadCount, setUnreadCount] = useState(0);
-  const [firstUnreadMessageId, setFirstUnreadMessageId] = useState(null);
-  const [showJumpToBottom, setShowJumpToBottom] = useState(false);
-  const [mediaPreview, setMediaPreview] = useState([]);
-  const [showPicker, setShowPicker] = useState(false);
-  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
-  const [pendingMessages, setPendingMessages] = useState([]);
-  const [uploadProgress, setUploadProgress] = useState({});
-  const [editingMessage, setEditingMessage] = useState(null);
-  const [isAddingContact, setIsAddingContact] = useState(false);
-  const chatRef = useRef(null);
-  const inputRef = useRef(null);
-  const listRef = useRef(null);
-  const typingTimeoutRef = useRef(null);
-  const isAtBottomRef = useRef(true);
-
-  const encryptMessage = useCallback(async (content, recipientPublicKey, isMedia = false) => {
-    try {
-      const aesKey = forge.random.getBytesSync(32);
-      const iv = forge.random.getBytesSync(16);
-      const cipher = forge.cipher.createCipher('AES-CBC', aesKey);
-      cipher.start({ iv });
-      cipher.update(forge.util.createBuffer(isMedia ? content : forge.util.encodeUtf8(content)));
-      cipher.finish();
-      const encrypted = `${forge.util.encode64(cipher.output.getBytes())}|${forge.util.encode64(iv)}|${forge.util.encode64(
-        forge.pki.publicKeyFromPem(recipientPublicKey).encrypt(aesKey, 'RSA-OAEP', { md: forge.md.sha256.create() })
-      )}`;
-      console.log('Message encrypted successfully');
-      return encrypted;
-    } catch (err) {
-      console.error('Encryption error:', err);
-      throw new Error('Failed to encrypt message');
-    }
-  }, []);
-
-  const decryptMessage = useCallback(async (encryptedContent, privateKeyPem, isMedia = false) => {
-    try {
-      if (!encryptedContent || typeof encryptedContent !== 'string' || !encryptedContent.includes('|')) {
-        throw new Error('Invalid encrypted content format');
-      }
-      const [encryptedData, iv, encryptedAesKey] = encryptedContent.split('|').map(forge.util.decode64);
-      const privateKey = forge.pki.privateKeyFromPem(privateKeyPem);
-      const aesKey = privateKey.decrypt(encryptedAesKey, 'RSA-OAEP', { md: forge.md.sha256.create() });
-      const decipher = forge.cipher.createDecipher('AES-CBC', aesKey);
-      decipher.start({ iv });
-      decipher.update(forge.util.createBuffer(encryptedData));
-      decipher.finish();
-      const decrypted = isMedia ? decipher.output.getBytes() : forge.util.decodeUtf8(decipher.output.getBytes());
-      console.log('Message decrypted successfully');
-      return decrypted;
-    } catch (err) {
-      console.error('Decryption error:', err);
-      return isMedia ? null : '[Decryption failed]';
-    }
-  }, []);
-
-  const getPublicKey = useCallback(async (recipientId) => {
-    if (!isValidObjectId(recipientId)) {
-      throw new Error('Invalid recipientId');
-    }
-    const cacheKey = `publicKey:${recipientId}`;
-    const cachedKey = localStorage.getItem(cacheKey);
-    if (cachedKey) return cachedKey;
-    try {
-      const { data } = await axios.get(`${BASE_URL}/auth/public_key/${recipientId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      localStorage.setItem(cacheKey, data.publicKey);
-      console.log(`Public key fetched for ${recipientId}`);
-      return data.publicKey;
-    } catch (err) {
-      console.error(`Failed to fetch public key for ${recipientId}:`, err);
-      throw err;
-    }
-  }, [token]);
-
-  const handleLogout = useCallback(() => {
-    dispatch(resetState());
-    setAuth(null, null, null, null, null, null, null);
-    localStorage.clear();
-    clearDatabase();
-    setUsers([]);
-    setError('Logged out successfully');
-  }, [dispatch, setAuth]);
-
-  useEffect(() => {
-    selectedChatRef.current = selectedChat;
-  }, [selectedChat]);
-
-  useEffect(() => {
-    const privateKey = localStorage.getItem('privateKey');
-    if (!privateKey) {
-      console.warn('No private key found in localStorage');
-      setError('Private key missing, please log in again');
-      handleLogout();
-    }
-  }, [handleLogout]);
-
-  useEffect(() => {
-    if (!socket || !userId) return;
-
-    const handleConnect = () => {
-      socket.emit('join', userId);
-      console.log('Socket connected:', socket.id);
-    };
-
-    const handleMessage = (msg) => {
-      if (msg.recipientId === userId && (!selectedChatRef.current || selectedChatRef.current !== msg.senderId)) {
-        setChatNotifications((prev) => prev + 1);
-      }
-      if (msg.senderId === selectedChatRef.current) {
-        const privateKeyPem = localStorage.getItem('privateKey');
-        decryptMessage(msg.content, privateKeyPem, msg.contentType !== 'text').then((decryptedContent) => {
-          dispatch(addMessage({
-            recipientId: msg.senderId,
-            message: { ...msg, content: decryptedContent || msg.content },
-          }));
-        });
-      }
-    };
-
-    const handleNewContact = (contactData) => {
-      console.log('New contact:', contactData);
-      setUsers((prev) => {
-        const updatedUsers = [...prev, contactData];
-        localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
-        return updatedUsers;
-      });
-    };
-
-    const handleDisconnect = (reason) => {
-      console.warn('Socket disconnected:', reason);
-    };
-
-    const handleConnectError = (error) => {
-      console.error('Socket connect error:', error.message);
-      setError(`Socket connection failed: ${error.message}`);
-    };
-
-    socket.on('connect', handleConnect);
-    socket.on('message', handleMessage);
-    socket.on('newContact', handleNewContact);
-    socket.on('disconnect', handleDisconnect);
-    socket.on('connect_error', handleConnectError);
-
-    return () => {
-      socket.off('connect', handleConnect);
-      socket.off('message', handleMessage);
-      socket.off('newContact', handleNewContact);
-      socket.off('disconnect', handleDisconnect);
-      socket.off('connect_error', handleConnectError);
-    };
-  }, [socket, userId, dispatch]);
-
-  const compressImage = async (file) => {
-    try {
-      return new Promise((resolve) => {
-        const img = new Image();
-        const reader = new FileReader();
-        reader.onload = (e) => {
-          img.src = e.target.result;
-          img.onload = () => {
-            const canvas = document.createElement('canvas');
-            const ctx = canvas.getContext('2d');
-            const maxWidth = 800;
-            const maxHeight = 800;
-            let width = img.width;
-            let height = img.height;
-
-            if (width > height) {
-              if (width > maxWidth) {
-                height *= maxWidth / width;
-                width = maxWidth;
-              }
-            } else {
-              if (height > maxHeight) {
-                width *= maxHeight / height;
-                height = maxHeight;
-              }
-            }
-
-            canvas.width = width;
-            canvas.height = height;
-            ctx.drawImage(img, 0, 0, width, height);
-            canvas.toBlob(
-              (blob) => resolve(new File([blob], file.name, { type: 'image/jpeg', lastModified: Date.now() })),
-              'image/jpeg',
-              0.7
-            );
-          };
-        };
-        reader.readAsDataURL(file);
-      });
-    } catch (err) {
-      console.error('Image compression error:', err);
-      throw err;
-    }
-  };
-
-  const formatChatListDate = (date) => format(parseISO(date), 'hh:mm a');
-  const formatDateHeader = (date) => {
-    const parsed = parseISO(date);
-    if (isToday(parsed)) return 'Today';
-    if (isYesterday(parsed)) return 'Yesterday';
-    return format(parsed, 'MMM d, yyyy');
-  };
-  const formatTime = (date) => format(parseISO(date), 'hh:mm a');
-
-  const initializeChat = useCallback((recipientId) => {
-    if (!recipientId || !isValidObjectId(recipientId) || chats[recipientId]) return;
-    dispatch(setMessages({ recipientId, messages: [] }));
-    console.log(`Initialized chat for recipientId: ${recipientId}`);
-  }, [dispatch, chats]);
-
-  const fetchChatList = useCallback(
-    debounce(async (retryCount = 3) => {
-      const cached = localStorage.getItem('cachedUsers');
-      if (cached) {
-        try {
-          const parsedUsers = JSON.parse(cached);
-          setUsers(parsedUsers);
-          console.log('Chat list loaded from cache');
-          return;
-        } catch (err) {
-          console.error('Failed to parse cached users:', err);
-        }
-      }
-      let attempt = 0;
-      while (attempt < retryCount) {
-        try {
-          const { data } = await axios.get(`${BASE_URL}/social/chat-list`, {
-            headers: { Authorization: `Bearer ${token}` },
-            params: { userId },
-            timeout: 10000,
-          });
-          const privateKeyPem = localStorage.getItem('privateKey');
-          const processedUsers = await Promise.all(
-            data.map(async (user) => {
-              if (user.latestMessage) {
-                user.latestMessage.content =
-                  user.latestMessage.senderId === userId
-                    ? `You: ${user.latestMessage.plaintextContent || '[Media]'}`
-                    : user.latestMessage.recipientId === userId && user.latestMessage.contentType === 'text'
-                    ? await decryptMessage(user.latestMessage.content, privateKeyPem)
-                    : `[${user.latestMessage.contentType}]`;
-              }
-              return user;
-            })
-          );
-          setUsers(processedUsers);
-          localStorage.setItem('cachedUsers', JSON.stringify(processedUsers));
-          setError('');
-          console.log('Chat list fetched successfully');
-          return;
-        } catch (err) {
-          attempt++;
-          console.error(`Fetch chat list attempt ${attempt} failed:`, err);
-          if (err.response?.status === 401) {
-            setError('Session expired, please log in again');
-            setTimeout(() => handleLogout(), 2000);
-            return;
-          }
-          if (err.response?.status === 429) {
-            await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * 1000));
-          }
-          if (attempt === retryCount) {
-            setError('Failed to load chat list');
-          }
-        }
-      }
-    }, 500),
-    [token, userId, decryptMessage, handleLogout]
-  );
-
-  const fetchMessages = useCallback(
-    debounce(async (recipientId, retryCount = 3) => {
-      if (!recipientId || !isValidObjectId(recipientId)) {
-        console.warn('Invalid recipientId:', recipientId);
-        dispatch(setMessages({ recipientId, messages: [] }));
-        setError('Invalid chat selected');
-        return;
-      }
-      try {
-        const localMessages = await getMessages(recipientId);
-        if (localMessages.length) {
-          dispatch(setMessages({ recipientId, messages: localMessages }));
-          listRef.current?.scrollToRow(localMessages.length - 1);
-          console.log(`Loaded ${localMessages.length} messages from IndexedDB for ${recipientId}`);
-          return;
-        } else {
-          console.log(`No local messages found for ${recipientId}, fetching from server`);
-        }
-      } catch (err) {
-        console.error('Failed to load local messages:', err);
-      }
-      let attempt = 0;
-      while (attempt < retryCount) {
-        try {
-          const { data } = await axios.get(`${BASE_URL}/social/messages`, {
-            headers: { Authorization: `Bearer ${token}` },
-            params: { userId, recipientId, limit: 50, skip: 0 },
-            timeout: 10000,
-          });
-          const privateKeyPem = localStorage.getItem('privateKey');
-          const messages = await Promise.all(
-            data.messages.map(async (msg) => {
-              const newMsg = { ...msg };
-              if (msg.senderId === userId) {
-                newMsg.content = msg.plaintextContent || msg.content;
-              } else if (msg.senderId !== userId) {
-                newMsg.content =
-                  msg.contentType === 'text' ? await decryptMessage(msg.content, privateKeyPem) : msg.content;
-              }
-              return newMsg;
-            })
-          );
-          dispatch(setMessages({ recipientId, messages }));
-          await saveMessages(messages);
-          listRef.current?.scrollToRow(messages.length - 1);
-          console.log(`Fetched ${messages.length} messages for ${recipientId}`);
-          setError('');
-          return;
-        } catch (err) {
-          attempt++;
-          console.error(`Fetch messages attempt ${attempt} failed:`, err);
-          if (err.response?.status === 401) {
-            setError('Authentication error, please log out and try again');
-            setTimeout(() => handleLogout(), 2000);
-            return;
-          }
-          if (err.response?.status === 429) {
-            await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * 1000));
-          }
-          if (attempt === retryCount) {
-            setError('Failed to load messages');
-            dispatch(setMessages({ recipientId, messages: [] }));
-            console.warn(`Failed to fetch messages for ${recipientId} after ${retryCount} attempts`);
-          }
-        }
-      }
-    }, 500),
-    [token, userId, dispatch, decryptMessage, handleLogout]
-  );
-
-  const sendPendingMessages = useCallback(async () => {
-    if (!navigator.onLine || !pendingMessages.length || !socket?.connected) {
-      console.log('Skipping sendPendingMessages: offline, no messages, or socket disconnected');
-      return;
-    }
-    const successfulSends = [];
-    for (const { tempId, recipientId, messageData } of pendingMessages) {
-      if (!isValidObjectId(recipientId)) {
-        console.warn('Invalid recipientId in pending message:', recipientId);
-        continue;
-      }
-      try {
-        await new Promise((resolve, reject) => {
-          socket.emit('message', messageData, (ack) => {
-            if (ack.error) {
-              console.error('Pending message send error:', ack.error);
-              reject(new Error(ack.error));
-              return;
-            }
-            const { message: sentMessage } = ack;
-            dispatch(
-              replaceMessage({
-                recipientId,
-                message: { ...sentMessage, content: sentMessage.plaintextContent || sentMessage.content },
-                replaceId: tempId,
-              })
-            );
-            saveMessages([{ ...sentMessage, content: sentMessage.plaintextContent || sentMessage.content }])
-              .then(() => {
-                successfulSends.push(tempId);
-                resolve();
-              })
-              .catch((err) => {
-                console.error('Failed to save pending message:', err);
-                reject(err);
-              });
-          });
-        });
-      } catch (err) {
-        console.error('Pending message send failed:', err);
-      }
-    }
-    if (successfulSends.length) {
-      const updatedPendingMessages = pendingMessages.filter((p) => !successfulSends.includes(p.tempId));
-      setPendingMessages(updatedPendingMessages);
-      await savePendingMessages(updatedPendingMessages);
-      await clearPendingMessages(successfulSends);
-      console.log(`Sent ${successfulSends.length} pending messages`);
-    }
-  }, [pendingMessages, socket, dispatch]);
-
-  const handleFileChange = useCallback(
-    async (e, type) => {
-      try {
-        const currentChatId = selectedChatRef.current;
-        if (!e.target.files?.length || !currentChatId || !isValidObjectId(currentChatId)) {
-          throw new Error('No files selected, no chat selected, or invalid chat');
-        }
-        if (!socket || !socket.connected) {
-          throw new Error('Socket connection not established');
-        }
-
-        const selectedFiles = Array.from(e.target.files);
-        const compressedFiles = await Promise.all(
-          selectedFiles.map((file) => file.type.startsWith('image/') ? compressImage(file) : file)
-        );
-
-        const tempMessages = compressedFiles.map((file) => {
-          const clientMessageId = generateClientMessageId();
-          return {
-            _id: clientMessageId,
-            senderId: userId,
-            recipientId: currentChatId,
-            content: URL.createObjectURL(file),
-            contentType: type,
-            status: 'pending',
-            timestamp: new Date().toISOString(),
-            clientMessageId,
-            originalFilename: file.name,
-            virtualNumber,
-            senderUsername: username,
-            senderPhoto: photo,
-          };
-        });
-
-        tempMessages.forEach((msg) => {
-          dispatch(addMessage({
-            recipientId: currentChatId,
-            message: msg,
-          }));
-        });
-
-        setFiles(compressedFiles);
-        setContentType(type);
-        setMediaPreview(compressedFiles.map((file) => ({
-          type,
-          content: URL.createObjectURL(file),
-          file,
-          caption: captions[file.name] || '',
-        })));
-
-        if (isAtBottomRef.current && chats[currentChatId]?.length) {
-          listRef.current?.scrollToRow(chats[currentChatId].length);
-        }
-
-        for (const [index, file] of compressedFiles.entries()) {
-          const clientMessageId = tempMessages[index]._id;
-          const formData = new FormData();
-          formData.append('file', file);
-          formData.append('userId', userId);
-          formData.append('recipientId', currentChatId);
-          formData.append('clientMessageId', clientMessageId);
-          formData.append('senderVirtualNumber', virtualNumber);
-          formData.append('senderUsername', username);
-          formData.append('senderPhoto', photo);
-          if (captions[file.name]) {
-            formData.append('caption', captions[file.name]);
-          }
-
-          const response = await axios.post(
-            `${BASE_URL}/social/upload`,
-            formData,
-            {
-              headers: {
-                Authorization: `Bearer ${token}`,
-                'Content-Type': 'multipart/form-data',
-              },
-              onUploadProgress: (e) => {
-                const percentCompleted = Math.round((e.loaded * 100) / e.total);
-                setUploadProgress((prev) => ({
-                  ...prev,
-                  [clientMessageId]: percentCompleted,
-                }));
-                dispatch(
-                  updateMessageStatus({
-                    messageId: clientMessageId,
-                    recipientId: currentChatId,
-                    status: 'uploading',
-                    uploadProgress: percentCompleted,
-                  })
-                );
-              },
-              timeout: 30000,
-            }
-          );
-
-          const { message: uploadedMessage } = response.data;
-          dispatch(
-            replaceMessage({
-              recipientId: currentChatId,
-              message: uploadedMessage,
-              replaceId: clientMessageId,
-            })
-          );
-          socket?.emit('messageStatus', {
-            id: uploadedMessage._id,
-            status: 'sent',
-          });
-          await saveMessages([uploadedMessage]);
-          console.log(`Uploaded file: ${uploadedMessage.originalFilename}`);
-        }
-      } catch (err) {
-        console.error('File upload failed:', err);
-        setError(`Upload failed: ${err.message}`);
-        dispatch(
-          updateMessageStatus({
-            messageId: clientMessageId,
-            recipientId: currentChatId,
-            status: 'failed',
-            uploadProgress: 0,
-          })
-        );
-        if (err.response?.status === 401) {
-          setError('Session expired, please log in again');
-          setTimeout(() => handleLogout(), 1000);
-        }
-      }
-
-      setFiles([]);
-      setMediaPreview([]);
-      setCaptions({});
-      setMessage('');
-      setReplyTo(null);
-      inputRef.current?.focus();
-    },
-    [token, userId, socket, virtualNumber, username, photo, dispatch, chats, compressImage, handleLogout]
-  );
-
-  const handleAddContact = useCallback(
-    async () => {
-      if (!newContactNumber || !newContactNumber.trim()) {
-        setError('Please enter a valid virtual number');
-        return;
-      }
-
-      setIsAddingContact(true);
-      try {
-        const { data } = await axios.post(
-          `${BASE_URL}/social/add_contact`,
-          { userId, virtualNumber: newContactNumber.trim() },
-          { headers: { Authorization: `Bearer ${token}` }, timeout: 6000 }
-        );
-        if (!data.id || !isValidObjectId(data.id)) {
-          throw new Error('Invalid contact ID received');
-        }
-
-        setUsers((prev) => {
-          const updatedUsers = [...prev, {
-            id: data.id,
-            virtualNumber: newContactNumber,
-            username: data.username || '',
-            photo: data.photo || '',
-          }];
-          localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
-          console.log('Contact added successfully:', data.id);
-          return updatedUsers;
-        });
-        setNewContactNumber('');
-        setIsAddingContact(false);
-        setError(null);
-      } catch (err) {
-        console.error('Add contact failed:', err);
-        setError(`Failed to add contact: ${err.message}`);
-        setIsAddingContact(false);
-        if (err.response?.status === 401) {
-          setError('Session expired, please log in again');
-          setTimeout(() => handleLogout(), 500);
-        }
-      }
-    },
-    [token, userId, newContactNumber, handleLogout]
-  );
-
-  const sendMessage = useCallback(async () => {
-    if (!message.trim() || !selectedChatRef.current || !isValidObjectId(selectedChatRef.current) || !socket?.connected) {
-      setError('Cannot send message: invalid input or chat state');
-      return;
-    }
-
-    const clientMessageId = generateClientMessageId();
-    const recipientId = selectedChatRef.current;
-    const tempMessage = {
-      _id: clientMessageId,
-      senderId: userId,
-      recipientId,
-      content: message,
-      plaintextContent: message,
-      contentType: 'text',
-      status: 'pending',
-      timestamp: new Date().toISOString(),
-      clientMessageId,
-      virtualNumber,
-      senderUsername: username,
-      senderPhoto: photo,
-      replyTo: replyTo?._id || null,
-    };
-
-    dispatch(addMessage({ recipientId, message: tempMessage }));
-    await saveMessages([tempMessage]);
-
-    try {
-      const recipientPublicKey = await getPublicKey(recipientId);
-      const encryptedContent = await encryptMessage(message, recipientPublicKey);
-      const messageData = {
-        senderId: userId,
-        recipientId,
-        content: encryptedContent,
-        plaintextContent: message,
-        contentType: 'text',
-        clientMessageId,
-        senderVirtualNumber: virtualNumber,
-        senderUsername: username,
-        senderPhoto: photo,
-        replyTo: replyTo?._id || null,
-      };
-
-      await new Promise((resolve, reject) => {
-        socket.emit('message', messageData, (ack) => {
-          if (ack.error) {
-            console.error('Message send error:', ack.error);
-            dispatch(updateMessageStatus({ recipientId, messageId: clientMessageId, status: 'failed' }));
-            setError(`Failed to send message: ${ack.error}`);
-            reject(new Error(ack.error));
-            return;
-          }
-          const { message: sentMessage } = ack;
-          dispatch(replaceMessage({
-            recipientId,
-            message: { ...sentMessage, content: sentMessage.plaintextContent || sentMessage.content },
-            replaceId: clientMessageId,
-          }));
-          saveMessages([sentMessage]).then(resolve).catch(reject);
-        });
-      });
-      setMessage('');
-      setReplyTo(null);
-      if (isAtBottomRef.current) {
-        listRef.current?.scrollToRow(chats[recipientId]?.length || 0);
-      }
-    } catch (err) {
-      console.error('Send message failed:', err);
-      dispatch(updateMessageStatus({ recipientId, messageId: clientMessageId, status: 'failed' }));
-      setError(`Failed to send message: ${err.message}`);
-      setPendingMessages((prev) => [...prev, { tempId: clientMessageId, recipientId, messageData }]);
-      await savePendingMessages([{ tempId: clientMessageId, recipientId, messageData }]);
-    }
-  }, [message, socket, userId, virtualNumber, username, photo, replyTo, dispatch, chats, getPublicKey, encryptMessage]);
-
-  useEffect(() => {
-    fetchChatList();
-    if (selectedChat) {
-      fetchMessages(selectedChat);
-      initializeChat(selectedChat);
-    }
-  }, [selectedChat, fetchChatList, fetchMessages, initializeChat]);
-
-  return (
-    <div className="chat-screen flex flex-col h-full">
-      {error && (
-        <div className="bg-red-500 text-white p-2 text-center">
-          {error}
-          <button
-            className="ml-2 bg-white text-red-500 px-2 py-1 rounded"
-            onClick={() => setError(null)}
-          >
-            Dismiss
-          </button>
-        </div>
-      )}
-      {!selectedChat ? (
-        <div className="chat-list">
-          <h2>Chats</h2>
-          {users.map((user) => (
-            <div
-              key={user.id}
-              className="p-2 border-b cursor-pointer"
-              onClick={() => dispatch(setSelectedChat(user.id))}
-            >
-              {user.username} ({user.virtualNumber})
-            </div>
-          ))}
-          <input
-            type="text"
-            value={newContactNumber}
-            onChange={(e) => setNewContactNumber(e.target.value)}
-            placeholder="Add contact by virtual number"
-            className="mt-2 p-2 border rounded"
-            disabled={isAddingContact}
-          />
-          <button
-            onClick={handleAddContact}
-            disabled={isAddingContact}
-            className="mt-2 bg-blue-500 text-white px-4 py-2 rounded"
-          >
-            Add Contact
-          </button>
-        </div>
-      ) : (
-        <div className="chat-messages flex flex-1">
-          <div className="flex items-center p-2 border-b">
-            <FaArrowLeft
-              className="cursor-pointer"
-              onClick={() => dispatch(setSelectedChat(null))}
-            />
-            <span className="ml-2">{users.find((u) => u.id === selectedChat)?.username || 'Chat'}</span>
-          </div>
-          <div className="messages flex-1 overflow-y-auto">
-            <AutoSizer>
-              {({ height, width }) => (
-                <List
-                  ref={listRef}
-                  width={width}
-                  height={height}
-                  rowCount={chats[selectedChat]?.length || 0}
-                  rowHeight={60}
-                  rowRenderer={({ index, key, style }) => {
-                    const msg = chats[selectedChat][index];
-                    return (
-                      <div key={key} style={style} className="p-2">
-                        <p>{msg.content}</p>
-                        <span className={msg.senderId === userId ? 'text-right' : 'text-left'}>
-                          {formatTime(msg.timestamp)}
-                        </span>
-                      </div>
-                    );
-                  }}
-                />
-              )}
-            </AutoSizer>
-          </div>
-          <div className="input-area flex p-2">
-            <input
-              ref={inputRef}
-              type="text"
-              value={message}
-              onChange={(e) => setMessage(e.target.value)}
-              placeholder="Type a message..."
-              className="flex-1 p-2 border rounded"
-            />
-            <input type="file" id="fileInput" className="hidden" onChange={(e) => handleFileChange(e, 'file')} />
-            <label htmlFor="fileInput">
-              <FaPaperclip className="ml-2 cursor-pointer" />
-            </label>
-            <button
-              onClick={sendMessage}
-              className="ml-2 bg-blue-500 text-white px-2 py-1 rounded"
-              disabled={!message.trim() || !socket?.connected}
-            >
-              <FaPaperPlane />
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
+const socket = io('https://gapp-6yc3.onrender.com', {
+  reconnection: true,
+  reconnectionAttempts: Infinity,
+  reconnectionDelay: 1000,
+  reconnectionDelayMax: 5000,
+  randomizationFactor: 0.5,
+  withCredentials: true,
 });
 
-export default ChatScreen;
+const FeedScreen = ({ token: initialToken, userId, onUnauthorized }) => {
+  const [posts, setPosts] = useState([]);
+  const [contentType, setContentType] = useState('video');
+  const [caption, setCaption] = useState('');
+  const [file, setFile] = useState(null);
+  const [showPostModal, setShowPostModal] = useState(false);
+  const [error, setError] = useState('');
+  const [comment, setComment] = useState('');
+  const [showComments, setShowComments] = useState(null);
+  const [uploadProgress, setUploadProgress] = useState(null);
+  const [playingPostId, setPlayingPostId] = useState(null);
+  const [muted, setMuted] = useState(true);
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [token, setToken] = useState(initialToken);
+  const feedRef = useRef(null);
+  const mediaRefs = useRef({});
+
+  const refreshToken = useCallback(async () => {
+    try {
+      const { data } = await axios.post('https://gapp-6yc3.onrender.com/auth/refresh', { userId }, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setToken(data.token);
+      localStorage.setItem('token', data.token);
+      return data.token;
+    } catch (err) {
+      console.error('Token refresh failed:', err);
+      setError('Session expired. Please log in again.');
+      onUnauthorized?.();
+      return null;
+    }
+  }, [token, userId, onUnauthorized]);
+
+  const setupIntersectionObserver = useCallback(
+    debounce(() => {
+      if (mediaRefs.current) {
+        Object.values(mediaRefs.current).forEach((media) => media && mediaRefs.current[media.dataset.postId]?.pause?.());
+      }
+
+      const observer = new IntersectionObserver(
+        (entries) => {
+          entries.forEach((entry) => {
+            const media = entry.target;
+            const postId = media.dataset.postId;
+            if (entry.isIntersecting) {
+              setPlayingPostId(postId);
+              if (media.tagName === 'VIDEO') {
+                media.play().catch((err) => console.error('Video play error:', err));
+              }
+            } else if (media.tagName === 'VIDEO') {
+              media.pause();
+              media.currentTime = 0;
+            }
+          });
+        },
+        { threshold: 0.8 }
+      );
+
+      Object.values(mediaRefs.current).forEach((media) => media && observer.observe(media));
+      return () => observer.disconnect();
+    }, 300),
+    []
+  );
+
+  const fetchFeed = useCallback(async (pageNum = 1, isRefresh = false) => {
+    if (!token || !userId || (loading && !isRefresh) || (!hasMore && !isRefresh)) return;
+    setLoading(true);
+    if (isRefresh) setRefreshing(true);
+    try {
+      const currentToken = token;
+      const { data } = await axios.get(`https://gapp-6yc3.onrender.com/feed?page=${pageNum}&limit=10`, {
+        headers: { Authorization: `Bearer ${currentToken}` },
+      });
+      const filteredPosts = Array.isArray(data.posts) ? data.posts.filter((post) => !post.isStory) : [];
+      setPosts((prev) => (pageNum === 1 || isRefresh ? filteredPosts : [...prev, ...filteredPosts]));
+      setHasMore(data.hasMore || false);
+      setError('');
+      if (filteredPosts.length > 0 && (pageNum === 1 || isRefresh)) {
+        setPlayingPostId(filteredPosts[0]._id);
+      }
+    } catch (error) {
+      console.error('Failed to fetch feed:', error);
+      if (error.response?.status === 401) {
+        const newToken = await refreshToken();
+        if (newToken) {
+          await fetchFeed(pageNum, isRefresh);
+        } else {
+          setError('Unauthorized. Please log in again.');
+          onUnauthorized?.();
+        }
+      } else {
+        setError(error.response?.data?.error || 'Failed to load feed');
+      }
+    } finally {
+      setLoading(false);
+      if (isRefresh) setRefreshing(false);
+    }
+  }, [token, userId, loading, hasMore, refreshToken, onUnauthorized]);
+
+  useEffect(() => {
+    if (token && userId) {
+      fetchFeed();
+      socket.emit('join', userId);
+    }
+
+    socket.on('newPost', (post) => {
+      if (!post.isStory) {
+        setPosts((prev) => [post, ...prev.filter((p) => p._id !== post._id)]);
+      }
+    });
+    socket.on('postUpdate', (updatedPost) => {
+      setPosts((prev) => prev.map((p) => (p._id === updatedPost._id ? updatedPost : p)));
+    });
+    socket.on('postDeleted', (postId) => {
+      setPosts((prev) => prev.filter((p) => p._id !== postId));
+    });
+
+    return () => {
+      socket.off('newPost');
+      socket.off('postUpdate');
+      socket.off('postDeleted');
+    };
+  }, [token, userId, fetchFeed]);
+
+  useEffect(() => {
+    setupIntersectionObserver();
+    if (posts.length > 0 && feedRef.current) {
+      feedRef.current.scrollTo({ top: currentIndex * window.innerHeight, behavior: 'smooth' });
+    }
+  }, [posts, currentIndex, setupIntersectionObserver]);
+
+  const handleScroll = useCallback(() => {
+    if (!feedRef.current || loading || !hasMore) return;
+    const { scrollTop, scrollHeight, clientHeight } = feedRef.current;
+    if (scrollTop + clientHeight >= scrollHeight - 50) {
+      setPage((prev) => prev + 1);
+      fetchFeed(page + 1);
+    }
+  }, [loading, hasMore, page, fetchFeed]);
+
+  useEffect(() => {
+    const feedElement = feedRef.current;
+    if (feedElement) {
+      feedElement.addEventListener('scroll', handleScroll);
+      return () => feedElement.removeEventListener('scroll', handleScroll);
+    }
+  }, [handleScroll]);
+
+  const postContent = async () => {
+    if (!userId || (!caption && !file && contentType !== 'text')) {
+      setError('Please provide content');
+      return;
+    }
+    const formData = new FormData();
+    formData.append('userId', userId);
+    formData.append('contentType', contentType);
+    formData.append('caption', caption);
+    if (file) formData.append('content', file);
+    else if (contentType === 'text') formData.append('content', caption);
+
+    try {
+      setUploadProgress(0);
+      const { data } = await axios.post('https://gapp-6yc3.onrender.com/feed', formData, {
+        headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
+        onUploadProgress: (progressEvent) =>
+          setUploadProgress(Math.round((progressEvent.loaded * 100) / progressEvent.total)),
+      });
+      socket.emit('newPost', data);
+      setPosts((prev) => [data, ...prev]);
+      setCaption('');
+      setFile(null);
+      setShowPostModal(false);
+      setUploadProgress(null);
+      setError('');
+      setCurrentIndex(0);
+    } catch (error) {
+      console.error('Post error:', error);
+      if (error.response?.status === 401) {
+        const newToken = await refreshToken();
+        if (newToken) {
+          await postContent();
+        } else {
+          setError('Unauthorized. Please log in again.');
+          onUnauthorized?.();
+        }
+      } else {
+        setError(error.response?.data?.error || 'Failed to post');
+      }
+      setUploadProgress(null);
+    }
+  };
+
+  const likePost = async (postId) => {
+    if (!playingPostId || postId !== playingPostId) return;
+    try {
+      const post = posts.find((p) => p._id === postId);
+      const action = post.likedBy?.includes(userId) ? '/feed/unlike' : '/feed/like';
+      const { data } = await axios.post(
+        `https://gapp-6yc3.onrender.com${action}`,
+        { postId, userId },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      socket.emit('postUpdate', data);
+    } catch (error) {
+      console.error('Like error:', error);
+      if (error.response?.status === 401) {
+        const newToken = await refreshToken();
+        if (newToken) {
+          await likePost(postId);
+        } else {
+          setError('Unauthorized. Please log in again.');
+          onUnauthorized?.();
+        }
+      }
+    }
+  };
+
+  const commentPost = async (postId) => {
+    if (!playingPostId || postId !== playingPostId || !comment.trim()) return;
+    try {
+      const { data } = await axios.post(
+        'https://gapp-6yc3.onrender.com/feed/comment',
+        { postId, comment, userId },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      const updatedPost = {
+        ...posts.find((p) => p._id === postId),
+        comments: [...(posts.find((p) => p._id === postId)?.comments || []), data],
+      };
+      socket.emit('postUpdate', updatedPost);
+      setComment('');
+    } catch (error) {
+      console.error('Comment error:', error);
+      if (error.response?.status === 401) {
+        const newToken = await refreshToken();
+        if (newToken) {
+          await commentPost(postId);
+        } else {
+          setError('Unauthorized. Please log in again.');
+          onUnauthorized?.();
+        }
+      }
+    }
+  };
+
+  const timeAgo = (date) => {
+    const now = new Date();
+    const diff = now - parseInt(date);
+    const minutes = Math.floor(diff / 60000);
+    if (minutes < 60) return `${minutes}m`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h`;
+    return `${Math.floor(hours / 24)}d`;
+  };
+
+  const handleRefresh = useCallback(() => {
+    setPage(1);
+    fetchFeed(1, true);
+  }, [fetchFeed]);
+
+  const swipeHandlers = useSwipeable({
+    onSwipedUp: () => {
+      if (showComments) return;
+      setCurrentIndex((prev) => Math.min(prev + 1, posts.length - 1));
+    },
+    onSwipedDown: () => {
+      if (showComments) return;
+      if (currentIndex === 0) {
+        handleRefresh();
+      } else {
+        setCurrentIndex((prev) => Math.max(prev - 1, 0));
+      }
+    },
+    onSwipedLeft: () => {
+      if (showComments) setShowComments(null);
+    },
+    onSwipedRight: () => {
+      if (!showComments && playingPostId) setShowComments(playingPostId);
+    },
+    trackMouse: false,
+    delta: 50,
+  });
+
+  const handleDoubleTap = (postId) => {
+    likePost(postId);
+  };
+
+  const LoadingSkeleton = () => (
+    <div className="h-screen w-full bg-gray-200 animate-pulse relative snap-start md:max-w-[600px] md:h-[800px] md:rounded-lg">
+      <div className="absolute top-4 left-4 flex items-center">
+        <div className="w-10 h-10 rounded-full bg-gray-300"></div>
+        <div className="ml-2">
+          <div className="w-20 h-4 bg-gray-300 rounded"></div>
+          <div className="w-10 h-3 mt-1 bg-gray-300 rounded"></div>
+        </div>
+      </div>
+      <div className="w-full h-full bg-gray-300"></div>
+      <div className="absolute right-4 bottom-20 flex flex-col space-y-4">
+        {[...Array(3)].map((_, i) => (
+          <div key={i} className="w-8 h-8 bg-gray-300 rounded-full"></div>
+        ))}
+      </div>
+    </div>
+  );
+
+  return (
+    <motion.div
+      ref={feedRef}
+      {...swipeHandlers}
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.5 }}
+      className="h-screen overflow-y-auto bg-black snap-y snap-mandatory md:max-w-[600px] md:mx-auto md:rounded-lg md:shadow-lg"
+    >
+      {/* Floating Post Button */}
+      <div className="fixed bottom-20 right-4 z-20">
+        <motion.button
+          whileHover={{ scale: 1.1, rotate: 90 }}
+          whileTap={{ scale: 0.9 }}
+          onClick={() => setShowPostModal(true)}
+          className="bg-gradient-to-r from-blue-500 to-purple-600 text-white p-4 rounded-full shadow-lg"
+        >
+          <FaPlus className="text-xl" />
+        </motion.button>
+      </div>
+
+      {/* Post Modal */}
+      <AnimatePresence>
+        {showPostModal && (
+          <motion.div
+            initial={{ opacity: 0, y: 50 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 50 }}
+            className="fixed inset-0 bg-black bg-opacity-80 flex items-center justify-center z-30 px-4"
+          >
+            <div className="bg-gray-900 text-white p-6 rounded-2xl shadow-2xl w-full max-w-md relative">
+              {uploadProgress !== null && (
+                <div className="absolute inset-0 flex items-center justify-center bg-gray-900 bg-opacity-75">
+                  <div className="relative w-20 h-20">
+                    <svg className="w-full h-full" viewBox="0 0 36 36">
+                      <path
+                        className="text-gray-700"
+                        d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="3"
+                      />
+                      <path
+                        className="text-blue-500"
+                        d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="3"
+                        strokeDasharray={`${uploadProgress}, 100`}
+                      />
+                    </svg>
+                    <span className="absolute inset-0 flex items-center justify-center text-blue-500 font-bold">
+                      {uploadProgress}%
+                    </span>
+                  </div>
+                </div>
+              )}
+              <div className="relative mb-4">
+                <select
+                  value={contentType}
+                  onChange={(e) => setContentType(e.target.value)}
+                  className="w-full p-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:ring-2 focus:ring-blue-500 focus:outline-none transition duration-200"
+                >
+                  <option value="text">Text</option>
+                  <option value="image">Image</option>
+                  <option value="video">Video</option>
+                  <option value="audio">Audio</option>
+                  <option value="raw">Document</option>
+                </select>
+              </div>
+              <div className="flex items-center mb-4">
+                {contentType === 'text' ? (
+                  <textarea
+                    value={caption}
+                    onChange={(e) => setCaption(e.target.value)}
+                    className="flex-1 p-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:ring-2 focus:ring-blue-500 focus:outline-none transition duration-200 resize-none"
+                    placeholder="What's on your mind?"
+                    rows="4"
+                  />
+                ) : (
+                  <input
+                    type="file"
+                    accept={
+                      contentType === 'image'
+                        ? 'image/jpeg,image/png'
+                        : contentType === 'video'
+                        ? 'video/mp4,video/webm'
+                        : contentType === 'audio'
+                        ? 'audio/mpeg,audio/wav'
+                        : '*/*'
+                    }
+                    onChange={(e) => setFile(e.target.files[0])}
+                    className="flex-1 p-3 bg-gray-800 border border-gray-700 rounded-lg text-white file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:bg-blue-500 file:text-white file:cursor-pointer"
+                  />
+                )}
+                <motion.button
+                  whileHover={{ scale: 1.1 }}
+                  whileTap={{ scale: 0.9 }}
+                  onClick={postContent}
+                  className="ml-3 p-3 bg-blue-500 rounded-full"
+                >
+                  <FaPaperPlane className="text-xl text-white" />
+                </motion.button>
+              </div>
+              {contentType !== 'text' && (
+                <input
+                  type="text"
+                  value={caption}
+                  onChange={(e) => setCaption(e.target.value)}
+                  className="w-full p-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:ring-2 focus:ring-blue-500 focus:outline-none transition duration-200"
+                  placeholder="Add a caption..."
+                />
+              )}
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={() => setShowPostModal(false)}
+                className="mt-4 w-full bg-gray-700 text-white p-3 rounded-lg hover:bg-gray-600 transition duration-200"
+              >
+                Cancel
+              </motion.button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Error Display */}
+      {error && (
+        <motion.div
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="text-red-500 text-center py-3 z-10 fixed top-0 w-full bg-black bg-opacity-75 md:max-w-[600px] md:mx-auto"
+        >
+          {error}
+          {error.includes('Unauthorized') && (
+            <button
+              onClick={() => onUnauthorized?.()}
+              className="ml-2 text-blue-500 underline"
+            >
+              Log In
+            </button>
+          )}
+        </motion.div>
+      )}
+
+      {/* Refresh Indicator */}
+      {refreshing && (
+        <div className="fixed top-4 left-0 right-0 text-center text-white z-10">
+          <FaSyncAlt className="inline-block w-6 h-6 animate-spin" />
+        </div>
+      )}
+
+      {/* Loading Indicator */}
+      {loading && !refreshing && (
+        <div className="fixed bottom-4 left-0 right-0 text-center text-white">
+          <div className="inline-block w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+        </div>
+      )}
+
+      {/* TikTok-like Feed */}
+      {posts.length === 0 && !loading && !refreshing ? (
+        <div className="h-screen flex items-center justify-center text-white">
+          <p>No posts available</p>
+        </div>
+      ) : (
+        posts.length === 0 && loading ? (
+          [...Array(3)].map((_, i) => <LoadingSkeleton key={i} />)
+        ) : (
+          posts.map((post, index) => (
+            <motion.div
+              key={post._id}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ duration: 0.3 }}
+              className="h-screen w-full flex flex-col items-center justify-center text-white relative snap-start md:max-w-[600px] md:mx-auto md:h-[800px] md:rounded-lg md:shadow-lg md:bg-gray-900"
+              onDoubleClick={() => handleDoubleTap(post._id)}
+            >
+              {/* User Info */}
+              <div className="absolute top-4 left-4 z-10 flex items-center">
+                <img
+                  src={post.photo || 'https://placehold.co/40x40'}
+                  alt="Profile"
+                  className="w-10 h-10 rounded-full mr-2 border-2 border-blue-500"
+                />
+                <div>
+                  <span className="font-bold text-white">{post.username || 'Unknown'}</span>
+                  <span className="text-xs ml-2 text-gray-400">{timeAgo(post.createdAt)}</span>
+                </div>
+              </div>
+
+              {/* Post Content */}
+              {post.contentType === 'text' && (
+                <p className="text-lg p-4 bg-black bg-opacity-50 rounded-lg max-w-[80%] mx-auto text-center">
+                  {post.content}
+                </p>
+              )}
+              {post.contentType === 'image' && (
+                <img
+                  src={post.content}
+                  alt="Post"
+                  className="w-full h-full object-cover md:rounded-lg"
+                  data-post-id={post._id}
+                  ref={(el) => (mediaRefs.current[post._id] = el)}
+                />
+              )}
+              {post.contentType === 'video' && (
+                <video
+                  ref={(el) => (mediaRefs.current[post._id] = el)}
+                  data-post-id={post._id}
+                  playsInline
+                  autoPlay
+                  muted={muted}
+                  loop
+                  src={post.content}
+                  className="w-full h-full object-cover md:rounded-lg"
+                />
+              )}
+              {post.contentType === 'audio' && (
+                <audio
+                  ref={(el) => (mediaRefs.current[post._id] = el)}
+                  data-post-id={post._id}
+                  controls
+                  autoPlay
+                  src={post.content}
+                  className="w-full mt-4"
+                />
+              )}
+              {post.contentType === 'raw' && (
+                <a
+                  href={post.content}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-blue-500 p-4 bg-black bg-opacity-50 rounded-lg"
+                >
+                  Open Document
+                </a>
+              )}
+
+              {/* Interactions */}
+              <div className="absolute right-4 bottom-20 flex flex-col items-center space-y-6 z-10">
+                <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
+                  <FaHeart
+                    onClick={() => likePost(post._id)}
+                    className={`text-3xl cursor-pointer ${post.likedBy?.includes(userId) ? 'text-red-500' : 'text-white'}`}
+                  />
+                  <span className="text-sm text-white">{post.likes || 0}</span>
+                </motion.div>
+                <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
+                  <FaComment
+                    onClick={() => setShowComments(post._id)}
+                    className="text-3xl cursor-pointer text-white hover:text-blue-500"
+                  />
+                  <span className="text-sm text-white">{post.comments?.length || 0}</span>
+                </motion.div>
+                <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
+                  <FaShare
+                    onClick={() =>
+                      navigator.clipboard
+                        .writeText(`${window.location.origin}/post/${post._id}`)
+                        .then(() => alert('Link copied!'))
+                    }
+                    className="text-3xl cursor-pointer text-white hover:text-blue-500"
+                  />
+                </motion.div>
+                {post.contentType === 'video' && (
+                  <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
+                    {muted ? (
+                      <FaVolumeMute
+                        onClick={() => setMuted(false)}
+                        className="text-3xl cursor-pointer text-white hover:text-blue-500"
+                      />
+                    ) : (
+                      <FaVolumeUp
+                        onClick={() => setMuted(true)}
+                        className="text-3xl cursor-pointer text-white hover:text-blue-500"
+                      />
+                    )}
+                  </motion.div>
+                )}
+              </div>
+
+              {/* Caption */}
+              {post.caption && (
+                <motion.div
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="absolute bottom-4 left-4 right-4 text-sm bg-black bg-opacity-50 p-3 rounded-lg max-w-[70%] md:max-w-[80%]"
+                >
+                  <span className="font-bold text-white">{post.username || 'Unknown'}</span>
+                  <span className="ml-2 text-white">{post.caption}</span>
+                </motion.div>
+              )}
+
+              {/* Comments Modal */}
+              <AnimatePresence>
+                {showComments === post._id && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 100 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 100 }}
+                    className="fixed bottom-0 left-0 right-0 bg-gray-900 text-white p-4 rounded-t-lg shadow-lg h-1/2 overflow-y-auto z-50 md:max-w-[600px] md:mx-auto"
+                  >
+                    <h3 className="text-lg font-bold text-blue-500 mb-2">Comments</h3>
+                    {post.comments?.length === 0 ? (
+                      <p className="text-gray-400">No comments yet</p>
+                    ) : (
+                      post.comments.map((c, i) => (
+                        <div key={i} className="flex items-center mb-3">
+                          <img
+                            src={c.photo || 'https://placehold.co/30x30'}
+                            alt="Profile"
+                            className="w-8 h-8 rounded-full mr-2 border border-gray-700"
+                          />
+                          <p className="text-sm text-white">
+                            <span className="font-semibold">{c.username || 'Unknown'}</span> {c.comment}
+                          </p>
+                        </div>
+                      ))
+                    )}
+                    <div className="flex items-center mt-3">
+                      <input
+                        value={comment}
+                        onChange={(e) => setComment(e.target.value)}
+                        className="flex-1 p-3 bg-gray-800 border border-gray-700 rounded-full text-white focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                        placeholder="Add a comment..."
+                      />
+                      <motion.button
+                        whileHover={{ scale: 1.1 }}
+                        whileTap={{ scale: 0.9 }}
+                        onClick={() => commentPost(post._id)}
+                        className="ml-3 p-3 bg-blue-500 rounded-full"
+                      >
+                        <FaPaperPlane className="text-xl text-white" />
+                      </motion.button>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </motion.div>
+          ))
+        )
+      )}
+
+      {/* Comments Overlay */}
+      {showComments && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 z-40" onClick={() => setShowComments(null)} />
+      )}
+    </motion.div>
+  );
+};
+
+export default FeedScreen;

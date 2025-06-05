@@ -3,12 +3,9 @@ import { openDB } from 'idb';
 const DB_NAME = 'MyChatDB';
 const MESSAGE_STORE = 'messages';
 const PENDING_STORE = 'pendingMessages';
-const VERSION = 12;
+const VERSION = 12; // Incremented to ensure clean migration
 
 let db = null;
-
-// Fallback ObjectId validation
-const isValidObjectId = (id) => /^[0-9a-fA-F]{24}$/.test(id);
 
 const getDb = async () => {
   if (db) {
@@ -89,17 +86,17 @@ const withRetry = async (operation, maxRetries = 3) => {
 
 export const clearDatabase = async () => {
   try {
-    if (db) {
-      db.close();
-      db = null;
-    }
+    db?.close();
     await indexedDB.deleteDatabase(DB_NAME);
+    db = null;
     console.log('Database cleared');
   } catch (error) {
     console.error('Error clearing DB:', error.message);
     throw error;
   }
 };
+
+
 
 export const saveMessages = async (messages) => {
   if (!Array.isArray(messages) || !messages.length) {
@@ -116,12 +113,7 @@ export const saveMessages = async (messages) => {
       await Promise.all(
         messages.map((msg) => {
           if (!msg._id || !msg.clientMessageId || !msg.recipientId || !msg.senderId || !isValidObjectId(msg.recipientId) || !isValidObjectId(msg.senderId)) {
-            console.warn('Invalid message skipped:', {
-              _id: msg._id,
-              clientMessageId: msg.clientMessageId,
-              recipientId: msg.recipientId,
-              senderId: msg.senderId,
-            });
+            console.warn('Invalid message skipped:', msg);
             return Promise.resolve();
           }
           return store.put({
@@ -153,6 +145,8 @@ export const saveMessages = async (messages) => {
     throw error;
   }
 };
+
+
 
 export const getMessages = async (recipientId) => {
   try {
@@ -241,10 +235,7 @@ export const savePendingMessages = async (pendingMessages) => {
       await Promise.all(
         pendingMessages.map((msg) => {
           if (!msg.tempId || typeof msg.tempId !== 'string' || !msg.messageData) {
-            console.warn('Invalid pending message:', {
-              tempId: msg.tempId,
-              recipientId: msg.recipientId,
-            });
+            console.warn('Invalid pending message:', msg);
             throw new Error('Invalid pending message');
           }
           return store.put({
@@ -295,6 +286,8 @@ export const loadPendingMessages = async () => {
   }
 };
 
+
+
 export const clearPendingMessages = async (tempIds = []) => {
   try {
     await withRetry(async () => {
@@ -315,5 +308,9 @@ export const clearPendingMessages = async (tempIds = []) => {
     throw error;
   }
 };
+
+
+
+
 
 export default getDb;

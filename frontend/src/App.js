@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Route, Routes, Navigate, NavLink, useLocation } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { FaHome, FaBriefcase, FaComments, FaUser } from 'react-icons/fa';
@@ -22,15 +22,15 @@ class ErrorBoundary extends React.Component {
     return { hasError: true, error };
   }
 
-  componentDidCatch(error, errorInfo) {
-    console.error('ErrorBoundary caught:', error, errorInfo);
-    axios.post(`${BASE_URL}/social/log-error`, {
-      error: error.message,
-      stack: errorInfo.componentStack,
-      timestamp: new Date().toISOString(),
-    }).catch((err) => console.warn('Failed to log error:', err.message));
-  }
-
+// In App.js, inside ErrorBoundary's componentDidCatch
+componentDidCatch(error, errorInfo) {
+  console.error('ErrorBoundary caught:', error, errorInfo);
+  axios.post(`${BASE_URL}/social/log-error`, { // Changed to /social/log-error
+    error: error.message,
+    stack: errorInfo.componentStack,
+    timestamp: new Date().toISOString(),
+  }).catch((err) => console.warn('Failed to log error:', err.message));
+}
   render() {
     if (this.state.hasError) {
       return (
@@ -90,14 +90,13 @@ const App = () => {
   const [error, setError] = useState(null);
   const { selectedChat } = useSelector((state) => state.messages);
 
-  const setAuth = useCallback((newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername, newPrivateKey) => {
+  const setAuth = (newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername) => {
     const token = newToken || '';
     const userId = newUserId || '';
     const role = Number(newRole) || 0;
     const photo = newPhoto || 'https://placehold.co/40x40';
     const virtualNumber = newVirtualNumber || '';
     const username = newUsername || '';
-    const privateKey = newPrivateKey || '';
 
     setToken(token);
     setUserId(userId);
@@ -113,85 +112,63 @@ const App = () => {
       localStorage.setItem('photo', photo);
       localStorage.setItem('virtualNumber', virtualNumber);
       localStorage.setItem('username', username);
-      localStorage.setItem('privateKey', privateKey);
       setIsAuthenticated(true);
     } else {
       localStorage.clear();
       setIsAuthenticated(false);
       setChatNotifications(0);
-      if (socket) {
-        socket.emit('leave', userId);
-        socket.disconnect();
-      }
       setSocket(null);
       setError('Authentication failed, please log in again');
     }
-  }, [socket]);
+  };
 
-  const refreshToken = useCallback(async () => {
+  useEffect(() => {
+    if (!token || !userId || typeof token !== 'string') {
+      console.warn('Invalid token or userId, skipping socket initialization');
+      setAuth(null, null, null, null, null, null);
+      return;
+    }
+
+    const newSocket = io(BASE_URL, {
+      auth: { token,
+      },
+      transports: ['websocket', 'polling'],
+      reconnectionAttempts: 10, // Increased for Render stability
+      reconnectionDelay: 3000, // Increased delay
+      timeout: 10000, // Increased connection timeout
+    });
+    setSocket(newSocket);
+
+    return () => {
+      newSocket.emit('leave', userId);
+      newSocket.disconnect();
+      console.log('Socket cleanup');
+      setSocket(null);
+    };
+  }, [token, userId]);
+
+  const refreshToken = async () => {
     try {
       const response = await axios.post(
         `${BASE_URL}/auth/refresh`,
         { userId },
         {
           headers: { Authorization: `Bearer ${token}` },
-          timeout: 15000,
+          timeout: 15000, // Increased timeout
         }
       );
       const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername, privateKey } = response.data;
-      setAuth(newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername, privateKey);
-      console.log('Token refreshed successfully');
+      setAuth(newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername);
+      localStorage.setItem('privateKey', privateKey);
+      console.log('Token refreshed');
       return newToken;
     } catch (error) {
       console.error('Token refresh failed:', error.response?.data || error.message);
-      setAuth(null, null, null, null, null, null, null);
+      setAuth(null, null, null, null, null, null);
       setError('Session expired, please log in again');
       return null;
     }
-  }, [token, userId, setAuth]);
-
-  useEffect(() => {
-    if (!token || !userId || typeof token !== 'string') {
-      console.warn('Invalid token or userId, skipping socket initialization');
-      setAuth(null, null, null, null, null, null, null);
-      return;
-    }
-
-    const newSocket = io(BASE_URL, {
-      auth: { token },
-      transports: ['websocket', 'polling'],
-      reconnection: true,
-      reconnectionAttempts: 15,
-      reconnectionDelay: 5000,
-      timeout: 20000,
-      query: { userId },
-    });
-
-    setSocket(newSocket);
-
-    const handleConnectError = async (error) => {
-      console.error('Socket connect error:', error.message);
-      if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
-        const newToken = await refreshToken();
-        if (newToken) {
-          newSocket.auth.token = newToken;
-          newSocket.disconnect().connect();
-        } else {
-          setAuth(null, null, null, null, null, null, null);
-        }
-      }
-    };
-
-    newSocket.on('connect_error', handleConnectError);
-
-    return () => {
-      newSocket.off('connect_error', handleConnectError);
-      newSocket.emit('leave', userId);
-      newSocket.disconnect();
-      console.log('Socket cleanup completed');
-      setSocket(null);
-    };
-  }, [token, userId, refreshToken, setAuth]);
+  };
 
   useEffect(() => {
     if (!isAuthenticated || !token || !userId || !socket) return;
@@ -202,7 +179,7 @@ const App = () => {
       isRefreshing = true;
       try {
         const expTime = getTokenExpiration(token);
-        if (expTime && expTime - Date.now() < 10 * 60 * 1000) {
+        if (expTime && expTime - Date.now() < 10 * 60 * 1000) { // Check 10 minutes before expiry
           await refreshToken();
         }
       } catch (err) {
@@ -214,9 +191,56 @@ const App = () => {
     };
 
     checkTokenExpiration();
-    const interval = setInterval(checkTokenExpiration, 5 * 60 * 1000);
+    const interval = setInterval(checkTokenExpiration, 5 * 60 * 1000); // Check every 5 minutes
     return () => clearInterval(interval);
-  }, [isAuthenticated, token, userId, socket, refreshToken]);
+  }, [isAuthenticated, token, userId, socket]);
+
+  useEffect(() => {
+    if (!socket) return;
+
+    socket.on('connect', () => {
+      socket.emit('join', userId);
+      console.log('Socket connected:', socket.id);
+    });
+
+    socket.on('connect_error', async (error) => {
+      console.error('Socket connect error:', error.message);
+      if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
+        const newToken = await refreshToken();
+        if (newToken) {
+          socket.auth.token = newToken;
+          socket.disconnect().connect();
+        } else {
+          setAuth(null, null, null, null, null, null);
+        }
+      }
+    });
+
+    socket.on('disconnect', (reason) => {
+      console.warn('Socket disconnected:', reason);
+      if (reason === 'io server disconnect') {
+        socket.connect();
+      }
+    });
+
+    socket.on('message', (msg) => {
+      if (msg.recipientId === userId && (!selectedChat || selectedChat !== msg.senderId)) {
+        setChatNotifications((prev) => prev + 1);
+      }
+    });
+
+    socket.on('newContact', (contactData) => {
+      console.log('New contact:', contactData);
+    });
+
+    return () => {
+      socket.off('connect');
+      socket.off('connect_error');
+      socket.off('disconnect');
+      socket.off('message');
+      socket.off('newContact');
+    };
+  }, [socket, userId, selectedChat]);
 
   useEffect(() => {
     document.documentElement.className = theme === 'dark' ? 'dark' : '';
@@ -232,12 +256,6 @@ const App = () => {
         {error && (
           <div className="fixed top-0 left-0 right-0 bg-red-500 text-white p-2 text-center">
             {error}
-            <button
-              className="ml-4 bg-white text-red-500 px-2 py-1 rounded"
-              onClick={() => setError(null)}
-            >
-              Dismiss
-            </button>
           </div>
         )}
         <LoginScreen setAuth={setAuth} />
@@ -250,12 +268,6 @@ const App = () => {
       {error && (
         <div className="fixed top-0 left-0 right-0 bg-red-500 text-white p-2 text-center">
           {error}
-          <button
-            className="ml-4 bg-white text-red-500 px-2 py-1 rounded"
-            onClick={() => setError(null)}
-          >
-            Dismiss
-          </button>
         </div>
       )}
       <Router>
@@ -303,7 +315,7 @@ const AuthenticatedApp = ({
           token={token}
           userId={userId}
           virtualNumber={virtualNumber}
-          onComplete={(newVirtualNumber) => setAuth(token, userId, role, photo, newVirtualNumber, username, localStorage.getItem('privateKey'))}
+          onComplete={(newVirtualNumber) => setAuth(token, userId, role, photo, newVirtualNumber, username)}
         />
       )}
       <div className="flex-1 p-0 relative">
@@ -326,7 +338,7 @@ const AuthenticatedApp = ({
           <FaHome className="text-xl"/>
           <span className="text-xs">Feed</span>
         </NavLink>
-        <NavLink to="/jobs" className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}>
+        <NavLink to="/jobs" className="flex flex-col items-center p-2 rounded">
           <FaBriefcase className="text-xl" />
           <span className="text-xs">Jobs</span>
         </NavLink>
@@ -343,7 +355,7 @@ const AuthenticatedApp = ({
           )}
           <span className="text-xs">Chat</span>
         </NavLink>
-        <NavLink to="/profile" className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}>
+        <NavLink to="/profile" className="flex flex-col items-center p-2">
           <FaUser className="text-xl"/>
           <span className="text-xs">Profile</span>
         </NavLink>
