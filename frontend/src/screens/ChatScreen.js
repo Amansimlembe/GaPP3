@@ -128,6 +128,49 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     }
   }, [token]);
 
+
+
+
+
+
+
+
+  const handleLogin = async (email, password) => {
+  try {
+    const response = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    });
+    const data = await response.json();
+    if (data.error) {
+      console.error('Login failed:', data.error);
+      return;
+    }
+    localStorage.setItem('token', data.token);
+    localStorage.setItem('privateKey', data.privateKey);
+    localStorage.setItem('userId', data.userId);
+    localStorage.setItem('virtualNumber', data.virtualNumber);
+    localStorage.setItem('username', data.username);
+    console.log('Logged in, private key stored');
+    // Redirect to chat or dispatch login action
+  } catch (err) {
+    console.error('Login error:', err);
+  }
+};
+
+
+useEffect(() => {
+  const privateKey = localStorage.getItem('privateKey');
+  if (!privateKey) {
+    console.warn('No private key found in localStorage');
+    setError('Private key missing, please log in again');
+    // Optionally redirect to login
+  }
+}, []);
+
+
+
   const compressImage = async (file) => {
     try {
       return new Promise((resolve) => {
@@ -363,8 +406,8 @@ const sendPendingMessages = useCallback(async () => {
     const updatedPending = pendingMessages.filter((p) => !successfulSends.includes(p.tempId));
     setPendingMessages(updatedPending);
     await savePendingMessages(updatedPending);
-    if (!updatedPending.length) {
-      await clearPendingMessages();
+    if (successfulSends.length) {
+      await clearPendingMessages(successfulSends); // Clear only successful messages
     }
     console.log(`Sent ${successfulSends.length} pending messages`);
   }
@@ -635,60 +678,67 @@ const retryUpload = async (retryCount = 3) => {
       replyTo: replyTo ? replyTo._id : undefined,
     };
 
-    socket.emit('message', messageData, async (ack) => {
-      if (ack?.error) {
-        console.error('Socket acknowledgment error:', ack.error);
-        setError(`Failed to send message: ${ack.error}`);
-        dispatch(
-          updateMessageStatus({
-            recipientId,
-            messageId: clientMessageId,
-            status: 'failed',
-          })
-        );
-        setPendingMessages((prev) => [
-          ...prev,
-          { tempId: clientMessageId, recipientId, messageData },
-        ]);
-        await savePendingMessages([
-          ...pendingMessages,
-          { tempId: clientMessageId, recipientId, messageData },
-        ]);
-        return;
-      }
-      if (!ack?.message?._id || !ack.message.clientMessageId) {
-        console.error('Invalid acknowledgment:', ack);
-        setError('Invalid server response');
-        dispatch(
-          updateMessageStatus({
-            recipientId,
-            messageId: clientMessageId,
-            status: 'failed',
-          })
-        );
-        return;
-      }
-      const { message: sentMessage } = ack;
-      dispatch(
-        replaceMessage({
-          recipientId,
-          message: { ...sentMessage, content: plaintextContent },
-          replaceId: clientMessageId,
-        })
-      );
-      await saveMessages([{ ...sentMessage, content: plaintextContent }]);
-      if (listRef.current && chats[recipientId]?.length) {
-        listRef.current.scrollToRow(chats[recipientId].length);
-        console.log(`Scrolled to row ${chats[recipientId].length} after replacing message`);
-      }
-      console.log('Message sent and replaced:', sentMessage._id);
-    });
 
-    setMessage('');
-    setReplyTo(null);
-    setShowEmojiPicker(false);
-    socket.emit('stopTyping', { userId, recipientId });
-    inputRef.current?.focus();
+
+
+    socket.emit('message', messageData, async (ack) => {
+  if (ack?.error) {
+    console.error('Socket acknowledgment error:', ack.error);
+    setError(`Failed to send message: ${ack.error}`);
+    dispatch(
+      updateMessageStatus({
+        recipientId,
+        messageId: clientMessageId,
+        status: 'failed',
+      })
+    );
+    setPendingMessages((prev) => [
+      ...prev,
+      { tempId: clientMessageId, recipientId, messageData },
+    ]);
+    await savePendingMessages([
+      ...pendingMessages,
+      { tempId: clientMessageId, recipientId, messageData },
+    ]);
+    return;
+  }
+  if (!ack?.message?._id || !ack.message.clientMessageId) {
+    console.error('Invalid acknowledgment:', ack);
+    setError('Invalid server response');
+    dispatch(
+      updateMessageStatus({
+        recipientId,
+        messageId: clientMessageId,
+        status: 'failed',
+      })
+    );
+    return;
+  }
+  const { message: sentMessage } = ack;
+  dispatch(
+    replaceMessage({
+      recipientId,
+      message: { ...sentMessage, content: plaintextContent },
+      replaceId: clientMessageId,
+    })
+  );
+  await saveMessages([{ ...sentMessage, content: plaintextContent }]);
+  if (listRef.current && chats[recipientId]?.length && recipientId === selectedChat) {
+    listRef.current.scrollToRow(chats[recipientId].length);
+    console.log(`Scrolled to row ${chats[recipientId].length} after replacing message`);
+  }
+  console.log('Message sent and replaced:', sentMessage._id);
+});
+
+setMessage('');
+setReplyTo(null);
+setShowEmojiPicker(false);
+socket.emit('stopTyping', { userId, recipientId });
+inputRef.current?.focus();
+// Force re-render of List component
+listRef.current?.recomputeRowHeights();
+listRef.current?.forceUpdateGrid();
+
   } catch (err) {
     console.error('Send message error:', err);
     setError(`Failed to send message: ${err.message}`);
@@ -861,32 +911,38 @@ const retryUpload = async (retryCount = 3) => {
     []
   );
 
-  useEffect(() => {
-    const initializeChat = async () => {
-      try {
-        await fetchChatList();
-        const pending = await loadPendingMessages();
-        setPendingMessages(Array.isArray(pending) ? pending : []);
-        if (selectedChat && !chats[selectedChat]) {
-          dispatch(setMessages({ recipientId: selectedChat, messages: [] }));
-          await fetchMessages(selectedChat);
-        }
-      } catch (err) {
-        console.error('Chat initialization error:', err);
-        if (err.name === 'VersionError') {
-          console.warn('IndexedDB VersionError, clearing database');
-          await clearDatabase();
-          setPendingMessages([]);
-          await fetchChatList();
-        } else {
-          setError('Failed to initialize chat');
-        }
+
+useEffect(() => {
+  const initializeChat = async () => {
+    try {
+      await fetchChatList();
+      const pending = await loadPendingMessages();
+      setPendingMessages(Array.isArray(pending) ? pending : []);
+      if (selectedChat && !chats[selectedChat]) {
+        dispatch(setMessages({ recipientId: selectedChat, messages: [] }));
+        await fetchMessages(selectedChat);
       }
-      const interval = setInterval(() => sendPendingMessages().catch((err) => console.error('Failed to send pending messages:', err)), 5000);
-      return () => clearInterval(interval);
-    };
-    initializeChat();
-  }, [fetchChatList, sendPendingMessages, selectedChat, chats, dispatch, fetchMessages]);
+    } catch (err) {
+      console.error('Chat initialization error:', err);
+      if (err.name === 'VersionError') {
+        console.warn('IndexedDB VersionError, please clear storage manually');
+        setError('Database error, please clear storage or contact support');
+        // Removed automatic clearDatabase call
+        // await clearDatabase();
+        // setPendingMessages([]);
+        // await fetchChatList();
+      } else {
+        setError('Failed to initialize chat');
+      }
+    }
+    const interval = setInterval(() => sendPendingMessages().catch((err) => console.error('Failed to send pending messages:', err)), 5000);
+    return () => clearInterval(interval);
+  };
+  initializeChat();
+}, [fetchChatList, sendPendingMessages, selectedChat, chats, dispatch, fetchMessages]);
+
+
+
 
   useEffect(() => {
     if (selectedChat && !chats[selectedChat] && isValidObjectId(selectedChat)) {
@@ -895,14 +951,61 @@ const retryUpload = async (retryCount = 3) => {
     }
   }, [selectedChat, fetchMessages, initializeChat, chats]);
 
+
+useEffect(() => {
+  socket.auth = { token: localStorage.getItem('token') };
+  socket.connect();
+
+  socket.on('connect_error', async (err) => {
+    console.error('Socket connect error:', err.message);
+    if (err.message === 'Invalid token') {
+      try {
+        const response = await fetch('/api/auth/refresh', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${localStorage.getItem('token')}`,
+          },
+          body: JSON.stringify({ userId: localStorage.getItem('userId') }),
+        });
+        const data = await response.json();
+        if (data.error) {
+          console.error('Token refresh failed:', data.error);
+          setError('Authentication failed, please log in again');
+          return;
+        }
+        localStorage.setItem('token', data.token);
+        socket.auth.token = data.token;
+        socket.disconnect().connect();
+        console.log('Token refreshed, reconnecting');
+      } catch (refreshErr) {
+        console.error('Refresh error:', refreshErr);
+        setError('Failed to refresh token, please log in again');
+      }
+    }
+  });
+
+  return () => {
+    socket.off('connect_error');
+  };
+}, [socket]);
+
+
   useEffect(() => {
     if (!socket || !userId) return;
-
-    const handleMessage = async (msg) => {
+const handleMessage = async (msg) => {
   try {
     // Extract string IDs from potential objects
-    const senderId = typeof msg.senderId === 'object' ? msg.senderId?._id?.toString() : msg.senderId;
-    const recipientId = typeof msg.recipientId === 'object' ? msg.recipientId?._id?.toString() : msg.recipientId;
+    const senderId = typeof msg.senderId === 'object' && msg.senderId?._id
+      ? msg.senderId._id.toString()
+      : typeof msg.senderId === 'string'
+      ? msg.senderId
+      : null;
+    const recipientId = typeof msg.recipientId === 'object' && msg.recipientId?._id
+      ? msg.recipientId._id.toString()
+      : typeof msg.recipientId === 'string'
+      ? msg.recipientId
+      : null;
 
     if (
       !msg?.clientMessageId ||
@@ -911,7 +1014,12 @@ const retryUpload = async (retryCount = 3) => {
       !isValidObjectId(recipientId) ||
       !isValidObjectId(senderId)
     ) {
-      console.warn('Invalid message received:', msg);
+      console.warn('Invalid message received:', {
+        message: msg,
+        senderId,
+        recipientId,
+        clientMessageId: msg?.clientMessageId,
+      });
       return;
     }
 
@@ -955,7 +1063,6 @@ const retryUpload = async (retryCount = 3) => {
     setError('Failed to process message');
   }
 };
-
     const handleEditMessage = async (updatedMessage) => {
       try {
         if (!updatedMessage || !selectedChat || !isValidObjectId(selectedChat)) {
@@ -1090,106 +1197,119 @@ const retryUpload = async (retryCount = 3) => {
     [chats, selectedChat]
   );
 
+
+
+
+
+
+
+
   const renderMessage = useCallback(
-    ({ index, key, style }) => {
-      if (!selectedChat || !chats[selectedChat] || !Array.isArray(chats[selectedChat])) {
-        console.warn('Invalid chat state:', { selectedChat, chats: chats[selectedChat] });
-        return <div key={key} style={style} />;
-      }
-      const messages = chats[selectedChat];
-      if (!messages[index]) {
-        console.warn(`No message at index ${index} for selectedChat ${selectedChat}`);
-        return <div key={key} style={style} />;
-      }
-      const msg = messages[index];
-      const prevMsg = index > 0 ? messages[index - 1] : null;
-      const isMine = msg.senderId === userId;
-      const showDate = !prevMsg || formatDateHeader(prevMsg.createdAt) !== formatDateHeader(msg.createdAt);
-      const isFirstUnread = msg._id === firstUnreadMessageId;
+  ({ index, key, style }) => {
+    if (!selectedChat || !chats[selectedChat] || !Array.isArray(chats[selectedChat])) {
+      console.warn('Invalid chat state:', { selectedChat, chats: chats[selectedChat] });
+      return <div key={key} style={style} />;
+    }
+    const messages = chats[selectedChat];
+    if (!messages[index]) {
+      console.warn(`No message at index ${index} for selectedChat ${selectedChat}`);
+      return <div key={key} style={style} />;
+    }
+    const msg = messages[index];
+    const prevMsg = index > 0 ? messages[index - 1] : null;
+    const isMine = msg.senderId === userId;
+    const showDate = !prevMsg || formatDateHeader(prevMsg.createdAt) !== formatDateHeader(msg.createdAt);
+    const isFirstUnread = msg._id === firstUnreadMessageId;
 
-      const swipeHandlers = useSwipeable({
-        onSwipedRight: () => isMine && handleSwipe(msg),
-        onSwipedLeft: () => !isMine && handleSwipe(msg),
-        delta: 50,
-        preventDefaultTouchmoveEvent: true,
-      });
+    const swipeHandlers = useSwipeable({
+      onSwipedRight: () => isMine && handleSwipe(msg),
+      onSwipedLeft: () => !isMine && handleSwipe(msg),
+      delta: 50,
+      preventDefaultTouchmoveEvent: true,
+    });
 
-      return (
-        <div key={msg._id || msg.clientMessageId || key} style={style} className="message-container" {...swipeHandlers}>
-          {showDate && (
-            <div className="date-header">
-              <span>{formatDateHeader(msg.createdAt)}</span>
+    return (
+      <div key={msg._id || msg.clientMessageId || key} style={style} className="message-container" {...swipeHandlers}>
+        {showDate && (
+          <div className="date-header">
+            <span>{formatDateHeader(msg.createdAt)}</span>
+          </div>
+        )}
+        {isFirstUnread && (
+          <div className="unread-divider">
+            <span>New Messages</span>
+          </div>
+        )}
+        <div className={`message ${isMine ? 'mine' : 'other'} ${replyTo?._id === msg._id ? 'swiped' : ''}`}>
+          {msg.replyTo && (
+            <div className="reply-preview">
+              <p>{msg.replyTo.content?.slice(0, 50) || '[Content unavailable]'}</p>
             </div>
           )}
-          {isFirstUnread && (
-            <div className="unread-divider">
-              <span>New Messages</span>
-            </div>
+          {msg.contentType === 'text' && <p className="message-content">{msg.content || '[Empty message]'}</p>}
+          {msg.contentType === 'image' && (
+            <img src={msg.content} alt="Sent image" className="message-media" onError={() => console.error(`Failed to load image: ${msg.content}`)} />
           )}
-          <div className={`message ${isMine ? 'mine' : 'other'} ${replyTo?._id === msg._id ? 'swiped' : ''}`}>
-            {msg.replyTo && (
-              <div className="reply-preview">
-                <p>{msg.replyTo.content?.slice(0, 50) || '[Content unavailable]'}</p>
-              </div>
-            )}
-            {msg.contentType === 'text' && <p className="message-content">{msg.content || '[Empty message]'}</p>}
-            {msg.contentType === 'image' && (
-              <img src={msg.content} alt="Sent image" className="message-media" onError={() => console.error(`Failed to load image: ${msg.content}`)} />
-            )}
-            {msg.contentType === 'video' && (
-              <video controls className="message-media">
-                <source src={msg.content} type="video/mp4" />
-              </video>
-            )}
-            {msg.contentType === 'audio' && (
-              <audio controls className="message-audio">
-                <source src={msg.content} type="audio/mpeg" />
-              </audio>
-            )}
-            {msg.contentType === 'document' && (
-              <a href={msg.content} target="_blank" rel="noopener noreferrer" className="message-document">
-                <FaFileAlt className="mr-2" /> {msg.originalFilename || 'Document'}
-              </a>
-            )}
-            {msg.caption && <p className="message-caption">{msg.caption}</p>}
-            <div className="message-meta">
-              <span>{formatTime(msg.createdAt)}</span>
-              {isMine && (
-                <span className="message-status">
-                  {msg.status === 'pending'
-                    ? 'Sending...'
-                    : msg.status === 'sent'
-                    ? '✓'
-                    : msg.status === 'delivered'
-                    ? '✓✓'
-                    : msg.status === 'read'
-                    ? '✓✓'
-                    : 'Failed'}
-                </span>
-              )}
-            </div>
-            {msg.status === 'uploading' && (
-              <div className="upload-progress">
-                <div style={{ width: `${uploadProgress[msg._id] || 0}%` }} />
-              </div>
-            )}
-            {isMine && msg.status !== 'uploading' && (
-              <div className="message-actions">
-                <FaReply className="action-icon" onClick={() => setReplyTo(msg)} />
-                <FaEdit className="action-icon" onClick={() => {
-                  setEditingMessage(msg);
-                  setMessage(msg.content || '');
-                  inputRef.current?.focus();
-                }} />
-                <FaTrash className="action-icon" onClick={() => handleDeleteMessage(msg._id)} />
-              </div>
+          {msg.contentType === 'video' && (
+            <video controls className="message-media">
+              <source src={msg.content} type="video/mp4" />
+            </video>
+          )}
+          {msg.contentType === 'audio' && (
+            <audio controls className="message-audio">
+              <source src={msg.content} type="audio/mpeg" />
+            </audio>
+          )}
+          {msg.contentType === 'document' && (
+            <a href={msg.content} target="_blank" rel="noopener noreferrer" className="message-document">
+              <FaFileAlt className="mr-2" /> {msg.originalFilename || 'Document'}
+            </a>
+          )}
+          {msg.caption && <p className="message-caption">{msg.caption}</p>}
+          <div className="message-meta">
+            <span>{formatTime(msg.createdAt)}</span>
+            {isMine && (
+              <span className="message-status">
+                {msg.status === 'pending'
+                  ? 'Sending...'
+                  : msg.status === 'sent'
+                  ? '✓'
+                  : msg.status === 'delivered'
+                  ? '✓✓'
+                  : msg.status === 'read'
+                  ? '✓✓'
+                  : 'Failed'}
+              </span>
             )}
           </div>
+          {msg.status === 'uploading' && (
+            <div className="upload-progress">
+              <div style={{ width: `${uploadProgress[msg._id || msg.clientMessageId] || 0}%` }} />
+            </div>
+          )}
+          {isMine && msg.status !== 'uploading' && (
+            <div className="message-actions">
+              <FaReply className="action-icon" onClick={() => setReplyTo(msg)} />
+              <FaEdit className="action-icon" onClick={() => {
+                setEditingMessage(msg);
+                setMessage(msg.content || '');
+                inputRef.current?.focus();
+              }} />
+              <FaTrash className="action-icon" onClick={() => handleDeleteMessage(msg._id || msg.clientMessageId)} />
+            </div>
+          )}
         </div>
-      );
-    },
-    [selectedChat, chats, userId, firstUnreadMessageId, uploadProgress, handleDeleteMessage, replyTo, handleSwipe]
-  );
+      </div>
+    );
+  },
+  [selectedChat, chats, userId, firstUnreadMessageId, uploadProgress, handleDeleteMessage, replyTo, handleSwipe]
+);
+
+
+
+
+
+
 
   const chatListRowRenderer = useCallback(
     ({ index, key, style }) => {

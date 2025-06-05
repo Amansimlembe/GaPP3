@@ -28,23 +28,30 @@ const messageSlice = createSlice({
       };
       console.log(`Set ${messages.length} messages for ${recipientId}`);
     },
+
+
+
+
+  
+    
     addMessage: (state, action) => {
-      const { recipientId, message } = action.payload;
-      if (!recipientId || !message || !message._id || !message.clientMessageId) {
-        console.warn('Invalid addMessage payload:', action.payload);
-        return;
-      }
-      state.chats = {
-        ...state.chats,
-        [recipientId]: state.chats[recipientId] || [],
-      };
-      if (state.chats[recipientId].some((msg) => msg._id === message._id || msg.clientMessageId === message.clientMessageId)) {
-        console.warn('Duplicate message:', message._id || message.clientMessageId);
-        return;
-      }
-      state.chats[recipientId] = [...state.chats[recipientId], { ...message }];
-      console.log(`Added message ${message._id} to ${recipientId}`);
-    },
+  const { recipientId, message } = action.payload;
+  if (!recipientId || !message || !message._id || !message.clientMessageId) {
+    console.warn('Invalid addMessage payload:', action.payload);
+    return;
+  }
+  state.chats = {
+    ...state.chats,
+    [recipientId]: state.chats[recipientId] || [],
+  };
+  if (state.chats[recipientId].some((msg) => msg._id === message._id || msg.clientMessageId === message.clientMessageId)) {
+    console.warn('Duplicate message:', message._id || message.clientMessageId);
+    return;
+  }
+  state.chats[recipientId] = [...state.chats[recipientId], { ...message }];
+  console.log(`Added message ${message._id} (clientMessageId: ${message.clientMessageId}) to ${recipientId}`);
+},                      
+
 
 
 replaceMessage: (state, action) => {
@@ -62,12 +69,15 @@ replaceMessage: (state, action) => {
   );
   if (index !== -1) {
     state.chats[recipientId][index] = { ...message };
-    console.log(`Replaced message ${replaceId} with ${message._id} in ${recipientId}`);
+    console.log(`Replaced message ${replaceId} with ${message._id} (clientMessageId: ${message.clientMessageId}) in ${recipientId}`);
   } else {
-    console.warn(`Message ${replaceId} not found for replacement in ${recipientId}, adding as new`);
+    console.warn(`Message ${replaceId} not found for replacement in ${recipientId}, adding as new`, {
+      chats: state.chats[recipientId]?.map(m => ({ _id: m._id, clientMessageId: m.clientMessageId })),
+    });
     state.chats[recipientId].push({ ...message });
   }
 },
+
 
 
 

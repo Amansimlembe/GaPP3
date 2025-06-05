@@ -286,20 +286,31 @@ export const loadPendingMessages = async () => {
   }
 };
 
-export const clearPendingMessages = async () => {
+
+
+export const clearPendingMessages = async (tempIds = []) => {
   try {
     await withRetry(async () => {
       const db = await getDb();
       const tx = db.transaction(PENDING_STORE, 'readwrite');
       const store = tx.objectStore(PENDING_STORE);
-      await store.clear();
+      if (tempIds.length) {
+        await Promise.all(tempIds.map((tempId) => store.delete(tempId)));
+        console.log(`Cleared ${tempIds.length} specific pending messages from IndexedDB`);
+      } else {
+        await store.clear();
+        console.log('Cleared all pending messages from IndexedDB');
+      }
       await tx.done;
-      console.log('Cleared pending messages from IndexedDB');
     });
   } catch (error) {
     console.error('Error clearing pending messages from IndexedDB:', error.message);
     throw error;
   }
 };
+
+
+
+
 
 export default getDb;

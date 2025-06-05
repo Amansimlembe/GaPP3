@@ -72,11 +72,18 @@ const upload = multer({
   },
 });
 
+
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 50,
+  max: 100, // Increased to 100
   message: { error: 'Too many requests, please try again later.' },
+  handler: (req, res, next, options) => {
+    logger.warn('Rate limit exceeded', { ip: req.ip, method: req.method, url: req.url });
+    res.status(options.statusCode).json(options.message);
+  },
 });
+
+
 
 // Updated authMiddleware without Redis
 const authMiddleware = async (req, res, next) => {
@@ -110,42 +117,42 @@ const loginSchema = Joi.object({
   password: Joi.string().min(6).required(),
 });
 
+
+
 const generateVirtualNumber = async (countryCode, userId) => {
   try {
     logger.info('Generating virtual number', { countryCode, userId });
     const countryCallingCode = getCountryCallingCode(countryCode.toUpperCase());
     let virtualNumber;
     let attempts = 0;
-    const maxAttempts = 10;
+    const maxAttempts = 20; // Increased attempts
 
     do {
-      // Generate first 5 digits (1-9, no zeros)
       let firstFive = '';
       for (let i = 0; i < 5; i++) {
-        firstFive += Math.floor(Math.random() * 9) + 1; // 1 to 9
+        firstFive += Math.floor(Math.random() * 9) + 1;
       }
-      // Generate remaining 4 digits (0-9)
       const remainingFour = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
       virtualNumber = `+${countryCallingCode}${firstFive}${remainingFour}`;
       const existingUser = await User.findOne({ virtualNumber });
       if (!existingUser) break;
       attempts++;
-      logger.info('Virtual number collision, retrying', { attempt: attempts, virtualNumber });
-    } while (attempts < maxAttempts);
-
-    if (attempts >= maxAttempts) {
-      throw new Error('Unable to generate unique virtual number after maximum attempts');
-    }
+      logger.warn('Virtual number collision', { attempt: attempts, virtualNumber });
+      if (attempts >= maxAttempts) {
+        throw new Error('Unable to generate unique virtual number after maximum attempts');
+      }
+    } while (true);
 
     const phoneNumber = parsePhoneNumberFromString(virtualNumber, countryCode.toUpperCase());
     const formattedNumber = phoneNumber ? phoneNumber.formatInternational().replace(/\s/g, '') : virtualNumber;
-    logger.info('Virtual number generated', { virtualNumber: formattedNumber });
+    logger.info('Virtual number generated', { virtualNumber: formattedNumber, attempts });
     return formattedNumber;
   } catch (error) {
     logger.error('Virtual number generation failed', { error: error.message, countryCode, userId });
     throw new Error(`Failed to generate virtual number: ${error.message}`);
   }
 };
+
 
 router.post('/register', authLimiter, upload.single('photo'), async (req, res) => {
   try {
@@ -275,15 +282,19 @@ router.post('/login', authLimiter, async (req, res) => {
     );
 
     logger.info('Login successful', { userId: user._id, email });
+    
+
     res.json({
-      token,
-      userId: user._id,
-      role: user.role,
-      photo: user.photo || 'https://placehold.co/40x40',
-      virtualNumber: user.virtualNumber || '',
-      username: user.username,
-      privateKey: user.privateKey,
-    });
+  token,
+  userId: user._id,
+  role: user.role,
+  photo: user.photo || 'https://placehold.co/40x40',
+  virtualNumber: user.virtualNumber || '',
+  username: user.username || '',
+  privateKey: user.privateKey,
+});
+
+
   } catch (error) {
     logger.error('Login error', { error: error.message, body: req.body });
     res.status(500).json({ error: 'Failed to login', details: error.message });
@@ -431,14 +442,14 @@ router.post('/refresh', authLimiter, authMiddleware, async (req, res) => {
 
     logger.info('Token refreshed successfully', { userId: user._id });
     res.json({
-      token: newToken,
-      userId: user._id,
-      role: user.role,
-      photo: user.photo || 'https://placehold.co/40x40',
-      virtualNumber: user.virtualNumber || '',
-      username: user.username,
-      privateKey: user.privateKey,
-    });
+  token: newToken,
+  userId: user._id,
+  role: user.role,
+  photo: user.photo || 'https://placehold.co/40x40',
+  virtualNumber: user.virtualNumber || '',
+  username: user.username || '',
+  privateKey: user.privateKey,
+});
   } catch (error) {
     logger.error('Refresh token error:', { error: error.message, userId: req.user?.id, ip: req.ip });
     res.status(500).json({ error: 'Failed to refresh token', details: error.message });
