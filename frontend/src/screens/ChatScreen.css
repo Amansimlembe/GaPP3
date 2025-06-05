@@ -191,6 +191,21 @@
   gap: 8px;
 }
 
+.typing-indicator {
+  font-size: 0.8rem;
+  color: #888;
+  margin-top: 2px;
+}
+
+.unread-badge {
+  background-color: #dc2626;
+  color: white;
+  border-radius: 9999px;
+  padding: 2px 8px;
+  font-size: 0.75rem;
+  margin-left: 8px;
+}
+
 .contact-button:hover {
   background: linear-gradient(to right, #43a047, #5cb85c);
   transform: translateY(-2px);

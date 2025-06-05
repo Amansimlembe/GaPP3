@@ -4,7 +4,6 @@ import { motion } from 'framer-motion';
 import { FaHome, FaBriefcase, FaComments, FaUser } from 'react-icons/fa';
 import axios from 'axios';
 import io from 'socket.io-client';
-import { useSelector } from 'react-redux';
 import LoginScreen from './screens/LoginScreen';
 import JobSeekerScreen from './screens/JobSeekerScreen';
 import EmployerScreen from './screens/EmployerScreen';
@@ -22,15 +21,15 @@ class ErrorBoundary extends React.Component {
     return { hasError: true, error };
   }
 
-// In App.js, inside ErrorBoundary's componentDidCatch
-componentDidCatch(error, errorInfo) {
-  console.error('ErrorBoundary caught:', error, errorInfo);
-  axios.post(`${BASE_URL}/social/log-error`, { // Changed to /social/log-error
-    error: error.message,
-    stack: errorInfo.componentStack,
-    timestamp: new Date().toISOString(),
-  }).catch((err) => console.warn('Failed to log error:', err.message));
-}
+  componentDidCatch(error, errorInfo) {
+    console.error('ErrorBoundary caught:', error, errorInfo);
+    axios.post(`${BASE_URL}/social/log-error`, {
+      error: error.message,
+      stack: errorInfo.componentStack,
+      timestamp: new Date().toISOString(),
+    }).catch((err) => console.warn('Failed to log error:', err.message));
+  }
+
   render() {
     if (this.state.hasError) {
       return (
@@ -88,7 +87,7 @@ const App = () => {
   const [socket, setSocket] = useState(null);
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
   const [error, setError] = useState(null);
-  const { selectedChat } = useSelector((state) => state.messages);
+  const [selectedChat, setSelectedChat] = useState(null);
 
   const setAuth = (newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername) => {
     const token = newToken || '';
@@ -130,12 +129,11 @@ const App = () => {
     }
 
     const newSocket = io(BASE_URL, {
-      auth: { token,
-      },
+      auth: { token },
       transports: ['websocket', 'polling'],
-      reconnectionAttempts: 10, // Increased for Render stability
-      reconnectionDelay: 3000, // Increased delay
-      timeout: 10000, // Increased connection timeout
+      reconnectionAttempts: 10,
+      reconnectionDelay: 3000,
+      timeout: 10000,
     });
     setSocket(newSocket);
 
@@ -154,7 +152,7 @@ const App = () => {
         { userId },
         {
           headers: { Authorization: `Bearer ${token}` },
-          timeout: 15000, // Increased timeout
+          timeout: 15000,
         }
       );
       const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername, privateKey } = response.data;
@@ -179,7 +177,7 @@ const App = () => {
       isRefreshing = true;
       try {
         const expTime = getTokenExpiration(token);
-        if (expTime && expTime - Date.now() < 10 * 60 * 1000) { // Check 10 minutes before expiry
+        if (expTime && expTime - Date.now() < 10 * 60 * 1000) {
           await refreshToken();
         }
       } catch (err) {
@@ -191,7 +189,7 @@ const App = () => {
     };
 
     checkTokenExpiration();
-    const interval = setInterval(checkTokenExpiration, 5 * 60 * 1000); // Check every 5 minutes
+    const interval = setInterval(checkTokenExpiration, 5 * 60 * 1000);
     return () => clearInterval(interval);
   }, [isAuthenticated, token, userId, socket]);
 
@@ -224,13 +222,10 @@ const App = () => {
     });
 
     socket.on('message', (msg) => {
-      if (msg.recipientId === userId && (!selectedChat || selectedChat !== msg.senderId)) {
+      const senderId = typeof msg.senderId === 'object' ? msg.senderId._id.toString() : msg.senderId;
+      if (msg.recipientId === userId && (!selectedChat || selectedChat !== senderId)) {
         setChatNotifications((prev) => prev + 1);
       }
-    });
-
-    socket.on('newContact', (contactData) => {
-      console.log('New contact:', contactData);
     });
 
     return () => {
@@ -238,7 +233,6 @@ const App = () => {
       socket.off('connect_error');
       socket.off('disconnect');
       socket.off('message');
-      socket.off('newContact');
     };
   }, [socket, userId, selectedChat]);
 
@@ -284,6 +278,7 @@ const App = () => {
           toggleTheme={toggleTheme}
           handleChatNavigation={handleChatNavigation}
           theme={theme}
+          setSelectedChat={setSelectedChat}
         />
       </Router>
     </ErrorBoundary>
@@ -303,10 +298,9 @@ const AuthenticatedApp = ({
   toggleTheme,
   handleChatNavigation,
   theme,
+  setSelectedChat,
 }) => {
   const location = useLocation();
-  const { selectedChat } = useSelector((state) => state.messages);
-  const isChatRouteWithSelectedChat = location.pathname === '/chat' && selectedChat;
 
   return (
     <div className={`min-h-screen flex flex-col ${theme === 'dark' ? 'dark' : ''} bg-gray-100 dark:bg-gray-900`}>
@@ -322,7 +316,7 @@ const AuthenticatedApp = ({
         <Routes>
           <Route path="/jobs" element={role === 0 ? <JobSeekerScreen token={token} userId={userId} /> : <EmployerScreen token={token} userId={userId} />} />
           <Route path="/feed" element={<FeedScreen token={token} userId={userId} />} />
-          <Route path="/chat" element={<ChatScreen token={token} userId={userId} setAuth={setAuth} socket={socket} username={username} virtualNumber={virtualNumber} photo={photo} />} />
+          <Route path="/chat" element={<ChatScreen token={token} userId={userId} setAuth={setAuth} socket={socket} username={username} virtualNumber={virtualNumber} photo={photo} setSelectedChat={setSelectedChat} />} />
           <Route path="/profile" element={<ProfileScreen token={token} userId={userId} setAuth={setAuth} username={username} virtualNumber={virtualNumber} photo={photo} />} />
           <Route path="/" element={<Navigate to="/feed" replace />} />
           <Route path="*" element={<Navigate to="/feed" replace />} />
@@ -330,7 +324,7 @@ const AuthenticatedApp = ({
       </div>
       <motion.nav
         initial={{ y: 0 }}
-        animate={{ y: isChatRouteWithSelectedChat ? 200 : 0 }}
+        animate={{ y: location.pathname === '/chat' && setSelectedChat ? 200 : 0 }}
         transition={{ duration: 0.3 }}
         className="fixed bottom-0 left-0 right-0 bg-primary text-white p-2 flex justify-around items-center shadow-lg z-20"
       >

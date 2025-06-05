@@ -3,7 +3,6 @@ const jwt = require('jsonwebtoken');
 const { authMiddleware } = require('./auth');
 const Message = require('../models/Message');
 const User = require('../models/User');
-const memcached = require('../memcached');
 const winston = require('winston');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
@@ -267,7 +266,6 @@ module.exports = (io, server) => {
       });
 
       socketIO.to(userId).emit('chatListUpdated', { userId, users: chatList });
-      await memcached.setex(`:chat-list:${userId}`, 300, JSON.stringify(chatList));
       logger.info('Emitted updated chat list', { userId });
     } catch (error) {
       logger.error('Failed to emit updated chat list', { error: error.message, stack: error.stack, userId });
@@ -445,10 +443,6 @@ module.exports = (io, server) => {
         socketIO.to(recipientId).emit('message', populatedMessage.toObject());
         socketIO.to(senderId).emit('message', populatedMessage.toObject());
 
-        await memcached.setex(`:message:${clientMessageId}`, 3600, JSON.stringify(populatedMessage.toObject()));
-        await memcached.del(`:chat-list:${senderId}`);
-        await memcached.del(`:chat-list:${recipientId}`);
-
         emitUpdatedChatList(senderId);
         emitUpdatedChatList(recipientId);
 
@@ -497,10 +491,6 @@ module.exports = (io, server) => {
         socketIO.to(message.recipientId.toString()).emit('editMessage', populatedMessage.toObject());
         socketIO.to(message.senderId.toString()).emit('editMessage', populatedMessage.toObject());
 
-        await memcached.setex(`:message:${message.clientMessageId}`, 3600, JSON.stringify(populatedMessage.toObject()));
-        await memcached.del(`:chat-list:${message.senderId}`);
-        await memcached.del(`:chat-list:${message.recipientId}`);
-
         logger.info('Message edited successfully', { messageId });
 
         callback({ message: populatedMessage.toObject() });
@@ -536,10 +526,6 @@ module.exports = (io, server) => {
 
         socketIO.to(recipientId).emit('deleteMessage', { messageId, recipientId });
         socketIO.to(message.senderId.toString()).emit('deleteMessage', { messageId, recipientId: message.senderId.toString() });
-
-        await memcached.del(`:message:${message.clientMessageId}`);
-        await memcached.del(`:chat-list:${message.senderId}`);
-        await memcached.del(`:chat-list:${message.recipientId}`);
 
         emitUpdatedChatList(message.senderId.toString());
         emitUpdatedChatList(recipientId);
@@ -580,8 +566,6 @@ module.exports = (io, server) => {
 
         socketIO.to(message.senderId.toString()).emit('messageStatus', { messageId, status });
 
-        await memcached.setex(`:message:${message.clientMessageId}`, 3600, JSON.stringify(message.toObject()));
-
         logger.info('Message status updated', { messageId, status });
       } catch (err) {
         await session.abortTransaction();
@@ -621,10 +605,6 @@ module.exports = (io, server) => {
           socketIO.to(senderId).emit('messageStatus', { messageIds, status });
         });
 
-        for (const message of messages) {
-          await memcached.setex(`:message:${message.clientMessageId}`, 3600, JSON.stringify(message.toObject()));
-        }
-
         logger.info('Batch message status updated', { messageIds, status, recipientId });
       } catch (err) {
         await session.abortTransaction();
@@ -640,13 +620,7 @@ module.exports = (io, server) => {
   });
 
   router.get('/health', async (req, res) => {
-    try {
-      await memcached.get('health-check');
-      res.json({ status: 'healthy', memcached: 'up' });
-    } catch (err) {
-      logger.error('Memcached health check failed', { error: err.message });
-      res.status(503).json({ status: 'unhealthy', memcached: 'down' });
-    }
+    res.json({ status: 'healthy' });
   });
 
   router.get('/chat-list', authMiddleware, async (req, res) => {
@@ -655,13 +629,6 @@ module.exports = (io, server) => {
       if (!mongoose.isValidObjectId(userId)) {
         logger.warn('Invalid userId in chat-list', { userId });
         return res.status(400).json({ error: 'Invalid userId' });
-      }
-
-      const cacheKey = `:chat-list:${userId}`;
-      const cachedChatList = await memcached.get(cacheKey);
-      if (cachedChatList) {
-        logger.info('Chat list served from cache', { userId });
-        return res.json(JSON.parse(cachedChatList));
       }
 
       const contacts = await User.find({ contacts: userId }).select(
@@ -747,7 +714,6 @@ module.exports = (io, server) => {
         };
       });
 
-      await memcached.setex(cacheKey, 300, JSON.stringify(chatList));
       logger.info('Chat list fetched', { userId });
 
       res.json(chatList);
@@ -763,13 +729,6 @@ module.exports = (io, server) => {
       if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId)) {
         logger.warn('Invalid IDs in messages', { userId, recipientId });
         return res.status(400).json({ error: 'Invalid userId or recipientId' });
-      }
-
-      const cacheKey = `:messages:${userId}:${recipientId}:${limit}:${skip}`;
-      const cachedMessages = await memcached.get(cacheKey);
-      if (cachedMessages) {
-        logger.info('Messages served from cache', { userId, recipientId });
-        return res.json(JSON.parse(cachedMessages));
       }
 
       const messages = await Message.find({
@@ -795,7 +754,6 @@ module.exports = (io, server) => {
         }),
       };
 
-      await memcached.setex(cacheKey, 300, JSON.stringify(response));
       logger.info('Messages fetched', { userId, recipientId, count: messages.length });
 
       res.json(response);
@@ -863,11 +821,6 @@ module.exports = (io, server) => {
 
       socketIO.to(userId).emit('newContact', { userId, contactData });
       socketIO.to(contact._id.toString()).emit('newContact', { userId: contact._id.toString(), contactData });
-
-      await memcached.del(`:chat-list:${userId}`);
-      await memcached.del(`:chat-list:${contact._id}`);
-      await memcached.del(`:contacts:${userId}`);
-      await memcached.del(`:contacts:${contact._id}`);
 
       emitUpdatedChatList(userId);
       emitUpdatedChatList(contact._id.toString());
@@ -956,10 +909,6 @@ module.exports = (io, server) => {
       socketIO.to(recipientId).emit('message', populatedMessage.toObject());
       socketIO.to(userId).emit('message', populatedMessage.toObject());
 
-      await memcached.setex(`:message:${clientMessageId}`, 3600, JSON.stringify(populatedMessage.toObject()));
-      await memcached.del(`:chat-list:${userId}`);
-      await memcached.del(`:chat-list:${recipientId}`);
-
       emitUpdatedChatList(userId);
       emitUpdatedChatList(recipientId);
 
@@ -1015,11 +964,7 @@ module.exports = (io, server) => {
       socketIO.to(userId).emit('userStatus', { userId, status: 'offline', lastSeen: new Date() });
       socketIO.to(contactIds).emit('userDeleted', { userId });
 
-      await memcached.del(`:chat-list:${userId}`);
-      await memcached.del(`:contacts:${userId}`);
       for (const contactId of contactIds) {
-        await memcached.del(`:chat-list:${contactId}`);
-        await memcached.del(`:contacts:${contactId}`);
         emitUpdatedChatList(contactId);
       }
 
