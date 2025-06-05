@@ -20,7 +20,6 @@ const logger = winston.createLogger({
   ],
 });
 
-// Initialize Cloudinary
 const configureCloudinary = () => {
   let cloudinaryConfig = {};
   if (process.env.CLOUDINARY_URL) {
@@ -140,40 +139,7 @@ const deleteUserSchema = Joi.object({
     .required(),
 });
 
-module.exports = (io, server) => {
-  // Socket.IO configuration
-  const socketIO = require('socket.io')(server, {
-    cors: {
-      origin: 'https://gapp-6yc3.onrender.com',
-      methods: ['GET', 'POST'],
-      credentials: true,
-    },
-    transports: ['websocket', 'polling'],
-    allowEIO3: true,
-    pingTimeout: 20000,
-    pingInterval: 25000,
-  });
-
-  // Socket.IO middleware for authentication
-  socketIO.use(async (socket, next) => {
-    const token = socket.handshake.auth?.token;
-    const sid = socket.handshake.query?.sid;
-    logger.info('Socket.IO connection attempt', { token: token?.substring(0, 10), sid });
-    if (!token || typeof token !== 'string') {
-      logger.warn('Invalid or missing token for Socket.IO', { token: token?.substring(0, 10), sid });
-      return next(new Error('Authentication error: No token provided'));
-    }
-    try {
-      const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
-      socket.user = decoded;
-      logger.info('Socket.IO authentication successful', { userId: decoded.id });
-      next();
-    } catch (err) {
-      logger.error('Socket.IO auth error:', { error: err.message, token: token.substring(0, 10) + '...' });
-      return next(new Error('Invalid token'));
-    }
-  });
-
+module.exports = (io) => {
   const router = express.Router();
 
   const emitUpdatedChatList = async (userId) => {
@@ -265,14 +231,14 @@ module.exports = (io, server) => {
         };
       });
 
-      socketIO.to(userId).emit('chatListUpdated', { userId, users: chatList });
+      io.to(userId).emit('chatListUpdated', { userId, users: chatList });
       logger.info('Emitted updated chat list', { userId });
     } catch (error) {
       logger.error('Failed to emit updated chat list', { error: error.message, stack: error.stack, userId });
     }
   };
 
-  socketIO.on('connection', (socket) => {
+  io.on('connection', (socket) => {
     logger.info('New Socket.IO connection', { socketId: socket.id });
 
     socket.on('join', (userId) => {
@@ -284,7 +250,7 @@ module.exports = (io, server) => {
       User.findByIdAndUpdate(userId, { status: 'online', lastSeen: new Date() }, { new: true })
         .then((user) => {
           if (user) {
-            socketIO.to(userId).emit('userStatus', { userId, status: 'online', lastSeen: user.lastSeen });
+            io.to(userId).emit('userStatus', { userId, status: 'online', lastSeen: user.lastSeen });
             emitUpdatedChatList(userId);
             logger.info('User joined', { userId });
           }
@@ -302,7 +268,7 @@ module.exports = (io, server) => {
       User.findByIdAndUpdate(userId, { status: 'offline', lastSeen: new Date() }, { new: true })
         .then((user) => {
           if (user) {
-            socketIO.to(userId).emit('userStatus', { userId, status: 'offline', lastSeen: user.lastSeen });
+            io.to(userId).emit('userStatus', { userId, status: 'offline', lastSeen: user.lastSeen });
             logger.info('User left', { userId });
           }
         })
@@ -317,7 +283,7 @@ module.exports = (io, server) => {
         logger.warn('Invalid IDs in typing', { userId, recipientId });
         return;
       }
-      socketIO.to(recipientId).emit('typing', { userId });
+      io.to(recipientId).emit('typing', { userId });
     });
 
     socket.on('stopTyping', ({ userId, recipientId }) => {
@@ -325,7 +291,7 @@ module.exports = (io, server) => {
         logger.warn('Invalid IDs in stopTyping', { userId, recipientId });
         return;
       }
-      socketIO.to(recipientId).emit('stopTyping', { userId });
+      io.to(recipientId).emit('stopTyping', { userId });
     });
 
     socket.on('newContact', ({ userId, contactData }) => {
@@ -344,8 +310,8 @@ module.exports = (io, server) => {
               status: contact.status,
               lastSeen: contact.lastSeen,
             };
-            socketIO.to(userId).emit('newContact', { userId, contactData: contactObj });
-            socketIO.to(contactData.id).emit('newContact', { userId: contactData.id, contactData: contactObj });
+            io.to(userId).emit('newContact', { userId, contactData: contactObj });
+            io.to(contactData.id).emit('newContact', { userId: contactData.id, contactData: contactObj });
             emitUpdatedChatList(userId);
             emitUpdatedChatList(contactData.id);
             logger.info('New contact emitted', { userId, contactId: contactData.id });
@@ -361,7 +327,7 @@ module.exports = (io, server) => {
         logger.warn('Invalid userId in chatListUpdated', { userId });
         return;
       }
-      socketIO.to(userId).emit('chatListUpdated', { userId, users });
+      io.to(userId).emit('chatListUpdated', { userId, users });
       logger.info('Chat list update propagated', { userId });
     });
 
@@ -440,8 +406,8 @@ module.exports = (io, server) => {
           clientMessageId,
         });
 
-        socketIO.to(recipientId).emit('message', populatedMessage.toObject());
-        socketIO.to(senderId).emit('message', populatedMessage.toObject());
+        io.to(recipientId).emit('message', populatedMessage.toObject());
+        io.to(senderId).emit('message', populatedMessage.toObject());
 
         emitUpdatedChatList(senderId);
         emitUpdatedChatList(recipientId);
@@ -488,16 +454,16 @@ module.exports = (io, server) => {
 
         await session.commitTransaction();
 
-        socketIO.to(message.recipientId.toString()).emit('editMessage', populatedMessage.toObject());
-        socketIO.to(message.senderId.toString()).emit('editMessage', populatedMessage.toObject());
+        io.to(message.recipientId.toString()).emit('editMessage', populatedMessage.toObject());
+        io.to(message.senderId.toString()).emit('editMessage', populatedMessage.toObject());
 
         logger.info('Message edited successfully', { messageId });
 
         callback({ message: populatedMessage.toObject() });
       } catch (err) {
         await session.abortTransaction();
-        logger.error('Edit message failed', { error: err.message, stack: err.stack, messageId });
-        callback({ error: err.message });
+        logger.error('Edit message failed', { error: err.message, stack: err.stack });
+        callback({ error: 'Failed to edit message' });
       } finally {
         session.endSession();
       }
@@ -520,23 +486,21 @@ module.exports = (io, server) => {
           return callback({ error: 'Message not found' });
         }
 
-        await Message.findByIdAndDelete(messageId, { session });
-
+        await Message.findByIdAndDelete(messageId).session({ session });
         await session.commitTransaction();
 
-        socketIO.to(recipientId).emit('deleteMessage', { messageId, recipientId });
-        socketIO.to(message.senderId.toString()).emit('deleteMessage', { messageId, recipientId: message.senderId.toString() });
+        io.to(recipientId).emit('deleteMessage', { messageId, recipientId });
+        io.to(message.senderId.toString()).emit('deleteMessage', { messageId, recipientId: message.senderId.toString() });
 
         emitUpdatedChatList(message.senderId.toString());
         emitUpdatedChatList(recipientId);
 
         logger.info('Message deleted successfully', { messageId, recipientId });
-
-        callback({});
+        callback({ status: 'success' });
       } catch (err) {
         await session.abortTransaction();
         logger.error('Delete message failed', { error: err.message, stack: err.stack, messageId, recipientId });
-        callback({ error: err.message });
+        callback({ error: 'Failed to delete message' });
       } finally {
         session.endSession();
       }
@@ -547,7 +511,7 @@ module.exports = (io, server) => {
       session.startTransaction();
       try {
         if (!mongoose.isValidObjectId(messageId)) {
-          logger.warn('Invalid messageId in messageStatus', { messageId });
+          logger.warn('Invalid messageId in messageStatus', { messageId: messageId });
           await session.abortTransaction();
           return;
         }
@@ -564,12 +528,13 @@ module.exports = (io, server) => {
 
         await session.commitTransaction();
 
-        socketIO.to(message.senderId.toString()).emit('messageStatus', { messageId, status });
+        io.to(message.senderId.toString()).emit('messageStatus', { messageId, status });
 
         logger.info('Message status updated', { messageId, status });
       } catch (err) {
         await session.abortTransaction();
-        logger.error('Message status update failed', { error: err.message, stack: err.stack, messageId });
+        logger.error('Message status update failed', { error: err.message, stack: err.stack });
+        callback({ error: 'Failed to update message status' });
       } finally {
         session.endSession();
       }
@@ -585,7 +550,7 @@ module.exports = (io, server) => {
           return;
         }
 
-        const messages = await Message.find({ _id: { $in: messageIds }, recipientId }).session(session);
+        const messages = await Message.find({ _id: { $in: messageIds }, recipientId}).session(session);
         if (!messages.length) {
           logger.warn('No messages found for batch status update', { messageIds });
           await session.abortTransaction();
@@ -602,25 +567,109 @@ module.exports = (io, server) => {
 
         const senderIds = [...new Set(messages.map((msg) => msg.senderId.toString()))];
         senderIds.forEach((senderId) => {
-          socketIO.to(senderId).emit('messageStatus', { messageIds, status });
+          io.toString(senderId).emit('messageStatus', { messageIds, status });
         });
 
-        logger.info('Batch message status updated', { messageIds, status, recipientId });
+        logger.info('Batch message status updated', { messageIds, status, ids: messageIds.length });
       } catch (err) {
         await session.abortTransaction();
-        logger.error('Batch message status update failed', { error: err.message, stack: err.stack, messageIds });
+        logger.error('Batch message status update failed', { error: messageIds, stack: err.stack });
+        callback({ error: 'Failed to update batch message status' });
       } finally {
         session.endSession();
-      }
+      };
     });
 
-    socket.on('disconnect', (reason) => {
-      logger.info('Socket.IO disconnected', { socketId: socket.id, reason });
+    socket.on('disconnect', () => {
+      logger.info('Socket.IO disconnected', { socketId: socket.id });
     });
   });
 
   router.get('/health', async (req, res) => {
     res.json({ status: 'healthy' });
+  });
+
+  router.post('/messages', authMiddleware, async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    try {
+      const { error } = messageSchema.validate(req.body);
+      if (error) {
+        logger.warn('Invalid message data', { error: error.details });
+        await session.endSession();
+        return res.status(400).json({ error: error.details[0].message });
+      }
+
+      const {
+        senderId,
+        recipientId,
+        content,
+        contentType,
+        plaintextContent,
+        caption,
+        replyTo,
+        clientMessageId,
+        senderVirtualNumber,
+        senderUsername,
+        senderPhoto,
+      } = req.body;
+
+      const sender = await User.findById(senderId).session(session);
+      const recipient = await User.findById(recipientId).session(session);
+      if (!sender || !recipient) {
+        logger.warn('Sender or recipient not found', { senderId, recipientId });
+        await session.abortTransaction();
+        return res.status(400).json({ error: 'Sender or recipient not found' });
+      }
+
+      const existingMessage = await Message.findOne({ clientMessageId }).session(session);
+      if (existingMessage) {
+        logger.info('Duplicate message found', { clientMessageId });
+        await session.commitTransaction();
+        return res.status(200).json({ message: existingMessage.toObject() });
+      }
+
+      const message = new Message({
+        senderId,
+        recipientId,
+        content,
+        contentType,
+        plaintextContent: plaintextContent || '',
+        status: 'sent',
+        caption: caption || '',
+        replyTo: replyTo && mongoose.isValidObjectId(replyTo) ? replyTo : undefined,
+        originalFilename: req.body.originalFilename || undefined,
+        clientMessageId,
+        senderVirtualNumber: senderVirtualNumber || sender.virtualNumber,
+        senderUsername: senderUsername || sender.username,
+        senderPhoto: senderPhoto || sender.photo,
+      });
+
+      await message.save({ session });
+
+      const populatedMessage = await Message.findById(message._id)
+        .session(session)
+        .populate('senderId', 'username virtualNumber photo')
+        .populate('recipientId', 'username virtualNumber photo')
+        .populate('replyTo', 'content contentType senderId recipientId createdAt');
+
+      await session.commitTransaction();
+
+      io.to(recipientId).emit('message', populatedMessage.toObject());
+      io.to(senderId).emit('message', populatedMessage.toObject());
+
+      emitUpdatedChatList(senderId);
+      emitUpdatedChatList(recipientId);
+
+      logger.info('Message saved', { messageId: message._id, clientMessageId });
+      res.status(201).json({ message: populatedMessage.toObject() });
+    } catch (error) {
+      await session.abortTransaction();
+      logger.error('Save message error:', { error: error.message, stack: error.stack });
+      res.status(500).json({ error: 'Failed to save message', details: error.message });
+    } finally {
+      session.endSession();
+    }
   });
 
   router.get('/chat-list', authMiddleware, async (req, res) => {
@@ -715,11 +764,10 @@ module.exports = (io, server) => {
       });
 
       logger.info('Chat list fetched', { userId });
-
       res.json(chatList);
     } catch (err) {
-      logger.error('Chat list fetch failed', { error: err.message, stack: err.stack, userId });
-      res.status(500).json({ error: err.message });
+      logger.error('Chat list failed', { error: err.message, stack: err.stack });
+      res.status(500).json({ error: 'Failed to fetch chat list' });
     }
   });
 
@@ -737,29 +785,25 @@ module.exports = (io, server) => {
           { senderId: recipientId, recipientId: userId },
         ],
       })
-        .sort({ createdAt: -1 })
+        .sort({ createdAt: 1 })
         .skip(parseInt(skip))
         .limit(parseInt(limit))
         .populate('senderId', 'username virtualNumber photo')
         .populate('recipientId', 'username virtualNumber photo')
         .populate('replyTo', 'content contentType senderId recipientId createdAt');
 
-      const response = {
-        messages: messages.map((msg) => msg.toObject()).reverse(),
-        total: await Message.countDocuments({
-          $or: [
-            { senderId: userId, recipientId },
-            { senderId: recipientId, recipientId: userId },
-          ],
-        }),
-      };
+      const total = await Message.countDocuments({
+        $or: [
+          { senderId: userId, recipientId },
+          { senderId: recipientId, recipientId: userId },
+        ],
+      });
 
       logger.info('Messages fetched', { userId, recipientId, count: messages.length });
-
-      res.json(response);
+      res.json({ messages, total });
     } catch (err) {
-      logger.error('Messages fetch failed', { error: err.message, stack: err.stack, userId, recipientId });
-      res.status(500).json({ error: err.message });
+      logger.error('Messages fetch failed', { error: err.message, stack: err.stack });
+      res.status(500).json({ error: 'Failed to fetch messages' });
     }
   });
 
@@ -769,7 +813,7 @@ module.exports = (io, server) => {
     try {
       const { error } = addContactSchema.validate(req.body);
       if (error) {
-        logger.warn('Invalid add contact request', { error: error.details });
+        logger.warn('Invalid add contact data', { error: error.details });
         await session.abortTransaction();
         return res.status(400).json({ error: error.details[0].message });
       }
@@ -777,7 +821,7 @@ module.exports = (io, server) => {
       const { userId, virtualNumber } = req.body;
       const user = await User.findById(userId).session(session);
       if (!user) {
-        logger.warn('User not found for add contact', { userId });
+        logger.warn('User not found', { userId });
         await session.abortTransaction();
         return res.status(404).json({ error: 'User not found' });
       }
@@ -786,19 +830,19 @@ module.exports = (io, server) => {
       if (!contact) {
         logger.warn('Contact not found', { virtualNumber });
         await session.abortTransaction();
-        return res.status(400).json({ error: 'Contact not found' });
+        return res.status(404).json({ error: 'Contact not found' });
       }
 
       if (contact._id.toString() === userId) {
         logger.warn('Cannot add self as contact', { userId });
         await session.abortTransaction();
-        return res.status(400).json({ error: 'Cannot add yourself as a contact' });
+        return res.status(400).json({ error: 'Cannot add self as contact' });
       }
 
       if (user.contacts.includes(contact._id)) {
         logger.info('Contact already exists', { userId, contactId: contact._id });
         await session.commitTransaction();
-        return res.status(400).json({ error: 'Contact already exists' });
+        return res.status(200).json({ contact });
       }
 
       user.contacts.push(contact._id);
@@ -819,19 +863,18 @@ module.exports = (io, server) => {
         lastSeen: contact.lastSeen,
       };
 
-      socketIO.to(userId).emit('newContact', { userId, contactData });
-      socketIO.to(contact._id.toString()).emit('newContact', { userId: contact._id.toString(), contactData });
+      io.to(userId).emit('newContact', { userId, contactData });
+      io.to(contact._id.toString()).emit('newContact', { userId: contact._id.toString(), contactData });
 
       emitUpdatedChatList(userId);
       emitUpdatedChatList(contact._id.toString());
 
       logger.info('Contact added', { userId, contactId: contact._id });
-
       res.json(contactData);
     } catch (err) {
       await session.abortTransaction();
-      logger.error('Add contact failed', { error: err.message, stack: err.stack, userId });
-      res.status(500).json({ error: err.message });
+      logger.error('Add contact failed', { error: err.message, stack: err.stack });
+      res.status(500).json({ error: 'Failed to add contact' });
     } finally {
       session.endSession();
     }
@@ -906,19 +949,18 @@ module.exports = (io, server) => {
 
       await session.commitTransaction();
 
-      socketIO.to(recipientId).emit('message', populatedMessage.toObject());
-      socketIO.to(userId).emit('message', populatedMessage.toObject());
+      io.to(recipientId).emit('message', populatedMessage.toObject());
+      io.to(userId).emit('message', populatedMessage.toObject());
 
       emitUpdatedChatList(userId);
       emitUpdatedChatList(recipientId);
 
-      logger.info('Media uploaded and message sent', { messageId: message._id, clientMessageId });
-
+      logger.info('Media uploaded', { messageId: message._id, clientMessageId });
       res.json({ message: populatedMessage.toObject() });
     } catch (err) {
       await session.abortTransaction();
-      logger.error('Media upload failed', { error: err.message, stack: err.stack, clientMessageId: req.body.clientMessageId });
-      res.status(500).json({ error: err.message });
+      logger.error('Media upload failed', { error: err.message, stack: err.stack });
+      res.status(500).json({ error: 'Failed to upload media' });
     } finally {
       session.endSession();
     }
@@ -930,7 +972,7 @@ module.exports = (io, server) => {
     try {
       const { error } = deleteUserSchema.validate(req.body);
       if (error) {
-        logger.warn('Invalid delete user request', { error: error.details });
+        logger.warn('Invalid delete user data', { error: error.details });
         await session.abortTransaction();
         return res.status(400).json({ error: error.details[0].message });
       }
@@ -938,7 +980,7 @@ module.exports = (io, server) => {
       const { userId } = req.body;
       const user = await User.findById(userId).session(session);
       if (!user) {
-        logger.warn('User not found for deletion', { userId });
+        logger.warn('User not found', { userId });
         await session.abortTransaction();
         return res.status(404).json({ error: 'User not found' });
       }
@@ -961,20 +1003,19 @@ module.exports = (io, server) => {
 
       await session.commitTransaction();
 
-      socketIO.to(userId).emit('userStatus', { userId, status: 'offline', lastSeen: new Date() });
-      socketIO.to(contactIds).emit('userDeleted', { userId });
+      io.to(userId).emit('userStatus', { userId, status: 'offline', lastSeen: new Date() });
+      io.to(contactIds).emit('userDeleted', { userId });
 
       for (const contactId of contactIds) {
         emitUpdatedChatList(contactId);
       }
 
       logger.info('User deleted', { userId });
-
       res.json({ message: 'User deleted successfully' });
     } catch (err) {
       await session.abortTransaction();
-      logger.error('User deletion failed', { error: err.message, stack: err.stack, userId });
-      res.status(500).json({ error: err.message });
+      logger.error('User deletion failed', { error: err.message, stack: err.stack });
+      res.status(500).json({ error: 'Failed to delete user' });
     } finally {
       session.endSession();
     }

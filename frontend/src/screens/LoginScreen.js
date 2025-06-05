@@ -17,6 +17,7 @@ const LoginScreen = ({ setAuth }) => {
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [isCountryInputFocused, setIsCountryInputFocused] = useState(false);
+  const [showLocationConfirm, setShowLocationConfirm] = useState(false);
   const countryInputRef = useRef(null);
 
   let countries = [];
@@ -31,7 +32,8 @@ const LoginScreen = ({ setAuth }) => {
   }
 
   const filteredCountries = countries.filter((c) =>
-    c.name.toLowerCase().includes(search.toLowerCase()) || c.code.toLowerCase().includes(search.toLowerCase())
+    c.name.toLowerCase().includes(search.toLowerCase()) ||
+    c.code.toLowerCase().includes(search.toLowerCase())
   );
 
   const validateForm = () => {
@@ -61,26 +63,38 @@ const LoginScreen = ({ setAuth }) => {
   };
 
   const checkLocation = async (selectedCountry) => {
-    if (isLogin) return true; // Skip for login
+    if (isLogin) return true;
     try {
       const position = await new Promise((resolve, reject) => {
-        navigator.geolocation.getCurrentPosition(resolve, reject);
+        navigator.geolocation.getCurrentPosition(
+          resolve,
+          reject,
+          { timeout: 10000, maximumAge: 60000, enableHighAccuracy: false }
+        );
       });
       const { latitude, longitude } = position.coords;
-      const response = await axios.get(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=en`);
+      const response = await axios.get(
+        `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=en`,
+        { timeout: 5000 }
+      );
       const currentCountryCode = response.data.countryCode;
       if (currentCountryCode !== selectedCountry) {
         setError('Selected country does not match your current location.');
+        setShowLocationConfirm(true);
         return false;
       }
       return true;
     } catch (err) {
-      setError('Unable to detect location. Please ensure you are in the selected country.');
+      console.error('Geolocation error:', err);
+      setError(
+        'Unable to detect location. Please ensure location services are enabled or confirm your country manually.'
+      );
+      setShowLocationConfirm(true);
       return false;
     }
   };
 
-  const retryRequest = async (data, config, retries = 5, delay = 1000) => {
+  const retryRequest = async (data, config, retries = 3, delay = 2000) => {
     for (let i = 0; i < retries; i++) {
       try {
         const response = await axios.post(
@@ -95,11 +109,14 @@ const LoginScreen = ({ setAuth }) => {
           data: err.response?.data,
           message: err.message,
           stack: err.stack,
-          requestData: isLogin ? data : 'FormData (multipart)',
+          requestData: isLogin ? data : 'FormData/JSON',
         });
-        if (isLogin && err.response?.status === 401 && 
-            (err.response?.data?.error === 'Email not registered' || 
-             err.response?.data?.error === 'Wrong password')) {
+        if (
+          isLogin &&
+          err.response?.status === 401 &&
+          (err.response?.data?.error === 'Email not registered' ||
+           err.response?.data?.error === 'Wrong password')
+        ) {
           throw err;
         }
         if ((err.response?.status === 429 || err.response?.status >= 500) && i < retries - 1) {
@@ -114,41 +131,40 @@ const LoginScreen = ({ setAuth }) => {
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
+    setShowLocationConfirm(false);
     if (!validateForm()) return;
 
     if (!isLogin) {
       const locationValid = await checkLocation(selectedCountry);
-      if (!locationValid) return;
+      if (!locationValid && !showLocationConfirm) return;
     }
 
     setLoading(true);
     try {
       const data = isLogin
         ? { email, password }
-        : (() => {
-            const formData = new FormData();
-            formData.append('email', email);
-            formData.append('password', password);
-            formData.append('username', username);
-            formData.append('country', selectedCountry);
-            return formData;
-          })();
+        : { email, password, username, country: selectedCountry };
 
-      const config = isLogin
-        ? { headers: { 'Content-Type': 'application/json' } }
-        : { headers: { 'Content-Type': 'multipart/form-data' } };
+      const config = { headers: { 'Content-Type': 'application/json' } };
 
       const response = await retryRequest(data, config);
 
-      localStorage.setItem('token', response.token);
-      localStorage.setItem('userId', response.userId);
-      localStorage.setItem('role', response.role);
-      localStorage.setItem('photo', response.photo || 'https://placehold.co/40x40');
-      localStorage.setItem('virtualNumber', response.virtualNumber || '');
-      localStorage.setItem('username', response.username);
-      localStorage.setItem('privateKey', response.privateKey || '');
+      sessionStorage.setItem('token', response.token);
+      sessionStorage.setItem('userId', response.userId);
+      sessionStorage.setItem('role', response.role);
+      sessionStorage.setItem('photo', response.photo || 'https://placehold.co/40x40');
+      sessionStorage.setItem('virtualNumber', response.virtualNumber || '');
+      sessionStorage.setItem('username', response.username);
+      sessionStorage.setItem('privateKey', response.privateKey || '');
 
-      setAuth(response.token, response.userId, response.role, response.photo, response.virtualNumber, response.username);
+      setAuth(
+        response.token,
+        response.userId,
+        response.role,
+        response.photo,
+        response.virtualNumber,
+        response.username
+      );
     } catch (error) {
       console.error(`${isLogin ? 'Login' : 'Register'} error:`, {
         status: error.response?.status,
@@ -158,7 +174,7 @@ const LoginScreen = ({ setAuth }) => {
       });
       const errorMessage =
         error.response?.status === 429
-          ? 'Too many requests, please try again later'
+          ? 'Too many requests. Please wait a few minutes and try again.'
           : error.response?.data?.error ||
             error.response?.data?.details ||
             error.message ||
@@ -167,6 +183,12 @@ const LoginScreen = ({ setAuth }) => {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleLocationConfirm = async () => {
+    setShowLocationConfirm(false);
+    setError('');
+    await handleSubmit({ preventDefault: () => {} });
   };
 
   const resetInputs = () => {
@@ -180,51 +202,41 @@ const LoginScreen = ({ setAuth }) => {
     setShowPassword(false);
     setShowConfirmPassword(false);
     setIsCountryInputFocused(false);
+    setShowLocationConfirm(false);
   };
 
   const handleCountrySelect = (country) => {
     setSelectedCountry(country.code);
-    setSearch('');
+    setSearch(country.name);
     setIsCountryInputFocused(false);
   };
 
   const handleCountryKeyDown = (e) => {
     if (e.key === 'Enter' && filteredCountries.length > 0) {
       e.preventDefault();
-      setSelectedCountry(filteredCountries[0].code);
-      setSearch('');
-      setIsCountryInputFocused(false);
+      handleCountrySelect(filteredCountries[0]);
     }
   };
 
   const handleCountryChange = (e) => {
     setSearch(e.target.value);
-    if (selectedCountry) {
-      setSelectedCountry(''); // Reset selectedCountry when user types (e.g., backspace)
-    }
   };
 
   useEffect(() => {
     const handleClickOutside = (e) => {
       if (countryInputRef.current && !countryInputRef.current.contains(e.target)) {
-        if (filteredCountries.length > 0 && search) {
-          setSelectedCountry(filteredCountries[0].code);
-          setSearch('');
+        if (filteredCountries.length > 0 && search && !selectedCountry) {
+          handleCountrySelect(filteredCountries[0]);
         }
         setIsCountryInputFocused(false);
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [filteredCountries, search]);
+  }, [filteredCountries, search, selectedCountry]);
 
   const getCountryInputValue = () => {
-    if (search) return search; // Prioritize search text when typing
-    if (selectedCountry) {
-      const country = countries.find((c) => c.code === selectedCountry);
-      return country ? country.name : '';
-    }
-    return '';
+    return search;
   };
 
   return (
@@ -239,6 +251,27 @@ const LoginScreen = ({ setAuth }) => {
           {isLogin ? 'Login' : 'Register'}
         </h2>
         {error && <p className="text-red-500 mb-4 text-center">{error}</p>}
+        {showLocationConfirm && (
+          <div className="mb-4 p-4 bg-yellow-100 dark:bg-yellow-900 text-yellow-800 dark:text-yellow-200 rounded-lg">
+            <p className="mb-2">Unable to verify your location. Are you sure you are in {countries.find(c => c.code === selectedCountry)?.name}?</p>
+            <div className="flex justify-between">
+              <button
+                onClick={handleLocationConfirm}
+                className="bg-primary text-white px-4 py-2 rounded-lg hover:bg-secondary"
+                disabled={loading}
+              >
+                Confirm
+              </button>
+              <button
+                onClick={() => setShowLocationConfirm(false)}
+                className="bg-gray-300 dark:bg-gray-600 text-gray-800 dark:text-white px-4 py-2 rounded-lg hover:bg-gray-400 dark:hover:bg-gray-500"
+                disabled={loading}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
         <form onSubmit={handleSubmit} className="space-y-4">
           {!isLogin && (
             <>

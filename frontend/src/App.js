@@ -76,14 +76,14 @@ const getTokenExpiration = (token) => {
 };
 
 const App = () => {
-  const [token, setToken] = useState(localStorage.getItem('token') || '');
-  const [userId, setUserId] = useState(localStorage.getItem('userId') || '');
-  const [role, setRole] = useState(Number(localStorage.getItem('role')) || 0);
-  const [photo, setPhoto] = useState(localStorage.getItem('photo') || 'https://placehold.co/40x40');
-  const [virtualNumber, setVirtualNumber] = useState(localStorage.getItem('virtualNumber') || '');
-  const [username, setUsername] = useState(localStorage.getItem('username') || '');
+  const [token, setToken] = useState(sessionStorage.getItem('token') || '');
+  const [userId, setUserId] = useState(sessionStorage.getItem('userId') || '');
+  const [role, setRole] = useState(Number(sessionStorage.getItem('role')) || 0);
+  const [photo, setPhoto] = useState(sessionStorage.getItem('photo') || 'https://placehold.co/40x40');
+  const [virtualNumber, setVirtualNumber] = useState(sessionStorage.getItem('virtualNumber') || '');
+  const [username, setUsername] = useState(sessionStorage.getItem('username') || '');
   const [chatNotifications, setChatNotifications] = useState(0);
-  const [isAuthenticated, setIsAuthenticated] = useState(!!localStorage.getItem('token'));
+  const [isAuthenticated, setIsAuthenticated] = useState(!!sessionStorage.getItem('token'));
   const [socket, setSocket] = useState(null);
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
   const [error, setError] = useState(null);
@@ -105,15 +105,15 @@ const App = () => {
     setUsername(username);
 
     if (token && userId) {
-      localStorage.setItem('token', token);
-      localStorage.setItem('userId', userId);
-      localStorage.setItem('role', String(role));
-      localStorage.setItem('photo', photo);
-      localStorage.setItem('virtualNumber', virtualNumber);
-      localStorage.setItem('username', username);
+      sessionStorage.setItem('token', token);
+      sessionStorage.setItem('userId', userId);
+      sessionStorage.setItem('role', String(role));
+      sessionStorage.setItem('photo', photo);
+      sessionStorage.setItem('virtualNumber', virtualNumber);
+      sessionStorage.setItem('username', username);
       setIsAuthenticated(true);
     } else {
-      localStorage.clear();
+      sessionStorage.clear();
       setIsAuthenticated(false);
       setChatNotifications(0);
       setSocket(null);
@@ -122,9 +122,11 @@ const App = () => {
   };
 
   useEffect(() => {
-    if (!token || !userId || typeof token !== 'string') {
-      console.warn('Invalid token or userId, skipping socket initialization');
-      setAuth(null, null, null, null, null, null);
+    if (!token || !userId || typeof token !== 'string' || !isAuthenticated) {
+      console.warn('Invalid token, userId, or authentication state, skipping socket initialization');
+      if (isAuthenticated) {
+        setAuth(null, null, null, null, null, null);
+      }
       return;
     }
 
@@ -143,10 +145,13 @@ const App = () => {
       console.log('Socket cleanup');
       setSocket(null);
     };
-  }, [token, userId]);
+  }, [token, userId, isAuthenticated]);
 
   const refreshToken = async () => {
     try {
+      if (!token || !userId) {
+        throw new Error('Missing token or userId');
+      }
       const response = await axios.post(
         `${BASE_URL}/auth/refresh`,
         { userId },
@@ -157,7 +162,7 @@ const App = () => {
       );
       const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername, privateKey } = response.data;
       setAuth(newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername);
-      localStorage.setItem('privateKey', privateKey);
+      sessionStorage.setItem('privateKey', privateKey);
       console.log('Token refreshed');
       return newToken;
     } catch (error) {
@@ -279,6 +284,7 @@ const App = () => {
           handleChatNavigation={handleChatNavigation}
           theme={theme}
           setSelectedChat={setSelectedChat}
+          selectedChat={selectedChat}
         />
       </Router>
     </ErrorBoundary>
@@ -299,6 +305,7 @@ const AuthenticatedApp = ({
   handleChatNavigation,
   theme,
   setSelectedChat,
+  selectedChat,
 }) => {
   const location = useLocation();
 
@@ -324,7 +331,7 @@ const AuthenticatedApp = ({
       </div>
       <motion.nav
         initial={{ y: 0 }}
-        animate={{ y: location.pathname === '/chat' && setSelectedChat ? 200 : 0 }}
+        animate={{ y: location.pathname === '/chat' && selectedChat ? 200 : 0 }}
         transition={{ duration: 0.3 }}
         className="fixed bottom-0 left-0 right-0 bg-primary text-white p-2 flex justify-around items-center shadow-lg z-20"
       >

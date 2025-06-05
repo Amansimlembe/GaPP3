@@ -66,12 +66,10 @@ try {
   logger.error(`Failed to access build directory: ${buildPath}`, { error: err.message });
 }
 
-// Health check endpoint
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'OK', uptime: process.uptime() });
 });
 
-// Error handling for invalid JSON
 app.use((err, req, res, next) => {
   if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
     logger.error('Invalid JSON payload', { method: req.method, url: req.url, body: req.body, error: err.message });
@@ -80,7 +78,6 @@ app.use((err, req, res, next) => {
   next(err);
 });
 
-// MongoDB connection
 const connectDB = async () => {
   try {
     await mongoose.connect(process.env.MONGO_URI);
@@ -112,23 +109,13 @@ const connectDB = async () => {
 };
 connectDB();
 
-// Register routes
 const routes = [
   { path: '/auth', handler: authRoutes, name: 'authRoutes' },
   { path: '/feed', handler: feedRoutes, name: 'feedRoutes' },
-  { path: '/social', handler: socialRoutes(io), name: 'socialRoutes' },
+  { path: '/social', handler: socialRoutes, name: 'socialRoutes' }, // Simplified registration
   { path: '/jobseeker', handler: jobseekerRoutes, name: 'jobseekerRoutes' },
   { path: '/employer', handler: employerRoutes, name: 'employerRoutes' },
 ];
-
-logger.info('Inspecting route handlers:', {
-  authRoutes: authRoutes ? 'defined' : 'undefined',
-  feedRoutes: feedRoutes ? 'defined' : 'undefined',
-  socialRoutes: socialRoutes ? 'defined' : 'undefined',
-  socialRoutesResult: socialRoutes(io) ? 'defined' : 'undefined',
-  jobseekerRoutes: jobseekerRoutes ? 'defined' : 'undefined',
-  employerRoutes: employerRoutes ? 'defined' : 'undefined',
-});
 
 routes.forEach(({ path, handler, name }) => {
   if (handler && (typeof handler === 'function' || (typeof handler === 'object' && handler.handle))) {
@@ -142,7 +129,6 @@ routes.forEach(({ path, handler, name }) => {
   }
 });
 
-// Serve frontend
 app.get('*', (req, res) => {
   const indexPath = path.join(buildPath, 'index.html');
   if (fs.existsSync(indexPath)) {
@@ -158,19 +144,40 @@ app.get('*', (req, res) => {
   }
 });
 
-// Global error handler
 app.use((err, req, res, next) => {
   logger.error('Unhandled error', { error: err.message, stack: err.stack });
   res.status(500).json({ error: 'Internal Server Error' });
 });
 
-// Socket.IO connection
 io.on('connection', (socket) => {
   logger.info('User connected', { socketId: socket.id });
 
   socket.on('join', (userId) => {
     socket.join(userId);
     logger.info('User joined room', { userId, socketId: socket.id });
+  });
+
+  socket.on('message', (msg, callback) => {
+    try {
+      io.to(msg.recipientId).emit('message', msg);
+      callback({ status: 'ok', message: msg });
+    } catch (err) {
+      logger.error('Socket message error', { error: err.message });
+      callback({ error: err.message });
+    }
+  });
+
+  socket.on('readMessages', ({ chatId, userId }) => {
+    io.to(chatId).emit('readMessages', { chatId, userId });
+  });
+
+  socket.on('typing', ({ chatId, userId }) => {
+    socket.to(chatId).emit('typing', { chatId, userId });
+  });
+
+  socket.on('leave', (userId) => {
+    socket.leave(userId);
+    logger.info('User left room', { userId, socketId: socket.id });
   });
 
   socket.on('disconnect', () => {
@@ -181,7 +188,6 @@ io.on('connection', (socket) => {
 const PORT = process.env.PORT || 8000;
 server.listen(PORT, '0.0.0.0', () => logger.info(`Server running on port ${PORT}`));
 
-// Shutdown handler
 const shutdown = async () => {
   logger.info('Shutting down server');
   try {

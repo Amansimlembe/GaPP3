@@ -8,11 +8,16 @@ const { getCountryCallingCode, parsePhoneNumberFromString } = require('libphonen
 const Joi = require('joi');
 const winston = require('winston');
 const rateLimit = require('express-rate-limit');
+const mongoose = require('mongoose');
 const User = require('../models/User');
 
 const router = express.Router();
 
-// Validate environment variables
+const TokenBlacklist = mongoose.model('TokenBlacklist', new mongoose.Schema({
+  token: { type: String, required: true, unique: true },
+  expiresAt: { type: Date, required: true, index: { expires: '24h' } },
+}));
+
 if (!process.env.JWT_SECRET) {
   throw new Error('JWT_SECRET is not defined');
 }
@@ -20,7 +25,6 @@ if (!process.env.CLOUDINARY_URL && (!process.env.CLOUDINARY_CLOUD_NAME || !proce
   throw new Error('Cloudinary environment variables or CLOUDINARY_URL must be set');
 }
 
-// Parse CLOUDINARY_URL or use individual variables
 let cloudinaryConfig = {};
 try {
   if (process.env.CLOUDINARY_URL) {
@@ -52,7 +56,6 @@ const logger = winston.createLogger({
   ],
 });
 
-// Log Cloudinary configuration (omit api_secret for security)
 logger.info('Cloudinary configuration loaded', {
   cloud_name: cloudinaryConfig.cloud_name,
   api_key: cloudinaryConfig.api_key,
@@ -62,7 +65,7 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    if (!file) return cb(null, true); // Allow no file
+    if (!file) return cb(null, true);
     const allowedTypes = ['image/jpeg', 'image/png', 'image/gif'];
     if (!allowedTypes.includes(file.mimetype)) {
       logger.warn('Invalid file type', { mimetype: file.mimetype });
@@ -72,20 +75,16 @@ const upload = multer({
   },
 });
 
-
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 100, // Increased to 100
+  max: 100,
   message: { error: 'Too many requests, please try again later.' },
-  handler: (req, res, next, options) => {
+  handler: (req, res) => {
     logger.warn('Rate limit exceeded', { ip: req.ip, method: req.method, url: req.url });
-    res.status(options.statusCode).json(options.message);
+    res.status(429).json({ error: 'Too many requests, please try again later.' });
   },
 });
 
-
-
-// Updated authMiddleware without Redis
 const authMiddleware = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -95,11 +94,16 @@ const authMiddleware = async (req, res, next) => {
 
   const token = authHeader.split(' ')[1];
   try {
+    const blacklisted = await TokenBlacklist.findOne({ token });
+    if (blacklisted) {
+      logger.warn('Blacklisted token used', { method: req.method, url: req.url });
+      return res.status(401).json({ error: 'Token invalidated' });
+    }
     const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
     req.user = decoded;
     next();
   } catch (error) {
-    logger.error('Auth middleware error:', { error: error.message, token: token.substring(0, 10) + '...', url: req.url });
+    logger.error('Auth middleware error:', { error: error.message, token: token.substring(0, 10) + '...' });
     res.status(401).json({ error: 'Invalid token', details: error.message });
   }
 };
@@ -117,15 +121,13 @@ const loginSchema = Joi.object({
   password: Joi.string().min(6).required(),
 });
 
-
-
 const generateVirtualNumber = async (countryCode, userId) => {
   try {
     logger.info('Generating virtual number', { countryCode, userId });
     const countryCallingCode = getCountryCallingCode(countryCode.toUpperCase());
     let virtualNumber;
     let attempts = 0;
-    const maxAttempts = 20; // Increased attempts
+    const maxAttempts = 20;
 
     do {
       let firstFive = '';
@@ -153,37 +155,32 @@ const generateVirtualNumber = async (countryCode, userId) => {
   }
 };
 
-
 router.post('/register', authLimiter, upload.single('photo'), async (req, res) => {
   try {
     logger.info('Register request received', { email: req.body.email, username: req.body.username });
 
     const { error } = registerSchema.validate(req.body);
     if (error) {
-      logger.warn('Validation error', { error: error.details[0].message, body: req.body });
+      logger.warn('Validation error', { error: error.details[0].message });
       return res.status(400).json({ error: error.details[0].message });
     }
 
     const { email, password, username, country, role = 0 } = req.body;
 
-    logger.info('Checking for existing user', { email, username });
     const existingUser = await User.findOne({ $or: [{ email }, { username }] });
     if (existingUser) {
       logger.warn('Duplicate user', { email, username });
       return res.status(400).json({ error: 'Email or username already exists' });
     }
 
-    logger.info('Generating RSA key pair', { email });
     const { publicKey, privateKey } = forge.pki.rsa.generateKeyPair({ bits: 2048 });
     const publicKeyPem = forge.pki.publicKeyToPem(publicKey);
     const privateKeyPem = forge.pki.privateKeyToPem(privateKey);
 
-    logger.info('Hashing password', { email });
     const hashedPassword = await bcrypt.hash(password, 10);
 
     let virtualNumber;
     try {
-      logger.info('Generating virtual number', { email, country });
       virtualNumber = await generateVirtualNumber(country, forge.util.bytesToHex(forge.random.getBytesSync(16)));
     } catch (err) {
       return res.status(400).json({ error: 'Failed to generate virtual number', details: err.message });
@@ -203,25 +200,18 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
 
     if (req.file) {
       logger.info('Uploading photo to Cloudinary', { email, mimetype: req.file.mimetype, size: req.file.size });
-      try {
-        const result = await new Promise((resolve, reject) => {
-          cloudinary.uploader.upload_stream(
-            { resource_type: 'image', folder: 'gapp_profile_photos' },
-            (error, result) => (error ? reject(error) : resolve(result))
-          ).end(req.file.buffer);
-        });
-        user.photo = result.secure_url;
-        logger.info('Photo uploaded successfully', { email, url: result.secure_url });
-      } catch (err) {
-        logger.error('Cloudinary upload failed', { error: err.message, email });
-        return res.status(400).json({ error: 'Failed to upload photo', details: err.message });
-      }
+      const result = await new Promise((resolve, reject) => {
+        cloudinary.uploader.upload_stream(
+          { resource_type: 'image', folder: 'gapp_profile_photos' },
+          (error, result) => (error ? reject(error) : resolve(result))
+        ).end(req.file.buffer);
+      });
+      user.photo = result.secure_url;
+      logger.info('Photo uploaded successfully', { email, url: result.secure_url });
     }
 
-    logger.info('Saving user to MongoDB', { email });
     await user.save();
 
-    logger.info('Generating JWT', { email });
     const token = jwt.sign({ id: user._id, email, virtualNumber, role: user.role }, process.env.JWT_SECRET, {
       expiresIn: '24h',
     });
@@ -237,23 +227,9 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
       privateKey: privateKeyPem,
     });
   } catch (error) {
-    logger.error('Register error:', {
-      error: error.message,
-      stack: error.stack,
-      body: {
-        email: req.body.email,
-        username: req.body.username,
-        country: req.body.country,
-        role: req.body.role,
-        hasPhoto: !!req.file,
-      },
-      file: req.file ? { mimetype: req.file.mimetype, size: req.file.size } : null,
-    });
+    logger.error('Register error:', { error: error.message, stack: error.stack });
     if (error.code === 11000) {
       return res.status(400).json({ error: 'Duplicate email, username, or virtual number' });
-    }
-    if (error.name === 'ValidationError') {
-      return res.status(400).json({ error: 'Invalid user data', details: error.message });
     }
     res.status(500).json({ error: 'Failed to register', details: error.message });
   }
@@ -282,22 +258,34 @@ router.post('/login', authLimiter, async (req, res) => {
     );
 
     logger.info('Login successful', { userId: user._id, email });
-    
-
     res.json({
-  token,
-  userId: user._id,
-  role: user.role,
-  photo: user.photo || 'https://placehold.co/40x40',
-  virtualNumber: user.virtualNumber || '',
-  username: user.username || '',
-  privateKey: user.privateKey,
+      token,
+      userId: user._id,
+      role: user.role,
+      photo: user.photo || 'https://placehold.co/40x40',
+      virtualNumber: user.virtualNumber || '',
+      username: user.username || '',
+      privateKey: user.privateKey,
+    });
+  } catch (error) {
+    logger.error('Login error', { error: error.message, stack: error.stack });
+    res.status(500).json({ error: 'Failed to login', details: error.message });
+  }
 });
 
-
+router.post('/logout', authMiddleware, async (req, res) => {
+  try {
+    const token = req.headers.authorization.split(' ')[1];
+    const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
+    await TokenBlacklist.create({
+      token,
+      expiresAt: new Date(decoded.exp * 1000),
+    });
+    logger.info('Token blacklisted', { userId: decoded.id });
+    res.status(200).json({ message: 'Logged out successfully' });
   } catch (error) {
-    logger.error('Login error', { error: error.message, body: req.body });
-    res.status(500).json({ error: 'Failed to login', details: error.message });
+    logger.error('Logout error:', { error: error.message, stack: error.stack });
+    res.status(500).json({ error: 'Failed to logout', details: error.message });
   }
 });
 
@@ -305,7 +293,7 @@ router.post('/update_country', authMiddleware, async (req, res) => {
   try {
     const updateCountrySchema = Joi.object({
       userId: Joi.string().required(),
-      country: Joi.string().required(),
+      country: Joi.string().length(2).uppercase().required(),
     });
     const { error } = updateCountrySchema.validate(req.body);
     if (error) return res.status(400).json({ error: error.details[0].message });
@@ -325,7 +313,7 @@ router.post('/update_country', authMiddleware, async (req, res) => {
     logger.info('Country updated', { userId, country });
     res.json({ virtualNumber: user.virtualNumber });
   } catch (error) {
-    logger.error('Update country error:', { error: error.message, userId: req.body.userId });
+    logger.error('Update country error:', { error: error.message, stack: error.stack });
     res.status(500).json({ error: 'Failed to update country', details: error.message });
   }
 });
@@ -352,7 +340,7 @@ router.post('/update_photo', authMiddleware, upload.single('photo'), async (req,
     logger.info('Photo updated', { userId });
     res.json({ photo: user.photo });
   } catch (error) {
-    logger.error('Update photo error:', { error: error.message, userId: req.body.userId });
+    logger.error('Update photo error:', { error: error.message, stack: error.stack });
     res.status(500).json({ error: 'Failed to update photo', details: error.message });
   }
 });
@@ -381,7 +369,7 @@ router.post('/update_username', authMiddleware, async (req, res) => {
     logger.info('Username updated', { userId, username });
     res.json({ username: user.username });
   } catch (error) {
-    logger.error('Update username error:', { error: error.message, userId: req.body.userId });
+    logger.error('Update username error:', { error: error.message, stack: error.stack });
     res.status(500).json({ error: 'Failed to update username', details: error.message });
   }
 });
@@ -402,7 +390,7 @@ router.get('/contacts', authMiddleware, async (req, res) => {
 
     res.json(contacts);
   } catch (error) {
-    logger.error('Fetch contacts error', { error: error.message, userId: req.user.id });
+    logger.error('Fetch contacts error', { error: error.message, stack: error.stack });
     res.status(500).json({ error: 'Failed to fetch contacts', details: error.message });
   }
 });
@@ -414,7 +402,7 @@ router.get('/public_key/:userId', authMiddleware, async (req, res) => {
 
     res.json({ publicKey: user.publicKey });
   } catch (error) {
-    logger.error('Fetch public key error:', { error: error.message, userId: req.params.userId });
+    logger.error('Fetch public key error:', { error: error.message, stack: error.stack });
     res.status(500).json({ error: 'Failed to fetch public key', details: error.message });
   }
 });
@@ -442,16 +430,16 @@ router.post('/refresh', authLimiter, authMiddleware, async (req, res) => {
 
     logger.info('Token refreshed successfully', { userId: user._id });
     res.json({
-  token: newToken,
-  userId: user._id,
-  role: user.role,
-  photo: user.photo || 'https://placehold.co/40x40',
-  virtualNumber: user.virtualNumber || '',
-  username: user.username || '',
-  privateKey: user.privateKey,
-});
+      token: newToken,
+      userId: user._id,
+      role: user.role,
+      photo: user.photo || 'https://placehold.co/40x40',
+      virtualNumber: user.virtualNumber || '',
+      username: user.username || '',
+      privateKey: user.privateKey,
+    });
   } catch (error) {
-    logger.error('Refresh token error:', { error: error.message, userId: req.user?.id, ip: req.ip });
+    logger.error('Refresh token error:', { error: error.message, stack: error.stack });
     res.status(500).json({ error: 'Failed to refresh token', details: error.message });
   }
 });
