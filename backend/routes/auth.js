@@ -259,20 +259,6 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
   }
 });
 
-
-// In auth.js, add to the router
-router.post('/log-error', async (req, res) => {
-  try {
-    const { error, stack, timestamp } = req.body;
-    logger.error('Client-side error reported', { error, stack, timestamp });
-    res.status(200).json({ message: 'Error logged successfully' });
-  } catch (err) {
-    logger.error('Failed to log client error', { error: err.message });
-    res.status(500).json({ error: 'Failed to log error' });
-  }
-});
-
-
 router.post('/login', authLimiter, async (req, res) => {
   try {
     const { error } = loginSchema.validate(req.body);
