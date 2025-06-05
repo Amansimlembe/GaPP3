@@ -13,23 +13,15 @@ const validator = require('validator');
 
 const logger = winston.createLogger({
   level: 'info',
-  format: winston.format.combine(winston.format.timestamp(), winston.format.json()),
+  format: winston.format.combine(
+    winston.format.timestamp({ tz: 'Africa/Nairobi' }),
+    winston.format.json()
+  ),
   transports: [
     new winston.transports.Console(),
     new winston.transports.File({ filename: 'logs/error.log', level: 'error' }),
     new winston.transports.File({ filename: 'logs/combined.log' }),
   ],
-});
-
-router.post('/log-error', async (req, res) => {
-  try {
-    const { error, stack, timestamp } = req.body;
-    logger.error('Client error reported', { error, stack, timestamp });
-    res.status(200).json({ message: 'Error logged successfully' });
-  } catch (err) {
-    logger.error('Failed to log client error', { error: err.message });
-    res.status(500).json({ error: 'Failed to log error' });
-  }
 });
 
 // Initialize Cloudinary
@@ -152,22 +144,23 @@ const deleteUserSchema = Joi.object({
     .required(),
 });
 
-module.exports = (io, server) => {
-  // Socket.IO configuration
-  const socketIO = require('socket.io')(server, {
-    cors: {
-      origin: 'https://gapp-6yc3.onrender.com',
-      methods: ['GET', 'POST'],
-      credentials: true,
-    },
-    transports: ['websocket', 'polling'],
-    allowEIO3: true,
-    pingTimeout: 20000,
-    pingInterval: 25000,
+module.exports = (io) => {
+  const router = express.Router();
+
+  // Log error endpoint
+  router.post('/log-error', async (req, res) => {
+    try {
+      const { error, stack, timestamp } = req.body;
+      logger.error('Client error reported', { error, stack, timestamp });
+      res.status(200).json({ message: 'Error logged successfully' });
+    } catch (err) {
+      logger.error('Failed to log client error', { error: err.message });
+      res.status(500).json({ error: 'Failed to log error' });
+    }
   });
 
   // Socket.IO middleware for authentication
-  socketIO.use(async (socket, next) => {
+  io.use(async (socket, next) => {
     const token = socket.handshake.auth?.token;
     const sid = socket.handshake.query?.sid;
     logger.info('Socket.IO connection attempt', { token: token?.substring(0, 10), sid });
@@ -185,8 +178,6 @@ module.exports = (io, server) => {
       return next(new Error('Invalid token'));
     }
   });
-
-  const router = express.Router();
 
   const emitUpdatedChatList = async (userId) => {
     try {
@@ -277,7 +268,7 @@ module.exports = (io, server) => {
         };
       });
 
-      socketIO.to(userId).emit('chatListUpdated', { userId, users: chatList });
+      io.to(userId).emit('chatListUpdated', { userId, users: chatList });
       await memcached.setex(`:chat-list:${userId}`, 300, JSON.stringify(chatList));
       logger.info('Emitted updated chat list', { userId });
     } catch (error) {
@@ -285,7 +276,7 @@ module.exports = (io, server) => {
     }
   };
 
-  socketIO.on('connection', (socket) => {
+  io.on('connection', (socket) => {
     logger.info('New Socket.IO connection', { socketId: socket.id });
 
     socket.on('join', (userId) => {
@@ -297,7 +288,7 @@ module.exports = (io, server) => {
       User.findByIdAndUpdate(userId, { status: 'online', lastSeen: new Date() }, { new: true })
         .then((user) => {
           if (user) {
-            socketIO.to(userId).emit('userStatus', { userId, status: 'online', lastSeen: user.lastSeen });
+            io.to(userId).emit('userStatus', { userId, status: 'online', lastSeen: user.lastSeen });
             emitUpdatedChatList(userId);
             logger.info('User joined', { userId });
           }
@@ -315,7 +306,7 @@ module.exports = (io, server) => {
       User.findByIdAndUpdate(userId, { status: 'offline', lastSeen: new Date() }, { new: true })
         .then((user) => {
           if (user) {
-            socketIO.to(userId).emit('userStatus', { userId, status: 'offline', lastSeen: user.lastSeen });
+            io.to(userId).emit('userStatus', { userId, status: 'offline', lastSeen: user.lastSeen });
             logger.info('User left', { userId });
           }
         })
@@ -330,7 +321,7 @@ module.exports = (io, server) => {
         logger.warn('Invalid IDs in typing', { userId, recipientId });
         return;
       }
-      socketIO.to(recipientId).emit('typing', { userId });
+      io.to(recipientId).emit('typing', { userId });
     });
 
     socket.on('stopTyping', ({ userId, recipientId }) => {
@@ -338,7 +329,7 @@ module.exports = (io, server) => {
         logger.warn('Invalid IDs in stopTyping', { userId, recipientId });
         return;
       }
-      socketIO.to(recipientId).emit('stopTyping', { userId });
+      io.to(recipientId).emit('stopTyping', { userId });
     });
 
     socket.on('newContact', ({ userId, contactData }) => {
@@ -357,8 +348,8 @@ module.exports = (io, server) => {
               status: contact.status,
               lastSeen: contact.lastSeen,
             };
-            socketIO.to(userId).emit('newContact', { userId, contactData: contactObj });
-            socketIO.to(contactData.id).emit('newContact', { userId: contactData.id, contactData: contactObj });
+            io.to(userId).emit('newContact', { userId, contactData: contactObj });
+            io.to(contactData.id).emit('newContact', { userId: contactData.id, contactData: contactObj });
             emitUpdatedChatList(userId);
             emitUpdatedChatList(contactData.id);
             logger.info('New contact emitted', { userId, contactId: contactData.id });
@@ -374,7 +365,7 @@ module.exports = (io, server) => {
         logger.warn('Invalid userId in chatListUpdated', { userId });
         return;
       }
-      socketIO.to(userId).emit('chatListUpdated', { userId, users });
+      io.to(userId).emit('chatListUpdated', { userId, users });
       logger.info('Chat list update propagated', { userId });
     });
 
@@ -453,8 +444,8 @@ module.exports = (io, server) => {
           clientMessageId,
         });
 
-        socketIO.to(recipientId).emit('message', populatedMessage.toObject());
-        socketIO.to(senderId).emit('message', populatedMessage.toObject());
+        io.to(recipientId).emit('message', populatedMessage.toObject());
+        io.to(senderId).emit('message', populatedMessage.toObject());
 
         await memcached.setex(`:message:${clientMessageId}`, 3600, JSON.stringify(populatedMessage.toObject()));
         await memcached.del(`:chat-list:${senderId}`);
@@ -505,8 +496,8 @@ module.exports = (io, server) => {
 
         await session.commitTransaction();
 
-        socketIO.to(message.recipientId.toString()).emit('editMessage', populatedMessage.toObject());
-        socketIO.to(message.senderId.toString()).emit('editMessage', populatedMessage.toObject());
+        io.to(message.recipientId.toString()).emit('editMessage', populatedMessage.toObject());
+        io.to(message.senderId.toString()).emit('editMessage', populatedMessage.toObject());
 
         await memcached.setex(`:message:${message.clientMessageId}`, 3600, JSON.stringify(populatedMessage.toObject()));
         await memcached.del(`:chat-list:${message.senderId}`);
@@ -545,8 +536,8 @@ module.exports = (io, server) => {
 
         await session.commitTransaction();
 
-        socketIO.to(recipientId).emit('deleteMessage', { messageId, recipientId });
-        socketIO.to(message.senderId.toString()).emit('deleteMessage', { messageId, recipientId: message.senderId.toString() });
+        io.to(recipientId).emit('deleteMessage', { messageId, recipientId });
+        io.to(message.senderId.toString()).emit('deleteMessage', { messageId, recipientId: message.senderId.toString() });
 
         await memcached.del(`:message:${message.clientMessageId}`);
         await memcached.del(`:chat-list:${message.senderId}`);
@@ -589,7 +580,7 @@ module.exports = (io, server) => {
 
         await session.commitTransaction();
 
-        socketIO.to(message.senderId.toString()).emit('messageStatus', { messageId, status });
+        io.to(message.senderId.toString()).emit('messageStatus', { messageId, status });
 
         await memcached.setex(`:message:${message.clientMessageId}`, 3600, JSON.stringify(message.toObject()));
 
@@ -629,7 +620,7 @@ module.exports = (io, server) => {
 
         const senderIds = [...new Set(messages.map((msg) => msg.senderId.toString()))];
         senderIds.forEach((senderId) => {
-          socketIO.to(senderId).emit('messageStatus', { messageIds, status });
+          io.to(senderId).emit('messageStatus', { messageIds, status });
         });
 
         for (const message of messages) {
@@ -872,8 +863,8 @@ module.exports = (io, server) => {
         lastSeen: contact.lastSeen,
       };
 
-      socketIO.to(userId).emit('newContact', { userId, contactData });
-      socketIO.to(contact._id.toString()).emit('newContact', { userId: contact._id.toString(), contactData });
+      io.to(userId).emit('newContact', { userId, contactData });
+      io.to(contact._id.toString()).emit('newContact', { userId: contact._id.toString(), contactData });
 
       await memcached.del(`:chat-list:${userId}`);
       await memcached.del(`:chat-list:${contact._id}`);
@@ -964,8 +955,8 @@ module.exports = (io, server) => {
 
       await session.commitTransaction();
 
-      socketIO.to(recipientId).emit('message', populatedMessage.toObject());
-      socketIO.to(userId).emit('message', populatedMessage.toObject());
+      io.to(recipientId).emit('message', populatedMessage.toObject());
+      io.to(userId).emit('message', populatedMessage.toObject());
 
       await memcached.setex(`:message:${clientMessageId}`, 3600, JSON.stringify(populatedMessage.toObject()));
       await memcached.del(`:chat-list:${userId}`);
@@ -1023,8 +1014,8 @@ module.exports = (io, server) => {
 
       await session.commitTransaction();
 
-      socketIO.to(userId).emit('userStatus', { userId, status: 'offline', lastSeen: new Date() });
-      socketIO.to(contactIds).emit('userDeleted', { userId });
+      io.to(userId).emit('userStatus', { userId, status: 'offline', lastSeen: new Date() });
+      io.to(contactIds).emit('userDeleted', { userId });
 
       await memcached.del(`:chat-list:${userId}`);
       await memcached.del(`:contacts:${userId}`);
