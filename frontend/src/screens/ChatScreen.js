@@ -257,27 +257,38 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
     }
   }, [message, selectedChat, userId, token, virtualNumber, username, photo, socket]);
 
+
+
+
   const handleAddContact = async () => {
-    if (!contactInput.trim()) {
-      setContactError('Please enter a valid phone number');
-      return;
-    }
-    try {
-      const response = await axios.post(`${BASE_URL}/social/contacts`, {
+  if (!contactInput.trim()) {
+    setContactError('Please enter a valid virtual number');
+    return;
+  }
+  try {
+    const response = await axios.post(
+      `${BASE_URL}/social/add_contact`,
+      {
         userId,
-        phone: contactInput.trim(),
-      }, {
+        virtualNumber: contactInput.trim(),
+      },
+      {
         headers: { Authorization: `Bearer ${token}` },
-      });
-      setChatList([...chatList, response.data.user]);
-      setContactInput('');
-      setContactError('');
-      setShowAddContact(false);
-    } catch (err) {
-      console.error('Add contact error:', err);
-      setContactError(err.response?.data?.error || 'Failed to add contact');
-    }
-  };
+      }
+    );
+    setChatList((prev) => [...prev, { ...response.data, _id: response.data.id }]);
+    setContactInput('');
+    setContactError('');
+    setShowAddContact(false);
+    socket?.emit('newContact', { userId, contactData: response.data });
+  } catch (err) {
+    console.error('Add contact error:', err);
+    setContactError(err.response?.data?.error || 'Failed to add contact');
+  }
+};
+
+
+
 
   const handleLogout = useCallback(async () => {
     try {
@@ -464,8 +475,11 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
                         className={`contact-input input ${contactError ? 'error' : ''}`}
                         value={contactInput}
                         onChange={(e) => setContactInput(e.target.value)}
-                        placeholder="Enter phone number or email"
+                        placeholder="Enter virtual number (e.g., +25534567890)"
                       />
+
+
+                      
                       {contactInput && (
                         <FaTimes
                           className="clear-input-icon"
