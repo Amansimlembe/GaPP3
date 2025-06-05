@@ -128,62 +128,60 @@ const LoginScreen = ({ setAuth }) => {
     }
   };
 
+
   const handleSubmit = async (e) => {
-    e.preventDefault();
-    setError('');
-    setShowLocationConfirm(false);
-    if (!validateForm()) return;
+  e.preventDefault();
+  setError('');
+  setShowLocationConfirm(false);
+  if (!validateForm()) return;
 
-    if (!isLogin) {
-      const locationValid = await checkLocation(selectedCountry);
-      if (!locationValid && !showLocationConfirm) return;
+  if (!isLogin) {
+    const locationValid = await checkLocation(selectedCountry);
+    if (!locationValid && !showLocationConfirm) return;
+  }
+
+  setLoading(true);
+  try {
+    const data = isLogin
+      ? { email, password }
+      : { email, password, username, country: selectedCountry };
+    const config = { headers: { 'Content-Type': 'application/json' } };
+    const response = await retryRequest(data, config);
+
+    if (!response.privateKey) {
+      throw new Error('No private key in response');
     }
 
-    setLoading(true);
-    try {
-      const data = isLogin
-        ? { email, password }
-        : { email, password, username, country: selectedCountry };
+    sessionStorage.setItem('token', response.token);
+    sessionStorage.setItem('userId', response.userId);
+    sessionStorage.setItem('role', response.role.toString());
+    sessionStorage.setItem('photo', response.photo || 'https://placehold.co/40x40');
+    sessionStorage.setItem('virtualNumber', response.virtualNumber || '');
+    sessionStorage.setItem('username', response.username);
+    sessionStorage.setItem('privateKey', response.privateKey);
 
-      const config = { headers: { 'Content-Type': 'application/json' } };
+    setAuth(
+      response.token,
+      response.userId,
+      response.role,
+      response.photo || 'https://placehold.co/40x40',
+      response.virtualNumber,
+      response.username
+    );
+  } catch (error) {
+    console.error(`${isLogin ? 'Login' : 'Register'} error:`, error);
+    const errorMessage =
+      error.response?.status === 429
+        ? 'Too many requests. Please wait a few minutes and try again.'
+        : error.response?.data?.error ||
+          error.message ||
+          (isLogin ? 'Login failed' : 'Registration failed');
+    setError(errorMessage);
+  } finally {
+    setLoading(false);
+  }
+};
 
-      const response = await retryRequest(data, config);
-
-      sessionStorage.setItem('token', response.token);
-      sessionStorage.setItem('userId', response.userId);
-      sessionStorage.setItem('role', response.role);
-      sessionStorage.setItem('photo', response.photo || 'https://placehold.co/40x40');
-      sessionStorage.setItem('virtualNumber', response.virtualNumber || '');
-      sessionStorage.setItem('username', response.username);
-      sessionStorage.setItem('privateKey', response.privateKey || '');
-
-      setAuth(
-        response.token,
-        response.userId,
-        response.role,
-        response.photo,
-        response.virtualNumber,
-        response.username
-      );
-    } catch (error) {
-      console.error(`${isLogin ? 'Login' : 'Register'} error:`, {
-        status: error.response?.status,
-        data: error.response?.data,
-        message: error.message,
-        stack: error.stack,
-      });
-      const errorMessage =
-        error.response?.status === 429
-          ? 'Too many requests. Please wait a few minutes and try again.'
-          : error.response?.data?.error ||
-            error.response?.data?.details ||
-            error.message ||
-            (isLogin ? 'Login failed' : 'Registration failed. Please try again.');
-      setError(errorMessage);
-    } finally {
-      setLoading(false);
-    }
-  };
 
   const handleLocationConfirm = async () => {
     setShowLocationConfirm(false);

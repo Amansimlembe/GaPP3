@@ -147,31 +147,41 @@ const App = () => {
     };
   }, [token, userId, isAuthenticated]);
 
+
+
+       
+
   const refreshToken = async () => {
-    try {
-      if (!token || !userId) {
-        throw new Error('Missing token or userId');
-      }
-      const response = await axios.post(
-        `${BASE_URL}/auth/refresh`,
-        { userId },
-        {
-          headers: { Authorization: `Bearer ${token}` },
-          timeout: 15000,
-        }
-      );
-      const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername, privateKey } = response.data;
-      setAuth(newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername);
-      sessionStorage.setItem('privateKey', privateKey);
-      console.log('Token refreshed');
-      return newToken;
-    } catch (error) {
-      console.error('Token refresh failed:', error.response?.data || error.message);
-      setAuth(null, null, null, null, null, null);
-      setError('Session expired, please log in again');
-      return null;
+  try {
+    if (!token || !userId) {
+      throw new Error('Missing token or userId');
     }
-  };
+    const response = await axios.post(
+      `${BASE_URL}/auth/refresh`,
+      { userId },
+      {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 15000,
+      }
+    );
+    const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername, privateKey } = response.data;
+    setAuth(newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername);
+    if (privateKey) {
+      sessionStorage.setItem('privateKey', privateKey);
+    } else {
+      console.warn('No privateKey in refresh response');
+    }
+    console.log('Token refreshed');
+    return newToken;
+  } catch (error) {
+    console.error('Token refresh failed:', error.response?.data || error.message);
+    setAuth(null, null, null, null, null, null);
+    setError('Session expired, please log in again');
+    return null;
+  }
+};
+
+
 
   useEffect(() => {
     if (!isAuthenticated || !token || !userId || !socket) return;
@@ -192,6 +202,9 @@ const App = () => {
         isRefreshing = false;
       }
     };
+
+
+    
 
     checkTokenExpiration();
     const interval = setInterval(checkTokenExpiration, 5 * 60 * 1000);
