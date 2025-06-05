@@ -4,7 +4,7 @@ import axios from 'axios';
 import { FaArrowLeft, FaEllipsisV, FaPaperclip, FaSmile, FaPaperPlane, FaTimes, FaSignOutAlt, FaPlus } from 'react-icons/fa';
 import { motion, AnimatePresence } from 'framer-motion';
 import Picker from 'emoji-picker-react';
-import { FixedSizeList } from 'react-window';
+import { FixedSizeList, VariableSizeList } from 'react-window';
 import AutoSizer from 'react-virtualized-auto-sizer';
 import './ChatScreen.css';
 
