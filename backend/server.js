@@ -7,6 +7,7 @@ const path = require('path');
 const mongoose = require('mongoose');
 const winston = require('winston');
 const fs = require('fs');
+const jwt = require('jsonwebtoken');
 const Message = require('./models/Message');
 
 const logger = winston.createLogger({
@@ -26,7 +27,7 @@ try {
   jobseekerRoutes = require('./routes/jobseeker');
   employerRoutes = require('./routes/employer');
 } catch (err) {
-  logger.error('Failed to load route modules', { error: err.message, stack: err.stack });
+  logger.error('Failed to load route modules:', { error: err.message, stack: err.stack });
   process.exit(1);
 }
 
@@ -40,8 +41,8 @@ const io = new Server(server, {
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     credentials: true,
   },
-  pingTimeout: 60000,
-  pingInterval: 25000,
+  pingTimeout: 120000, // Increased to 120s
+  pingInterval: 30000, // Increased to 30s
 });
 app.set('io', io);
 
@@ -112,6 +113,24 @@ const connectDB = async () => {
 };
 connectDB();
 
+// Socket.IO authentication middleware
+io.use((socket, next) => {
+  const token = socket.handshake.auth.token;
+  if (!token) {
+    logger.warn('No token provided for Socket.IO connection', { socketId: socket.id });
+    return next(new Error('No token provided'));
+  }
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
+    socket.user = decoded;
+    logger.debug('Socket.IO authentication successful', { socketId: socket.id, userId: decoded.id });
+    next();
+  } catch (error) {
+    logger.error('Socket.IO authentication failed:', { error: error.message, socketId: socket.id });
+    next(new Error('Invalid token'));
+  }
+});
+
 // Register routes
 const routes = [
   { path: '/auth', handler: authRoutes, name: 'authRoutes' },
@@ -137,7 +156,7 @@ routes.forEach(({ path, handler, name }) => {
   } else {
     logger.error(`Skipping invalid route handler for ${path} (${name})`, {
       handlerType: typeof handler,
-      handler: handler,
+      handler,
     });
   }
 });
@@ -160,26 +179,77 @@ app.get('*', (req, res) => {
 
 // Global error handler
 app.use((err, req, res, next) => {
-  logger.error('Unhandled error', { error: err.message, stack: err.stack });
+  logger.error('Unhandled error:', { error: err.message, stack: err.stack });
   res.status(500).json({ error: 'Internal Server Error' });
 });
 
 // Socket.IO connection
 io.on('connection', (socket) => {
-  logger.info('User connected', { socketId: socket.id });
+  logger.info('User connected', { socketId: socket.id, userId: socket.user.id });
 
   socket.on('join', (userId) => {
+    if (userId !== socket.user.id) {
+      logger.warn('Unauthorized join attempt', { socketId: socket.id, userId, authUserId: socket.user.id });
+      socket.emit('error', { message: 'Unauthorized join attempt' });
+      return;
+    }
     socket.join(userId);
-    logger.info('User joined room', { userId, socketId: socket.id });
+    logger.info('User joined room', { socketId: socket.id, userId });
   });
 
-  socket.on('disconnect', () => {
-    logger.info('User disconnected', { socketId: socket.id });
+  socket.on('message', async (msg, callback) => {
+    try {
+      if (!msg.recipientId || !msg.senderId || msg.senderId !== socket.user.id) {
+        throw new Error('Invalid message data or unauthorized sender');
+      }
+      const message = new Message({
+        senderId: msg.senderId,
+        recipientId: msg.recipientId,
+        content: msg.content,
+        contentType: msg.contentType || 'text',
+        clientMessageId: msg.clientMessageId,
+        plaintextContent: msg.plaintextContent,
+        originalFilename: msg.originalFilename,
+        senderVirtualNumber: msg.senderVirtualNumber,
+        senderUsername: msg.senderUsername,
+        senderPhoto: msg.senderPhoto,
+      });
+      await message.save();
+      io.to(msg.recipientId).emit('message', message);
+      io.to(msg.senderId).emit('messageStatus', { id: message._id, status: 'sent' });
+      logger.info('Message sent', { messageId: message._id, senderId: msg.senderId, recipientId: msg.recipientId });
+      callback({ message });
+    } catch (err) {
+      logger.error('Message error:', { error: err.message, socketId: socket.id });
+      callback({ error: err.message });
+    }
+  });
+
+  socket.on('newContact', async (contactData) => {
+    try {
+      io.to(contactData.userId).emit('newContact', contactData);
+      logger.info('New contact emitted', { userId: contactData.userId, socketId: socket.id });
+    } catch (err) {
+      logger.error('New contact error:', { error: err.message, socketId: socket.id });
+    }
+  });
+
+  socket.on('leave', (userId) => {
+    if (userId === socket.user.id) {
+      socket.leave(userId);
+      logger.info('User left room', { socketId: socket.id, userId });
+    }
+  });
+
+  socket.on('disconnect', (reason) => {
+    logger.info('User disconnected', { socketId: socket.id, userId: socket.user.id, reason });
   });
 });
 
-const PORT = process.env.PORT || 8000;
-server.listen(PORT, '0.0.0.0', () => logger.info(`Server running on port ${PORT}`));
+const PORT = process.env.PORT || 5000; // Aligned with typical Render.com setup
+server.listen(PORT, '0.0.0.0', () => {
+  logger.info(`Server running on port ${PORT}`);
+});
 
 // Shutdown handler
 const shutdown = async () => {
@@ -200,3 +270,5 @@ const shutdown = async () => {
 };
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
+
+module.exports = app;
