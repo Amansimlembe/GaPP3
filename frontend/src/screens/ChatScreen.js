@@ -413,35 +413,32 @@ useEffect(() => {
 }, [selectedChat]);
 
 
+
+
+
 const handleFileChange = useCallback(
   async (e, type) => {
     try {
-      if (!e.target.files?.length || !selectedChatRef.current || !isValidObjectId(selectedChatRef.current)) {
+      const currentChat = selectedChatRef.current;
+      if (!e.target.files?.length || !currentChat || !isValidObjectId(currentChat)) {
         throw new Error('No files selected, no chat selected, or invalid chat');
       }
-      if (!socket) {
+      if (!socket || !socket.connected) {
         throw new Error('Socket connection not established');
       }
+
       const selectedFiles = Array.from(e.target.files);
       const compressedFiles = await Promise.all(
-        selectedFiles.map((file) => (file.type.startsWith('image') ? compressImage(file) : file))
+        selectedFiles.map((file) => file.type.startsWith('image/') ? compressImage(file) : file)
       );
-      setFiles(compressedFiles);
-      setContentType(type);
-      setMediaPreview(
-        compressedFiles.map((file) => ({
-          type,
-          content: URL.createObjectURL(file),
-          originalFile: file,
-          caption: captions[file.name] || '',
-        }))
-      );
+
+      // Create temporary messages
       const tempMessages = compressedFiles.map((file) => {
         const clientMessageId = generateClientMessageId();
         return {
           _id: clientMessageId,
           senderId: userId,
-          recipientId: selectedChatRef.current,
+          recipientId: currentChat,
           content: URL.createObjectURL(file),
           contentType: type,
           status: 'uploading',
@@ -455,110 +452,105 @@ const handleFileChange = useCallback(
         };
       });
 
+      // Dispatch temporary messages
       tempMessages.forEach((msg) => {
-        dispatch(addMessage({ recipientId: selectedChatRef.current, message: msg }));
-        console.log('Added temporary media message:', msg._id);
+        dispatch(addMessage({ recipientId: currentChat, message: msg }));
       });
 
-      if (listRef.current && isAtBottomRef.current && chats[selectedChatRef.current]?.length) {
-        listRef.current.scrollToRow(chats[selectedChatRef.current].length - 1);
+      // Update media preview
+      setFiles(compressedFiles);
+      setContentType(type);
+      setMediaPreview(
+        compressedFiles.map((file) => ({
+          type,
+          content: URL.createObjectURL(file),
+          originalFile: file,
+          caption: captions[file.name] || '',
+        }))
+      );
+
+      // Scroll to bottom if at bottom
+      if (isAtBottomRef.current && chats[currentChat]?.length) {
+        listRef.current?.scrollToRow(chats[currentChat].length - 1);
       }
 
+      // Upload files
       for (let [index, file] of compressedFiles.entries()) {
         const clientMessageId = tempMessages[index]._id;
-        const retryUpload = async (retryCount = 3) => {
-          let attempt = 0;
-          while (attempt < retryCount) {
-            const formData = new FormData();
-            try {
-              formData.append('file', file);
-              formData.append('userId', userId);
-              formData.append('recipientId', selectedChatRef.current);
-              formData.append('clientMessageId', clientMessageId);
-              formData.append('senderVirtualNumber', virtualNumber);
-              formData.append('senderUsername', username);
-              formData.append('senderPhoto', photo);
-              if (captions[clientMessageId]) {
-                formData.append('caption', captions[clientMessageId]);
-              }
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('userId', userId);
+        formData.append('recipientId', currentChat);
+        formData.append('clientMessageId', clientMessageId);
+        formData.append('senderVirtualNumber', virtualNumber);
+        formData.append('senderUsername', username);
+        formData.append('senderPhoto', photo);
+        if (captions[clientMessageId]) {
+          formData.append('caption', captions[clientMessageId]);
+        }
 
-              const response = await axios.post(`${BASE_URL}/social/upload`, formData, {
-                headers: {
-                  Authorization: `Bearer ${token}`,
-                  'Content-Type': 'multipart/form-data',
-                },
-                onUploadProgress: (data) => {
-                  const percentCompleted = Math.round((data.loaded * 100) / data.total);
-                  setUploadProgress((prev) => ({ ...prev, [clientMessageId]: percentCompleted }));
-                  dispatch(
-                    updateMessageStatus({
-                      recipientId: selectedChatRef.current,
-                      messageId: clientMessageId,
-                      status: 'uploading',
-                      uploadProgress: percentCompleted,
-                    })
-                  );
-                  console.log(`Upload progress for ${clientMessageId}: ${percentCompleted}%`);
-                },
-              });
-
-              const { message: uploadedMessage } = response.data;
+        try {
+          const response = await axios.post(`${BASE_URL}/social/upload`, formData, {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              'Content-Type': 'multipart/form-data',
+            },
+            onUploadProgress: (data) => {
+              const percentCompleted = Math.round((data.loaded * 100) / data.total);
+              setUploadProgress((prev) => ({ ...prev, [clientMessageId]: percentCompleted }));
               dispatch(
-                replaceMessage({
-                  recipientId: selectedChatRef.current,
-                  message: uploadedMessage,
-                  replaceId: clientMessageId,
+                updateMessageStatus({
+                  recipientId: currentChat,
+                  messageId: clientMessageId,
+                  status: 'uploading',
+                  uploadProgress: percentCompleted,
                 })
               );
-              socket.emit('messageStatus', uploadedMessage);
-              await saveMessages([uploadedMessage]);
-              console.log('Media uploaded successfully:', uploadedMessage._id);
-              return;
-            } catch (error) {
-              console.error(`Media upload attempt ${attempt + 1} failed:`, error);
-              attempt++;
-              if (error.response?.status === 401) {
-                setError('Session expired, please log in again');
-                setTimeout(() => handleLogout(), 1000);
-                return;
-              }
-              if (error.response?.status === 429) {
-                await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * 1000));
-              }
-              if (attempt === retryCount) {
-                dispatch(
-                  updateMessageStatus({
-                    recipientId: selectedChatRef.current,
-                    messageId: clientMessageId,
-                    status: 'failed',
-                    uploadProgress: false,
-                  })
-                );
-                setError('Failed to upload media');
-                console.log(`Media upload failed for ${clientMessageId}`);
-              }
-            }
-          }
-        };
-        await retryUpload();
+            },
+            timeout: 30000, // Increase timeout for uploads
+          });
+
+          const { message: uploadedMessage } = response.data;
+          dispatch(
+            replaceMessage({
+              recipientId: currentChat,
+              message: uploadedMessage,
+              replaceId: clientMessageId,
+            })
+          );
+          socket.emit('messageStatus', { messageId: uploadedMessage._id, status: 'sent' });
+          await saveMessages([uploadedMessage]);
+        } catch (error) {
+          dispatch(
+            updateMessageStatus({
+              recipientId: currentChat,
+              messageId: clientMessageId,
+              status: 'failed',
+              uploadProgress: 0,
+            })
+          );
+          throw error;
+        }
       }
 
+      // Clean up
       setFiles([]);
       setMediaPreview([]);
       setCaptions({});
       setMessage('');
       setReplyTo(null);
       inputRef.current?.focus();
-      console.log('File change processed successfully');
     } catch (err) {
       console.error('File change error:', err.message, err.stack);
       setError(`Error processing file: ${err.message}`);
+      if (err.response?.status === 401) {
+        setError('Session expired, please log in again');
+        setTimeout(() => handleLogout(), 1000);
+      }
     }
   },
-  [selectedChat, userId, token, socket, dispatch, virtualNumber, username, photo, captions, chats, handleLogout, compressImage]
+  [userId, token, socket, dispatch, virtualNumber, username, photo, captions, chats, handleLogout, compressImage]
 );
-
-
   
 
   const handleAddContact = useCallback(async () => {
@@ -1203,6 +1195,109 @@ const handleMessage = async (msg) => {
       socket.off('userStatus');
     };
   }, [socket, selectedChat, userId, dispatch, decryptMessage, chats]);
+
+
+
+
+
+  useEffect(() => {
+  if (!socket || !userId || !token) {
+    console.warn('Socket, userId, or token missing');
+    setError('Authentication error, please log in again');
+    return;
+  }
+
+  socket.auth = { token };
+
+  const handleConnect = () => {
+    console.log('Socket connected:', socket.id);
+    socket.emit('join', userId);
+  };
+
+  const handleConnectError = async (err) => {
+    console.error('Socket connect error:', err.message);
+    if (err.message === 'Invalid token' || err.message === 'No token provided') {
+      try {
+        const response = await axios.post(`${BASE_URL}/auth/refresh`, { userId }, {
+          headers: { Authorization: `Bearer ${token}` },
+          timeout: 15000,
+        });
+        const { token: newToken } = response.data;
+        if (!newToken) {
+          throw new Error('No token in refresh response');
+        }
+        localStorage.setItem('token', newToken);
+        socket.auth.token = newToken;
+        socket.disconnect().connect();
+      } catch (refreshErr) {
+        setError('Failed to refresh token, please log in again');
+        handleLogout();
+      }
+    }
+  };
+
+  const handleDisconnect = (reason) => {
+    console.warn('Socket disconnected:', reason);
+    if (reason === 'io server disconnect') {
+      socket.connect();
+    }
+  };
+
+  socket.on('connect', handleConnect);
+  socket.on('connect_error', handleConnectError);
+  socket.on('disconnect', handleDisconnect);
+  socket.on('message', handleMessage);
+  socket.on('editMessage', handleEditMessage);
+  socket.on('deleteMessage', handleDeleteMessage);
+  socket.on('typing', ({ userId: typerId }) => setIsTyping((prev) => ({ ...prev, [typerId]: true })));
+  socket.on('stopTyping', ({ userId: typerId }) => setIsTyping((prev) => ({ ...prev, [typerId]: false })));
+  socket.on('messageStatus', ({ messageId, status }) => {
+    if (selectedChat && messageId) {
+      dispatch(updateMessageStatus({ recipientId: selectedChat, messageId, status }));
+    }
+  });
+  socket.on('newContact', ({ contactData }) => {
+    if (contactData?.id && isValidObjectId(contactData.id)) {
+      setUsers((prev) => {
+        if (prev.some((u) => u.id === contactData.id)) return prev;
+        const updatedUsers = [...prev, contactData];
+        localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
+        dispatch(setMessages({ recipientId: contactData.id, messages: [] }));
+        return updatedUsers;
+      });
+    }
+  });
+  socket.on('chatListUpdated', ({ users }) => {
+    if (Array.isArray(users)) {
+      setUsers(users);
+      localStorage.setItem('cachedUsers', JSON.stringify(users));
+    }
+  });
+  socket.on('userStatus', ({ userId: statusUserId, status, lastSeen }) => {
+    if (statusUserId && isValidObjectId(statusUserId)) {
+      setUsers((prev) => {
+        const updatedUsers = prev.map((u) => (u.id === statusUserId ? { ...u, status, lastSeen } : u));
+        localStorage.setItem('cachedUsers', JSON.stringify(updatedUsers));
+        return updatedUsers;
+      });
+    }
+  });
+
+  return () => {
+    socket.off('connect', handleConnect);
+    socket.off('connect_error', handleConnectError);
+    socket.off('disconnect', handleDisconnect);
+    socket.off('message', handleMessage);
+    socket.off('editMessage', handleEditMessage);
+    socket.off('deleteMessage', handleDeleteMessage);
+    socket.off('typing');
+    socket.off('stopTyping');
+    socket.off('messageStatus');
+    socket.off('newContact');
+    socket.off('chatListUpdated');
+    socket.off('userStatus');
+  };
+}, [socket, userId, token, selectedChat, dispatch, decryptMessage, handleLogout, handleMessage, handleEditMessage, handleDeleteMessage, isTyping, users]);
 
   useEffect(() => {
     if (selectedChat && chats[selectedChat]?.length > 0 && isValidObjectId(selectedChat)) {

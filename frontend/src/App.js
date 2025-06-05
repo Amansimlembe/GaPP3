@@ -22,16 +22,15 @@ class ErrorBoundary extends React.Component {
     return { hasError: true, error };
   }
 
-  componentDidCatch(error, errorInfo) {
-    console.error('ErrorBoundary caught:', error, errorInfo);
-    // Optionally send error to server for logging
-    axios.post(`${BASE_URL}/log-error`, {
-      error: error.message,
-      stack: errorInfo.componentStack,
-      timestamp: new Date().toISOString(),
-    }).catch((err) => console.warn('Failed to log error:', err.message));
-  }
-
+// In App.js, inside ErrorBoundary's componentDidCatch
+componentDidCatch(error, errorInfo) {
+  console.error('ErrorBoundary caught:', error, errorInfo);
+  axios.post(`${BASE_URL}/social/log-error`, { // Changed to /social/log-error
+    error: error.message,
+    stack: errorInfo.componentStack,
+    timestamp: new Date().toISOString(),
+  }).catch((err) => console.warn('Failed to log error:', err.message));
+}
   render() {
     if (this.state.hasError) {
       return (
@@ -123,30 +122,51 @@ const App = () => {
     }
   };
 
+
+
   useEffect(() => {
-    if (!token || !userId || typeof token !== 'string') {
-      console.warn('Invalid token or userId, skipping socket initialization');
-      setAuth(null, null, null, null, null, null);
-      return;
+  if (!token || !userId || typeof token !== 'string') {
+    console.warn('Invalid token or userId, skipping socket initialization');
+    setAuth(null, null, null, null, null, null);
+    return;
+  }
+
+  const newSocket = io(BASE_URL, {
+    auth: { token },
+    transports: ['websocket', 'polling'],
+    reconnection: true,
+    reconnectionAttempts: 15, // Increased attempts
+    reconnectionDelay: 5000, // Increased delay
+    timeout: 20000, // Increased timeout
+    query: { userId }, // Pass userId for server-side validation
+  });
+
+  newSocket.on('connect_error', async (error) => {
+    console.error('Socket connect error:', error.message);
+    if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
+      const newToken = await refreshToken();
+      if (newToken) {
+        newSocket.auth.token = newToken;
+        newSocket.disconnect().connect();
+      } else {
+        setAuth(null, null, null, null, null, null);
+      }
     }
+  });
 
-    const newSocket = io(BASE_URL, {
-      auth: { token,
-      },
-      transports: ['websocket', 'polling'],
-      reconnectionAttempts: 10, // Increased for Render stability
-      reconnectionDelay: 3000, // Increased delay
-      timeout: 10000, // Increased connection timeout
-    });
-    setSocket(newSocket);
+  setSocket(newSocket);
 
-    return () => {
-      newSocket.emit('leave', userId);
-      newSocket.disconnect();
-      console.log('Socket cleanup');
-      setSocket(null);
-    };
-  }, [token, userId]);
+  return () => {
+    newSocket.emit('leave', userId);
+    newSocket.off('connect_error');
+    newSocket.disconnect();
+    console.log('Socket cleanup');
+    setSocket(null);
+  };
+}, [token, userId, refreshToken, setAuth]);
+
+
+
 
   const refreshToken = async () => {
     try {
