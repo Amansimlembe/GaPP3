@@ -22,13 +22,20 @@ const logger = winston.createLogger({
 const storage = multer.memoryStorage();
 const upload = multer({
   storage,
-  limits: { fileSize: 100 * 1024 * 1024 }, // 100MB limit
+  limits: { fileSize: 100 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    const allowedTypes = ['image/jpeg', 'image/png', 'video/mp4', 'audio/mpeg', 'application/pdf'];
-    if (allowedTypes.includes(file.mimetype)) {
+    const allowedTypes = {
+      image: ['image/jpeg', 'image/png'],
+      video: ['video/mp4', 'video/webm'],
+      audio: ['audio/mpeg', 'audio/wav'],
+      raw: ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+    };
+    const contentType = req.body.contentType;
+    if (!file || (contentType && allowedTypes[contentType]?.includes(file.mimetype))) {
       cb(null, true);
     } else {
-      cb(new Error('Invalid file type'));
+      logger.warn('Invalid file type', { contentType, mimetype: file?.mimetype });
+      cb(new Error(`Invalid file type for ${contentType}`));
     }
   },
 });
@@ -63,35 +70,48 @@ router.post('/', authMiddleware, upload.single('content'), async (req, res) => {
     let contentUrl = '';
 
     if (contentType !== 'text' && req.file) {
-      const result = await cloudinary.uploader.upload_stream(
-        { resource_type: contentType, folder: 'feed' },
-        async (error, result) => {
-          if (error) {
-            logger.error('Cloudinary upload failed', { error });
-            return res.status(500).json({ error: 'Failed to upload file' });
+      const uploadOptions = {
+        resource_type: contentType,
+        folder: 'feed',
+        transformation: contentType === 'video' ? [
+          { width: 720, height: 1280, crop: 'fill', quality: 'auto' },
+          { format: 'mp4', video_codec: 'h264' }
+        ] : contentType === 'image' ? [
+          { width: 1080, height: 1080, crop: 'fit', quality: 'auto' }
+        ] : null,
+      };
+
+      const result = await new Promise((resolve, reject) => {
+        const uploadStream = cloudinary.uploader.upload_stream(
+          uploadOptions,
+          (error, result) => {
+            if (error) reject(error);
+            else resolve(result);
           }
-          contentUrl = result.secure_url;
+        );
+        req.file.pipe(uploadStream);
+      });
 
-          const user = await User.findById(userId).select('username photo');
-          if (!user) {
-            return res.status(404).json({ error: 'User not found' });
-          }
+      contentUrl = result.secure_url;
 
-          const post = new Post({
-            userId,
-            contentType,
-            content: contentUrl || caption,
-            caption: contentType !== 'text' ? caption : '',
-            username: user.username,
-            photo: user.photo,
-          });
+      const user = await User.findById(userId).select('username photo');
+      if (!user) {
+        return res.status(404).json({ error: 'User not found' });
+      }
 
-          await post.save();
-          req.app.get('io').emit('newPost', post);
-          res.json(post);
-        }
-      );
-      req.file.pipe(result);
+      const post = new Post({
+        userId,
+        contentType,
+        content: contentUrl,
+        caption: contentType !== 'text' ? caption : '',
+        username: user.username,
+        photo: user.photo,
+        createdAt: new Date().toISOString()
+      });
+
+      await post.save();
+      req.app.get('io').emit('newPost', post);
+      res.json(post);
     } else if (contentType === 'text' && caption) {
       const user = await User.findById(userId).select('username photo');
       if (!user) {
@@ -105,17 +125,18 @@ router.post('/', authMiddleware, upload.single('content'), async (req, res) => {
         caption: '',
         username: user.username,
         photo: user.photo,
+        createdAt: new Date().toISOString()
       });
 
       await post.save();
       req.app.get('io').emit('newPost', post);
       res.json(post);
     } else {
-      res.status(400).json({ error: 'Invalid post data' });
+      res.status(400).json({ error: 'Missing required content' });
     }
   } catch (err) {
     logger.error('Failed to create post', { error: err.message });
-    res.status(500).json({ error: 'Failed to create post' });
+    res.status(400).json({ error: err.message || 'Failed to create post' });
   }
 });
 
@@ -166,7 +187,7 @@ router.post('/unlike', authMiddleware, async (req, res) => {
 // Comment on a post
 router.post('/comment', authMiddleware, async (req, res) => {
   try {
-    const { postId, comment, userId } = req.body;
+    const { postId, userId, comment } = req.body;
     const user = await User.findById(userId).select('username photo');
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
@@ -184,8 +205,8 @@ router.post('/comment', authMiddleware, async (req, res) => {
     req.app.get('io').emit('postUpdate', post);
     res.json(newComment);
   } catch (err) {
-    logger.error('Failed to comment on post', { error: err.message });
-    res.status(500).json({ error: 'Failed to comment on post' });
+    logger.error('Failed to comment', { error: err.message });
+    res.status(400).json({ error: 'Failed to comment' });
   }
 });
 

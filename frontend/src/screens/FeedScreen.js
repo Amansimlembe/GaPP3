@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
-import { FaPlus, FaPaperPlane, FaHeart, FaComment, FaShare, FaVolumeMute, FaVolumeUp } from 'react-icons/fa';
+import { FaPlus, FaPaperPlane, FaHeart, FaComment, FaShare, FaVolumeMute, FaVolumeUp, FaSyncAlt } from 'react-icons/fa';
 import { useSwipeable } from 'react-swipeable';
 import io from 'socket.io-client';
 import debounce from 'lodash/debounce';
@@ -15,7 +15,7 @@ const socket = io('https://gapp-6yc3.onrender.com', {
   withCredentials: true,
 });
 
-const FeedScreen = ({ token, userId }) => {
+const FeedScreen = ({ token: initialToken, userId, onUnauthorized }) => {
   const [posts, setPosts] = useState([]);
   const [contentType, setContentType] = useState('video');
   const [caption, setCaption] = useState('');
@@ -31,18 +31,34 @@ const FeedScreen = ({ token, userId }) => {
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
   const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [token, setToken] = useState(initialToken);
   const feedRef = useRef(null);
   const mediaRefs = useRef({});
-  const observerRef = useRef(null);
+
+  const refreshToken = useCallback(async () => {
+    try {
+      const { data } = await axios.post('https://gapp-6yc3.onrender.com/auth/refresh', { userId }, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setToken(data.token);
+      localStorage.setItem('token', data.token);
+      return data.token;
+    } catch (err) {
+      console.error('Token refresh failed:', err);
+      setError('Session expired. Please log in again.');
+      onUnauthorized?.();
+      return null;
+    }
+  }, [token, userId, onUnauthorized]);
 
   const setupIntersectionObserver = useCallback(
     debounce(() => {
-      if (observerRef.current) {
-        Object.values(mediaRefs.current).forEach((media) => media && observerRef.current.unobserve(media));
-        observerRef.current.disconnect();
+      if (mediaRefs.current) {
+        Object.values(mediaRefs.current).forEach((media) => media && mediaRefs.current[media.dataset.postId]?.pause?.());
       }
 
-      observerRef.current = new IntersectionObserver(
+      const observer = new IntersectionObserver(
         (entries) => {
           entries.forEach((entry) => {
             const media = entry.target;
@@ -61,36 +77,50 @@ const FeedScreen = ({ token, userId }) => {
         { threshold: 0.8 }
       );
 
-      Object.values(mediaRefs.current).forEach((media) => media && observerRef.current.observe(media));
+      Object.values(mediaRefs.current).forEach((media) => media && observer.observe(media));
+      return () => observer.disconnect();
     }, 300),
     []
   );
 
-  const fetchFeed = useCallback(async (pageNum = 1) => {
-    if (!token || !userId || loading || !hasMore) return;
+  const fetchFeed = useCallback(async (pageNum = 1, isRefresh = false) => {
+    if (!token || !userId || (loading && !isRefresh) || (!hasMore && !isRefresh)) return;
     setLoading(true);
+    if (isRefresh) setRefreshing(true);
     try {
+      const currentToken = token;
       const { data } = await axios.get(`https://gapp-6yc3.onrender.com/feed?page=${pageNum}&limit=10`, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { Authorization: `Bearer ${currentToken}` },
       });
-      const filteredPosts = data.posts.filter((post) => !post.isStory);
-      setPosts((prev) => (pageNum === 1 ? filteredPosts : [...prev, ...filteredPosts]));
-      setHasMore(data.hasMore);
+      const filteredPosts = Array.isArray(data.posts) ? data.posts.filter((post) => !post.isStory) : [];
+      setPosts((prev) => (pageNum === 1 || isRefresh ? filteredPosts : [...prev, ...filteredPosts]));
+      setHasMore(data.hasMore || false);
       setError('');
-      if (filteredPosts.length > 0 && pageNum === 1) {
+      if (filteredPosts.length > 0 && (pageNum === 1 || isRefresh)) {
         setPlayingPostId(filteredPosts[0]._id);
       }
     } catch (error) {
       console.error('Failed to fetch feed:', error);
-      setError(error.response?.data?.error || 'Failed to load feed');
+      if (error.response?.status === 401) {
+        const newToken = await refreshToken();
+        if (newToken) {
+          await fetchFeed(pageNum, isRefresh);
+        } else {
+          setError('Unauthorized. Please log in again.');
+          onUnauthorized?.();
+        }
+      } else {
+        setError(error.response?.data?.error || 'Failed to load feed');
+      }
     } finally {
       setLoading(false);
+      if (isRefresh) setRefreshing(false);
     }
-  }, [token, userId, loading, hasMore]);
+  }, [token, userId, loading, hasMore, refreshToken, onUnauthorized]);
 
   useEffect(() => {
-    fetchFeed();
     if (token && userId) {
+      fetchFeed();
       socket.emit('join', userId);
     }
 
@@ -107,9 +137,6 @@ const FeedScreen = ({ token, userId }) => {
     });
 
     return () => {
-      if (observerRef.current) {
-        observerRef.current.disconnect();
-      }
       socket.off('newPost');
       socket.off('postUpdate');
       socket.off('postDeleted');
@@ -121,11 +148,6 @@ const FeedScreen = ({ token, userId }) => {
     if (posts.length > 0 && feedRef.current) {
       feedRef.current.scrollTo({ top: currentIndex * window.innerHeight, behavior: 'smooth' });
     }
-    return () => {
-      if (observerRef.current) {
-        observerRef.current.disconnect();
-      }
-    };
   }, [posts, currentIndex, setupIntersectionObserver]);
 
   const handleScroll = useCallback(() => {
@@ -174,7 +196,17 @@ const FeedScreen = ({ token, userId }) => {
       setCurrentIndex(0);
     } catch (error) {
       console.error('Post error:', error);
-      setError(error.response?.data?.error || 'Failed to post');
+      if (error.response?.status === 401) {
+        const newToken = await refreshToken();
+        if (newToken) {
+          await postContent();
+        } else {
+          setError('Unauthorized. Please log in again.');
+          onUnauthorized?.();
+        }
+      } else {
+        setError(error.response?.data?.error || 'Failed to post');
+      }
       setUploadProgress(null);
     }
   };
@@ -192,6 +224,15 @@ const FeedScreen = ({ token, userId }) => {
       socket.emit('postUpdate', data);
     } catch (error) {
       console.error('Like error:', error);
+      if (error.response?.status === 401) {
+        const newToken = await refreshToken();
+        if (newToken) {
+          await likePost(postId);
+        } else {
+          setError('Unauthorized. Please log in again.');
+          onUnauthorized?.();
+        }
+      }
     }
   };
 
@@ -211,18 +252,32 @@ const FeedScreen = ({ token, userId }) => {
       setComment('');
     } catch (error) {
       console.error('Comment error:', error);
+      if (error.response?.status === 401) {
+        const newToken = await refreshToken();
+        if (newToken) {
+          await commentPost(postId);
+        } else {
+          setError('Unauthorized. Please log in again.');
+          onUnauthorized?.();
+        }
+      }
     }
   };
 
   const timeAgo = (date) => {
     const now = new Date();
-    const diff = now - new Date(date);
+    const diff = now - parseInt(date);
     const minutes = Math.floor(diff / 60000);
     if (minutes < 60) return `${minutes}m`;
     const hours = Math.floor(minutes / 60);
     if (hours < 24) return `${hours}h`;
     return `${Math.floor(hours / 24)}d`;
   };
+
+  const handleRefresh = useCallback(() => {
+    setPage(1);
+    fetchFeed(1, true);
+  }, [fetchFeed]);
 
   const swipeHandlers = useSwipeable({
     onSwipedUp: () => {
@@ -231,7 +286,11 @@ const FeedScreen = ({ token, userId }) => {
     },
     onSwipedDown: () => {
       if (showComments) return;
-      setCurrentIndex((prev) => Math.max(prev - 1, 0));
+      if (currentIndex === 0) {
+        handleRefresh();
+      } else {
+        setCurrentIndex((prev) => Math.max(prev - 1, 0));
+      }
     },
     onSwipedLeft: () => {
       if (showComments) setShowComments(null);
@@ -239,13 +298,31 @@ const FeedScreen = ({ token, userId }) => {
     onSwipedRight: () => {
       if (!showComments && playingPostId) setShowComments(playingPostId);
     },
-    trackMouse: true,
+    trackMouse: false,
     delta: 50,
   });
 
   const handleDoubleTap = (postId) => {
     likePost(postId);
   };
+
+  const LoadingSkeleton = () => (
+    <div className="h-screen w-full bg-gray-200 animate-pulse relative snap-start md:max-w-[600px] md:h-[800px] md:rounded-lg">
+      <div className="absolute top-4 left-4 flex items-center">
+        <div className="w-10 h-10 rounded-full bg-gray-300"></div>
+        <div className="ml-2">
+          <div className="w-20 h-4 bg-gray-300 rounded"></div>
+          <div className="w-10 h-3 mt-1 bg-gray-300 rounded"></div>
+        </div>
+      </div>
+      <div className="w-full h-full bg-gray-300"></div>
+      <div className="absolute right-4 bottom-20 flex flex-col space-y-4">
+        {[...Array(3)].map((_, i) => (
+          <div key={i} className="w-8 h-8 bg-gray-300 rounded-full"></div>
+        ))}
+      </div>
+    </div>
+  );
 
   return (
     <motion.div
@@ -254,8 +331,7 @@ const FeedScreen = ({ token, userId }) => {
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       transition={{ duration: 0.5 }}
-      className="h-screen overflow-y-auto bg-black snap-y snap-mandatory"
-      style={{ scrollSnapType: 'y mandatory' }}
+      className="h-screen overflow-y-auto bg-black snap-y snap-mandatory md:max-w-[600px] md:mx-auto md:rounded-lg md:shadow-lg"
     >
       {/* Floating Post Button */}
       <div className="fixed bottom-20 right-4 z-20">
@@ -263,7 +339,7 @@ const FeedScreen = ({ token, userId }) => {
           whileHover={{ scale: 1.1, rotate: 90 }}
           whileTap={{ scale: 0.9 }}
           onClick={() => setShowPostModal(true)}
-          className="bg-blue-500 text-white p-3 rounded-full shadow-lg"
+          className="bg-gradient-to-r from-blue-500 to-purple-600 text-white p-4 rounded-full shadow-lg"
         >
           <FaPlus className="text-xl" />
         </motion.button>
@@ -276,15 +352,15 @@ const FeedScreen = ({ token, userId }) => {
             initial={{ opacity: 0, y: 50 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 50 }}
-            className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-30"
+            className="fixed inset-0 bg-black bg-opacity-80 flex items-center justify-center z-30 px-4"
           >
-            <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg w-full max-w-md relative">
+            <div className="bg-gray-900 text-white p-6 rounded-2xl shadow-2xl w-full max-w-md relative">
               {uploadProgress !== null && (
-                <div className="absolute inset-0 flex items-center justify-center bg-gray-200 bg-opacity-75">
+                <div className="absolute inset-0 flex items-center justify-center bg-gray-900 bg-opacity-75">
                   <div className="relative w-20 h-20">
                     <svg className="w-full h-full" viewBox="0 0 36 36">
                       <path
-                        className="text-gray-300"
+                        className="text-gray-700"
                         d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
                         fill="none"
                         stroke="currentColor"
@@ -299,67 +375,76 @@ const FeedScreen = ({ token, userId }) => {
                         strokeDasharray={`${uploadProgress}, 100`}
                       />
                     </svg>
-                    <span className="absolute inset-0 flex items-center justify-center text-blue-500">
+                    <span className="absolute inset-0 flex items-center justify-center text-blue-500 font-bold">
                       {uploadProgress}%
                     </span>
                   </div>
                 </div>
               )}
-              <select
-                value={contentType}
-                onChange={(e) => setContentType(e.target.value)}
-                className="w-full p-2 mb-4 border rounded-lg dark:bg-gray-700 dark:text-white focus:ring-2 focus:ring-blue-500"
-              >
-                <option value="text">Text</option>
-                <option value="image">Image</option>
-                <option value="video">Video</option>
-                <option value="audio">Audio</option>
-                <option value="raw">Document</option>
-              </select>
+              <div className="relative mb-4">
+                <select
+                  value={contentType}
+                  onChange={(e) => setContentType(e.target.value)}
+                  className="w-full p-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:ring-2 focus:ring-blue-500 focus:outline-none transition duration-200"
+                >
+                  <option value="text">Text</option>
+                  <option value="image">Image</option>
+                  <option value="video">Video</option>
+                  <option value="audio">Audio</option>
+                  <option value="raw">Document</option>
+                </select>
+              </div>
               <div className="flex items-center mb-4">
                 {contentType === 'text' ? (
                   <textarea
                     value={caption}
                     onChange={(e) => setCaption(e.target.value)}
-                    className="flex-1 p-2 border rounded-lg dark:bg-gray-700 dark:text-white focus:ring-2 focus:ring-blue-500"
-                    placeholder="Write something..."
+                    className="flex-1 p-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:ring-2 focus:ring-blue-500 focus:outline-none transition duration-200 resize-none"
+                    placeholder="What's on your mind?"
+                    rows="4"
                   />
                 ) : (
                   <input
                     type="file"
                     accept={
                       contentType === 'image'
-                        ? 'image/*'
+                        ? 'image/jpeg,image/png'
                         : contentType === 'video'
-                        ? 'video/*'
+                        ? 'video/mp4,video/webm'
                         : contentType === 'audio'
-                        ? 'audio/*'
+                        ? 'audio/mpeg,audio/wav'
                         : '*/*'
                     }
                     onChange={(e) => setFile(e.target.files[0])}
-                    className="flex-1 p-2 border rounded-lg dark:bg-gray-700 dark:text-white"
+                    className="flex-1 p-3 bg-gray-800 border border-gray-700 rounded-lg text-white file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:bg-blue-500 file:text-white file:cursor-pointer"
                   />
                 )}
-                <FaPaperPlane
+                <motion.button
+                  whileHover={{ scale: 1.1 }}
+                  whileTap={{ scale: 0.9 }}
                   onClick={postContent}
-                  className="ml-2 text-xl text-blue-500 cursor-pointer hover:text-blue-600"
-                />
+                  className="ml-3 p-3 bg-blue-500 rounded-full"
+                >
+                  <FaPaperPlane className="text-xl text-white" />
+                </motion.button>
               </div>
               {contentType !== 'text' && (
                 <input
                   type="text"
                   value={caption}
                   onChange={(e) => setCaption(e.target.value)}
-                  className="w-full p-2 border rounded-lg dark:bg-gray-700 dark:text-white focus:ring-2 focus:ring-blue-500"
-                  placeholder="Add a caption (optional)"
+                  className="w-full p-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:ring-2 focus:ring-blue-500 focus:outline-none transition duration-200"
+                  placeholder="Add a caption..."
                 />
               )}
-              <button
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
                 onClick={() => setShowPostModal(false)}
-                className="mt-4 w-full bg-gray-300 dark:bg-gray-600 p-2 rounded-lg hover:bg-gray-400 dark:hover:bg-gray-500"
+                className="mt-4 w-full bg-gray-700 text-white p-3 rounded-lg hover:bg-gray-600 transition duration-200"
               >
                 Cancel
-              </button>
+              </motion.button>
             </div>
           </motion.div>
         )}
@@ -367,181 +452,219 @@ const FeedScreen = ({ token, userId }) => {
 
       {/* Error Display */}
       {error && (
-        <p className="text-red-500 text-center py-2 z-10 fixed top-0 w-full bg-black bg-opacity-75">{error}</p>
+        <motion.div
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="text-red-500 text-center py-3 z-10 fixed top-0 w-full bg-black bg-opacity-75 md:max-w-[600px] md:mx-auto"
+        >
+          {error}
+          {error.includes('Unauthorized') && (
+            <button
+              onClick={() => onUnauthorized?.()}
+              className="ml-2 text-blue-500 underline"
+            >
+              Log In
+            </button>
+          )}
+        </motion.div>
+      )}
+
+      {/* Refresh Indicator */}
+      {refreshing && (
+        <div className="fixed top-4 left-0 right-0 text-center text-white z-10">
+          <FaSyncAlt className="inline-block w-6 h-6 animate-spin" />
+        </div>
       )}
 
       {/* Loading Indicator */}
-      {loading && (
+      {loading && !refreshing && (
         <div className="fixed bottom-4 left-0 right-0 text-center text-white">
           <div className="inline-block w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
         </div>
       )}
 
       {/* TikTok-like Feed */}
-      {posts.length === 0 && !loading ? (
+      {posts.length === 0 && !loading && !refreshing ? (
         <div className="h-screen flex items-center justify-center text-white">
           <p>No posts available</p>
         </div>
       ) : (
-        posts.map((post, index) => (
-          <motion.div
-            key={post._id}
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ duration: 0.3 }}
-            className="h-screen w-full flex flex-col items-center justify-center text-white relative snap-start"
-            onDoubleClick={() => handleDoubleTap(post._id)}
-          >
-            {/* User Info */}
-            <div className="absolute top-4 left-4 z-10 flex items-center">
-              <img
-                src={post.photo || 'https://placehold.co/40x40'}
-                alt="Profile"
-                className="w-10 h-10 rounded-full mr-2"
-              />
-              <div>
-                <span className="font-semibold">{post.username || 'Unknown'}</span>
-                <span className="text-xs ml-2">{timeAgo(post.createdAt)}</span>
+        posts.length === 0 && loading ? (
+          [...Array(3)].map((_, i) => <LoadingSkeleton key={i} />)
+        ) : (
+          posts.map((post, index) => (
+            <motion.div
+              key={post._id}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ duration: 0.3 }}
+              className="h-screen w-full flex flex-col items-center justify-center text-white relative snap-start md:max-w-[600px] md:mx-auto md:h-[800px] md:rounded-lg md:shadow-lg md:bg-gray-900"
+              onDoubleClick={() => handleDoubleTap(post._id)}
+            >
+              {/* User Info */}
+              <div className="absolute top-4 left-4 z-10 flex items-center">
+                <img
+                  src={post.photo || 'https://placehold.co/40x40'}
+                  alt="Profile"
+                  className="w-10 h-10 rounded-full mr-2 border-2 border-blue-500"
+                />
+                <div>
+                  <span className="font-bold text-white">{post.username || 'Unknown'}</span>
+                  <span className="text-xs ml-2 text-gray-400">{timeAgo(post.createdAt)}</span>
+                </div>
               </div>
-            </div>
 
-            {/* Post Content */}
-            {post.contentType === 'text' && (
-              <p className="text-lg p-4 bg-black bg-opacity-50 rounded">{post.content}</p>
-            )}
-            {post.contentType === 'image' && (
-              <img
-                src={post.content}
-                alt="Post"
-                className="w-screen h-screen object-cover"
-                data-post-id={post._id}
-                ref={(el) => (mediaRefs.current[post._id] = el)}
-              />
-            )}
-            {post.contentType === 'video' && (
-              <video
-                ref={(el) => (mediaRefs.current[post._id] = el)}
-                data-post-id={post._id}
-                playsInline
-                muted={muted}
-                loop
-                src={post.content}
-                className="w-screen h-screen object-cover"
-              />
-            )}
-            {post.contentType === 'audio' && (
-              <audio
-                ref={(el) => (mediaRefs.current[post._id] = el)}
-                data-post-id={post._id}
-                controls
-                src={post.content}
-                className="w-full mt-4"
-              />
-            )}
-            {post.contentType === 'raw' && (
-              <a
-                href={post.content}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-blue-500 p-4 bg-black bg-opacity-50 rounded"
-              >
-                Open Document
-              </a>
-            )}
-
-            {/* Interactions */}
-            <div className="absolute right-4 bottom-20 flex flex-col items-center space-y-6 z-10">
-              <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
-                <FaHeart
-                  onClick={() => likePost(post._id)}
-                  className={`text-3xl cursor-pointer ${post.likedBy?.includes(userId) ? 'text-red-500' : 'text-white'}`}
+              {/* Post Content */}
+              {post.contentType === 'text' && (
+                <p className="text-lg p-4 bg-black bg-opacity-50 rounded-lg max-w-[80%] mx-auto text-center">
+                  {post.content}
+                </p>
+              )}
+              {post.contentType === 'image' && (
+                <img
+                  src={post.content}
+                  alt="Post"
+                  className="w-full h-full object-cover md:rounded-lg"
+                  data-post-id={post._id}
+                  ref={(el) => (mediaRefs.current[post._id] = el)}
                 />
-                <span className="text-sm">{post.likes || 0}</span>
-              </motion.div>
-              <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
-                <FaComment
-                  onClick={() => setShowComments(post._id)}
-                  className="text-3xl cursor-pointer text-white hover:text-blue-500"
-                />
-                <span className="text-sm">{post.comments?.length || 0}</span>
-              </motion.div>
-              <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
-                <FaShare
-                  onClick={() =>
-                    navigator.clipboard
-                      .writeText(`${window.location.origin}/post/${post._id}`)
-                      .then(() => alert('Link copied!'))
-                  }
-                  className="text-3xl cursor-pointer text-white hover:text-blue-500"
-                />
-              </motion.div>
+              )}
               {post.contentType === 'video' && (
-                <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
-                  {muted ? (
-                    <FaVolumeMute
-                      onClick={() => setMuted(false)}
-                      className="text-3xl cursor-pointer text-white hover:text-blue-500"
-                    />
-                  ) : (
-                    <FaVolumeUp
-                      onClick={() => setMuted(true)}
-                      className="text-3xl cursor-pointer text-white hover:text-blue-500"
-                    />
-                  )}
-                </motion.div>
+                <video
+                  ref={(el) => (mediaRefs.current[post._id] = el)}
+                  data-post-id={post._id}
+                  playsInline
+                  autoPlay
+                  muted={muted}
+                  loop
+                  src={post.content}
+                  className="w-full h-full object-cover md:rounded-lg"
+                />
               )}
-            </div>
-
-            {/* Caption */}
-            {post.caption && (
-              <p className="absolute bottom-4 left-4 text-sm bg-black bg-opacity-50 p-2 rounded max-w-[70%]">
-                {post.caption}
-              </p>
-            )}
-
-            {/* Comments Modal */}
-            <AnimatePresence>
-              {showComments === post._id && (
-                <motion.div
-                  initial={{ opacity: 0, y: 100 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: 100 }}
-                  className="fixed bottom-0 left-0 right-0 bg-white dark:bg-gray-800 p-4 rounded-t-lg shadow-lg h-1/2 overflow-y-auto z-50"
+              {post.contentType === 'audio' && (
+                <audio
+                  ref={(el) => (mediaRefs.current[post._id] = el)}
+                  data-post-id={post._id}
+                  controls
+                  autoPlay
+                  src={post.content}
+                  className="w-full mt-4"
+                />
+              )}
+              {post.contentType === 'raw' && (
+                <a
+                  href={post.content}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-blue-500 p-4 bg-black bg-opacity-50 rounded-lg"
                 >
-                  <h3 className="text-lg font-bold text-blue-500 dark:text-gray-100 mb-2">Comments</h3>
-                  {post.comments?.length === 0 ? (
-                    <p className="text-gray-500 dark:text-gray-400">No comments yet</p>
-                  ) : (
-                    post.comments.map((c, i) => (
-                      <div key={i} className="flex items-center mb-2">
-                        <img
-                          src={c.photo || 'https://placehold.co/30x30'}
-                          alt="Profile"
-                          className="w-8 h-8 rounded-full mr-2"
-                        />
-                        <p className="text-sm text-black dark:text-gray-100">
-                          <span className="font-semibold">{c.username || 'Unknown'}</span> {c.comment}
-                        </p>
-                      </div>
-                    ))
-                  )}
-                  <div className="flex items-center mt-2">
-                    <input
-                      value={comment}
-                      onChange={(e) => setComment(e.target.value)}
-                      className="flex-1 p-2 border rounded-full dark:bg-gray-700 dark:text-white focus:ring-2 focus:ring-blue-500"
-                      placeholder="Add a comment..."
-                    />
-                    <FaPaperPlane
-                      onClick={() => commentPost(post._id)}
-                      className="ml-2 text-xl text-blue-500 cursor-pointer hover:text-blue-600"
-                    />
-                  </div>
+                  Open Document
+                </a>
+              )}
+
+              {/* Interactions */}
+              <div className="absolute right-4 bottom-20 flex flex-col items-center space-y-6 z-10">
+                <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
+                  <FaHeart
+                    onClick={() => likePost(post._id)}
+                    className={`text-3xl cursor-pointer ${post.likedBy?.includes(userId) ? 'text-red-500' : 'text-white'}`}
+                  />
+                  <span className="text-sm text-white">{post.likes || 0}</span>
+                </motion.div>
+                <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
+                  <FaComment
+                    onClick={() => setShowComments(post._id)}
+                    className="text-3xl cursor-pointer text-white hover:text-blue-500"
+                  />
+                  <span className="text-sm text-white">{post.comments?.length || 0}</span>
+                </motion.div>
+                <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
+                  <FaShare
+                    onClick={() =>
+                      navigator.clipboard
+                        .writeText(`${window.location.origin}/post/${post._id}`)
+                        .then(() => alert('Link copied!'))
+                    }
+                    className="text-3xl cursor-pointer text-white hover:text-blue-500"
+                  />
+                </motion.div>
+                {post.contentType === 'video' && (
+                  <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
+                    {muted ? (
+                      <FaVolumeMute
+                        onClick={() => setMuted(false)}
+                        className="text-3xl cursor-pointer text-white hover:text-blue-500"
+                      />
+                    ) : (
+                      <FaVolumeUp
+                        onClick={() => setMuted(true)}
+                        className="text-3xl cursor-pointer text-white hover:text-blue-500"
+                      />
+                    )}
+                  </motion.div>
+                )}
+              </div>
+
+              {/* Caption */}
+              {post.caption && (
+                <motion.div
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="absolute bottom-4 left-4 right-4 text-sm bg-black bg-opacity-50 p-3 rounded-lg max-w-[70%] md:max-w-[80%]"
+                >
+                  <span className="font-bold text-white">{post.username || 'Unknown'}</span>
+                  <span className="ml-2 text-white">{post.caption}</span>
                 </motion.div>
               )}
-            </AnimatePresence>
-          </motion.div>
-        ))
+
+              {/* Comments Modal */}
+              <AnimatePresence>
+                {showComments === post._id && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 100 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 100 }}
+                    className="fixed bottom-0 left-0 right-0 bg-gray-900 text-white p-4 rounded-t-lg shadow-lg h-1/2 overflow-y-auto z-50 md:max-w-[600px] md:mx-auto"
+                  >
+                    <h3 className="text-lg font-bold text-blue-500 mb-2">Comments</h3>
+                    {post.comments?.length === 0 ? (
+                      <p className="text-gray-400">No comments yet</p>
+                    ) : (
+                      post.comments.map((c, i) => (
+                        <div key={i} className="flex items-center mb-3">
+                          <img
+                            src={c.photo || 'https://placehold.co/30x30'}
+                            alt="Profile"
+                            className="w-8 h-8 rounded-full mr-2 border border-gray-700"
+                          />
+                          <p className="text-sm text-white">
+                            <span className="font-semibold">{c.username || 'Unknown'}</span> {c.comment}
+                          </p>
+                        </div>
+                      ))
+                    )}
+                    <div className="flex items-center mt-3">
+                      <input
+                        value={comment}
+                        onChange={(e) => setComment(e.target.value)}
+                        className="flex-1 p-3 bg-gray-800 border border-gray-700 rounded-full text-white focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                        placeholder="Add a comment..."
+                      />
+                      <motion.button
+                        whileHover={{ scale: 1.1 }}
+                        whileTap={{ scale: 0.9 }}
+                        onClick={() => commentPost(post._id)}
+                        className="ml-3 p-3 bg-blue-500 rounded-full"
+                      >
+                        <FaPaperPlane className="text-xl text-white" />
+                      </motion.button>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </motion.div>
+          ))
+        )
       )}
 
       {/* Comments Overlay */}

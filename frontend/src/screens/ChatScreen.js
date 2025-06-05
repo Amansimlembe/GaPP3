@@ -24,6 +24,7 @@ const generateClientMessageId = () => `${Date.now()}-${Math.random().toString(36
 const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtualNumber, photo }) => {
   const dispatch = useDispatch();
   const { chats, selectedChat } = useSelector((state) => state.messages);
+  const selectedChatRef = useRef(selectedChat); 
   const [users, setUsers] = useState(() => JSON.parse(localStorage.getItem('cachedUsers')) || []);
   const [message, setMessage] = useState('');
   const [files, setFiles] = useState([]);
@@ -403,151 +404,164 @@ const sendPendingMessages = useCallback(async () => {
 }, [pendingMessages, socket, dispatch]);
 
 
-  const handleFileChange = useCallback(
-    async (e, type) => {
-      try {
-        const selectedFiles = Array.from(e.target.files);
-        if (!selectedFiles.length || !selectedChatRef.current) {
-          setError('No files selected');
-          return;
-        }
-const compressedFiles = await Promise.all(
-  selectedFiles.map((file) => (file.type.startsWith('image') ? compressImage(file) : file))
-);
-setFiles(compressedFiles);
-setContentType(type);
-setMediaPreview(
-  compressedFiles.map((file) => ({
-    type,
-    content: URL.createObjectURL(file),
-    originalFile: file,
-    caption: captions[file.name] || '',
-  }))
-);
-const tempMessages = compressedFiles.map((file) => {
-  const clientMessageId = generateClientMessageId();
-  return {
-    _id: clientMessageId,
-    senderId: userId,
-    recipientId: selectedChat,
-    content: URL.createObjectURL(file),
-    contentType: type,
-    status: 'uploading',
-    createdAt: new Date().toISOString(),
-    originalFilename: file.name,
-    uploadProgress: 0,
-    clientMessageId,
-    senderVirtualNumber: virtualNumber,
-    senderUsername: username,
-    senderPhoto: photo,
-  };
-});
-
-        tempMessages.forEach((msg) => {
-  dispatch(addMessage({ recipientId: selectedChat, message: msg }));
-  console.log('Added temporary media message:', msg._id);
-});
-
- if (listRef.current && isAtBottomRef.current && chats[selectedChat]?.length) {
-  listRef.current.scrollToRow(chats[selectedChat].length - 1);
-}
 
 
 
-        for (let [index, file] of compressedFiles.entries()) {
-          const clientMessageId = tempMessages[index]._id;
+// Update useEffect to keep selectedChatRef in sync with selectedChat
+useEffect(() => {
+  selectedChatRef.current = selectedChat;
+}, [selectedChat]);
 
-const retryUpload = async (retryCount = 3) => {
-  let attempt = 0;
-  while (attempt < retryCount) {
-    const formData = new FormData();
+// Corrected handleFileChange function (starting around line 260)
+const handleFileChange = useCallback(
+  async (e, type) => {
     try {
-      formData.append('file', file); // Correct key expected by the backend
-      formData.append('userId', userId);
-      formData.append('recipientId', selectedChatRef.current);
-      formData.append('clientMessageId', clientMessageId);
-      formData.append('senderVirtualNumber', virtualNumber);
-      formData.append('senderUsername', username);
-      formData.append('senderPhoto', photo);
-      if (captions[clientMessageId]) {
-        formData.append('caption', captions[clientMessageId]);
-      }
-
-      const response = await axios.post(`${BASE_URL}/social/upload`, formData, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'multipart/form-data',
-        },
-        onUploadProgress: (data) => {
-          const percentCompleted = Math.round((data.loaded * 100) / data.total);
-          setUploadProgress((prev) => ({ ...prev, [clientMessageId]: percentCompleted }));
-          dispatch(
-            updateMessageStatus({
-              recipientId: selectedChat,
-              messageId: clientMessageId,
-              status: 'uploading',
-              uploadProgress: percentCompleted,
-            })
-          );
-          console.log(`Upload progress for ${clientMessageId}: ${percentCompleted}%`);
-        },
-      });
-
-      const { message: uploadedMessage } = response.data;
-      dispatch(
-        updateMessage({
-          recipientId: selectedChatRef.current,
-          message: uploadedMessage,
-          replaceId: clientMessageId,
-        })
-      );
-      socket.emit('messageStatus', uploadedMessage);
-      await saveMessages([uploadedMessage]);
-      console.log('Media uploaded successfully:', uploadedMessage._id);
-      return;
-    } catch (error) {
-      console.error(`Media upload attempt ${attempt + 1} failed:`, error);
-      attempt++;
-      if (error.response?.status === 401) {
-        setError('Session expired, please log in again');
-        setTimeout(() => handleLogout(), 1000);
+      const selectedFiles = Array.from(e.target.files);
+      if (!selectedFiles.length || !selectedChatRef.current) {
+        setError('No files selected or no chat selected');
+        console.warn('No files or invalid chat:', { selectedChat: selectedChatRef.current });
         return;
       }
-      if (error.response?.status === 429) {
-        await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * 1000));
-      }
-      if (attempt === retryCount) {
-        dispatch(
-          updateMessageStatus({
-            recipientId: selectedChatRef.current,
-            messageId: clientMessageId,
-            status: 'failed',
-            uploadProgress: false,
-          })
-        );
-        setError('Failed to upload media');
-        console.log(`Media upload failed for ${clientMessageId}`);
-      }
-    }
-  }
-};
-          retryUpload();
-        }
+      const compressedFiles = await Promise.all(
+        selectedFiles.map((file) => (file.type.startsWith('image') ? compressImage(file) : file))
+      );
+      setFiles(compressedFiles);
+      setContentType(type);
+      setMediaPreview(
+        compressedFiles.map((file) => ({
+          type,
+          content: URL.createObjectURL(file),
+          originalFile: file,
+          caption: captions[file.name] || '',
+        }))
+      );
+      const tempMessages = compressedFiles.map((file) => {
+        const clientMessageId = generateClientMessageId();
+        return {
+          _id: clientMessageId,
+          senderId: userId,
+          recipientId: selectedChatRef.current, // Use ref here
+          content: URL.createObjectURL(file),
+          contentType: type,
+          status: 'uploading',
+          createdAt: new Date().toISOString(),
+          originalFilename: file.name,
+          uploadProgress: 0,
+          clientMessageId,
+          senderVirtualNumber: virtualNumber,
+          senderUsername: username,
+          senderPhoto: photo,
+        };
+      });
+      
 
-        setFiles([]);
-        setMediaPreview([]);
-        setCaptions({});
-        setMessage('');
-        setReplyTo(null);
-        inputRef.current?.focus();
-        console.log('File change processed successfully');
-      } catch (err) {
-        console.error('File change error:', err);
-        setError('Error processing file');
+      tempMessages.forEach((msg) => {
+        dispatch(addMessage({ recipientId: selectedChatRef.current, message: msg }));
+        console.log('Added temporary media message:', msg._id);
+      });
+
+      if (listRef.current && isAtBottomRef.current && chats[selectedChatRef.current]?.length) {
+        listRef.current.scrollToRow(chats[selectedChatRef.current].length - 1);
       }
-    },
-    [selectedChat, userId, token, socket, dispatch, virtualNumber, username, photo, captions, chats]
-  );
+
+      for (let [index, file] of compressedFiles.entries()) {
+        const clientMessageId = tempMessages[index]._id;
+
+        const retryUpload = async (retryCount = 3) => {
+          let attempt = 0;
+          while (attempt < retryCount) {
+            const formData = new FormData();
+            try {
+              formData.append('file', file);
+              formData.append('userId', userId);
+              formData.append('recipientId', selectedChatRef.current);
+              formData.append('clientMessageId', clientMessageId);
+              formData.append('senderVirtualNumber', virtualNumber);
+              formData.append('senderUsername', username);
+              formData.append('senderPhoto', photo);
+              if (captions[clientMessageId]) {
+                formData.append('caption', captions[clientMessageId]);
+              }
+
+              const response = await axios.post(`${BASE_URL}/social/upload`, formData, {
+                headers: {
+                  Authorization: `Bearer ${token}`,
+                  'Content-Type': 'multipart/form-data',
+                },
+                onUploadProgress: (data) => {
+                  const percentCompleted = Math.round((data.loaded * 100) / data.total);
+                  setUploadProgress((prev) => ({ ...prev, [clientMessageId]: percentCompleted }));
+                  dispatch(
+                    updateMessageStatus({
+                      recipientId: selectedChatRef.current,
+                      messageId: clientMessageId,
+                      status: 'uploading',
+                      uploadProgress: percentCompleted,
+                    })
+                  );
+                  console.log(`Upload progress for ${clientMessageId}: ${percentCompleted}%`);
+                },
+              });
+
+              const { message: uploadedMessage } = response.data;
+              dispatch(
+                replaceMessage({
+                  recipientId: selectedChatRef.current,
+                  message: uploadedMessage,
+                  replaceId: clientMessageId,
+                })
+              );
+              socket.emit('messageStatus', uploadedMessage);
+              await saveMessages([uploadedMessage]);
+              console.log('Media uploaded successfully:', uploadedMessage._id);
+              return;
+            } catch (error) {
+              console.error(`Media upload attempt ${attempt + 1} failed:`, error);
+              attempt++;
+              if (error.response?.status === 401) {
+                setError('Session expired, please log in again');
+                setTimeout(() => handleLogout(), 1000);
+                return;
+              }
+              if (error.response?.status === 429) {
+                await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * 1000));
+              }
+              if (attempt === retryCount) {
+                dispatch(
+                  updateMessageStatus({
+                    recipientId: selectedChatRef.current,
+                    messageId: clientMessageId,
+                    status: 'failed',
+                    uploadProgress: false,
+                  })
+                );
+                setError('Failed to upload media');
+                console.log(`Media upload failed for ${clientMessageId}`);
+              }
+            }
+          }
+        };
+        retryUpload();
+      }
+
+      setFiles([]);
+      setMediaPreview([]);
+      setCaptions({});
+      setMessage('');
+      setReplyTo(null);
+      inputRef.current?.focus();
+      console.log('File change processed successfully');
+    } catch (err) {
+      console.error('File change error:', err);
+      setError('Error processing file');
+    }
+  },
+  [selectedChat, userId, token, socket, dispatch, virtualNumber, username, photo, captions, chats]
+);
+
+
+
+  
 
   const handleAddContact = useCallback(async () => {
     if (!newContactNumber.trim()) {
@@ -929,7 +943,6 @@ useEffect(() => {
   };
   initializeChat();
 }, [fetchChatList, sendPendingMessages, selectedChat, chats, dispatch, fetchMessages]);
-
 
 
 
