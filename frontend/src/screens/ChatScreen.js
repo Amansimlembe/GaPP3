@@ -1,7 +1,7 @@
-
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
+import forge from 'node-forge';
 import { FaArrowLeft, FaEllipsisV, FaPaperclip, FaSmile, FaPaperPlane, FaTimes, FaSignOutAlt, FaPlus } from 'react-icons/fa';
 import { motion, AnimatePresence } from 'framer-motion';
 import Picker from 'emoji-picker-react';
@@ -30,70 +30,38 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
   const [showAttachmentPicker, setShowAttachmentPicker] = useState(false);
   const [isTyping, setIsTyping] = useState({});
   const [unreadMessages, setUnreadMessages] = useState({});
-  const [isCryptoReady, setIsCryptoReady] = useState(false);
-  const [forge, setForge] = useState(null);
   const inputRef = useRef(null);
   const listRef = useRef(null);
   const menuRef = useRef(null);
 
-  // Dynamically load node-forge
-  useEffect(() => {
-    let isMounted = true;
-    import('node-forge')
-      .then((module) => {
-        if (isMounted) {
-          setForge(module.default || module);
-          if (module.random && module.cipher && module.pki && module.util && module.md) {
-            setIsCryptoReady(true);
-            console.debug('node-forge loaded successfully');
-          } else {
-            setError('Encryption library incomplete');
-            console.error('node-forge missing required modules:', module);
-          }
-        }
-      })
-      .catch((err) => {
-        if (isMounted) {
-          setError('Failed to load encryption library');
-          console.error('node-forge load error:', err.message);
-        }
-      });
-    return () => {
-      isMounted = false;
-    };
-  }, []);
 
-  const encryptMessage = useCallback(async (content, recipientPublicKey, isMedia = false) => {
-    if (!isCryptoReady || !forge || !recipientPublicKey) {
-      console.error('encryptMessage: Dependencies missing', { isCryptoReady, forge: !!forge, recipientPublicKey });
-      throw new Error('Encryption dependencies missing');
-    }
-    try {
-      console.debug('encryptMessage called', { contentLength: content?.length, isMedia });
-      const aesKey = forge.random.getBytesSync(32);
-      const iv = forge.random.getBytesSync(16);
-      const cipher = forge.cipher.createCipher('AES-CBC', aesKey);
-      cipher.start({ iv });
-      cipher.update(forge.util.createBuffer(isMedia ? content : forge.util.encodeUtf8(content)));
-      cipher.finish();
-      const encrypted = `${forge.util.encode64(cipher.output.getBytes())}|${forge.util.encode64(iv)}|${forge.util.encode64(
-        forge.pki.publicKeyFromPem(recipientPublicKey).encrypt(aesKey, 'RSA-OAEP', { md: forge.md.sha256.create() })
-      )}`;
-      return encrypted;
-    } catch (err) {
-      console.error('encryptMessage error:', err.message);
-      throw new Error('Failed to encrypt message: ' + err.message);
-    }
-  }, [isCryptoReady, forge]);
+// Replace encryptMessage (around line 124)
+const encryptMessage = useCallback(async (content, recipientPublicKey, isMedia = false) => {
+  if (!forge || !recipientPublicKey) {
+    throw new Error('Encryption dependencies missing');
+  }
+  try {
+    const aesKey = forge.random.getBytesSync(32);
+    const iv = forge.random.getBytesSync(16);
+    const cipher = forge.cipher.createCipher('AES-CBC', aesKey);
+    cipher.start({ iv });
+    cipher.update(forge.util.createBuffer(isMedia ? content : forge.util.encodeUtf8(content)));
+    cipher.finish();
+    const encrypted = `${forge.util.encode64(cipher.output.getBytes())}|${forge.util.encode64(iv)}|${forge.util.encode64(
+      forge.pki.publicKeyFromPem(recipientPublicKey).encrypt(aesKey, 'RSA-OAEP', { md: forge.md.sha256.create() })
+    )}`;
+    return encrypted;
+  } catch (err) {
+    throw new Error('Failed to encrypt message: ' + err.message);
+  }
+}, []);
+
+
+
 
   const decryptMessage = useCallback(async (encryptedContent, privateKeyPem, isMedia = false) => {
-    if (!isCryptoReady || !forge || !encryptedContent || !privateKeyPem) {
-      console.error('decryptMessage: Dependencies missing', { isCryptoReady, forge: !!forge, encryptedContent, privateKeyPem });
-      return isMedia ? null : '[Decryption failed]';
-    }
     try {
-      console.debug('decryptMessage called', { encryptedContentLength: encryptedContent?.length, isMedia });
-      if (typeof encryptedContent !== 'string' || !encryptedContent.includes('|')) {
+      if (!encryptedContent || typeof encryptedContent !== 'string' || !encryptedContent.includes('|')) {
         throw new Error('Invalid encrypted content format');
       }
       const [encryptedData, iv, encryptedAesKey] = encryptedContent.split('|').map(forge.util.decode64);
@@ -105,43 +73,31 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
       decipher.finish();
       return isMedia ? decipher.output.getBytes() : forge.util.decodeUtf8(decipher.output.getBytes());
     } catch (err) {
-      console.error('decryptMessage error:', err.message);
       return isMedia ? null : '[Decryption failed]';
     }
-  }, [isCryptoReady, forge]);
+  }, []);
 
   const getPublicKey = useCallback(async (recipientId) => {
     if (!isValidObjectId(recipientId)) throw new Error('Invalid recipientId');
     const cacheKey = `publicKey:${recipientId}`;
     const cachedKey = sessionStorage.getItem(cacheKey);
-    if (cachedKey) {
-      console.debug('getPublicKey: Using cached key', { recipientId });
-      return cachedKey;
-    }
+    if (cachedKey) return cachedKey;
     try {
       const { data } = await axios.get(`${BASE_URL}/auth/public_key/${recipientId}`, {
         headers: { Authorization: `Bearer ${token}` },
         timeout: 5000,
       });
-      if (!data.publicKey) throw new Error('No public key returned');
-      console.debug('getPublicKey: Fetched key', { recipientId, publicKey: data.publicKey.substring(0, 30) + '...' });
       sessionStorage.setItem(cacheKey, data.publicKey);
       return data.publicKey;
     } catch (err) {
-      console.error('getPublicKey error:', err.message);
-      throw new Error('Failed to fetch public key: ' + err.message);
+      throw new Error('Failed to fetch public key');
     }
   }, [token]);
 
   const fetchChatList = useCallback(async () => {
-    if (!isCryptoReady || !forge) {
-      console.warn('fetchChatList: Waiting for encryption library');
-      return;
-    }
     try {
       const privateKey = sessionStorage.getItem('privateKey');
       if (!privateKey) throw new Error('Private key missing');
-      console.debug('fetchChatList: Fetching chat list', { userId });
       const { data } = await axios.get(`${BASE_URL}/social/chat-list`, {
         headers: { Authorization: `Bearer ${token}` },
         params: { userId },
@@ -166,22 +122,20 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
       });
       setError('');
     } catch (err) {
-      console.error('fetchChatList error:', err.message);
       if (err.response?.status === 401 || err.message === 'Private key missing') {
         setError('Session expired, please log in again');
         setTimeout(() => handleLogout(), 2000);
       } else {
-        setError('Failed to load chat list: ' + err.message);
+        setError('Failed to load chat list');
       }
     }
-  }, [isCryptoReady, forge, token, userId, decryptMessage, handleLogout]);
+  }, [token, userId, handleLogout]);
 
   const fetchMessages = useCallback(async (chatId) => {
-    if (!isCryptoReady || !forge || !isValidObjectId(chatId)) return;
+    if (!isValidObjectId(chatId)) return;
     try {
       const privateKey = sessionStorage.getItem('privateKey');
       if (!privateKey) throw new Error('Private key missing');
-      console.debug('fetchMessages: Fetching messages', { chatId });
       const { data } = await axios.get(`${BASE_URL}/social/messages`, {
         headers: { Authorization: `Bearer ${token}` },
         params: { userId, chatId },
@@ -209,72 +163,73 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
       }
       listRef.current?.scrollToItem(decryptedMessages.length, 'end');
     } catch (err) {
-      console.error('fetchMessages error:', err.message);
-      setError('Failed to load messages: ' + err.message);
+      setError('Failed to load messages');
     }
-  }, [isCryptoReady, forge, token, userId, socket, decryptMessage]);
-
-  const sendMessage = useCallback(async () => {
-    if (!isCryptoReady || !forge || !message.trim() || !selectedChat || !isValidObjectId(selectedChat)) return;
-    const clientMessageId = generateClientMessageId();
-    const plaintextContent = message.trim();
-    try {
-      const recipientPublicKey = await getPublicKey(selectedChat);
-      if (!recipientPublicKey) throw new Error('Recipient public key not found');
-      const encryptedContent = await encryptMessage(plaintextContent, recipientPublicKey);
-      const messageData = {
-        senderId: userId,
-        recipientId: selectedChat,
-        content: encryptedContent,
-        contentType: 'text',
-        plaintextContent,
-        clientMessageId,
-        senderVirtualNumber: virtualNumber,
-        senderUsername: username,
-        senderPhoto: photo,
-      };
-      const tempMessage = {
-        _id: clientMessageId,
-        ...messageData,
-        status: 'pending',
-        createdAt: new Date(),
-      };
-      setMessages((prev) => ({
-        ...prev,
-        [selectedChat]: [...(prev[selectedChat] || []), tempMessage],
-      }));
-      socket?.emit('message', messageData, (ack) => {
-        if (ack?.error) {
-          setError('Failed to send message: ' + ack.error);
-          setMessages((prev) => ({
-            ...prev,
-            [selectedChat]: prev[selectedChat].map((msg) => 
-              msg._id === clientMessageId ? { ...msg, status: 'failed' } : msg
-            ),
-          }));
-          return;
-        }
+  }, [token, userId, socket]);
+// Update sendMessage to guard against invalid public key
+const sendMessage = useCallback(async () => {
+  if (!message.trim() || !selectedChat || !isValidObjectId(selectedChat)) return;
+  const clientMessageId = generateClientMessageId();
+  const plaintextContent = message.trim();
+  try {
+    const recipientPublicKey = await getPublicKey(selectedChat);
+    if (!recipientPublicKey) {
+      throw new Error('Recipient public key not found');
+    }
+    const encryptedContent = await encryptMessage(plaintextContent, recipientPublicKey);
+    const messageData = {
+      senderId: userId,
+      recipientId: selectedChat,
+      content: encryptedContent,
+      contentType: 'text',
+      plaintextContent,
+      clientMessageId,
+      senderVirtualNumber: virtualNumber,
+      senderUsername: username,
+      senderPhoto: photo,
+    };
+    const tempMessage = {
+      _id: clientMessageId,
+      ...messageData,
+      status: 'pending',
+      createdAt: new Date(),
+    };
+    setMessages((prev) => ({
+      ...prev,
+      [selectedChat]: [...(prev[selectedChat] || []), tempMessage],
+    }));
+    socket?.emit('message', messageData, (ack) => {
+      if (ack?.error) {
+        setError('Failed to send message: ' + ack.error);
         setMessages((prev) => ({
           ...prev,
           [selectedChat]: prev[selectedChat].map((msg) => 
-            msg._id === clientMessageId ? { ...ack.message, content: plaintextContent, status: 'sent' } : msg
+            msg._id === clientMessageId ? { ...msg, status: 'failed' } : msg
           ),
         }));
-      });
-      setMessage('');
-      inputRef.current?.focus();
-      listRef.current?.scrollToItem(messages[selectedChat]?.length ?? 0, 'end');
-    } catch (err) {
-      console.error('sendMessage error:', err.message);
-      setError('Failed to send message: ' + err.message);
+        return;
+      }
       setMessages((prev) => ({
         ...prev,
         [selectedChat]: prev[selectedChat].map((msg) => 
-          msg._id === clientMessageId ? { ...msg, status: 'failed' } : msg
+          msg._id === clientMessageId ? { ...ack.message, content: plaintextContent, status: 'sent' } : msg
         ),
       }));
-    }
-  }, [isCryptoReady, forge, message, selectedChat, userId, virtualNumber, username, photo, socket, getPublicKey, encryptMessage]);
+    });
+    setMessage('');
+    inputRef.current?.focus();
+    listRef.current?.scrollToItem(messages[selectedChat]?.length ?? 0, 'end');
+  } catch (err) {
+    setError('Failed to send message: ' + err.message);
+    setMessages((prev) => ({
+      ...prev,
+      [selectedChat]: prev[selectedChat].map((msg) => 
+        msg._id === clientMessageId ? { ...msg, status: 'failed' } : msg
+      ),
+    }));
+  }
+}, [message, selectedChat, userId, virtualNumber, username, photo, socket, setError, setMessages, setMessage]);
+
 
   const handleAddContact = async () => {
     if (!contactInput.trim()) {
@@ -282,7 +237,6 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
       return;
     }
     try {
-      console.debug('handleAddContact: Adding contact', { virtualNumber: contactInput });
       const response = await axios.post(
         `${BASE_URL}/social/add_contact`,
         { userId, virtualNumber: contactInput.trim() },
@@ -297,7 +251,6 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
       setShowAddContact(false);
       socket?.emit('newContact', { userId, contactData: response.data });
     } catch (err) {
-      console.error('handleAddContact error:', err.message);
       setContactError(err.response?.data?.error || 'Failed to add contact');
     }
   };
@@ -319,14 +272,12 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
       setSelectedChatAndNotify(null);
       navigate('/');
     } catch (err) {
-      console.error('handleLogout error:', err.message);
       setError('Failed to logout');
     }
   }, [socket, userId, setAuth, token, navigate]);
 
   useEffect(() => {
-    if (!token || !userId || !isCryptoReady) {
-      if (!isCryptoReady) console.warn('useEffect: Waiting for encryption library');
+    if (!token || !userId) {
       navigate('/');
       return;
     }
@@ -337,7 +288,7 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
     } else {
       fetchChatList();
     }
-  }, [isCryptoReady, fetchChatList, handleLogout, token, userId, navigate]);
+  }, [fetchChatList, handleLogout, token, userId, navigate]);
 
   useEffect(() => {
     if (selectedChat && !messages[selectedChat]) {
@@ -349,18 +300,17 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
     const handleClickOutside = (e) => {
       if (menuRef.current && !menuRef.current.contains(e.target)) {
         setShowMenu(false);
-        setShowAddContact(null);
+        setShowAddContact(false);
       }
     };
-    document.addEventListener('click', handleClickOutside);
-    return () => document.removeEventListener('click', handleClickOutside);
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
   useEffect(() => {
-    if (!socket || !isCryptoReady) return;
+    if (!socket) return;
 
     socket.on('newContact', ({ contactData }) => {
-      console.debug('Socket: newContact', { contactId: contactData.id });
       setChatList((prev) => {
         if (prev.find((chat) => chat.id === contactData.id)) return prev;
         return [...prev, { ...contactData, _id: contactData.id }];
@@ -368,7 +318,6 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
     });
 
     socket.on('chatListUpdated', ({ users }) => {
-      console.debug('Socket: chatListUpdated', { userCount: users.length });
       setChatList((prev) => {
         const newChatMap = new Map(users.map((chat) => [chat.id, chat]));
         return [...newChatMap.values()];
@@ -378,27 +327,21 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
     socket.on('message', async (msg) => {
       const senderId = typeof msg.senderId === 'object' ? msg.senderId._id.toString() : msg.senderId.toString();
       const privateKey = sessionStorage.getItem('privateKey');
-      if (!privateKey || !isCryptoReady || !forge) {
-        setError('Private key missing or encryption not ready, please log in again');
-        console.error('Socket message: Dependencies missing', { privateKey: !!privateKey, isCryptoReady, forge: !!forge });
+      if (!privateKey) {
+        setError('Private key missing, please log in again');
         return;
       }
-      try {
-        console.debug('Socket: message received', { senderId, contentType: msg.contentType });
-        const decryptedContent = msg.contentType === 'text' ? await decryptMessage(msg.content, privateKey) : msg.content;
-        setMessages((prev) => ({
-          ...prev,
-          [senderId]: [...(prev[senderId] || []), { ...msg, content: decryptedContent }],
-        }));
-        if (selectedChat === senderId) {
-          socket.emit('batchMessageStatus', { messageIds: [msg._id], status: 'read', recipientId: userId });
-          setUnreadMessages((prev) => ({ ...prev, [senderId]: 0 }));
-          listRef.current?.scrollToItem(messages[senderId]?.length || 0, 'end');
-        } else {
-          setUnreadMessages((prev) => ({ ...prev, [senderId]: (prev[senderId] || 0) + 1 }));
-        }
-      } catch (err) {
-        console.error('Socket message handler error:', err.message);
+      const decryptedContent = msg.contentType === 'text' ? await decryptMessage(msg.content, privateKey) : msg.content;
+      setMessages((prev) => ({
+        ...prev,
+        [senderId]: [...(prev[senderId] || []), { ...msg, content: decryptedContent }],
+      }));
+      if (selectedChat === senderId) {
+        socket.emit('batchMessageStatus', { messageIds: [msg._id], status: 'read', recipientId: userId });
+        setUnreadMessages((prev) => ({ ...prev, [senderId]: 0 }));
+        listRef.current?.scrollToItem(messages[senderId]?.length || 0, 'end');
+      } else {
+        setUnreadMessages((prev) => ({ ...prev, [senderId]: (prev[senderId] || 0) + 1 }));
       }
     });
 
@@ -416,7 +359,6 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
     });
 
     socket.on('messageStatus', ({ messageIds, status }) => {
-      console.debug('Socket: messageStatus', { messageIds, status });
       setMessages((prev) => {
         const updatedMessages = { ...prev };
         Object.keys(updatedMessages).forEach((chatId) => {
@@ -436,7 +378,7 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
       socket.off('stopTyping');
       socket.off('messageStatus');
     };
-  }, [socket, isCryptoReady, forge, selectedChat, userId, messages, decryptMessage]);
+  }, [socket, selectedChat, userId, messages]);
 
   const handleTyping = useCallback(() => {
     if (socket && selectedChat) {
