@@ -45,10 +45,8 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
       const encrypted = `${forge.util.encode64(cipher.output.getBytes())}|${forge.util.encode64(iv)}|${forge.util.encode64(
         forge.pki.publicKeyFromPem(recipientPublicKey).encrypt(aesKey, 'RSA-OAEP', { md: forge.md.sha256.create() })
       )}`;
-      console.log('Message encrypted successfully');
       return encrypted;
     } catch (err) {
-      console.error('Encryption error:', err);
       throw new Error('Failed to encrypt message');
     }
   }, []);
@@ -65,45 +63,37 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
       decipher.start({ iv });
       decipher.update(forge.util.createBuffer(encryptedData));
       decipher.finish();
-      const decrypted = isMedia ? decipher.output.getBytes() : forge.util.decodeUtf8(decipher.output.getBytes());
-      console.log('Message decrypted successfully');
-      return decrypted;
+      return isMedia ? decipher.output.getBytes() : forge.util.decodeUtf8(decipher.output.getBytes());
     } catch (err) {
-      console.error('Decryption error:', err);
       return isMedia ? null : '[Decryption failed]';
     }
   }, []);
 
   const getPublicKey = useCallback(async (recipientId) => {
-    if (!isValidObjectId(recipientId)) {
-      throw new Error('Invalid recipientId');
-    }
+    if (!isValidObjectId(recipientId)) throw new Error('Invalid recipientId');
     const cacheKey = `publicKey:${recipientId}`;
     const cachedKey = sessionStorage.getItem(cacheKey);
     if (cachedKey) return cachedKey;
     try {
       const { data } = await axios.get(`${BASE_URL}/auth/public_key/${recipientId}`, {
         headers: { Authorization: `Bearer ${token}` },
+        timeout: 5000,
       });
       sessionStorage.setItem(cacheKey, data.publicKey);
-      console.log(`Public key fetched for ${recipientId}`);
       return data.publicKey;
     } catch (err) {
-      console.error(`Failed to fetch public key for ${recipientId}:`, err);
-      throw err;
+      throw new Error('Failed to fetch public key');
     }
   }, [token]);
 
   const fetchChatList = useCallback(async () => {
     try {
       const privateKey = sessionStorage.getItem('privateKey');
-      if (!privateKey) {
-        throw new Error('Private key missing');
-      }
+      if (!privateKey) throw new Error('Private key missing');
       const { data } = await axios.get(`${BASE_URL}/social/chat-list`, {
         headers: { Authorization: `Bearer ${token}` },
         params: { userId },
-        timeout: 10000,
+        timeout: 5000,
       });
       const processedUsers = await Promise.all(
         data.map(async (user) => {
@@ -118,13 +108,12 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
           return user;
         })
       );
-      setChatList(processedUsers);
+      setChatList((prev) => {
+        const newChatMap = new Map(processedUsers.map((chat) => [chat.id, chat]));
+        return [...newChatMap.values()];
+      });
       setError('');
-      if (socket) {
-        socket.emit('chatListUpdated', { userId, users: processedUsers });
-      }
     } catch (err) {
-      console.error('Fetch chat list failed:', err);
       if (err.response?.status === 401 || err.message === 'Private key missing') {
         setError('Session expired, please log in again');
         setTimeout(() => handleLogout(), 2000);
@@ -132,22 +121,17 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
         setError('Failed to load chat list');
       }
     }
-  }, [token, userId, socket]);
+  }, [token, userId, handleLogout]);
 
   const fetchMessages = useCallback(async (chatId) => {
-    if (!isValidObjectId(chatId)) {
-      setError('Invalid chat ID');
-      return;
-    }
+    if (!isValidObjectId(chatId)) return;
     try {
       const privateKey = sessionStorage.getItem('privateKey');
-      if (!privateKey) {
-        throw new Error('Private key missing');
-      }
+      if (!privateKey) throw new Error('Private key missing');
       const { data } = await axios.get(`${BASE_URL}/social/messages`, {
         headers: { Authorization: `Bearer ${token}` },
         params: { userId, chatId },
-        timeout: 10000,
+        timeout: 5000,
       });
       const decryptedMessages = await Promise.all(
         data.messages.map(async (msg) => {
@@ -161,22 +145,22 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
         ...prev,
         [chatId]: decryptedMessages,
       }));
-      if (data.unreadCount > 0) {
-        socket?.emit('readMessages', { chatId, userId });
-        setUnreadMessages((prev) => ({ ...prev, [chatId]: 0 }));
+      setUnreadMessages((prev) => ({ ...prev, [chatId]: 0 }));
+      if (decryptedMessages.length) {
+        socket?.emit('batchMessageStatus', {
+          messageIds: decryptedMessages.filter((m) => m.status !== 'read' && m.recipientId === userId).map((m) => m._id),
+          status: 'read',
+          recipientId: userId,
+        });
       }
       listRef.current?.scrollToItem(decryptedMessages.length, 'end');
     } catch (err) {
-      console.error('Fetch messages failed:', err);
       setError('Failed to load messages');
     }
   }, [token, userId, socket]);
 
   const sendMessage = useCallback(async () => {
-    if (!message.trim() || !selectedChat || !isValidObjectId(selectedChat)) {
-      setError('Cannot send empty message or invalid chat');
-      return;
-    }
+    if (!message.trim() || !selectedChat || !isValidObjectId(selectedChat)) return;
     const clientMessageId = generateClientMessageId();
     const plaintextContent = message.trim();
     try {
@@ -186,7 +170,7 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
         senderId: userId,
         recipientId: selectedChat,
         content: encryptedContent,
-        contentType: 'text/plain',
+        contentType: 'text',
         plaintextContent,
         clientMessageId,
         senderVirtualNumber: virtualNumber,
@@ -197,98 +181,67 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
         _id: clientMessageId,
         ...messageData,
         status: 'pending',
-        createdAt: new Date().toISOString(),
+        createdAt: new Date(),
       };
       setMessages((prev) => ({
         ...prev,
         [selectedChat]: [...(prev[selectedChat] || []), tempMessage],
       }));
-
-      const response = await axios.post(`${BASE_URL}/social/messages`, messageData, {
-        headers: { Authorization: `Bearer ${token}` },
+      socket?.emit('message', messageData, (ack) => {
+        if (ack?.error) {
+          setError('Failed to send message: ' + ack.error);
+          setMessages((prev) => ({
+            ...prev,
+            [selectedChat]: prev[selectedChat].map((msg) => 
+              msg._id === clientMessageId ? { ...msg, status: 'failed' } : msg
+            ),
+          }));
+          return;
+        }
+        setMessages((prev) => ({
+          ...prev,
+          [selectedChat]: prev[selectedChat].map((msg) => 
+            msg._id === clientMessageId ? { ...ack.message, content: plaintextContent, status: 'sent' } : msg
+          ),
+        }));
       });
-      const savedMessage = response.data.message;
-
-      if (socket) {
-        socket.emit('message', savedMessage, (ack) => {
-          if (ack?.error) {
-            console.error('Socket acknowledgment error:', ack.error);
-            setError(`Failed to send message: ${ack.error}`);
-            setMessages((prev) => {
-              const chatMessages = prev[selectedChat] || [];
-              return {
-                ...prev,
-                [selectedChat]: chatMessages.map((msg) =>
-                  msg._id === clientMessageId ? { ...msg, status: 'failed' } : msg
-                ),
-              };
-            });
-            return;
-          }
-
-          setMessages((prev) => {
-            const chatMessages = prev[selectedChat] || [];
-            return {
-              ...prev,
-              [selectedChat]: chatMessages.map((msg) =>
-                msg._id === clientMessageId
-                  ? { ...savedMessage, content: plaintextContent, status: 'sent' }
-                  : msg
-              ),
-            };
-          });
-        });
-      }
       setMessage('');
       inputRef.current?.focus();
-      listRef.current?.scrollToItem(messages[selectedChat]?.length || 0, 'end');
+      listRef.current?.scrollToItem(messages[selectedChat]?.length ?? 0, 'end');
     } catch (err) {
-      console.error('Send message error:', err);
-      setError(`Failed to send message: ${err.message}`);
-      setMessages((prev) => {
-        const chatMessages = prev[selectedChat] || [];
-        return {
-          ...prev,
-          [selectedChat]: chatMessages.map((msg) =>
-            msg._id === clientMessageId ? { ...msg, status: 'failed' } : msg
-          ),
-        };
-      });
+      setError('Failed to send message');
+      setMessages((prev) => ({
+        ...prev,
+        [selectedChat]: prev[selectedChat].map((msg) => 
+          msg._id === clientMessageId ? { ...msg, status: 'failed' } : msg
+        ),
+      }));
     }
-  }, [message, selectedChat, userId, token, virtualNumber, username, photo, socket]);
-
-
-
+  }, [message, selectedChat, userId, virtualNumber, username, photo, socket]);
 
   const handleAddContact = async () => {
-  if (!contactInput.trim()) {
-    setContactError('Please enter a valid virtual number');
-    return;
-  }
-  try {
-    const response = await axios.post(
-      `${BASE_URL}/social/add_contact`,
-      {
-        userId,
-        virtualNumber: contactInput.trim(),
-      },
-      {
-        headers: { Authorization: `Bearer ${token}` },
-      }
-    );
-    setChatList((prev) => [...prev, { ...response.data, _id: response.data.id }]);
-    setContactInput('');
-    setContactError('');
-    setShowAddContact(false);
-    socket?.emit('newContact', { userId, contactData: response.data });
-  } catch (err) {
-    console.error('Add contact error:', err);
-    setContactError(err.response?.data?.error || 'Failed to add contact');
-  }
-};
-
-
-
+    if (!contactInput.trim()) {
+      setContactError('Please enter a valid virtual number');
+      return;
+    }
+    try {
+      const response = await axios.post(
+        `${BASE_URL}/social/add_contact`,
+        { userId, virtualNumber: contactInput.trim() },
+        { headers: { Authorization: `Bearer ${token}` }, timeout: 5000 }
+      );
+      setChatList((prev) => {
+        if (prev.find((chat) => chat.id === response.data.id)) return prev;
+        return [...prev, { ...response.data, _id: response.data.id }];
+      });
+      setContactInput('');
+      setContactError('');
+      setShowAddContact(false);
+      socket?.emit('newContact', { userId, contactData: response.data });
+    } catch (err) {
+      setContactError(err.response?.data?.error || 'Failed to add contact');
+    }
+  };
 
   const handleLogout = useCallback(async () => {
     try {
@@ -296,23 +249,26 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
         socket.emit('leave', userId);
         await axios.post(`${BASE_URL}/auth/logout`, {}, {
           headers: { Authorization: `Bearer ${token}` },
+          timeout: 5000,
         });
-        socket?.disconnect();
+        socket.disconnect();
       }
       sessionStorage.clear();
       setAuth('', '', '', '', '', '');
       setChatList([]);
       setMessages({});
       setSelectedChatAndNotify(null);
-      console.log('Logged out successfully');
       navigate('/');
     } catch (err) {
-      console.error('Logout error:', err);
       setError('Failed to logout');
     }
   }, [socket, userId, setAuth, token, navigate]);
 
   useEffect(() => {
+    if (!token || !userId) {
+      navigate('/');
+      return;
+    }
     const privateKey = sessionStorage.getItem('privateKey');
     if (!privateKey) {
       setError('Private key missing, please log in again');
@@ -320,11 +276,10 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
     } else {
       fetchChatList();
     }
-  }, [fetchChatList, handleLogout]);
+  }, [fetchChatList, handleLogout, token, userId, navigate]);
 
   useEffect(() => {
     if (selectedChat && !messages[selectedChat]) {
-      setMessages((prev) => ({ ...prev, [selectedChat]: [] }));
       fetchMessages(selectedChat);
     }
   }, [selectedChat, fetchMessages]);
@@ -343,63 +298,80 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
   useEffect(() => {
     if (!socket) return;
 
+    socket.on('newContact', ({ contactData }) => {
+      setChatList((prev) => {
+        if (prev.find((chat) => chat.id === contactData.id)) return prev;
+        return [...prev, { ...contactData, _id: contactData.id }];
+      });
+    });
+
+    socket.on('chatListUpdated', ({ users }) => {
+      setChatList((prev) => {
+        const newChatMap = new Map(users.map((chat) => [chat.id, chat]));
+        return [...newChatMap.values()];
+      });
+    });
+
     socket.on('message', async (msg) => {
-      const senderId = typeof msg.senderId === 'object' ? msg.senderId._id.toString() : msg.senderId;
-      if (msg.recipientId === userId) {
-        const privateKey = sessionStorage.getItem('privateKey');
-        if (!privateKey) {
-          setError('Private key missing, please log in again');
-          return;
-        }
-        const decryptedContent = msg.contentType === 'text' ? await decryptMessage(msg.content, privateKey) : msg.content;
-        setMessages((prev) => {
-          const chatMessages = prev[senderId] || [];
-          return {
-            ...prev,
-            [senderId]: [...chatMessages, { ...msg, content: decryptedContent }],
-          };
-        });
-        if (selectedChat === senderId) {
-          socket.emit('readMessages', { chatId: senderId, userId });
-          setUnreadMessages((prev) => ({ ...prev, [senderId]: 0 }));
-          listRef.current?.scrollToItem(messages[senderId]?.length || 0, 'end');
-        } else {
-          setUnreadMessages((prev) => ({ ...prev, [senderId]: (prev[senderId] || 0) + 1 }));
-        }
+      const senderId = typeof msg.senderId === 'object' ? msg.senderId._id.toString() : msg.senderId.toString();
+      const privateKey = sessionStorage.getItem('privateKey');
+      if (!privateKey) {
+        setError('Private key missing, please log in again');
+        return;
+      }
+      const decryptedContent = msg.contentType === 'text' ? await decryptMessage(msg.content, privateKey) : msg.content;
+      setMessages((prev) => ({
+        ...prev,
+        [senderId]: [...(prev[senderId] || []), { ...msg, content: decryptedContent }],
+      }));
+      if (selectedChat === senderId) {
+        socket.emit('batchMessageStatus', { messageIds: [msg._id], status: 'read', recipientId: userId });
+        setUnreadMessages((prev) => ({ ...prev, [senderId]: 0 }));
+        listRef.current?.scrollToItem(messages[senderId]?.length || 0, 'end');
+      } else {
+        setUnreadMessages((prev) => ({ ...prev, [senderId]: (prev[senderId] || 0) + 1 }));
       }
     });
 
-    socket.on('typing', ({ userId: typingUserId, chatId }) => {
-      if (chatId === selectedChat) {
+    socket.on('typing', ({ userId: typingUserId }) => {
+      if (typingUserId === selectedChat) {
         setIsTyping((prev) => ({ ...prev, [typingUserId]: true }));
-        setTimeout(() => {
-          setIsTyping((prev) => ({ ...prev, [typingUserId]: false }));
-        }, 3000);
+        setTimeout(() => setIsTyping((prev) => ({ ...prev, [typingUserId]: false })), 3000);
       }
     });
 
-    socket.on('readMessages', ({ chatId }) => {
-      if (chatId === selectedChat) {
-        setMessages((prev) => {
-          const chatMessages = prev[chatId] || [];
-          return {
-            ...prev,
-            [chatId]: chatMessages.map((msg) => (msg.status === 'sent' ? { ...msg, status: 'read' } : msg)),
-          };
-        });
+    socket.on('stopTyping', ({ userId: typingUserId }) => {
+      if (typingUserId === selectedChat) {
+        setIsTyping((prev) => ({ ...prev, [typingUserId]: false }));
       }
+    });
+
+    socket.on('messageStatus', ({ messageIds, status }) => {
+      setMessages((prev) => {
+        const updatedMessages = { ...prev };
+        Object.keys(updatedMessages).forEach((chatId) => {
+          updatedMessages[chatId] = updatedMessages[chatId].map((msg) =>
+            messageIds.includes(msg._id) && msg.senderId === userId ? { ...msg, status } : msg
+          );
+        });
+        return updatedMessages;
+      });
     });
 
     return () => {
+      socket.off('newContact');
+      socket.off('chatListUpdated');
       socket.off('message');
       socket.off('typing');
-      socket.off('readMessages');
+      socket.off('stopTyping');
+      socket.off('messageStatus');
     };
   }, [socket, selectedChat, userId, messages]);
 
   const handleTyping = useCallback(() => {
     if (socket && selectedChat) {
-      socket.emit('typing', { chatId: selectedChat, userId });
+      socket.emit('typing', { userId, recipientId: selectedChat });
+      setTimeout(() => socket.emit('stopTyping', { userId, recipientId: selectedChat }), 3000);
     }
   }, [socket, selectedChat, userId]);
 
@@ -408,6 +380,13 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
     setSelectedChat(chatId);
     setShowMenu(false);
     setError('');
+    if (chatId && socket) {
+      socket.emit('batchMessageStatus', {
+        messageIds: (messages[chatId] || []).filter((m) => m.status !== 'read' && m.recipientId === userId).map((m) => m._id),
+        status: 'read',
+        recipientId: userId,
+      });
+    }
     inputRef.current?.focus();
   };
 
@@ -415,7 +394,7 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
     const msg = messages[selectedChat][index];
     const prevMsg = index > 0 ? messages[selectedChat][index - 1] : null;
     const showDate = !prevMsg || new Date(msg.createdAt).toDateString() !== new Date(prevMsg.createdAt).toDateString();
-    const isMine = msg.senderId === userId;
+    const isMine = msg.senderId.toString() === userId;
 
     return (
       <>
@@ -431,9 +410,7 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
               <span className="timestamp">{new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
               {isMine && (
                 <span className="message-status">
-                  {msg.status === 'pending' ? '⌛' : ''}
-                  {msg.status === 'sent' ? '✓' : ''}
-                  {msg.status === 'read' ? '✓✓' : ''}
+                  {msg.status === 'pending' ? '⌛' : msg.status === 'sent' ? '✓' : '✓✓'}
                 </span>
               )}
             </div>
@@ -460,11 +437,11 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
                 transition={{ duration: 0.2 }}
               >
                 <div className="menu-item" onClick={() => { setShowAddContact(true); setShowMenu(false); }}>
-                  <FaPlus className="fa-plus menu-item-icon" />
+                  <FaPlus className="menu-item-icon" />
                   Add Contact
                 </div>
                 <div className="menu-item logout" onClick={handleLogout}>
-                  <FaSignOutAlt className="fa-sign-out menu-item-icon" />
+                  <FaSignOutAlt className="menu-item-icon" />
                   Logout
                 </div>
                 {showAddContact && (
@@ -477,9 +454,6 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
                         onChange={(e) => setContactInput(e.target.value)}
                         placeholder="Enter virtual number (e.g., +25534567890)"
                       />
-
-
-                      
                       {contactInput && (
                         <FaTimes
                           className="clear-input-icon"

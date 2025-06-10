@@ -374,13 +374,16 @@ router.post('/update_username', authMiddleware, async (req, res) => {
   }
 });
 
+
+
+
 router.get('/contacts', authMiddleware, async (req, res) => {
   try {
     const user = await User.findById(req.user.id).populate('contacts', 'username virtualNumber photo status lastSeen');
     if (!user) return res.status(404).json({ error: 'User not found' });
 
     const contacts = user.contacts.map((contact) => ({
-      id: contact._id,
+      id: contact._id.toString(),
       username: contact.username,
       virtualNumber: contact.virtualNumber,
       photo: contact.photo || 'https://placehold.co/40x40',
@@ -390,7 +393,7 @@ router.get('/contacts', authMiddleware, async (req, res) => {
 
     res.json(contacts);
   } catch (error) {
-    logger.error('Fetch contacts error', { error: error.message, stack: error.stack });
+    logger.error('Fetch contacts error', { error: error.message });
     res.status(500).json({ error: 'Failed to fetch contacts', details: error.message });
   }
 });

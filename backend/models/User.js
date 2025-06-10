@@ -1,3 +1,4 @@
+
 const mongoose = require('mongoose');
 const { getCountries } = require('libphonenumber-js');
 const Message = require('./Message');
@@ -25,7 +26,7 @@ const userSchema = new mongoose.Schema({
   password: {
     type: String,
     required: true,
-    minlength: 6,
+    minlength: 8,
   },
   username: {
     type: String,
@@ -54,7 +55,7 @@ const userSchema = new mongoose.Schema({
   virtualNumber: {
     type: String,
     unique: true,
-    match: /^\+\d{1,4}[1-9]{5}\d{4}$/,
+    match: /^\+\d{1,4}\d{6,14}$/,
     sparse: true,
   },
   contacts: [{
@@ -82,64 +83,26 @@ const userSchema = new mongoose.Schema({
   },
   lastSeen: {
     type: Date,
-    default: null,
   },
 }, {
   timestamps: true,
 });
 
 // Indexes for performance
-userSchema.index({ status: 1, lastSeen: -1 });
-userSchema.index({ contacts: 1 });
 userSchema.index({ virtualNumber: 1 }, { unique: true, sparse: true });
+userSchema.index({ contacts: 1, _id: 1 });
+userSchema.index({ status: 1, lastSeen: -1 });
+userSchema.index({ email: 1 }, { unique: true });
+userSchema.index({ username: 1 }, { unique: true });
 
-// Middleware for document-level deleteOne
-userSchema.pre('deleteOne', { document: true, query: false }, async function (next) {
-  const session = await mongoose.startSession();
-  session.startTransaction();
-  try {
-    const userId = this._id;
-    logger.info('Deleting user and related data', { userId });
-
-    // Delete messages in batches
-    const batchSize = 1000;
-    let deletedMessages = 0;
-    while (true) {
-      const result = await Message.deleteMany({
-        $or: [{ senderId: userId }, { recipientId: userId }],
-      }).limit(batchSize).session(session);
-      deletedMessages += result.deletedCount;
-      if (result.deletedCount < batchSize) break;
-    }
-    logger.info('Messages deleted for user', { userId, deletedCount: deletedMessages });
-
-    // Remove user from other users' contact lists
-    const contactResult = await mongoose.model('User').updateMany(
-      { contacts: userId },
-      { $pull: { contacts: userId } },
-      { session }
-    );
-    logger.info('User removed from contacts', { userId, modifiedCount: contactResult.modifiedCount });
-
-    await session.commitTransaction();
-    next();
-  } catch (error) {
-    await session.abortTransaction();
-    logger.error('User deletion middleware failed', { error: error.message, stack: error.stack });
-    next(error);
-  } finally {
-    session.endSession();
-  }
-});
-
-// Middleware for query-level deleteOne
-userSchema.pre('deleteOne', { document: false, query: true }, async function (next) {
+// Pre-delete hook for all deletion operations
+userSchema.pre(['deleteOne', 'deleteMany', 'findOneAndDelete'], async function (next) {
   const session = await mongoose.startSession();
   session.startTransaction();
   try {
     const filter = this.getFilter();
-    const users = await this.model.find(filter).select('_id').session(session);
-    const userIds = users.map(user => user._id);
+    const users = await this.model.find(filter).select('_id').lean().session(session);
+    const userIds = users.map(user => user._id.toString());
     if (!userIds.length) {
       logger.info('No users found for deletion', { filter });
       await session.commitTransaction();
@@ -148,19 +111,13 @@ userSchema.pre('deleteOne', { document: false, query: true }, async function (ne
 
     logger.info('Deleting users and related data', { userIds });
 
-    // Delete messages in batches
-    const batchSize = 1000;
-    let deletedMessages = 0;
-    while (true) {
-      const result = await Message.deleteMany({
-        $or: [{ senderId: { $in: userIds } }, { recipientId: { $in: userIds } }],
-      }).limit(batchSize).session(session);
-      deletedMessages += result.deletedCount;
-      if (result.deletedCount < batchSize) break;
-    }
-    logger.info('Messages deleted for users', { userIds, deletedCount: deletedMessages });
+    // Delete messages
+    const result = await Message.deleteMany({
+      $or: [{ senderId: { $in: userIds } }, { recipientId: { $in: userIds } }],
+    }).session(session);
+    logger.info('Messages deleted for users', { userIds, deletedCount: result.deletedCount });
 
-    // Remove users from other users' contact lists
+    // Remove users from contact lists
     const contactResult = await this.model.updateMany(
       { contacts: { $in: userIds } },
       { $pull: { contacts: { $in: userIds } } },
@@ -172,100 +129,7 @@ userSchema.pre('deleteOne', { document: false, query: true }, async function (ne
     next();
   } catch (error) {
     await session.abortTransaction();
-    logger.error('Query deleteOne middleware failed', { error: error.message, stack: error.stack });
-    next(error);
-  } finally {
-    session.endSession();
-  }
-});
-
-// Middleware for deleteMany
-userSchema.pre('deleteMany', async function (next) {
-  const session = await mongoose.startSession();
-  session.startTransaction();
-  try {
-    const filter = this.getFilter();
-    const users = await this.model.find(filter).select('_id').session(session);
-    const userIds = users.map(user => user._id);
-    if (!userIds.length) {
-      logger.info('No users found for deletion', { filter });
-      await session.commitTransaction();
-      return next();
-    }
-
-    logger.info('Deleting multiple users and related data', { userIds });
-
-    // Delete messages in batches
-    const batchSize = 1000;
-    let deletedMessages = 0;
-    while (true) {
-      const result = await Message.deleteMany({
-        $or: [{ senderId: { $in: userIds } }, { recipientId: { $in: userIds } }],
-      }).limit(batchSize).session(session);
-      deletedMessages += result.deletedCount;
-      if (result.deletedCount < batchSize) break;
-    }
-    logger.info('Messages deleted for users', { userIds, deletedCount: deletedMessages });
-
-    // Remove users from other users' contact lists
-    const contactResult = await this.model.updateMany(
-      { contacts: { $in: userIds } },
-      { $pull: { contacts: { $in: userIds } } },
-      { session }
-    );
-    logger.info('Users removed from contacts', { userIds, modifiedCount: contactResult.modifiedCount });
-
-    await session.commitTransaction();
-    next();
-  } catch (error) {
-    await session.abortTransaction();
-    logger.error('DeleteMany middleware failed', { error: error.message, stack: error.stack });
-    next(error);
-  } finally {
-    session.endSession();
-  }
-});
-
-// Middleware for findOneAndDelete
-userSchema.pre('findOneAndDelete', async function (next) {
-  const session = await mongoose.startSession();
-  session.startTransaction();
-  try {
-    const user = await this.model.findOne(this.getFilter()).select('_id').session(session);
-    if (!user) {
-      logger.info('No user found for findOneAndDelete', { filter: this.getFilter() });
-      await session.commitTransaction();
-      return next();
-    }
-
-    const userId = user._id;
-    logger.info('Deleting user and related data via findOneAndDelete', { userId });
-
-    // Delete messages in batches
-    const batchSize = 1000;
-    let deletedMessages = 0;
-    while (true) {
-      const result = await Message.deleteMany({
-        $or: [{ senderId: userId }, { recipientId: userId }],
-      }).limit(batchSize).session(session);
-      deletedMessages += result.deletedCount;
-      if (result.deletedCount < batchSize) break;
-    }
-    logger.info('Messages deleted for user', { userId, deletedCount: deletedMessages });
-
-    // Remove user from other users' contact lists
-    const contactResult = await this.model.updateMany(
-      { contacts: userId },
-      { $pull: { contacts: userId } },
-      { session }
-    );
-    logger.info('User removed from contacts', { userId, modifiedCount: contactResult.modifiedCount });
-
-    await session.commitTransaction();
-    next();
-  } catch (error) {
-    await session.abortTransaction();
-    logger.error('FindOneAndDelete middleware failed', { error: error.message, stack: error.stack });
+    logger.error('User deletion failed', { error: error.message });
     next(error);
   } finally {
     session.endSession();

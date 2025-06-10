@@ -1,4 +1,5 @@
-import React, { useState, useEffect } from 'react';
+
+import React, { useState, useEffect, useCallback } from 'react';
 import { BrowserRouter as Router, Route, Routes, Navigate, NavLink, useLocation } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { FaHome, FaBriefcase, FaComments, FaUser } from 'react-icons/fa';
@@ -22,7 +23,6 @@ class ErrorBoundary extends React.Component {
   }
 
   componentDidCatch(error, errorInfo) {
-    console.error('ErrorBoundary caught:', error, errorInfo);
     axios.post(`${BASE_URL}/social/log-error`, {
       error: error.message,
       stack: errorInfo.componentStack,
@@ -51,15 +51,9 @@ class ErrorBoundary extends React.Component {
 
 const getTokenExpiration = (token) => {
   try {
-    if (!token || typeof token !== 'string' || !token.includes('.')) {
-      console.warn('Invalid token format');
-      return null;
-    }
+    if (!token || typeof token !== 'string' || !token.includes('.')) return null;
     const base64Url = token.split('.')[1];
-    if (!base64Url) {
-      console.warn('Invalid JWT payload');
-      return null;
-    }
+    if (!base64Url) return null;
     const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
     const jsonPayload = decodeURIComponent(
       atob(base64)
@@ -70,7 +64,6 @@ const getTokenExpiration = (token) => {
     const decoded = JSON.parse(jsonPayload);
     return decoded.exp ? decoded.exp * 1000 : null;
   } catch (error) {
-    console.error('Error decoding token:', error.message);
     return null;
   }
 };
@@ -89,7 +82,7 @@ const App = () => {
   const [error, setError] = useState(null);
   const [selectedChat, setSelectedChat] = useState(null);
 
-  const setAuth = (newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername) => {
+  const setAuth = useCallback((newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername) => {
     const token = newToken || '';
     const userId = newUserId || '';
     const role = Number(newRole) || 0;
@@ -119,69 +112,49 @@ const App = () => {
       setSocket(null);
       setError('Authentication failed, please log in again');
     }
-  };
+  }, []);
+
+  const refreshToken = useCallback(async () => {
+    try {
+      if (!token || !userId) throw new Error('Missing token or userId');
+      const response = await axios.post(
+        `${BASE_URL}/auth/refresh`,
+        { userId },
+        { headers: { Authorization: `Bearer ${token}` }, timeout: 15000 }
+      );
+      const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername, privateKey } = response.data;
+      setAuth(newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername);
+      if (privateKey) sessionStorage.setItem('privateKey', privateKey);
+      return newToken;
+    } catch (error) {
+      setAuth('', '', '', '', '', '');
+      setError('Session expired, please log in again');
+      return null;
+    }
+  }, [token, userId, setAuth]);
 
   useEffect(() => {
     if (!token || !userId || typeof token !== 'string' || !isAuthenticated) {
-      console.warn('Invalid token, userId, or authentication state, skipping socket initialization');
-      if (isAuthenticated) {
-        setAuth(null, null, null, null, null, null);
-      }
+      if (isAuthenticated) setAuth('', '', '', '', '', '');
       return;
     }
 
-    const newSocket = io(BASE_URL, {
+    const socketInstance = io(BASE_URL, {
       auth: { token },
       transports: ['websocket', 'polling'],
       reconnectionAttempts: 10,
       reconnectionDelay: 3000,
       timeout: 10000,
     });
-    setSocket(newSocket);
+
+    setSocket(socketInstance);
 
     return () => {
-      newSocket.emit('leave', userId);
-      newSocket.disconnect();
-      console.log('Socket cleanup');
+      socketInstance.emit('leave', userId);
+      socketInstance.disconnect();
       setSocket(null);
     };
-  }, [token, userId, isAuthenticated]);
-
-
-
-       
-
-  const refreshToken = async () => {
-  try {
-    if (!token || !userId) {
-      throw new Error('Missing token or userId');
-    }
-    const response = await axios.post(
-      `${BASE_URL}/auth/refresh`,
-      { userId },
-      {
-        headers: { Authorization: `Bearer ${token}` },
-        timeout: 15000,
-      }
-    );
-    const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername, privateKey } = response.data;
-    setAuth(newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername);
-    if (privateKey) {
-      sessionStorage.setItem('privateKey', privateKey);
-    } else {
-      console.warn('No privateKey in refresh response');
-    }
-    console.log('Token refreshed');
-    return newToken;
-  } catch (error) {
-    console.error('Token refresh failed:', error.response?.data || error.message);
-    setAuth(null, null, null, null, null, null);
-    setError('Session expired, please log in again');
-    return null;
-  }
-};
-
-
+  }, [token, userId, isAuthenticated, setAuth]);
 
   useEffect(() => {
     if (!isAuthenticated || !token || !userId || !socket) return;
@@ -193,55 +166,50 @@ const App = () => {
       try {
         const expTime = getTokenExpiration(token);
         if (expTime && expTime - Date.now() < 10 * 60 * 1000) {
-          await refreshToken();
+          const newToken = await refreshToken();
+          if (newToken) {
+            socket.auth.token = newToken;
+            socket.disconnect().connect();
+          }
         }
-      } catch (err) {
-        console.error('Token expiration check failed:', err.message);
-        setError('Authentication error, please log in again');
       } finally {
         isRefreshing = false;
       }
     };
 
-
-    
-
     checkTokenExpiration();
     const interval = setInterval(checkTokenExpiration, 5 * 60 * 1000);
     return () => clearInterval(interval);
-  }, [isAuthenticated, token, userId, socket]);
+  }, [isAuthenticated, token, userId, socket, refreshToken]);
 
   useEffect(() => {
     if (!socket) return;
 
     socket.on('connect', () => {
       socket.emit('join', userId);
-      console.log('Socket connected:', socket.id);
     });
 
     socket.on('connect_error', async (error) => {
-      console.error('Socket connect error:', error.message);
       if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
         const newToken = await refreshToken();
         if (newToken) {
           socket.auth.token = newToken;
           socket.disconnect().connect();
         } else {
-          setAuth(null, null, null, null, null, null);
+          setAuth('', '', '', '', '', '');
         }
       }
     });
 
     socket.on('disconnect', (reason) => {
-      console.warn('Socket disconnected:', reason);
       if (reason === 'io server disconnect') {
         socket.connect();
       }
     });
 
     socket.on('message', (msg) => {
-      const senderId = typeof msg.senderId === 'object' ? msg.senderId._id.toString() : msg.senderId;
-      if (msg.recipientId === userId && (!selectedChat || selectedChat !== senderId)) {
+      const senderId = typeof msg.senderId === 'object' ? msg.senderId._id.toString() : msg.senderId.toString();
+      if (msg.recipientId.toString() === userId && (!selectedChat || selectedChat !== senderId)) {
         setChatNotifications((prev) => prev + 1);
       }
     });
@@ -252,15 +220,15 @@ const App = () => {
       socket.off('disconnect');
       socket.off('message');
     };
-  }, [socket, userId, selectedChat]);
+  }, [socket, userId, selectedChat, setAuth, refreshToken]);
 
   useEffect(() => {
-    document.documentElement.className = theme === 'dark' ? 'dark' : '';
+    document.documentElement.className = theme;
     localStorage.setItem('theme', theme);
   }, [theme]);
 
-  const toggleTheme = () => setTheme(theme === 'light' ? 'dark' : 'light');
-  const handleChatNavigation = () => setChatNotifications(0);
+  const toggleTheme = useCallback(() => setTheme(theme === 'light' ? 'dark' : 'light'), [theme]);
+  const handleChatNavigation = useCallback(() => setChatNotifications(0), []);
 
   if (!isAuthenticated) {
     return (
@@ -268,7 +236,7 @@ const App = () => {
         {error && (
           <div className="fixed top-0 left-0 right-0 bg-red-500 text-white p-2 text-center">
             {error}
-          </div>
+        </div>
         )}
         <LoginScreen setAuth={setAuth} />
       </ErrorBoundary>
@@ -332,7 +300,7 @@ const AuthenticatedApp = ({
           onComplete={(newVirtualNumber) => setAuth(token, userId, role, photo, newVirtualNumber, username)}
         />
       )}
-      <div className="flex-1 p-0 relative">
+      <div className="flex-1 p-0">
         <Routes>
           <Route path="/jobs" element={role === 0 ? <JobSeekerScreen token={token} userId={userId} /> : <EmployerScreen token={token} userId={userId} />} />
           <Route path="/feed" element={<FeedScreen token={token} userId={userId} />} />
@@ -349,10 +317,10 @@ const AuthenticatedApp = ({
         className="fixed bottom-0 left-0 right-0 bg-primary text-white p-2 flex justify-around items-center shadow-lg z-20"
       >
         <NavLink to="/feed" className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}>
-          <FaHome className="text-xl"/>
+          <FaHome className="text-xl" />
           <span className="text-xs">Feed</span>
         </NavLink>
-        <NavLink to="/jobs" className="flex flex-col items-center p-2 rounded">
+        <NavLink to="/jobs" className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}>
           <FaBriefcase className="text-xl" />
           <span className="text-xs">Jobs</span>
         </NavLink>
@@ -361,7 +329,7 @@ const AuthenticatedApp = ({
           onClick={handleChatNavigation}
           className={({ isActive }) => `flex flex-col items-center p-2 rounded relative ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}
         >
-          <FaComments className="text-xl"/>
+          <FaComments className="text-xl" />
           {chatNotifications > 0 && (
             <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
               {chatNotifications}
@@ -369,8 +337,8 @@ const AuthenticatedApp = ({
           )}
           <span className="text-xs">Chat</span>
         </NavLink>
-        <NavLink to="/profile" className="flex flex-col items-center p-2">
-          <FaUser className="text-xl"/>
+        <NavLink to="/profile" className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}>
+          <FaUser className="text-xl" />
           <span className="text-xs">Profile</span>
         </NavLink>
       </motion.nav>
