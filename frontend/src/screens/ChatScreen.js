@@ -34,7 +34,12 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
   const listRef = useRef(null);
   const menuRef = useRef(null);
 
- const encryptMessage = useCallback(async (content, recipientPublicKey, isMedia = false) => {
+
+// Replace encryptMessage (around line 124)
+const encryptMessage = useCallback(async (content, recipientPublicKey, isMedia = false) => {
+  if (!forge || !recipientPublicKey) {
+    throw new Error('Encryption dependencies missing');
+  }
   try {
     const aesKey = forge.random.getBytesSync(32);
     const iv = forge.random.getBytesSync(16);
@@ -47,9 +52,12 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
     )}`;
     return encrypted;
   } catch (err) {
-    throw new Error('Failed to encrypt message');
+    throw new Error('Failed to encrypt message: ' + err.message);
   }
 }, []);
+
+
+
 
   const decryptMessage = useCallback(async (encryptedContent, privateKeyPem, isMedia = false) => {
     try {
@@ -158,66 +166,70 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
       setError('Failed to load messages');
     }
   }, [token, userId, socket]);
-
-  const sendMessage = useCallback(async () => {
-    if (!message.trim() || !selectedChat || !isValidObjectId(selectedChat)) return;
-    const clientMessageId = generateClientMessageId();
-    const plaintextContent = message.trim();
-    try {
-      const recipientPublicKey = await getPublicKey(selectedChat);
-      const encryptedContent = await encryptMessage(plaintextContent, recipientPublicKey);
-      const messageData = {
-        senderId: userId,
-        recipientId: selectedChat,
-        content: encryptedContent,
-        contentType: 'text',
-        plaintextContent,
-        clientMessageId,
-        senderVirtualNumber: virtualNumber,
-        senderUsername: username,
-        senderPhoto: photo,
-      };
-      const tempMessage = {
-        _id: clientMessageId,
-        ...messageData,
-        status: 'pending',
-        createdAt: new Date(),
-      };
-      setMessages((prev) => ({
-        ...prev,
-        [selectedChat]: [...(prev[selectedChat] || []), tempMessage],
-      }));
-      socket?.emit('message', messageData, (ack) => {
-        if (ack?.error) {
-          setError('Failed to send message: ' + ack.error);
-          setMessages((prev) => ({
-            ...prev,
-            [selectedChat]: prev[selectedChat].map((msg) => 
-              msg._id === clientMessageId ? { ...msg, status: 'failed' } : msg
-            ),
-          }));
-          return;
-        }
+// Update sendMessage to guard against invalid public key
+const sendMessage = useCallback(async () => {
+  if (!message.trim() || !selectedChat || !isValidObjectId(selectedChat)) return;
+  const clientMessageId = generateClientMessageId();
+  const plaintextContent = message.trim();
+  try {
+    const recipientPublicKey = await getPublicKey(selectedChat);
+    if (!recipientPublicKey) {
+      throw new Error('Recipient public key not found');
+    }
+    const encryptedContent = await encryptMessage(plaintextContent, recipientPublicKey);
+    const messageData = {
+      senderId: userId,
+      recipientId: selectedChat,
+      content: encryptedContent,
+      contentType: 'text',
+      plaintextContent,
+      clientMessageId,
+      senderVirtualNumber: virtualNumber,
+      senderUsername: username,
+      senderPhoto: photo,
+    };
+    const tempMessage = {
+      _id: clientMessageId,
+      ...messageData,
+      status: 'pending',
+      createdAt: new Date(),
+    };
+    setMessages((prev) => ({
+      ...prev,
+      [selectedChat]: [...(prev[selectedChat] || []), tempMessage],
+    }));
+    socket?.emit('message', messageData, (ack) => {
+      if (ack?.error) {
+        setError('Failed to send message: ' + ack.error);
         setMessages((prev) => ({
           ...prev,
           [selectedChat]: prev[selectedChat].map((msg) => 
-            msg._id === clientMessageId ? { ...ack.message, content: plaintextContent, status: 'sent' } : msg
+            msg._id === clientMessageId ? { ...msg, status: 'failed' } : msg
           ),
         }));
-      });
-      setMessage('');
-      inputRef.current?.focus();
-      listRef.current?.scrollToItem(messages[selectedChat]?.length ?? 0, 'end');
-    } catch (err) {
-      setError('Failed to send message');
+        return;
+      }
       setMessages((prev) => ({
         ...prev,
         [selectedChat]: prev[selectedChat].map((msg) => 
-          msg._id === clientMessageId ? { ...msg, status: 'failed' } : msg
+          msg._id === clientMessageId ? { ...ack.message, content: plaintextContent, status: 'sent' } : msg
         ),
       }));
-    }
-  }, [message, selectedChat, userId, virtualNumber, username, photo, socket]);
+    });
+    setMessage('');
+    inputRef.current?.focus();
+    listRef.current?.scrollToItem(messages[selectedChat]?.length ?? 0, 'end');
+  } catch (err) {
+    setError('Failed to send message: ' + err.message);
+    setMessages((prev) => ({
+      ...prev,
+      [selectedChat]: prev[selectedChat].map((msg) => 
+        msg._id === clientMessageId ? { ...msg, status: 'failed' } : msg
+      ),
+    }));
+  }
+}, [message, selectedChat, userId, virtualNumber, username, photo, socket, setError, setMessages, setMessage]);
+
 
   const handleAddContact = async () => {
     if (!contactInput.trim()) {

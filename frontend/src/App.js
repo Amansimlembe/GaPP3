@@ -5,7 +5,6 @@ import { motion } from 'framer-motion';
 import { FaHome, FaBriefcase, FaComments, FaUser } from 'react-icons/fa';
 import axios from 'axios';
 import io from 'socket.io-client';
-import forge from 'node-forge';
 import LoginScreen from './screens/LoginScreen';
 import JobSeekerScreen from './screens/JobSeekerScreen';
 import EmployerScreen from './screens/EmployerScreen';
