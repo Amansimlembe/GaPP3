@@ -34,22 +34,22 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
   const listRef = useRef(null);
   const menuRef = useRef(null);
 
-  const encryptMessage = useCallback(async (content, recipientPublicKey, isMedia = false) => {
-    try {
-      const aesKey = forge.random.getBytesSync(32);
-      const iv = forge.random.getBytesSync(16);
-      const cipher = forge.cipher.createCipher('AES-CBC', aesKey);
-      cipher.start({ iv });
-      cipher.update(forge.util.createBuffer(isMedia ? content : forge.util.encodeUtf8(content)));
-      cipher.finish();
-      const encrypted = `${forge.util.encode64(cipher.output.getBytes())}|${forge.util.encode64(iv)}|${forge.util.encode64(
-        forge.pki.publicKeyFromPem(recipientPublicKey).encrypt(aesKey, 'RSA-OAEP', { md: forge.md.sha256.create() })
-      )}`;
-      return encrypted;
-    } catch (err) {
-      throw new Error('Failed to encrypt message');
-    }
-  }, []);
+ const encryptMessage = useCallback(async (content, recipientPublicKey, isMedia = false) => {
+  try {
+    const aesKey = forge.random.getBytesSync(32);
+    const iv = forge.random.getBytesSync(16);
+    const cipher = forge.cipher.createCipher('AES-CBC', aesKey);
+    cipher.start({ iv });
+    cipher.update(forge.util.createBuffer(isMedia ? content : forge.util.encodeUtf8(content)));
+    cipher.finish();
+    const encrypted = `${forge.util.encode64(cipher.output.getBytes())}|${forge.util.encode64(iv)}|${forge.util.encode64(
+      forge.pki.publicKeyFromPem(recipientPublicKey).encrypt(aesKey, 'RSA-OAEP', { md: forge.md.sha256.create() })
+    )}`;
+    return encrypted;
+  } catch (err) {
+    throw new Error('Failed to encrypt message');
+  }
+}, []);
 
   const decryptMessage = useCallback(async (encryptedContent, privateKeyPem, isMedia = false) => {
     try {
