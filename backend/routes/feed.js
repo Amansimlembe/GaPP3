@@ -34,7 +34,7 @@ const upload = multer({
     if (!file || (contentType && allowedTypes[contentType]?.includes(file.mimetype))) {
       cb(null, true);
     } else {
-      logger.warn('Invalid file type', { contentType, mimetype: file?.mimetype });
+      logger.warn('Invalid file type', { contentType, mimetype: file?.mimetype, userId: req.body.userId });
       cb(new Error(`Invalid file type for ${contentType}`));
     }
   },
@@ -47,19 +47,23 @@ router.get('/', authMiddleware, async (req, res) => {
     const limit = parseInt(req.query.limit) || 10;
     const skip = (page - 1) * limit;
 
-    const posts = await Post.find({ isStory: false })
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .lean();
+    const [posts, totalPosts] = await Promise.all([
+      Post.find({ isStory: false })
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+        
+      Post.countDocuments({ isStory: false }),
+    ]);
 
-    const totalPosts = await Post.countDocuments({ isStory: false });
     const hasMore = skip + posts.length < totalPosts;
+    logger.info('Fetched feed', { userId: req.user.userId, page, limit, postCount: posts.length });
 
     res.json({ posts, hasMore });
   } catch (err) {
-    logger.error('Failed to fetch feed', { error: err.message });
-    res.status(500).json({ error: 'Failed to fetch feed' });
+    logger.error('Failed to fetch feed', { error: err.message, userId: req.user.userId });
+    res.status(500).json({ error: 'Failed to fetch feed', details: err.message });
   }
 });
 
@@ -67,12 +71,21 @@ router.get('/', authMiddleware, async (req, res) => {
 router.post('/', authMiddleware, upload.single('content'), async (req, res) => {
   try {
     const { userId, contentType, caption } = req.body;
-    let contentUrl = '';
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({ error: 'Invalid user ID' });
+    }
 
+    const user = await User.findById(userId).select('username photo');
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    let contentUrl = '';
     if (contentType !== 'text' && req.file) {
       const uploadOptions = {
         resource_type: contentType,
         folder: 'feed',
+        timeout: 60000, // 60s timeout
         transformation: contentType === 'video' ? [
           { width: 720, height: 1280, crop: 'fill', quality: 'auto' },
           { format: 'mp4', video_codec: 'h264' }
@@ -89,53 +102,37 @@ router.post('/', authMiddleware, upload.single('content'), async (req, res) => {
             else resolve(result);
           }
         );
-        req.file.pipe(uploadStream);
+        req.file.stream.pipe(uploadStream);
       });
 
       contentUrl = result.secure_url;
-
-      const user = await User.findById(userId).select('username photo');
-      if (!user) {
-        return res.status(404).json({ error: 'User not found' });
-      }
-
-      const post = new Post({
-        userId,
-        contentType,
-        content: contentUrl,
-        caption: contentType !== 'text' ? caption : '',
-        username: user.username,
-        photo: user.photo,
-        createdAt: new Date().toISOString()
-      });
-
-      await post.save();
-      req.app.get('io').emit('newPost', post);
-      res.json(post);
     } else if (contentType === 'text' && caption) {
-      const user = await User.findById(userId).select('username photo');
-      if (!user) {
-        return res.status(404).json({ error: 'User not found' });
-      }
-
-      const post = new Post({
-        userId,
-        contentType,
-        content: caption,
-        caption: '',
-        username: user.username,
-        photo: user.photo,
-        createdAt: new Date().toISOString()
-      });
-
-      await post.save();
-      req.app.get('io').emit('newPost', post);
-      res.json(post);
+      contentUrl = caption;
     } else {
-      res.status(400).json({ error: 'Missing required content' });
+      return res.status(400).json({ error: 'Missing required content' });
     }
+
+    const post = new Post({
+      userId: mongoose.Types.ObjectId(userId),
+      contentType,
+      content: contentUrl,
+      caption: contentType !== 'text' ? caption : '',
+      username: user.username,
+      photo: user.photo,
+      createdAt: new Date(),
+    });
+
+    await post.save();
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('newPost', post.toObject());
+    } else {
+      logger.warn('Socket.IO instance not found', { userId });
+    }
+    logger.info('Created post', { userId, postId: post._id, contentType });
+    res.json(post.toObject());
   } catch (err) {
-    logger.error('Failed to create post', { error: err.message });
+    logger.error('Failed to create post', { error: err.message, userId: req.body.userId });
     res.status(400).json({ error: err.message || 'Failed to create post' });
   }
 });
@@ -144,22 +141,32 @@ router.post('/', authMiddleware, upload.single('content'), async (req, res) => {
 router.post('/like', authMiddleware, async (req, res) => {
   try {
     const { postId, userId } = req.body;
+    if (!mongoose.Types.ObjectId.isValid(postId) || !mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({ error: 'Invalid post or user ID' });
+    }
+
     const post = await Post.findById(postId);
     if (!post) {
       return res.status(404).json({ error: 'Post not found' });
     }
 
-    post.likes = post.likedBy.includes(userId) ? post.likes - 1 : post.likes + 1;
-    post.likedBy = post.likedBy.includes(userId)
-      ? post.likedBy.filter((id) => id !== userId)
-      : [...post.likedBy, userId];
+    const userObjectId = mongoose.Types.ObjectId(userId);
+    const isLiked = post.likedBy.some((id) => id.equals(userObjectId));
+    post.likes = isLiked ? post.likes - 1 : post.likes + 1;
+    post.likedBy = isLiked
+      ? post.likedBy.filter((id) => !id.equals(userObjectId))
+      : [...post.likedBy, userObjectId];
 
     await post.save();
-    req.app.get('io').emit('postUpdate', post);
-    res.json(post);
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('postUpdate', post.toObject());
+    }
+    logger.info('Liked post', { userId, postId });
+    res.json(post.toObject());
   } catch (err) {
-    logger.error('Failed to like post', { error: err.message });
-    res.status(500).json({ error: 'Failed to like post' });
+    logger.error('Failed to like post', { error: err.message, userId: req.body.userId, postId: req.body.postId });
+    res.status(500).json({ error: 'Failed to like post', details: err.message });
   }
 });
 
@@ -167,20 +174,29 @@ router.post('/like', authMiddleware, async (req, res) => {
 router.post('/unlike', authMiddleware, async (req, res) => {
   try {
     const { postId, userId } = req.body;
+    if (!mongoose.Types.ObjectId.isValid(postId) || !mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({ error: 'Invalid post or user ID' });
+    }
+
     const post = await Post.findById(postId);
     if (!post) {
       return res.status(404).json({ error: 'Post not found' });
     }
 
-    post.likes = post.likedBy.includes(userId) ? post.likes - 1 : post.likes;
-    post.likedBy = post.likedBy.filter((id) => id !== userId);
+    const userObjectId = mongoose.Types.ObjectId(userId);
+    post.likes = post.likedBy.some((id) => id.equals(userObjectId)) ? post.likes - 1 : post.likes;
+    post.likedBy = post.likedBy.filter((id) => !id.equals(userObjectId));
 
     await post.save();
-    req.app.get('io').emit('postUpdate', post);
-    res.json(post);
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('postUpdate', post.toObject());
+    }
+    logger.info('Unliked post', { userId, postId });
+    res.json(post.toObject());
   } catch (err) {
-    logger.error('Failed to unlike post', { error: err.message });
-    res.status(500).json({ error: 'Failed to unlike post' });
+    logger.error('Failed to unlike post', { error: err.message, userId: req.body.userId, postId: req.body.postId });
+    res.status(500).json({ error: 'Failed to unlike post', details: err.message });
   }
 });
 
@@ -188,6 +204,13 @@ router.post('/unlike', authMiddleware, async (req, res) => {
 router.post('/comment', authMiddleware, async (req, res) => {
   try {
     const { postId, userId, comment } = req.body;
+    if (!mongoose.Types.ObjectId.isValid(postId) || !mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({ error: 'Invalid post or user ID' });
+    }
+    if (!comment?.trim()) {
+      return res.status(400).json({ error: 'Comment cannot be empty' });
+    }
+
     const user = await User.findById(userId).select('username photo');
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
@@ -198,15 +221,25 @@ router.post('/comment', authMiddleware, async (req, res) => {
       return res.status(404).json({ error: 'Post not found' });
     }
 
-    const newComment = { userId, comment, username: user.username, photo: user.photo, createdAt: new Date() };
+    const newComment = {
+      userId: mongoose.Types.ObjectId(userId),
+      comment: comment.trim(),
+      username: user.username,
+      photo: user.photo,
+      createdAt: new Date(),
+    };
     post.comments.push(newComment);
     await post.save();
 
-    req.app.get('io').emit('postUpdate', post);
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('postUpdate', post.toObject());
+    }
+    logger.info('Commented on post', { userId, postId, commentLength: comment.length });
     res.json(newComment);
   } catch (err) {
-    logger.error('Failed to comment', { error: err.message });
-    res.status(400).json({ error: 'Failed to comment' });
+    logger.error('Failed to comment', { error: err.message, userId: req.body.userId, postId: req.body.postId });
+    res.status(400).json({ error: 'Failed to comment', details: err.message });
   }
 });
 
