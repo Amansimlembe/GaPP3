@@ -95,57 +95,7 @@ const userSchema = new mongoose.Schema({
 });
 
 // Indexes for performance
-userSchema.index({ virtualNumber: 1 }, { unique: true, sparse: true });
 userSchema.index({ contacts: 1, status: 1 });
 userSchema.index({ status: 1, lastSeen: -1 });
-userSchema.index({ email: 1 }, { unique: true });
-userSchema.index({ username: 1 }, { unique: true });
-
-// Pre-delete hook for all deletion operations
-userSchema.pre(['deleteOne', 'deleteMany', 'findOneAndDelete'], async function (next) {
-  const session = await mongoose.startSession();
-  session.startTransaction();
-  try {
-    const filter = this.getFilter();
-    const users = await this.model.find(filter).select('_id').lean().session(session);
-    const userIds = users.map(user => user._id.toString());
-    if (!userIds.length) {
-      logger.info('No users found for deletion', { filter });
-      await session.commitTransaction();
-      return next();
-    }
-
-    logger.info('Deleting users and related data', { userIds, operation: this.op });
-
-    // Delete messages in batches
-    const batchSize = 1000;
-    const messageCount = await Message.countDocuments({
-      $or: [{ senderId: { $in: userIds } }, { recipientId: { $in: userIds } }],
-    }).session(session);
-    for (let i = 0; i < messageCount; i += batchSize) {
-      const result = await Message.deleteMany({
-        $or: [{ senderId: { $in: userIds } }, { recipientId: { $in: userIds } }],
-      }).limit(batchSize).session(session);
-      logger.info('Messages deleted for users', { userIds, deletedCount: result.deletedCount, batch: i / batchSize });
-    }
-
-    // Remove users from contact lists
-    const contactResult = await this.model.updateMany(
-      { contacts: { $in: userIds } },
-      { $pull: { contacts: { $in: userIds } } },
-      { session }
-    );
-    logger.info('Users removed from contacts', { userIds, modifiedCount: contactResult.modifiedCount });
-
-    await session.commitTransaction();
-    next();
-  } catch (error) {
-    await session.abortTransaction();
-    logger.error('User deletion failed', { error: error.message, filter, operation: this.op });
-    next(error);
-  } finally {
-    session.endSession();
-  }
-});
 
 module.exports = mongoose.model('User', userSchema);

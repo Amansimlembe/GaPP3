@@ -35,9 +35,9 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   const menuRef = useRef(null);
   const typingTimeoutRef = useRef(null);
 
-  // Check if forge is loaded
+  // Check forge initialization
   useEffect(() => {
-    if (forge && forge.random && forge.cipher && forge.pki) {
+    if (forge?.random && forge?.cipher && forge?.pki) {
       setIsForgeReady(true);
     } else {
       setError('Encryption library failed to load');
@@ -45,9 +45,54 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     }
   }, []);
 
+  const handleLogout = useCallback(async () => {
+    try {
+      if (socket) {
+        socket.emit('leave', userId);
+        await axios.post(`${BASE_URL}/auth/logout`, {}, {
+          headers: { Authorization: `Bearer ${token}` },
+          timeout: 5000,
+        });
+        socket.disconnect();
+      }
+      sessionStorage.clear();
+      setAuth('', '', '', '', '', '');
+      setChatList([]);
+      setMessages({});
+      setSelectedChatAndNotify(null);
+      navigate('/');
+    } catch (err) {
+      console.error('handleLogout error:', err.message);
+      setError('Failed to logout');
+    }
+  }, [socket, userId, setAuth, token, navigate]);
+
+  const getPublicKey = useCallback(async (recipientId) => {
+    if (!isValidObjectId(recipientId)) throw new Error('Invalid recipientId');
+    const cacheKey = `publicKey:${recipientId}`;
+    const cachedKey = sessionStorage.getItem(cacheKey);
+    if (cachedKey) return cachedKey;
+    try {
+      const { data } = await axios.get(`${BASE_URL}/auth/public_key/${recipientId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 5000,
+      });
+      if (!data.publicKey) throw new Error('No public key returned');
+      sessionStorage.setItem(cacheKey, data.publicKey);
+      return data.publicKey;
+    } catch (err) {
+      console.error('getPublicKey error:', err.message);
+      if (err.response?.status === 401) {
+        setError('Session expired, please log in again');
+        setTimeout(() => handleLogout(), 2000);
+      }
+      throw new Error('Failed to fetch public key: ' + err.message);
+    }
+  }, [token, handleLogout]);
+
   const encryptMessage = useCallback(async (content, recipientPublicKey, isMedia = false) => {
-    if (!isForgeReady || !forge || !recipientPublicKey) {
-      console.error('encryptMessage: Dependencies missing', { isForgeReady, forge: !!forge, recipientPublicKey });
+    if (!isForgeReady || !recipientPublicKey) {
+      console.error('encryptMessage: Dependencies missing', { isForgeReady, recipientPublicKey });
       throw new Error('Encryption dependencies missing');
     }
     try {
@@ -66,47 +111,6 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       throw new Error('Failed to encrypt message: ' + err.message);
     }
   }, [isForgeReady]);
-
-  const decryptMessage = useCallback(async (encryptedContent, privateKeyPem, isMedia = false) => {
-    if (!isForgeReady || !forge || !encryptedContent || !privateKeyPem) {
-      return isMedia ? null : '[Decryption failed: Dependencies missing]';
-    }
-    try {
-      if (typeof encryptedContent !== 'string' || !encryptedContent.includes('|')) {
-        return isMedia ? null : '[Decryption failed: Invalid format]';
-      }
-      const [encryptedData, iv, encryptedAesKey] = encryptedContent.split('|').map(forge.util.decode64);
-      const privateKey = forge.pki.privateKeyFromPem(privateKeyPem);
-      const aesKey = privateKey.decrypt(encryptedAesKey, 'RSA-OAEP', { md: forge.md.sha256.create() });
-      const decipher = forge.cipher.createDecipher('AES-CBC', aesKey);
-      decipher.start({ iv });
-      decipher.update(forge.util.createBuffer(encryptedData));
-      decipher.finish();
-      return isMedia ? decipher.output.getBytes() : forge.util.decodeUtf8(decipher.output.getBytes());
-    } catch (err) {
-      console.error('decryptMessage error:', err.message);
-      return isMedia ? null : '[Decryption failed: Error occurred]';
-    }
-  }, [isForgeReady]);
-
-  const getPublicKey = useCallback(async (recipientId) => {
-    if (!isValidObjectId(recipientId)) throw new Error('Invalid recipientId');
-    const cacheKey = `publicKey:${recipientId}`;
-    const cachedKey = sessionStorage.getItem(cacheKey);
-    if (cachedKey) return cachedKey;
-    try {
-      const { data } = await axios.get(`${BASE_URL}/auth/public_key/${recipientId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-        timeout: 5000,
-      });
-      if (!data.publicKey) throw new Error('No public key returned');
-      sessionStorage.setItem(cacheKey, data.publicKey);
-      return data.publicKey;
-    } catch (err) {
-      console.error('getPublicKey error:', err.message);
-      throw new Error('Failed to fetch public key: ' + err.message);
-    }
-  }, [token]);
 
   const fetchChatList = useCallback(async () => {
     if (!isForgeReady) return;
@@ -138,7 +142,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     try {
       const { data } = await axios.get(`${BASE_URL}/social/messages`, {
         headers: { Authorization: `Bearer ${token}` },
-        params: { userId, chatId },
+        params: { userId, recipientId: chatId },
         timeout: 5000,
       });
       setMessages((prev) => ({
@@ -146,8 +150,8 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         [chatId]: data.messages,
       }));
       setUnreadMessages((prev) => ({ ...prev, [chatId]: 0 }));
-      if (data.messages.length) {
-        socket?.emit('batchMessageStatus', {
+      if (data.messages.length && socket) {
+        socket.emit('batchMessageStatus', {
           messageIds: data.messages.filter((m) => m.status !== 'read' && m.recipientId === userId).map((m) => m._id),
           status: 'read',
           recipientId: userId,
@@ -156,9 +160,14 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       listRef.current?.scrollToItem(data.messages.length, 'end');
     } catch (err) {
       console.error('fetchMessages error:', err.message);
-      setError('Failed to load messages: ' + err.message);
+      if (err.response?.status === 401) {
+        setError('Session expired, please log in again');
+        setTimeout(() => handleLogout(), 2000);
+      } else {
+        setError('Failed to load messages: ' + err.message);
+      }
     }
-  }, [isForgeReady, token, userId, socket]);
+  }, [isForgeReady, token, userId, socket, handleLogout]);
 
   const sendMessage = useCallback(async () => {
     if (!isForgeReady || !message.trim() || !selectedChat || !isValidObjectId(selectedChat)) return;
@@ -193,7 +202,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
           setError('Failed to send message: ' + ack.error);
           setMessages((prev) => ({
             ...prev,
-            [selectedChat]: prev[selectedChat].map((msg) => 
+            [selectedChat]: prev[selectedChat].map((msg) =>
               msg._id === clientMessageId ? { ...msg, status: 'failed' } : msg
             ),
           }));
@@ -201,20 +210,20 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         }
         setMessages((prev) => ({
           ...prev,
-          [selectedChat]: prev[selectedChat].map((msg) => 
+          [selectedChat]: prev[selectedChat].map((msg) =>
             msg._id === clientMessageId ? { ...ack.message, content: plaintextContent, status: 'sent' } : msg
           ),
         }));
       });
       setMessage('');
       inputRef.current?.focus();
-      listRef.current?.scrollToItem(messages[selectedChat]?.length ?? 0, 'end');
+      listRef.current?.scrollToItem((messages[selectedChat]?.length ?? 0) + 1, 'end');
     } catch (err) {
       console.error('sendMessage error:', err.message);
       setError('Failed to send message: ' + err.message);
       setMessages((prev) => ({
         ...prev,
-        [selectedChat]: prev[selectedChat].map((msg) => 
+        [selectedChat]: prev[selectedChat].map((msg) =>
           msg._id === clientMessageId ? { ...msg, status: 'failed' } : msg
         ),
       }));
@@ -246,28 +255,6 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     }
   }, [contactInput, token, userId, socket]);
 
-  const handleLogout = useCallback(async () => {
-    try {
-      if (socket) {
-        socket.emit('leave', userId);
-        await axios.post(`${BASE_URL}/auth/logout`, {}, {
-          headers: { Authorization: `Bearer ${token}` },
-          timeout: 5000,
-        });
-        socket.disconnect();
-      }
-      sessionStorage.clear();
-      setAuth('', '', '', '', '', '');
-      setChatList([]);
-      setMessages({});
-      setSelectedChatAndNotify(null);
-      navigate('/');
-    } catch (err) {
-      console.error('handleLogout error:', err.message);
-      setError('Failed to logout');
-    }
-  }, [socket, userId, setAuth, token, navigate]);
-
   // Socket event listeners
   useEffect(() => {
     if (!socket || !isForgeReady) return;
@@ -297,10 +284,10 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
           [senderId]: [...prevMessages, msg],
         };
       });
-      if (selectedChat === senderId) {
+      if (selectedChat === senderId && document.hasFocus()) {
         socket.emit('batchMessageStatus', { messageIds: [msg._id], status: 'read', recipientId: userId });
         setUnreadMessages((prev) => ({ ...prev, [senderId]: 0 }));
-        listRef.current?.scrollToItem(messages[senderId]?.length || 0, 'end');
+        listRef.current?.scrollToItem((messages[senderId]?.length || 0) + 1, 'end');
       } else {
         setUnreadMessages((prev) => ({ ...prev, [senderId]: (prev[senderId] || 0) + 1 }));
       }
@@ -324,7 +311,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         const updatedMessages = { ...prev };
         Object.keys(updatedMessages).forEach((chatId) => {
           updatedMessages[chatId] = updatedMessages[chatId].map((msg) =>
-            messageIds.includes(msg._id) && msg.senderId === userId ? { ...msg, status } : msg
+            messageIds.includes(msg._id) && msg.senderId.toString() === userId ? { ...msg, status } : msg
           );
         });
         return JSON.stringify(updatedMessages) === JSON.stringify(prev) ? prev : updatedMessages;
@@ -339,14 +326,14 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     socket.on('messageStatus', handleMessageStatus);
 
     return () => {
-      socket.off('newContact', handleNewContact);
-      socket.off('chatListUpdated', handleChatListUpdated);
-      socket.off('message', handleMessage);
-      socket.off('typing', handleTyping);
-      socket.off('stopTyping', handleStopTyping);
-      socket.off('messageStatus', handleMessageStatus);
+      socket.off('newContact');
+      socket.off('chatListUpdated');
+      socket.off('message');
+      socket.off('typing');
+      socket.off('stopTyping');
+      socket.off('messageStatus');
     };
-  }, [socket, isForgeReady, selectedChat, userId]);
+  }, [socket, isForgeReady, selectedChat, userId, messages]);
 
   // Initial setup
   useEffect(() => {
@@ -355,7 +342,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       return;
     }
     fetchChatList();
-  }, [isForgeReady, fetchChatList, token, userId, navigate]);
+  }, [token, userId, isForgeReady, navigate, fetchChatList]);
 
   // Fetch messages for selected chat
   useEffect(() => {
@@ -393,10 +380,11 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     setError('');
     if (chatId && socket) {
       socket.emit('batchMessageStatus', {
-        messageIds: (messages[chatId] || []).filter((m) => m.status !== 'read' && m.recipientId === userId).map((m) => m._id),
+        messageIds: (messages[chatId] || []).filter((m) => m.status !== 'read' && m.recipientId.toString() === userId).map((m) => m._id),
         status: 'read',
         recipientId: userId,
       });
+      setUnreadMessages((prev) => ({ ...prev, [chatId]: 0 }));
     }
     inputRef.current?.focus();
   }, [socket, messages, userId, setSelectedChatAndNotify]);
@@ -413,49 +401,54 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   }, [messages, selectedChat]);
 
   // Memoized message rendering component
-  const Row = useMemo(() => React.memo(({ index, style }) => {
-    const msg = messages[selectedChat][index];
-    const prevMsg = index > 0 ? messages[selectedChat][index - 1] : null;
-    const showDate = !prevMsg || new Date(msg.createdAt).toDateString() !== new Date(prevMsg.createdAt).toDateString();
-    const isMine = msg.senderId.toString() === userId;
+  const Row = useMemo(() => {
+    const Component = ({ index, style }) => {
+      const msg = messages[selectedChat]?.[index];
+      if (!msg) return null;
+      const prevMsg = index > 0 ? messages[selectedChat][index - 1] : null;
+      const showDate = !prevMsg || new Date(msg.createdAt).toDateString() !== new Date(prevMsg.createdAt).toDateString();
+      const isMine = msg.senderId.toString() === userId;
 
-    return (
-      <>
-        {showDate && (
-          <div className="date-header">
-            <span className="timestamp">{new Date(msg.createdAt).toLocaleDateString()}</span>
-          </div>
-        )}
-        <div className="message-container" style={style}>
-          <div className={`message ${isMine ? 'mine' : 'other'}`}>
-            {msg.contentType === 'text' ? (
-              <p className="message-content">{msg.content}</p>
-            ) : (
-              <>
-                {msg.contentType === 'image' && <img src={msg.content} alt="media" className="message-media" />}
-                {msg.contentType === 'video' && <video src={msg.content} controls className="message-media" />}
-                {msg.contentType === 'audio' && <audio src={msg.content} controls className="message-audio" />}
-                {msg.contentType === 'document' && (
-                  <a href={msg.content} className="message-document" target="_blank" rel="noopener noreferrer">
-                    {msg.originalFilename || 'Document'}
-                  </a>
-                )}
-                {msg.caption && <p className="message-caption">{msg.caption}</p>}
-              </>
-            )}
-            <div className="message-meta">
-              <span className="timestamp">{new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-              {isMine && (
-                <span className="message-status">
-                  {msg.status === 'pending' ? '⌛' : msg.status === 'sent' ? '✓' : '✓✓'}
-                </span>
+      return (
+        <>
+          {showDate && (
+            <div className="date-header">
+              <span className="timestamp">{new Date(msg.createdAt).toLocaleDateString()}</span>
+            </div>
+          )}
+          <div className="message-container" style={style}>
+            <div className={`message ${isMine ? 'mine' : 'other'}`}>
+              {msg.contentType === 'text' ? (
+                <p className="message-content">{msg.plaintextContent || '[Message not decrypted]'}</p>
+              ) : (
+                <>
+                  {msg.contentType === 'image' && <img src={msg.content} alt="media" className="message-media" />}
+                  {msg.contentType === 'video' && <video src={msg.content} controls className="message-media" />}
+                  {msg.contentType === 'audio' && <audio src={msg.content} controls className="message-audio" />}
+                  {msg.contentType === 'document' && (
+                    <a href={msg.content} className="message-document" target="_blank" rel="noopener noreferrer">
+                      {msg.originalFilename || 'Document'}
+                    </a>
+                  )}
+                  {msg.caption && <p className="message-caption">{msg.caption}</p>}
+                </>
               )}
+              <div className="message-meta">
+                <span className="timestamp">{new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                {isMine && (
+                  <span className="message-status">
+                    {msg.status === 'pending' ? '⌛' : msg.status === 'sent' ? '✓' : msg.status === 'delivered' ? '✓✓' : '👀'}
+                  </span>
+                )}
+              </div>
             </div>
           </div>
-        </div>
-      </>
-    );
-  }, [messages, selectedChat, userId]), [messages, selectedChat, userId]);
+        </>
+      );
+    };
+    Component.displayName = 'MessageRow';
+    return React.memo(Component);
+  }, [messages, selectedChat, userId]);
 
   return (
     <div className="chat-screen">
@@ -518,9 +511,9 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         <div className={`chat-list ${selectedChat ? 'hidden md:block' : 'block'}`}>
           {chatList.map((chat) => (
             <div
-              key={chat._id}
-              className={`chat-list-item ${selectedChat === chat._id ? 'selected' : ''}`}
-              onClick={() => selectChat(chat._id)}
+              key={chat.id}
+              className={`chat-list-item ${selectedChat === chat.id ? 'selected' : ''}`}
+              onClick={() => selectChat(chat.id)}
             >
               <img src={chat.photo || 'https://placehold.co/40x40'} alt="Avatar" className="chat-list-avatar" />
               <div className="chat-list-info">
@@ -535,8 +528,8 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
                 {chat.latestMessage && (
                   <p className="chat-list-preview">{chat.latestMessage.plaintextContent || `[${chat.latestMessage.contentType}]`}</p>
                 )}
-                {!!unreadMessages[chat._id] && (
-                  <span className="chat-list-unread">{unreadMessages[chat._id]}</span>
+                {!!unreadMessages[chat.id] && (
+                  <span className="chat-list-unread">{unreadMessages[chat.id]}</span>
                 )}
               </div>
             </div>
@@ -548,12 +541,12 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
               <div className="conversation-header">
                 <FaArrowLeft className="back-icon md:hidden" onClick={() => selectChat(null)} />
                 <img
-                  src={chatList.find((c) => c._id === selectedChat)?.photo || 'https://placehold.co/40x40'}
+                  src={chatList.find((c) => c.id === selectedChat)?.photo || 'https://placehold.co/40x40'}
                   alt="Avatar"
                   className="conversation-avatar"
                 />
                 <div className="conversation-info">
-                  <h2 className="title">{chatList.find((c) => c._id === selectedChat)?.username}</h2>
+                  <h2 className="title">{chatList.find((c) => c.id === selectedChat)?.username}</h2>
                   {isTyping[selectedChat] && <span className="typing-indicator">Typing...</span>}
                 </div>
               </div>

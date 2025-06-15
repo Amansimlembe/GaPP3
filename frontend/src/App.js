@@ -106,6 +106,7 @@ const App = () => {
       sessionStorage.setItem('virtualNumber', virtualNumber);
       sessionStorage.setItem('username', username);
       setIsAuthenticated(true);
+      setError(null);
     } else {
       sessionStorage.clear();
       setIsAuthenticated(false);
@@ -126,6 +127,7 @@ const App = () => {
       const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername, privateKey } = response.data;
       setAuth(newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername);
       if (privateKey) sessionStorage.setItem('privateKey', privateKey);
+      setError(null);
       return newToken;
     } catch (error) {
       setAuth('', '', '', '', '', '');
@@ -133,6 +135,38 @@ const App = () => {
       return null;
     }
   }, [token, userId, setAuth]);
+
+  useEffect(() => {
+    const interceptor = axios.interceptors.request.use(
+      (config) => {
+        if (token && !config.headers.Authorization) {
+          config.headers.Authorization = `Bearer ${token}`;
+        }
+        return config;
+      },
+      (error) => Promise.reject(error)
+    );
+
+    axios.interceptors.response.use(
+      (response) => response,
+      async (error) => {
+        if (error.response?.status === 401 && !error.config._retry) {
+          error.config._retry = true;
+          const newToken = await refreshToken();
+          if (newToken) {
+            error.config.headers.Authorization = `Bearer ${newToken}`;
+            return axios(error.config);
+          }
+        }
+        return Promise.reject(error);
+      }
+    );
+
+    return () => {
+      axios.interceptors.request.eject(interceptor);
+      axios.interceptors.response.eject(interceptor);
+    };
+  }, [token, refreshToken]);
 
   useEffect(() => {
     if (!token || !userId || typeof token !== 'string' || !isAuthenticated) {
@@ -143,9 +177,49 @@ const App = () => {
     const socketInstance = io(BASE_URL, {
       auth: { token },
       transports: ['websocket', 'polling'],
-      reconnectionAttempts: 5, // Reduced to prevent server overload
-      reconnectionDelay: 5000, // Increased delay to debounce reconnects
+      reconnection: true,
+      reconnectionAttempts: 5,
+      reconnectionDelay: 5000,
       timeout: 10000,
+    });
+
+    socketInstance.on('connect', () => {
+      console.log('Socket connected:', socketInstance.id);
+      socketInstance.emit('join', userId);
+      setError(null);
+    });
+
+    socketInstance.on('connect_error', async (error) => {
+      console.warn('Socket connect error:', error.message);
+      if (error.message.includes('invalid token') || error.message.includes('No token provided') || error.message.includes('Token invalidated')) {
+        const newToken = await refreshToken();
+        if (newToken) {
+          socketInstance.auth.token = newToken;
+          socketInstance.disconnect().connect();
+        } else {
+          setAuth('', '', '', '', '', '');
+        }
+      } else {
+        setError('Connection error, retrying...');
+      }
+    });
+
+    socketInstance.on('disconnect', (reason) => {
+      console.log('Socket disconnected:', reason);
+      if (reason === 'io server disconnect') {
+        socketInstance.connect();
+      }
+    });
+
+    socketInstance.on('message', (msg) => {
+      const senderId = typeof msg.senderId === 'object' ? msg.senderId._id.toString() : msg.senderId.toString();
+      if (msg.recipientId.toString() === userId && (!selectedChat || selectedChat !== senderId)) {
+        setChatNotifications((prev) => prev + 1);
+      }
+    });
+
+    socketInstance.on('chatListUpdated', () => {
+      // Trigger chat list refresh if needed
     });
 
     setSocket(socketInstance);
@@ -153,9 +227,8 @@ const App = () => {
     return () => {
       socketInstance.emit('leave', userId);
       socketInstance.disconnect();
-      setSocket(null);
     };
-  }, [token, userId, isAuthenticated, setAuth]);
+  }, [token, userId, isAuthenticated, setAuth, refreshToken, selectedChat]);
 
   useEffect(() => {
     if (!isAuthenticated || !token || !userId || !socket) return;
@@ -166,9 +239,9 @@ const App = () => {
       isRefreshing = true;
       try {
         const expTime = getTokenExpiration(token);
-        if (expTime && expTime - Date.now() < 15 * 60 * 1000) { // Check 15 minutes before expiry
+        if (expTime && expTime - Date.now() < 15 * 60 * 1000) {
           const newToken = await refreshToken();
-          if (newToken) {
+          if (newToken && socket) {
             socket.auth.token = newToken;
             socket.disconnect().connect();
           }
@@ -179,54 +252,9 @@ const App = () => {
     };
 
     checkTokenExpiration();
-    const interval = setInterval(checkTokenExpiration, 10 * 60 * 1000); // Check every 10 minutes
+    const interval = setInterval(checkTokenExpiration, 10 * 60 * 1000);
     return () => clearInterval(interval);
   }, [isAuthenticated, token, userId, socket, refreshToken]);
-
-  useEffect(() => {
-    if (!socket) return;
-
-    socket.on('connect', () => {
-      socket.emit('join', userId);
-    });
-
-    socket.on('connect_error', async (error) => {
-      if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
-        const newToken = await refreshToken();
-        if (newToken) {
-          socket.auth.token = newToken;
-          socket.disconnect().connect();
-        } else {
-          setAuth('', '', '', '', '', '');
-        }
-      }
-    });
-
-    socket.on('disconnect', (reason) => {
-      if (reason === 'io server disconnect') {
-        socket.connect();
-      }
-    });
-
-    socket.on('message', (msg) => {
-      const senderId = typeof msg.senderId === 'object' ? msg.senderId._id.toString() : msg.senderId.toString();
-      if (msg.recipientId.toString() === userId && (!selectedChat || selectedChat !== senderId)) {
-        setChatNotifications((prev) => prev + 1);
-      }
-    });
-
-    socket.on('chatListUpdated', () => {
-      // Trigger chat list refresh if needed
-    });
-
-    return () => {
-      socket.off('connect');
-      socket.off('connect_error');
-      socket.off('disconnect');
-      socket.off('message');
-      socket.off('chatListUpdated');
-    };
-  }, [socket, userId, selectedChat, setAuth, refreshToken]);
 
   useEffect(() => {
     document.documentElement.className = theme;
@@ -239,7 +267,7 @@ const App = () => {
 
   const handleChatNavigation = useCallback(() => {
     if (selectedChat) {
-      setChatNotifications(0); // Reset only when a chat is selected
+      setChatNotifications(0);
     }
   }, [selectedChat]);
 
@@ -249,6 +277,7 @@ const App = () => {
         {error && (
           <div className="fixed top-0 left-0 right-0 bg-red-500 text-white p-2 text-center">
             {error}
+            <button onClick={() => setError(null)} className="ml-2 underline">Dismiss</button>
           </div>
         )}
         <LoginScreen setAuth={setAuth} />
@@ -261,6 +290,7 @@ const App = () => {
       {error && (
         <div className="fixed top-0 left-0 right-0 bg-red-500 text-white p-2 text-center">
           {error}
+          <button onClick={() => setError(null)} className="ml-2 underline">Dismiss</button>
         </div>
       )}
       <Router>
@@ -316,41 +346,58 @@ const AuthenticatedApp = ({
       <div className="flex-1 p-0">
         <Routes>
           <Route path="/jobs" element={role === 0 ? <JobSeekerScreen token={token} userId={userId} /> : <EmployerScreen token={token} userId={userId} />} />
-          <Route path="/feed" element={<FeedScreen token={token} userId={userId} />} />
-          <Route path="/chat" element={<ChatScreen token={token} userId={userId} setAuth={setAuth} socket={socket} username={username} virtualNumber={virtualNumber} photo={photo} setSelectedChat={setSelectedChat} />} />
-          <Route path="/profile" element={<ProfileScreen token={token} userId={userId} setAuth={setAuth} username={username} virtualNumber={virtualNumber} photo={photo} />} />
+          <Route path="/feed" element={<FeedScreen token={token} userId={userId} socket={socket} onUnauthorized={() => setAuth('', '', '', '', '', '')} />} />
+          <Route path="/chat" element={<ChatScreen
+            token={token}
+            userId={userId}
+            setAuth={() => setAuth('', '', '', '', '', '')}
+            socket={socket}
+            username={username}
+            virtualNumber={virtualNumber}
+            photo={photo}
+            setSelectedChat={setSelectedChat}
+          />} />
+          <Route path="/profile" element={<ProfileScreen
+            token={token}
+            userId={userId}
+            setAuth={setAuth}
+            username={username}
+            virtualNumber={virtualNumber}
+            photo={photo}
+          />}
+          />
           <Route path="/" element={<Navigate to="/feed" replace />} />
-          <Route path="*" element={<Navigate to="/feed" replace />} />
+          <Route path="*" element={<Navigate to="/feed" />} />
         </Routes>
       </div>
       <motion.nav
         initial={{ y: 0 }}
-        animate={{ y: location.pathname === '/chat' && selectedChat ? 200 : 0 }}
+        animate={{ y: location.pathname === '/chat' && selectedChat ? '100%' : 0 }}
         transition={{ duration: 0.3 }}
-        className="fixed bottom-0 left-0 right-0 bg-primary text-white p-2 flex justify-around items-center shadow-lg z-20"
+        className="fixed bottom-0 left-0 right-0 bg-primary-blue-600 text-white p-4 flex justify-around items-center shadow-lg z-50"
       >
-        <NavLink to="/feed" className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}>
+        <NavLink to="/feed" className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-blue-700' : 'hover:bg-blue-700'}`}>
           <FaHome className="text-xl" />
           <span className="text-xs">Feed</span>
         </NavLink>
-        <NavLink to="/jobs" className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}>
+        <NavLink to="/jobs" className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-blue-700' : 'hover:bg-blue-700'}`}>
           <FaBriefcase className="text-xl" />
           <span className="text-xs">Jobs</span>
         </NavLink>
         <NavLink
           to="/chat"
           onClick={handleChatNavigation}
-          className={({ isActive }) => `flex flex-col items-center p-2 rounded relative ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}
+          className={({ isActive }) => `flex flex-col items-center p-2 rounded relative ${isActive ? 'bg-blue-700' : 'hover:bg-blue-700'}`}
         >
           <FaComments className="text-xl" />
           {chatNotifications > 0 && (
-            <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
+            <span className="absolute -top-1 right-0 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
               {chatNotifications}
             </span>
           )}
           <span className="text-xs">Chat</span>
         </NavLink>
-        <NavLink to="/profile" className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}>
+        <NavLink to="/profile" className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-blue-700' : 'hover:bg-blue-700'}`}>
           <FaUser className="text-xl" />
           <span className="text-xs">Profile</span>
         </NavLink>

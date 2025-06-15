@@ -37,7 +37,6 @@ const messageSchema = new mongoose.Schema({
 });
 
 // Indexes for performance
-messageSchema.index({ clientMessageId: 1 }, { unique: true });
 messageSchema.index({ senderId: 1, recipientId: 1, createdAt: -1 });
 messageSchema.index({ senderId: 1, status: 1 });
 messageSchema.index({ recipientId: 1, status: 1 });
@@ -46,7 +45,6 @@ messageSchema.index({ senderId: 1, recipientId: 1, status: 1 });
 // Pre-save hook to validate senderId and recipientId
 messageSchema.pre('save', async function (next) {
   try {
-    // Only validate existence if sender details are missing
     if (!this.senderVirtualNumber || !this.senderUsername || !this.senderPhoto) {
       const sender = await User.findById(this.senderId).select('virtualNumber username photo').lean();
       if (!sender) {
@@ -78,7 +76,6 @@ messageSchema.statics.cleanupOrphanedMessages = async function () {
     const batchSize = 1000;
     let totalDeleted = 0;
 
-    // Get distinct sender and recipient IDs
     const [senderIds, recipientIds] = await Promise.all([
       this.distinct('senderId'),
       this.distinct('recipientId'),
@@ -90,7 +87,6 @@ messageSchema.statics.cleanupOrphanedMessages = async function () {
       return { deletedCount: 0 };
     }
 
-    // Get existing user IDs in batches
     const existingUserIds = new Set();
     for (let i = 0; i < messageUsers.length; i += batchSize) {
       const batch = messageUsers.slice(i, i + batchSize);
@@ -98,7 +94,6 @@ messageSchema.statics.cleanupOrphanedMessages = async function () {
       users.forEach(user => existingUserIds.add(user._id.toString()));
     }
 
-    // Identify orphaned user IDs
     const orphanedUserIds = messageUsers.filter(id => !existingUserIds.has(id));
 
     if (!orphanedUserIds.length) {
@@ -106,7 +101,6 @@ messageSchema.statics.cleanupOrphanedMessages = async function () {
       return { deletedCount: 0 };
     }
 
-    // Delete orphaned messages in batches
     for (let i = 0; i < orphanedUserIds.length; i += batchSize) {
       const batch = orphanedUserIds.slice(i, i + batchSize);
       const result = await this.deleteMany({

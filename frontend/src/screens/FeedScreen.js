@@ -3,19 +3,9 @@ import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import { FaPlus, FaPaperPlane, FaHeart, FaComment, FaShare, FaVolumeMute, FaVolumeUp, FaSyncAlt } from 'react-icons/fa';
 import { useSwipeable } from 'react-swipeable';
-import io from 'socket.io-client';
 import debounce from 'lodash/debounce';
 
-const socket = io('https://gapp-6yc3.onrender.com', {
-  reconnection: true,
-  reconnectionAttempts: Infinity,
-  reconnectionDelay: 1000,
-  reconnectionDelayMax: 5000,
-  randomizationFactor: 0.5,
-  withCredentials: true,
-});
-
-const FeedScreen = ({ token: initialToken, userId, onUnauthorized }) => {
+const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
   const [posts, setPosts] = useState([]);
   const [contentType, setContentType] = useState('video');
   const [caption, setCaption] = useState('');
@@ -32,25 +22,8 @@ const FeedScreen = ({ token: initialToken, userId, onUnauthorized }) => {
   const [hasMore, setHasMore] = useState(true);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const [token, setToken] = useState(initialToken);
   const feedRef = useRef(null);
   const mediaRefs = useRef({});
-
-  const refreshToken = useCallback(async () => {
-    try {
-      const { data } = await axios.post('https://gapp-6yc3.onrender.com/auth/refresh', { userId }, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      setToken(data.token);
-      localStorage.setItem('token', data.token);
-      return data.token;
-    } catch (err) {
-      console.error('Token refresh failed:', err);
-      setError('Session expired. Please log in again.');
-      onUnauthorized?.();
-      return null;
-    }
-  }, [token, userId, onUnauthorized]);
 
   const setupIntersectionObserver = useCallback(
     debounce(() => {
@@ -88,27 +61,19 @@ const FeedScreen = ({ token: initialToken, userId, onUnauthorized }) => {
     setLoading(true);
     if (isRefresh) setRefreshing(true);
     try {
-      const currentToken = token;
-      const { data } = await axios.get(`https://gapp-6yc3.onrender.com/feed?page=${pageNum}&limit=10`, {
-        headers: { Authorization: `Bearer ${currentToken}` },
-      });
+      const { data } = await axios.get(`https://gapp-6yc3.onrender.com/feed?page=${pageNum}&limit=10`, { timeout: 5000 });
       const filteredPosts = Array.isArray(data.posts) ? data.posts.filter((post) => !post.isStory) : [];
       setPosts((prev) => (pageNum === 1 || isRefresh ? filteredPosts : [...prev, ...filteredPosts]));
       setHasMore(data.hasMore || false);
       setError('');
       if (filteredPosts.length > 0 && (pageNum === 1 || isRefresh)) {
-        setPlayingPostId(filteredPosts[0]._id);
+        setPlayingPostId(filteredPosts[0]._id.toString());
       }
     } catch (error) {
       console.error('Failed to fetch feed:', error);
       if (error.response?.status === 401) {
-        const newToken = await refreshToken();
-        if (newToken) {
-          await fetchFeed(pageNum, isRefresh);
-        } else {
-          setError('Unauthorized. Please log in again.');
-          onUnauthorized?.();
-        }
+        setError('Unauthorized. Please log in again.');
+        onUnauthorized?.();
       } else {
         setError(error.response?.data?.error || 'Failed to load feed');
       }
@@ -116,32 +81,32 @@ const FeedScreen = ({ token: initialToken, userId, onUnauthorized }) => {
       setLoading(false);
       if (isRefresh) setRefreshing(false);
     }
-  }, [token, userId, loading, hasMore, refreshToken, onUnauthorized]);
+  }, [token, userId, loading, hasMore, onUnauthorized]);
 
   useEffect(() => {
-    if (token && userId) {
+    if (token && userId && socket) {
       fetchFeed();
       socket.emit('join', userId);
+
+      socket.on('newPost', (post) => {
+        if (!post.isStory) {
+          setPosts((prev) => [post, ...prev.filter((p) => p._id.toString() !== post._id.toString())]);
+        }
+      });
+      socket.on('postUpdate', (updatedPost) => {
+        setPosts((prev) => prev.map((p) => (p._id.toString() === updatedPost._id.toString() ? updatedPost : p)));
+      });
+      socket.on('postDeleted', (postId) => {
+        setPosts((prev) => prev.filter((p) => p._id.toString() !== postId.toString()));
+      });
+
+      return () => {
+        socket.off('newPost');
+        socket.off('postUpdate');
+        socket.off('postDeleted');
+      };
     }
-
-    socket.on('newPost', (post) => {
-      if (!post.isStory) {
-        setPosts((prev) => [post, ...prev.filter((p) => p._id !== post._id)]);
-      }
-    });
-    socket.on('postUpdate', (updatedPost) => {
-      setPosts((prev) => prev.map((p) => (p._id === updatedPost._id ? updatedPost : p)));
-    });
-    socket.on('postDeleted', (postId) => {
-      setPosts((prev) => prev.filter((p) => p._id !== postId));
-    });
-
-    return () => {
-      socket.off('newPost');
-      socket.off('postUpdate');
-      socket.off('postDeleted');
-    };
-  }, [token, userId, fetchFeed]);
+  }, [token, userId, socket, fetchFeed]);
 
   useEffect(() => {
     setupIntersectionObserver();
@@ -182,9 +147,10 @@ const FeedScreen = ({ token: initialToken, userId, onUnauthorized }) => {
     try {
       setUploadProgress(0);
       const { data } = await axios.post('https://gapp-6yc3.onrender.com/feed', formData, {
-        headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
+        headers: { 'Content-Type': 'multipart/form-data' },
         onUploadProgress: (progressEvent) =>
           setUploadProgress(Math.round((progressEvent.loaded * 100) / progressEvent.total)),
+        timeout: 10000,
       });
       socket.emit('newPost', data);
       setPosts((prev) => [data, ...prev]);
@@ -197,13 +163,8 @@ const FeedScreen = ({ token: initialToken, userId, onUnauthorized }) => {
     } catch (error) {
       console.error('Post error:', error);
       if (error.response?.status === 401) {
-        const newToken = await refreshToken();
-        if (newToken) {
-          await postContent();
-        } else {
-          setError('Unauthorized. Please log in again.');
-          onUnauthorized?.();
-        }
+        setError('Unauthorized. Please log in again.');
+        onUnauthorized?.();
       } else {
         setError(error.response?.data?.error || 'Failed to post');
       }
@@ -214,24 +175,19 @@ const FeedScreen = ({ token: initialToken, userId, onUnauthorized }) => {
   const likePost = async (postId) => {
     if (!playingPostId || postId !== playingPostId) return;
     try {
-      const post = posts.find((p) => p._id === postId);
-      const action = post.likedBy?.includes(userId) ? '/feed/unlike' : '/feed/like';
+      const post = posts.find((p) => p._id.toString() === postId);
+      const action = post.likedBy?.map(id => id.toString()).includes(userId) ? '/feed/unlike' : '/feed/like';
       const { data } = await axios.post(
         `https://gapp-6yc3.onrender.com${action}`,
         { postId, userId },
-        { headers: { Authorization: `Bearer ${token}` } }
+        { timeout: 5000 }
       );
       socket.emit('postUpdate', data);
     } catch (error) {
       console.error('Like error:', error);
       if (error.response?.status === 401) {
-        const newToken = await refreshToken();
-        if (newToken) {
-          await likePost(postId);
-        } else {
-          setError('Unauthorized. Please log in again.');
-          onUnauthorized?.();
-        }
+        setError('Unauthorized. Please log in again.');
+        onUnauthorized?.();
       }
     }
   };
@@ -242,31 +198,26 @@ const FeedScreen = ({ token: initialToken, userId, onUnauthorized }) => {
       const { data } = await axios.post(
         'https://gapp-6yc3.onrender.com/feed/comment',
         { postId, comment, userId },
-        { headers: { Authorization: `Bearer ${token}` } }
+        { timeout: 5000 }
       );
       const updatedPost = {
-        ...posts.find((p) => p._id === postId),
-        comments: [...(posts.find((p) => p._id === postId)?.comments || []), data],
+        ...posts.find((p) => p._id.toString() === postId),
+        comments: [...(posts.find((p) => p._id.toString() === postId)?.comments || []), data],
       };
       socket.emit('postUpdate', updatedPost);
       setComment('');
     } catch (error) {
       console.error('Comment error:', error);
       if (error.response?.status === 401) {
-        const newToken = await refreshToken();
-        if (newToken) {
-          await commentPost(postId);
-        } else {
-          setError('Unauthorized. Please log in again.');
-          onUnauthorized?.();
-        }
+        setError('Unauthorized. Please log in again.');
+        onUnauthorized?.();
       }
     }
   };
 
   const timeAgo = (date) => {
     const now = new Date();
-    const diff = now - parseInt(date);
+    const diff = now - new Date(date);
     const minutes = Math.floor(diff / 60000);
     if (minutes < 60) return `${minutes}m`;
     const hours = Math.floor(minutes / 60);
@@ -494,12 +445,12 @@ const FeedScreen = ({ token: initialToken, userId, onUnauthorized }) => {
         ) : (
           posts.map((post, index) => (
             <motion.div
-              key={post._id}
+              key={post._id.toString()}
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               transition={{ duration: 0.3 }}
               className="h-screen w-full flex flex-col items-center justify-center text-white relative snap-start md:max-w-[600px] md:mx-auto md:h-[800px] md:rounded-lg md:shadow-lg md:bg-gray-900"
-              onDoubleClick={() => handleDoubleTap(post._id)}
+              onDoubleClick={() => handleDoubleTap(post._id.toString())}
             >
               {/* User Info */}
               <div className="absolute top-4 left-4 z-10 flex items-center">
@@ -525,14 +476,14 @@ const FeedScreen = ({ token: initialToken, userId, onUnauthorized }) => {
                   src={post.content}
                   alt="Post"
                   className="w-full h-full object-cover md:rounded-lg"
-                  data-post-id={post._id}
-                  ref={(el) => (mediaRefs.current[post._id] = el)}
+                  data-post-id={post._id.toString()}
+                  ref={(el) => (mediaRefs.current[post._id.toString()] = el)}
                 />
               )}
               {post.contentType === 'video' && (
                 <video
-                  ref={(el) => (mediaRefs.current[post._id] = el)}
-                  data-post-id={post._id}
+                  ref={(el) => (mediaRefs.current[post._id.toString()] = el)}
+                  data-post-id={post._id.toString()}
                   playsInline
                   autoPlay
                   muted={muted}
@@ -543,8 +494,8 @@ const FeedScreen = ({ token: initialToken, userId, onUnauthorized }) => {
               )}
               {post.contentType === 'audio' && (
                 <audio
-                  ref={(el) => (mediaRefs.current[post._id] = el)}
-                  data-post-id={post._id}
+                  ref={(el) => (mediaRefs.current[post._id.toString()] = el)}
+                  data-post-id={post._id.toString()}
                   controls
                   autoPlay
                   src={post.content}
@@ -566,14 +517,14 @@ const FeedScreen = ({ token: initialToken, userId, onUnauthorized }) => {
               <div className="absolute right-4 bottom-20 flex flex-col items-center space-y-6 z-10">
                 <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
                   <FaHeart
-                    onClick={() => likePost(post._id)}
-                    className={`text-3xl cursor-pointer ${post.likedBy?.includes(userId) ? 'text-red-500' : 'text-white'}`}
+                    onClick={() => likePost(post._id.toString())}
+                    className={`text-3xl cursor-pointer ${post.likedBy?.map(id => id.toString()).includes(userId) ? 'text-red-500' : 'text-white'}`}
                   />
                   <span className="text-sm text-white">{post.likes || 0}</span>
                 </motion.div>
                 <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
                   <FaComment
-                    onClick={() => setShowComments(post._id)}
+                    onClick={() => setShowComments(post._id.toString())}
                     className="text-3xl cursor-pointer text-white hover:text-blue-500"
                   />
                   <span className="text-sm text-white">{post.comments?.length || 0}</span>
@@ -582,7 +533,7 @@ const FeedScreen = ({ token: initialToken, userId, onUnauthorized }) => {
                   <FaShare
                     onClick={() =>
                       navigator.clipboard
-                        .writeText(`${window.location.origin}/post/${post._id}`)
+                        .writeText(`${window.location.origin}/post/${post._id.toString()}`)
                         .then(() => alert('Link copied!'))
                     }
                     className="text-3xl cursor-pointer text-white hover:text-blue-500"
@@ -619,7 +570,7 @@ const FeedScreen = ({ token: initialToken, userId, onUnauthorized }) => {
 
               {/* Comments Modal */}
               <AnimatePresence>
-                {showComments === post._id && (
+                {showComments === post._id.toString() && (
                   <motion.div
                     initial={{ opacity: 0, y: 100 }}
                     animate={{ opacity: 1, y: 0 }}
@@ -653,7 +604,7 @@ const FeedScreen = ({ token: initialToken, userId, onUnauthorized }) => {
                       <motion.button
                         whileHover={{ scale: 1.1 }}
                         whileTap={{ scale: 0.9 }}
-                        onClick={() => commentPost(post._id)}
+                        onClick={() => commentPost(post._id.toString())}
                         className="ml-3 p-3 bg-blue-500 rounded-full"
                       >
                         <FaPaperPlane className="text-xl text-white" />

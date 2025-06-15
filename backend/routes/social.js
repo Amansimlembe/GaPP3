@@ -125,6 +125,28 @@ const deleteUserSchema = Joi.object({
 module.exports = (io) => {
   const router = express.Router();
 
+  // Socket.IO middleware for token validation
+  io.use(async (socket, next) => {
+    const token = socket.handshake.auth.token;
+    if (!token) {
+      logger.warn('No token provided for Socket.IO', { socketId: socket.id });
+      return next(new Error('No token provided'));
+    }
+    try {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
+      const blacklisted = await mongoose.model('TokenBlacklist').findOne({ token }).select('_id').lean();
+      if (blacklisted) {
+        logger.warn('Blacklisted token used for Socket.IO', { socketId: socket.id });
+        return next(new Error('Token invalidated'));
+      }
+      socket.user = decoded;
+      next();
+    } catch (error) {
+      logger.error('Socket.IO auth error', { error: error.message, socketId: socket.id });
+      next(new Error('Invalid token'));
+    }
+  });
+
   const emitUpdatedChatList = async (userId) => {
     try {
       if (!mongoose.isValidObjectId(userId)) return;
@@ -211,43 +233,59 @@ module.exports = (io) => {
   };
 
   io.on('connection', (socket) => {
-    logger.info('New Socket.IO connection', { socketId: socket.id });
+    logger.info('New Socket.IO connection', { socketId: socket.id, userId: socket.user?.id });
 
     socket.on('join', (userId) => {
-      if (!mongoose.isValidObjectId(userId)) return;
+      if (!mongoose.isValidObjectId(userId) || userId !== socket.user.id) {
+        logger.warn('Invalid or unauthorized join attempt', { socketId: socket.id, userId });
+        return;
+      }
       socket.join(userId);
       User.findByIdAndUpdate(userId, { status: 'online', lastSeen: new Date() }, { new: true, lean: true })
         .then((user) => {
           if (user) {
             io.to(userId).emit('userStatus', { userId, status: 'online', lastSeen: user.lastSeen });
             emitUpdatedChatList(userId);
+            logger.info('User joined room', { socketId: socket.id, userId });
           }
         })
-        .catch((err) => logger.error('User join failed', { error: err.message }));
+        .catch((err) => logger.error('User join failed', { error: err.message, userId }));
     });
 
     socket.on('leave', (userId) => {
-      if (!mongoose.isValidObjectId(userId)) return;
+      if (!mongoose.isValidObjectId(userId) || userId !== socket.user.id) {
+        logger.warn('Invalid or unauthorized leave attempt', { socketId: socket.id, userId });
+        return;
+      }
       User.findByIdAndUpdate(userId, { status: 'offline', lastSeen: new Date() }, { new: true, lean: true })
         .then((user) => {
-          if (user) io.to(userId).emit('userStatus', { userId, status: 'offline', lastSeen: user.lastSeen });
+          if (user) {
+            io.to(userId).emit('userStatus', { userId, status: 'offline', lastSeen: user.lastSeen });
+            logger.info('User left room', { socketId: socket.id, userId });
+          }
         })
-        .catch((err) => logger.error('User leave failed', { error: err.message }));
+        .catch((err) => logger.error('User leave failed', { error: err.message, userId }));
       socket.leave(userId);
     });
 
     socket.on('typing', ({ userId, recipientId }) => {
-      if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId)) return;
+      if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId) || userId !== socket.user.id) {
+        return;
+      }
       io.to(recipientId).emit('typing', { userId });
     });
 
     socket.on('stopTyping', ({ userId, recipientId }) => {
-      if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId)) return;
+      if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId) || userId !== socket.user.id) {
+        return;
+      }
       io.to(recipientId).emit('stopTyping', { userId });
     });
 
     socket.on('newContact', async ({ userId, contactData }) => {
-      if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(contactData.id)) return;
+      if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(contactData.id) || userId !== socket.user.id) {
+        return;
+      }
       try {
         const contact = await User.findById(contactData.id).select('username virtualNumber photo status lastSeen').lean();
         if (contact) {
@@ -267,7 +305,7 @@ module.exports = (io) => {
           await Promise.all([emitUpdatedChatList(userId), emitUpdatedChatList(contactData.id)]);
         }
       } catch (err) {
-        logger.error('New contact emission failed', { error: err.message });
+        logger.error('New contact emission failed', { error: err.message, userId });
       }
     });
 
@@ -294,6 +332,11 @@ module.exports = (io) => {
           senderUsername,
           senderPhoto,
         } = messageData;
+
+        if (senderId !== socket.user.id) {
+          await session.abortTransaction();
+          return callback({ error: 'Unauthorized sender' });
+        }
 
         if (contentType === 'text' && !plaintextContent) {
           await session.abortTransaction();
@@ -341,7 +384,7 @@ module.exports = (io) => {
         callback({ message: populatedMessage });
       } catch (err) {
         await session.abortTransaction();
-        logger.error('Message send failed', { error: err.message });
+        logger.error('Message send failed', { error: err.message, senderId: messageData.senderId });
         callback({ error: err.message });
       } finally {
         session.endSession();
@@ -361,6 +404,11 @@ module.exports = (io) => {
         if (!message) {
           await session.abortTransaction();
           return callback({ error: 'Message not found' });
+        }
+
+        if (message.senderId.toString() !== socket.user.id) {
+          await session.abortTransaction();
+          return callback({ error: 'Unauthorized to edit message' });
         }
 
         message.content = newContent;
@@ -383,7 +431,7 @@ module.exports = (io) => {
         callback({ message: populatedMessage });
       } catch (err) {
         await session.abortTransaction();
-        logger.error('Edit message failed', { error: err.message });
+        logger.error('Edit message failed', { error: err.message, messageId });
         callback({ error: 'Failed to edit message' });
       } finally {
         session.endSession();
@@ -405,6 +453,11 @@ module.exports = (io) => {
           return callback({ error: 'Message not found' });
         }
 
+        if (message.senderId.toString() !== socket.user.id) {
+          await session.abortTransaction();
+          return callback({ error: 'Unauthorized to delete message' });
+        }
+
         await Message.findByIdAndDelete(messageId, { session });
         await session.commitTransaction();
 
@@ -416,7 +469,7 @@ module.exports = (io) => {
         callback({ status: 'success' });
       } catch (err) {
         await session.abortTransaction();
-        logger.error('Delete message failed', { error: err.message });
+        logger.error('Delete message failed', { error: err.message, messageId });
         callback({ error: 'Failed to delete message' });
       } finally {
         session.endSession();
@@ -438,6 +491,11 @@ module.exports = (io) => {
           return;
         }
 
+        if (message.recipientId.toString() !== socket.user.id) {
+          await session.abortTransaction();
+          return;
+        }
+
         message.status = status;
         await message.save({ session });
 
@@ -446,7 +504,7 @@ module.exports = (io) => {
         io.to(message.senderId.toString()).emit('messageStatus', { messageId, status });
       } catch (err) {
         await session.abortTransaction();
-        logger.error('Message status update failed', { error: err.message });
+        logger.error('Message status update failed', { error: err.message, messageId });
       } finally {
         session.endSession();
       }
@@ -457,6 +515,11 @@ module.exports = (io) => {
       session.startTransaction();
       try {
         if (!messageIds.every((id) => mongoose.isValidObjectId(id)) || !mongoose.isValidObjectId(recipientId)) {
+          await session.abortTransaction();
+          return;
+        }
+
+        if (recipientId !== socket.user.id) {
           await session.abortTransaction();
           return;
         }
@@ -481,14 +544,23 @@ module.exports = (io) => {
         });
       } catch (err) {
         await session.abortTransaction();
-        logger.error('Batch message status update failed', { error: err.message });
+        logger.error('Batch message status update failed', { error: err.message, recipientId });
       } finally {
         session.endSession();
       }
     });
 
     socket.on('disconnect', () => {
-      logger.info('Socket.IO disconnected', { socketId: socket.id });
+      if (socket.user?.id) {
+        User.findByIdAndUpdate(socket.user.id, { status: 'offline', lastSeen: new Date() }, { new: true, lean: true })
+          .then((user) => {
+            if (user) {
+              io.to(socket.user.id).emit('userStatus', { userId: socket.user.id, status: 'offline', lastSeen: user.lastSeen });
+            }
+          })
+          .catch((err) => logger.error('User disconnect status update failed', { error: err.message, userId: socket.user.id }));
+      }
+      logger.info('Socket.IO disconnected', { socketId: socket.id, userId: socket.user?.id });
     });
   });
 
@@ -519,6 +591,11 @@ module.exports = (io) => {
         senderUsername,
         senderPhoto,
       } = req.body;
+
+      if (senderId !== req.user.id) {
+        await session.endSession();
+        return res.status(403).json({ error: 'Unauthorized sender' });
+      }
 
       if (contentType === 'text' && !plaintextContent) {
         await session.endSession();
@@ -576,8 +653,8 @@ module.exports = (io) => {
   router.get('/chat-list', authMiddleware, async (req, res) => {
     const { userId } = req.query;
     try {
-      if (!mongoose.isValidObjectId(userId)) {
-        return res.status(400).json({ error: 'Invalid userId' });
+      if (!mongoose.isValidObjectId(userId) || userId !== req.user.id) {
+        return res.status(400).json({ error: 'Invalid or unauthorized userId' });
       }
 
       const user = await User.findById(userId).select('contacts').lean();
@@ -667,8 +744,8 @@ module.exports = (io) => {
   router.get('/messages', authMiddleware, async (req, res) => {
     const { userId, recipientId, limit = 50, skip = 0 } = req.query;
     try {
-      if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId)) {
-        return res.status(400).json({ error: 'Invalid userId or recipientId' });
+      if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId) || userId !== req.user.id) {
+        return res.status(400).json({ error: 'Invalid or unauthorized userId or recipientId' });
       }
 
       const messages = await Message.find({
@@ -710,6 +787,11 @@ module.exports = (io) => {
       }
 
       const { userId, virtualNumber } = req.body;
+      if (userId !== req.user.id) {
+        await session.abortTransaction();
+        return res.status(403).json({ error: 'Unauthorized' });
+      }
+
       const user = await User.findById(userId).session(session);
       if (!user) {
         await session.abortTransaction();
@@ -778,9 +860,9 @@ module.exports = (io) => {
     session.startTransaction();
     try {
       const { userId, recipientId, clientMessageId, senderVirtualNumber, senderUsername, senderPhoto, caption } = req.body;
-      if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId) || !clientMessageId || !req.file) {
+      if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId) || !clientMessageId || !req.file || userId !== req.user.id) {
         await session.abortTransaction();
-        return res.status(400).json({ error: 'Invalid parameters' });
+        return res.status(400).json({ error: 'Invalid or unauthorized parameters' });
       }
 
       const existingMessage = await Message.findOne({ clientMessageId }).session(session).lean();
@@ -860,6 +942,11 @@ module.exports = (io) => {
       }
 
       const { userId } = req.body;
+      if (userId !== req.user.id) {
+        await session.abortTransaction();
+        return res.status(403).json({ error: 'Unauthorized' });
+      }
+
       const user = await User.findById(userId).session(session);
       if (!user) {
         await session.abortTransaction();
@@ -885,7 +972,9 @@ module.exports = (io) => {
       await session.commitTransaction();
 
       io.to(userId).emit('userStatus', { userId, status: 'offline', lastSeen: new Date() });
-      io.to(contactIds).emit('userDeleted', { userId });
+      contactIds.forEach((contactId) => {
+        io.to(contactId).emit('userDeleted', { userId });
+      });
 
       await Promise.all(contactIds.map((contactId) => emitUpdatedChatList(contactId)));
 
