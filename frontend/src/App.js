@@ -38,7 +38,7 @@ class ErrorBoundary extends React.Component {
           <h2 className="text-xl font-bold">Something went wrong</h2>
           <p className="my-2">{this.state.error?.message || 'Unknown error'}</p>
           <button
-            className="bg-primary text-white px-4 py-2 rounded"
+            className="bg-blue-600 text-white px-4 py-2 rounded"
             onClick={() => window.location.reload()}
           >
             Reload
@@ -189,9 +189,9 @@ const App = () => {
       setError(null);
     });
 
-    socketInstance.on('connect_error', async (error) => {
-      console.warn('Socket connect error:', error.message);
-      if (error.message.includes('invalid token') || error.message.includes('No token provided') || error.message.includes('Token invalidated')) {
+    socketInstance.on('connect_error', async (err) => {
+      console.warn('Socket connect error:', err.message);
+      if (err.message.includes('invalid token') || err.message.includes('No token provided') || err.message.includes('Token invalidated')) {
         const newToken = await refreshToken();
         if (newToken) {
           socketInstance.auth.token = newToken;
@@ -219,7 +219,7 @@ const App = () => {
     });
 
     socketInstance.on('chatListUpdated', () => {
-      // Trigger chat list refresh if needed
+      // Trigger chat list refresh
     });
 
     setSocket(socketInstance);
@@ -228,7 +228,7 @@ const App = () => {
       socketInstance.emit('leave', userId);
       socketInstance.disconnect();
     };
-  }, [token, userId, isAuthenticated, setAuth, refreshToken, selectedChat]);
+  }, [token, userId, isAuthenticated, setAuth, refreshToken]);
 
   useEffect(() => {
     if (!isAuthenticated || !token || !userId || !socket) return;
@@ -241,7 +241,7 @@ const App = () => {
         const expTime = getTokenExpiration(token);
         if (expTime && expTime - Date.now() < 15 * 60 * 1000) {
           const newToken = await refreshToken();
-          if (newToken && socket) {
+          if (newToken) {
             socket.auth.token = newToken;
             socket.disconnect().connect();
           }
@@ -275,7 +275,7 @@ const App = () => {
     return (
       <ErrorBoundary>
         {error && (
-          <div className="fixed top-0 left-0 right-0 bg-red-500 text-white p-2 text-center">
+          <div className="fixed top-0 left-0 right-0 bg-blue-600 text-white p-2 text-center">
             {error}
             <button onClick={() => setError(null)} className="ml-2 underline">Dismiss</button>
           </div>
@@ -288,10 +288,10 @@ const App = () => {
   return (
     <ErrorBoundary>
       {error && (
-        <div className="fixed top-0 left-0 right-0 bg-red-500 text-white p-2 text-center">
-          {error}
-          <button onClick={() => setError(null)} className="ml-2 underline">Dismiss</button>
-        </div>
+        <div className="fixed top-0 left-0 right-0 bg-blue-600 text-white p-2 text-center">
+        {error}
+        <button onClick={() => setError(null)} className="ml-2 underline">Dismiss</button>
+      </div>
       )}
       <Router>
         <AuthenticatedApp
@@ -308,7 +308,6 @@ const App = () => {
           handleChatNavigation={handleChatNavigation}
           theme={theme}
           setSelectedChat={setSelectedChat}
-          selectedChat={selectedChat}
         />
       </Router>
     </ErrorBoundary>
@@ -329,12 +328,11 @@ const AuthenticatedApp = ({
   handleChatNavigation,
   theme,
   setSelectedChat,
-  selectedChat,
 }) => {
   const location = useLocation();
 
   return (
-    <div className={`min-h-screen flex flex-col ${theme === 'dark' ? 'dark' : ''} bg-gray-100 dark:bg-gray-900`}>
+    <div className={`min-h-screen flex flex-col ${theme === 'light' ? 'bg-gray-100' : 'dark:bg-gray-900'}`}>
       {!virtualNumber && (
         <CountrySelector
           token={token}
@@ -350,7 +348,7 @@ const AuthenticatedApp = ({
           <Route path="/chat" element={<ChatScreen
             token={token}
             userId={userId}
-            setAuth={() => setAuth('', '', '', '', '', '')}
+            setAuth={setAuth}
             socket={socket}
             username={username}
             virtualNumber={virtualNumber}
@@ -367,14 +365,14 @@ const AuthenticatedApp = ({
           />}
           />
           <Route path="/" element={<Navigate to="/feed" replace />} />
-          <Route path="*" element={<Navigate to="/feed" />} />
+          <Route path="*" element={<Navigate to="/feed" replace />} />
         </Routes>
       </div>
       <motion.nav
         initial={{ y: 0 }}
         animate={{ y: location.pathname === '/chat' && selectedChat ? '100%' : 0 }}
         transition={{ duration: 0.3 }}
-        className="fixed bottom-0 left-0 right-0 bg-primary-blue-600 text-white p-4 flex justify-around items-center shadow-lg z-50"
+        className="fixed bottom-0 left-0 right-0 bg-blue-600 text-white p-2 flex justify-around items-center shadow-lg z-20"
       >
         <NavLink to="/feed" className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-blue-700' : 'hover:bg-blue-700'}`}>
           <FaHome className="text-xl" />
@@ -391,7 +389,7 @@ const AuthenticatedApp = ({
         >
           <FaComments className="text-xl" />
           {chatNotifications > 0 && (
-            <span className="absolute -top-1 right-0 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
+            <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
               {chatNotifications}
             </span>
           )}

@@ -37,23 +37,33 @@ const LoginScreen = ({ setAuth }) => {
   );
 
   const validateForm = () => {
+    // Email: Must be valid
     if (!email || !/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(email)) {
       setError('Please enter a valid email');
       return false;
     }
-    if (!password || password.length < 6) {
-      setError('Password must be at least 6 characters');
+    // Password: 8+ chars, 1 lowercase, 1 uppercase, 1 number, 1 special char
+    if (
+      !password ||
+      !/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/.test(password)
+    ) {
+      setError(
+        'Password must be at least 8 characters with one lowercase, one uppercase, one number, and one special character'
+      );
       return false;
     }
     if (!isLogin) {
+      // Username: 3–20 chars
       if (!username || username.length < 3 || username.length > 20) {
         setError('Username must be between 3 and 20 characters');
         return false;
       }
-      if (!selectedCountry) {
-        setError('Please select a country');
+      // Country: 2-letter ISO code
+      if (!selectedCountry || !countries.find((c) => c.code === selectedCountry)) {
+        setError('Please select a valid country');
         return false;
       }
+      // Confirm password
       if (password !== confirmPassword) {
         setError('Passwords do not match');
         return false;
@@ -68,7 +78,7 @@ const LoginScreen = ({ setAuth }) => {
       const position = await new Promise((resolve, reject) => {
         navigator.geolocation.getCurrentPosition(
           resolve,
-          reject,
+          (err) => reject(err),
           { timeout: 10000, maximumAge: 60000, enableHighAccuracy: false }
         );
       });
@@ -79,15 +89,15 @@ const LoginScreen = ({ setAuth }) => {
       );
       const currentCountryCode = response.data.countryCode;
       if (currentCountryCode !== selectedCountry) {
-        setError('Selected country does not match your current location.');
+        setError(`Selected country (${selectedCountry}) does not match your current location (${currentCountryCode}).`);
         setShowLocationConfirm(true);
         return false;
       }
       return true;
     } catch (err) {
-      console.error('Geolocation error:', err);
+      console.warn('Geolocation error:', err.message);
       setError(
-        'Unable to detect location. Please ensure location services are enabled or confirm your country manually.'
+        'Unable to detect location. Ensure location services are enabled or confirm your country manually.'
       );
       setShowLocationConfirm(true);
       return false;
@@ -106,16 +116,15 @@ const LoginScreen = ({ setAuth }) => {
       } catch (err) {
         console.error(`Attempt ${i + 1} failed:`, {
           status: err.response?.status,
-          data: err.response?.data,
+          data: JSON.stringify(err.response?.data || {}),
           message: err.message,
-          stack: err.stack,
-          requestData: isLogin ? data : 'FormData/JSON',
+          requestData: JSON.stringify(isLogin ? data : '[FormData/JSON]'),
         });
         if (
           isLogin &&
           err.response?.status === 401 &&
           (err.response?.data?.error === 'Email not registered' ||
-           err.response?.data?.error === 'Wrong password')
+            err.response?.data?.error === 'Wrong password')
         ) {
           throw err;
         }
@@ -128,60 +137,54 @@ const LoginScreen = ({ setAuth }) => {
     }
   };
 
-
   const handleSubmit = async (e) => {
-  e.preventDefault();
-  setError('');
-  setShowLocationConfirm(false);
-  if (!validateForm()) return;
+    e.preventDefault();
+    setError('');
+    setShowLocationConfirm(false);
+    if (!validateForm()) return;
 
-  if (!isLogin) {
-    const locationValid = await checkLocation(selectedCountry);
-    if (!locationValid && !showLocationConfirm) return;
-  }
-
-  setLoading(true);
-  try {
-    const data = isLogin
-      ? { email, password }
-      : { email, password, username, country: selectedCountry };
-    const config = { headers: { 'Content-Type': 'application/json' } };
-    const response = await retryRequest(data, config);
-
-    if (!response.privateKey) {
-      throw new Error('No private key in response');
+    if (!isLogin) {
+      const locationValid = await checkLocation(selectedCountry);
+      if (!locationValid && !showLocationConfirm) return;
     }
 
-    sessionStorage.setItem('token', response.token);
-    sessionStorage.setItem('userId', response.userId);
-    sessionStorage.setItem('role', response.role.toString());
-    sessionStorage.setItem('photo', response.photo || 'https://placehold.co/40x40');
-    sessionStorage.setItem('virtualNumber', response.virtualNumber || '');
-    sessionStorage.setItem('username', response.username);
-    sessionStorage.setItem('privateKey', response.privateKey);
+    setLoading(true);
+    try {
+      const data = isLogin
+        ? { email, password }
+        : { email, password, username, country: selectedCountry };
+      const config = { headers: { 'Content-Type': 'application/json' } };
+      const response = await retryRequest(data, config);
 
-    setAuth(
-      response.token,
-      response.userId,
-      response.role,
-      response.photo || 'https://placehold.co/40x40',
-      response.virtualNumber,
-      response.username
-    );
-  } catch (error) {
-    console.error(`${isLogin ? 'Login' : 'Register'} error:`, error);
-    const errorMessage =
-      error.response?.status === 429
-        ? 'Too many requests. Please wait a few minutes and try again.'
-        : error.response?.data?.error ||
-          error.message ||
-          (isLogin ? 'Login failed' : 'Registration failed');
-    setError(errorMessage);
-  } finally {
-    setLoading(false);
-  }
-};
+      if (!response.token || !response.userId) {
+        throw new Error('Invalid response: Missing token or userId');
+      }
 
+      setAuth(
+        response.token,
+        response.userId,
+        response.role,
+        response.photo || 'https://placehold.co/40x40',
+        response.virtualNumber || '',
+        response.username || ''
+      );
+    } catch (error) {
+      console.error(`${isLogin ? 'Login' : 'Register'} error:`, {
+        status: error.response?.status,
+        message: error.response?.data?.error || error.message,
+        details: JSON.stringify(error.response?.data?.details || {}),
+      });
+      const errorMessage =
+        error.response?.status === 429
+          ? 'Too many requests. Please wait a few minutes and try again.'
+          : error.response?.data?.error ||
+            error.message ||
+            (isLogin ? 'Login failed' : 'Registration failed');
+      setError(errorMessage);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleLocationConfirm = async () => {
     setShowLocationConfirm(false);
@@ -218,6 +221,7 @@ const LoginScreen = ({ setAuth }) => {
 
   const handleCountryChange = (e) => {
     setSearch(e.target.value);
+    setSelectedCountry(''); // Reset until a country is selected
   };
 
   useEffect(() => {
@@ -245,17 +249,25 @@ const LoginScreen = ({ setAuth }) => {
       className="min-h-screen flex items-center justify-center bg-gray-100 dark:bg-gray-900"
     >
       <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg w-full max-w-md">
-        <h2 className="text-2xl font-bold mb-4 text-primary dark:text-white">
+        <h2 className="text-2xl font-bold mb-4 text-blue-600 dark:text-white">
           {isLogin ? 'Login' : 'Register'}
         </h2>
-        {error && <p className="text-red-500 mb-4 text-center">{error}</p>}
+        {error && (
+          <p className="text-white bg-blue-600 mb-4 text-center p-2 rounded">
+            {error}
+            <button onClick={() => setError('')} className="ml-2 underline">Dismiss</button>
+          </p>
+        )}
         {showLocationConfirm && (
           <div className="mb-4 p-4 bg-yellow-100 dark:bg-yellow-900 text-yellow-800 dark:text-yellow-200 rounded-lg">
-            <p className="mb-2">Unable to verify your location. Are you sure you are in {countries.find(c => c.code === selectedCountry)?.name}?</p>
+            <p className="mb-2">
+              Unable to verify your location. Are you sure you are in{' '}
+              {countries.find((c) => c.code === selectedCountry)?.name}?
+            </p>
             <div className="flex justify-between">
               <button
                 onClick={handleLocationConfirm}
-                className="bg-primary text-white px-4 py-2 rounded-lg hover:bg-secondary"
+                className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700"
                 disabled={loading}
               >
                 Confirm
@@ -300,7 +312,9 @@ const LoginScreen = ({ setAuth }) => {
                           <li
                             key={c.code}
                             onClick={() => handleCountrySelect(c)}
-                            className={`p-2 cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-600 ${index === 0 ? 'bg-gray-100 dark:bg-gray-600' : ''}`}
+                            className={`p-2 cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-600 ${
+                              index === 0 ? 'bg-gray-100 dark:bg-gray-600' : ''
+                            }`}
                           >
                             {c.name}
                           </li>
@@ -318,7 +332,7 @@ const LoginScreen = ({ setAuth }) => {
             type="email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            className="w-full p-2 border rounded-md dark:bg-gray-700 dark:text-white dark:border-gray-600"
+            className="w-full p-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600"
             placeholder="Email"
             required
             disabled={loading}
@@ -328,8 +342,8 @@ const LoginScreen = ({ setAuth }) => {
               type={showPassword ? 'text' : 'password'}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className="w-full p-2 border rounded-md dark:bg-gray-700 dark:text-white dark:border-gray-600"
-              placeholder="Password (min 6 characters)"
+              className="w-full p-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600"
+              placeholder="Password (8+ chars, mixed case, number, special)"
               required
               disabled={loading}
             />
@@ -340,6 +354,8 @@ const LoginScreen = ({ setAuth }) => {
               disabled={loading}
             >
               {showPassword ? <FaEyeSlash size={20} /> : <FaEye size={20} />}
+              
+              
             </button>
           </div>
           {!isLogin && (
@@ -348,7 +364,7 @@ const LoginScreen = ({ setAuth }) => {
                 type={showConfirmPassword ? 'text' : 'password'}
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
-                className="w-full p-2 border rounded-md dark:bg-gray-700 dark:text-white dark:border-gray-600"
+                className="w-full p-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600"
                 placeholder="Confirm Password"
                 required
                 disabled={loading}
@@ -365,7 +381,9 @@ const LoginScreen = ({ setAuth }) => {
           )}
           <button
             type="submit"
-            className={`w-full bg-primary text-white p-2 rounded-lg hover:bg-secondary ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}
+            className={`w-full bg-blue-600 text-white p-2 rounded-lg hover:bg-blue-700 ${
+              loading ? 'opacity-50 cursor-not-allowed' : ''
+            }`}
             disabled={loading}
           >
             {loading ? 'Processing...' : isLogin ? 'Login' : 'Register'}
@@ -380,7 +398,7 @@ const LoginScreen = ({ setAuth }) => {
                 resetInputs();
               }
             }}
-            className={`text-primary cursor-pointer hover:underline ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}
+            className={`text-blue-600 cursor-pointer hover:underline ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}
           >
             {isLogin ? 'Register' : 'Login'}
           </span>

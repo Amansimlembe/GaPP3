@@ -77,7 +77,7 @@ const upload = multer({
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 100,
+  max: 50, // Reduced from 100 to avoid Render throttling
   message: { error: 'Too many requests, please try again later.' },
   handler: (req, res) => {
     logger.warn('Rate limit exceeded', { ip: req.ip, method: req.method, url: req.url });
@@ -186,7 +186,7 @@ const generateVirtualNumber = async (countryCode, userId) => {
     return formattedNumber;
   } catch (error) {
     logger.error('Virtual number generation failed', { error: error.message, countryCode, userId });
-    throw new Error(`Failed to generate virtual number: ${error.message}`);
+    throw new Error(`Failed to generate virtual number: ${err.message}`);
   }
 };
 
@@ -200,7 +200,7 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
     if (error) {
       logger.warn('Validation error', { error: error.details[0].message });
       await session.abortTransaction();
-      return res.status(400).json({ error: error.details[0].message });
+      return res.status(400).json({ error: 'Validation failed', details: error.details[0].message });
     }
 
     const { email, password, username, country, role = 0 } = req.body;
@@ -261,7 +261,7 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
     logger.info('User registered successfully', { userId: user._id, email });
     res.status(201).json({
       token,
-      userId: user._id,
+      userId: user._id.toString(),
       role: user.role,
       photo: user.photo,
       virtualNumber: user.virtualNumber,
@@ -270,7 +270,13 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
     });
   } catch (error) {
     await session.abortTransaction();
-    logger.error('Register error:', { error: error.message, stack: error.stack });
+    logger.error('Register error:', {
+      error: error.message,
+      stack: error.stack,
+      code: error.code,
+      email: req.body.email,
+      username: req.body.username,
+    });
     if (error.code === 11000) {
       return res.status(400).json({ error: 'Duplicate email, username, or virtual number' });
     }
@@ -286,7 +292,10 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
 router.post('/login', authLimiter, async (req, res) => {
   try {
     const { error } = loginSchema.validate(req.body);
-    if (error) return res.status(400).json({ error: error.details[0].message });
+    if (error) {
+      logger.warn('Login validation error', { error: error.details[0].message, email: req.body.email });
+      return res.status(400).json({ error: 'Validation failed', details: error.details[0].message });
+    }
 
     const { email, password } = req.body;
     const user = await User.findOne({ email }).select('+privateKey').lean();
@@ -308,7 +317,7 @@ router.post('/login', authLimiter, async (req, res) => {
     logger.info('Login successful', { userId: user._id, email });
     res.json({
       token,
-      userId: user._id,
+      userId: user._id.toString(),
       role: user.role,
       photo: user.photo || 'https://placehold.co/40x40',
       virtualNumber: user.virtualNumber || '',
@@ -316,7 +325,11 @@ router.post('/login', authLimiter, async (req, res) => {
       privateKey: user.privateKey,
     });
   } catch (error) {
-    logger.error('Login error', { error: error.message, stack: error.stack });
+    logger.error('Login error', {
+      error: error.message,
+      stack: error.stack,
+      email: req.body.email,
+    });
     res.status(500).json({ error: 'Failed to login', details: error.message });
   }
 });
@@ -385,7 +398,7 @@ router.post('/update_country', authMiddleware, async (req, res) => {
 router.post('/update_photo', authMiddleware, photoUploadLimiter, upload.single('photo'), async (req, res) => {
   try {
     const { userId } = req.body;
-    if (userId !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
+    if (userId !== req.user.id) return res.status(400).json({ error: 'Not authorized' });
     if (!req.file) return res.status(400).json({ error: 'No photo provided' });
 
     const user = await User.findById(userId);
@@ -539,7 +552,7 @@ router.post('/refresh', authLimiter, authMiddleware, async (req, res) => {
     logger.info('Token refreshed successfully', { userId: user._id });
     res.json({
       token: newToken,
-      userId: user._id,
+      userId: user._id.toString(),
       role: user.role,
       photo: user.photo || 'https://placehold.co/40x40',
       virtualNumber: user.virtualNumber || '',
