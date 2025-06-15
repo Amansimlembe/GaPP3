@@ -72,47 +72,34 @@ const upload = multer({
 const validContentTypes = ['text', 'image', 'video', 'audio', 'document'];
 
 const messageSchema = Joi.object({
-  senderId: Joi.string()
-    .custom((value, helpers) => {
-      if (!mongoose.isValidObjectId(value)) return helpers.error('any.invalid');
+  senderId: Joi.string().custom((value, helpers) => {
+    if (!mongoose.isValidObjectId(value)) return helpers.error('any.invalid');
+    return value;
+  }, 'ObjectId validation').required().messages({ 'any.invalid': 'Invalid senderId' }),
+  recipientId: Joi.string().custom((value, helpers) => {
+    if (!mongoose.isValidObjectId(value)) return helpers.error('any.invalid');
+    return value;
+  }, 'ObjectId validation').required().messages({ 'any.invalid': 'Invalid recipientId' }),
+  content: Joi.string().required().when('contentType', {
+    is: 'text',
+    then: Joi.string().pattern(/^[A-Za-z0-9+/=]+\|[A-Za-z0-9+/=]+\|[A-Za-z0-9+/=]+$/, 'encrypted format'),
+    otherwise: Joi.string().custom((value, helpers) => {
+      if (!validator.isURL(value)) return helpers.error('any.invalid');
       return value;
-    }, 'ObjectId validation')
-    .required()
-    .messages({ 'any.invalid': 'Invalid senderId' }),
-  recipientId: Joi.string()
-    .custom((value, helpers) => {
-      if (!mongoose.isValidObjectId(value)) return helpers.error('any.invalid');
-      return value;
-    }, 'ObjectId validation')
-    .required()
-    .messages({ 'any.invalid': 'Invalid recipientId' }),
-  content: Joi.string()
-    .required()
-    .when('contentType', {
-      is: 'text',
-      then: Joi.string().pattern(/^[A-Za-z0-9+/=]+\|[A-Za-z0-9+/=]+\|[A-Za-z0-9+/=]+$/, 'encrypted format'),
-      otherwise: Joi.string().custom((value, helpers) => {
-        if (!validator.isURL(value)) return helpers.error('any.invalid');
-        return value;
-      }, 'URL validation'),
-    })
-    .messages({
-      'string.pattern.name': 'Text content must be in encrypted format (data|iv|key)',
-      'any.invalid': 'Media content must be a valid URL',
-    }),
-  contentType: Joi.string()
-    .valid(...validContentTypes)
-    .required()
-    .messages({ 'any.only': `contentType must be one of: ${validContentTypes.join(', ')}` }),
-  plaintextContent: Joi.string().allow('').optional(),
+    }, 'URL validation'),
+  }).messages({
+    'string.pattern.name': 'Text content must be in encrypted format (data|iv|key)',
+    'any.invalid': 'Media content must be a valid URL',
+  }),
+  contentType: Joi.string().valid(...validContentTypes).required().messages({
+    'any.only': `contentType must be one of: ${validContentTypes.join(', ')}`,
+  }),
+  plaintextContent: Joi.string().required().messages({ 'string.empty': 'plaintextContent required for text messages' }),
   caption: Joi.string().optional(),
-  replyTo: Joi.string()
-    .custom((value, helpers) => {
-      if (value && !mongoose.isValidObjectId(value)) return helpers.error('any.invalid');
-      return value;
-    }, 'ObjectId validation')
-    .optional()
-    .messages({ 'any.invalid': 'Invalid replyTo ID' }),
+  replyTo: Joi.string().custom((value, helpers) => {
+    if (value && !mongoose.isValidObjectId(value)) return helpers.error('any.invalid');
+    return value;
+  }, 'ObjectId validation').optional().messages({ 'any.invalid': 'Invalid replyTo ID' }),
   originalFilename: Joi.string().optional(),
   clientMessageId: Joi.string().required().messages({ 'string.empty': 'clientMessageId required' }),
   senderVirtualNumber: Joi.string().optional(),
@@ -121,22 +108,18 @@ const messageSchema = Joi.object({
 });
 
 const addContactSchema = Joi.object({
-  userId: Joi.string()
-    .custom((value, helpers) => {
-      if (!mongoose.isValidObjectId(value)) return helpers.error('any.invalid');
-      return value;
-    }, 'ObjectId validation')
-    .required(),
+  userId: Joi.string().custom((value, helpers) => {
+    if (!mongoose.isValidObjectId(value)) return helpers.error('any.invalid');
+    return value;
+  }, 'ObjectId validation').required(),
   virtualNumber: Joi.string().required(),
 });
 
 const deleteUserSchema = Joi.object({
-  userId: Joi.string()
-    .custom((value, helpers) => {
-      if (!mongoose.isValidObjectId(value)) return helpers.error('any.invalid');
-      return value;
-    }, 'ObjectId validation')
-    .required(),
+  userId: Joi.string().custom((value, helpers) => {
+    if (!mongoose.isValidObjectId(value)) return helpers.error('any.invalid');
+    return value;
+  }, 'ObjectId validation').required(),
 });
 
 module.exports = (io) => {
@@ -145,60 +128,64 @@ module.exports = (io) => {
   const emitUpdatedChatList = async (userId) => {
     try {
       if (!mongoose.isValidObjectId(userId)) return;
-      const contacts = await User.find({ contacts: userId })
+      const user = await User.findById(userId).select('contacts').lean();
+      if (!user) return;
+
+      const contacts = await User.find({ _id: { $in: user.contacts } })
         .select('username virtualNumber photo status lastSeen')
         .lean();
 
       const contactIds = contacts.map((c) => c._id);
-      const latestMessages = await Message.aggregate([
-        {
-          $match: {
-            $or: [
-              { senderId: new mongoose.Types.ObjectId(userId), recipientId: { $in: contactIds } },
-              { senderId: { $in: contactIds }, recipientId: new mongoose.Types.ObjectId(userId) },
-            ],
-          },
-        },
-        { $sort: { createdAt: -1 } },
-        {
-          $group: {
-            _id: {
-              $cond: [
-                { $eq: ['$senderId', new mongoose.Types.ObjectId(userId)] },
-                '$recipientId',
-                '$senderId',
+      const [latestMessages, unreadCounts] = await Promise.all([
+        Message.aggregate([
+          {
+            $match: {
+              $or: [
+                { senderId: new mongoose.Types.ObjectId(userId), recipientId: { $in: contactIds } },
+                { senderId: { $in: contactIds }, recipientId: new mongoose.Types.ObjectId(userId) },
               ],
             },
-            latestMessage: { $first: '$$ROOT' },
           },
-        },
-        {
-          $project: {
-            contactId: '$_id',
-            latestMessage: {
-              content: 1,
-              contentType: 1,
-              senderId: 1,
-              recipientId: 1,
-              createdAt: 1,
-              plaintextContent: 1,
-              senderVirtualNumber: 1,
-              senderUsername: 1,
-              senderPhoto: 1,
+          { $sort: { createdAt: -1 } },
+          {
+            $group: {
+              _id: {
+                $cond: [
+                  { $eq: ['$senderId', new mongoose.Types.ObjectId(userId)] },
+                  '$recipientId',
+                  '$senderId',
+                ],
+              },
+              latestMessage: { $first: '$$ROOT' },
             },
           },
-        },
-      ]);
-
-      const unreadCounts = await Message.aggregate([
-        {
-          $match: {
-            senderId: { $in: contactIds },
-            recipientId: new mongoose.Types.ObjectId(userId),
-            status: { $ne: 'read' },
+          {
+            $project: {
+              contactId: '$_id',
+              latestMessage: {
+                content: 1,
+                contentType: 1,
+                senderId: 1,
+                recipientId: 1,
+                createdAt: 1,
+                plaintextContent: 1,
+                senderVirtualNumber: 1,
+                senderUsername: 1,
+                senderPhoto: 1,
+              },
+            },
           },
-        },
-        { $group: { _id: '$senderId', unreadCount: { $sum: 1 } } },
+        ]),
+        Message.aggregate([
+          {
+            $match: {
+              senderId: { $in: contactIds },
+              recipientId: new mongoose.Types.ObjectId(userId),
+              status: { $ne: 'read' },
+            },
+          },
+          { $group: { _id: '$senderId', unreadCount: { $sum: 1 } } },
+        ]),
       ]);
 
       const chatList = contacts.map((contact) => {
@@ -308,6 +295,11 @@ module.exports = (io) => {
           senderPhoto,
         } = messageData;
 
+        if (contentType === 'text' && !plaintextContent) {
+          await session.abortTransaction();
+          return callback({ error: 'plaintextContent required for text messages' });
+        }
+
         const existingMessage = await Message.findOne({ clientMessageId }).session(session).lean();
         if (existingMessage) {
           await session.commitTransaction();
@@ -319,7 +311,7 @@ module.exports = (io) => {
           recipientId,
           content,
           contentType,
-          plaintextContent: plaintextContent || '',
+          plaintextContent,
           status: 'sent',
           caption: caption || undefined,
           replyTo: replyTo && mongoose.isValidObjectId(replyTo) ? replyTo : undefined,
@@ -528,6 +520,11 @@ module.exports = (io) => {
         senderPhoto,
       } = req.body;
 
+      if (contentType === 'text' && !plaintextContent) {
+        await session.endSession();
+        return res.status(400).json({ error: 'plaintextContent required for text messages' });
+      }
+
       const existingMessage = await Message.findOne({ clientMessageId }).session(session).lean();
       if (existingMessage) {
         await session.commitTransaction();
@@ -539,7 +536,7 @@ module.exports = (io) => {
         recipientId,
         content,
         contentType,
-        plaintextContent: plaintextContent || '',
+        plaintextContent,
         status: 'sent',
         caption: caption || undefined,
         replyTo: replyTo && mongoose.isValidObjectId(replyTo) ? replyTo : undefined,
@@ -583,60 +580,66 @@ module.exports = (io) => {
         return res.status(400).json({ error: 'Invalid userId' });
       }
 
-      const contacts = await User.find({ contacts: userId })
+      const user = await User.findById(userId).select('contacts').lean();
+      if (!user) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      const contacts = await User.find({ _id: { $in: user.contacts } })
         .select('username virtualNumber photo status lastSeen')
         .lean();
 
       const contactIds = contacts.map((c) => c._id);
-      const latestMessages = await Message.aggregate([
-        {
-          $match: {
-            $or: [
-              { senderId: new mongoose.Types.ObjectId(userId), recipientId: { $in: contactIds } },
-              { senderId: { $in: contactIds }, recipientId: new mongoose.Types.ObjectId(userId) },
-            ],
-          },
-        },
-        { $sort: { createdAt: -1 } },
-        {
-          $group: {
-            _id: {
-              $cond: [
-                { $eq: ['$senderId', new mongoose.Types.ObjectId(userId)] },
-                '$recipientId',
-                '$senderId',
+      const [latestMessages, unreadCounts] = await Promise.all([
+        Message.aggregate([
+          {
+            $match: {
+              $or: [
+                { senderId: new mongoose.Types.ObjectId(userId), recipientId: { $in: contactIds } },
+                { senderId: { $in: contactIds }, recipientId: new mongoose.Types.ObjectId(userId) },
               ],
             },
-            latestMessage: { $first: '$$ROOT' },
           },
-        },
-        {
-          $project: {
-            contactId: '$_id',
-            latestMessage: {
-              content: 1,
-              contentType: 1,
-              senderId: 1,
-              recipientId: 1,
-              createdAt: 1,
-              plaintextContent: 1,
-              senderVirtualNumber: 1,
-              senderUsername: 1,
-              senderPhoto: 1,
+          { $sort: { createdAt: -1 } },
+          {
+            $group: {
+              _id: {
+                $cond: [
+                  { $eq: ['$senderId', new mongoose.Types.ObjectId(userId)] },
+                  '$recipientId',
+                  '$senderId',
+                ],
+              },
+              latestMessage: { $first: '$$ROOT' },
             },
           },
-        },
-      ]);
-
-      const unreadCounts = await Message.aggregate([
-        {
-          $match: {
-            senderId: { $in: contactIds },
-            recipientId: new mongoose.Types.ObjectId(userId),
-            status: { $ne: 'read' },
+          {
+            $project: {
+              contactId: '$_id',
+              latestMessage: {
+                content: 1,
+                contentType: 1,
+                senderId: 1,
+                recipientId: 1,
+                createdAt: 1,
+                plaintextContent: 1,
+                senderVirtualNumber: 1,
+                senderUsername: 1,
+                senderPhoto: 1,
+              },
+            },
           },
-        },
-        { $group: { _id: '$senderId', unreadCount: { $sum: 1 } } },
+        ]),
+        Message.aggregate([
+          {
+            $match: {
+              senderId: { $in: contactIds },
+              recipientId: new mongoose.Types.ObjectId(userId),
+              status: { $ne: 'read' },
+            },
+          },
+          { $group: { _id: '$senderId', unreadCount: { $sum: 1 } } },
+        ]),
       ]);
 
       const chatList = contacts.map((contact) => {
@@ -810,6 +813,7 @@ module.exports = (io) => {
         recipientId,
         content: uploadResult.secure_url,
         contentType,
+        plaintextContent: '',
         status: 'sent',
         caption: caption || undefined,
         originalFilename: req.file.originalname,

@@ -1,21 +1,20 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import forge from 'node-forge';
 import { FaArrowLeft, FaEllipsisV, FaPaperclip, FaSmile, FaPaperPlane, FaTimes, FaSignOutAlt, FaPlus } from 'react-icons/fa';
 import { motion, AnimatePresence } from 'framer-motion';
 import Picker from 'emoji-picker-react';
-import { FixedSizeList } from 'react-window';
+import { VariableSizeList } from 'react-window';
 import AutoSizer from 'react-virtualized-auto-sizer';
 import './ChatScreen.css';
 
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
 
 const isValidObjectId = (id) => /^[0-9a-fA-F]{24}$/.test(id);
-
 const generateClientMessageId = () => `${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
 
-const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, photo, setSelectedChat }) => {
+const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtualNumber, photo, setSelectedChat }) => {
   const navigate = useNavigate();
   const [chatList, setChatList] = useState([]);
   const [messages, setMessages] = useState({});
@@ -30,39 +29,51 @@ const ChatScreen = ({ token, userId, setAuth, socket, username, virtualNumber, p
   const [showAttachmentPicker, setShowAttachmentPicker] = useState(false);
   const [isTyping, setIsTyping] = useState({});
   const [unreadMessages, setUnreadMessages] = useState({});
+  const [isForgeReady, setIsForgeReady] = useState(false);
   const inputRef = useRef(null);
   const listRef = useRef(null);
   const menuRef = useRef(null);
+  const typingTimeoutRef = useRef(null);
 
+  // Check if forge is loaded
+  useEffect(() => {
+    if (forge && forge.random && forge.cipher && forge.pki) {
+      setIsForgeReady(true);
+    } else {
+      setError('Encryption library failed to load');
+      console.error('node-forge initialization failed:', forge);
+    }
+  }, []);
 
-// Replace encryptMessage (around line 124)
-const encryptMessage = useCallback(async (content, recipientPublicKey, isMedia = false) => {
-  if (!forge || !recipientPublicKey) {
-    throw new Error('Encryption dependencies missing');
-  }
-  try {
-    const aesKey = forge.random.getBytesSync(32);
-    const iv = forge.random.getBytesSync(16);
-    const cipher = forge.cipher.createCipher('AES-CBC', aesKey);
-    cipher.start({ iv });
-    cipher.update(forge.util.createBuffer(isMedia ? content : forge.util.encodeUtf8(content)));
-    cipher.finish();
-    const encrypted = `${forge.util.encode64(cipher.output.getBytes())}|${forge.util.encode64(iv)}|${forge.util.encode64(
-      forge.pki.publicKeyFromPem(recipientPublicKey).encrypt(aesKey, 'RSA-OAEP', { md: forge.md.sha256.create() })
-    )}`;
-    return encrypted;
-  } catch (err) {
-    throw new Error('Failed to encrypt message: ' + err.message);
-  }
-}, []);
-
-
-
+  const encryptMessage = useCallback(async (content, recipientPublicKey, isMedia = false) => {
+    if (!isForgeReady || !forge || !recipientPublicKey) {
+      console.error('encryptMessage: Dependencies missing', { isForgeReady, forge: !!forge, recipientPublicKey });
+      throw new Error('Encryption dependencies missing');
+    }
+    try {
+      const aesKey = forge.random.getBytesSync(32);
+      const iv = forge.random.getBytesSync(16);
+      const cipher = forge.cipher.createCipher('AES-CBC', aesKey);
+      cipher.start({ iv });
+      cipher.update(forge.util.createBuffer(isMedia ? content : forge.util.encodeUtf8(content)));
+      cipher.finish();
+      const encrypted = `${forge.util.encode64(cipher.output.getBytes())}|${forge.util.encode64(iv)}|${forge.util.encode64(
+        forge.pki.publicKeyFromPem(recipientPublicKey).encrypt(aesKey, 'RSA-OAEP', { md: forge.md.sha256.create() })
+      )}`;
+      return encrypted;
+    } catch (err) {
+      console.error('encryptMessage error:', err.message);
+      throw new Error('Failed to encrypt message: ' + err.message);
+    }
+  }, [isForgeReady]);
 
   const decryptMessage = useCallback(async (encryptedContent, privateKeyPem, isMedia = false) => {
+    if (!isForgeReady || !forge || !encryptedContent || !privateKeyPem) {
+      return isMedia ? null : '[Decryption failed: Dependencies missing]';
+    }
     try {
-      if (!encryptedContent || typeof encryptedContent !== 'string' || !encryptedContent.includes('|')) {
-        throw new Error('Invalid encrypted content format');
+      if (typeof encryptedContent !== 'string' || !encryptedContent.includes('|')) {
+        return isMedia ? null : '[Decryption failed: Invalid format]';
       }
       const [encryptedData, iv, encryptedAesKey] = encryptedContent.split('|').map(forge.util.decode64);
       const privateKey = forge.pki.privateKeyFromPem(privateKeyPem);
@@ -73,9 +84,10 @@ const encryptMessage = useCallback(async (content, recipientPublicKey, isMedia =
       decipher.finish();
       return isMedia ? decipher.output.getBytes() : forge.util.decodeUtf8(decipher.output.getBytes());
     } catch (err) {
-      return isMedia ? null : '[Decryption failed]';
+      console.error('decryptMessage error:', err.message);
+      return isMedia ? null : '[Decryption failed: Error occurred]';
     }
-  }, []);
+  }, [isForgeReady]);
 
   const getPublicKey = useCallback(async (recipientId) => {
     if (!isValidObjectId(recipientId)) throw new Error('Invalid recipientId');
@@ -87,151 +99,129 @@ const encryptMessage = useCallback(async (content, recipientPublicKey, isMedia =
         headers: { Authorization: `Bearer ${token}` },
         timeout: 5000,
       });
+      if (!data.publicKey) throw new Error('No public key returned');
       sessionStorage.setItem(cacheKey, data.publicKey);
       return data.publicKey;
     } catch (err) {
-      throw new Error('Failed to fetch public key');
+      console.error('getPublicKey error:', err.message);
+      throw new Error('Failed to fetch public key: ' + err.message);
     }
   }, [token]);
 
   const fetchChatList = useCallback(async () => {
+    if (!isForgeReady) return;
     try {
-      const privateKey = sessionStorage.getItem('privateKey');
-      if (!privateKey) throw new Error('Private key missing');
       const { data } = await axios.get(`${BASE_URL}/social/chat-list`, {
         headers: { Authorization: `Bearer ${token}` },
         params: { userId },
         timeout: 5000,
       });
-      const processedUsers = await Promise.all(
-        data.map(async (user) => {
-          if (user.latestMessage) {
-            user.latestMessage.content =
-              user.latestMessage.senderId === userId
-                ? `You: ${user.latestMessage.plaintextContent || '[Media]'}` 
-                : user.latestMessage.recipientId === userId && user.latestMessage.contentType === 'text'
-                ? await decryptMessage(user.latestMessage.content, privateKey)
-                : `[${user.latestMessage.contentType}]`;
-          }
-          return user;
-        })
-      );
       setChatList((prev) => {
-        const newChatMap = new Map(processedUsers.map((chat) => [chat.id, chat]));
-        return [...newChatMap.values()];
+        const newChatMap = new Map(data.map((chat) => [chat.id, chat]));
+        const newList = [...newChatMap.values()];
+        return JSON.stringify(newList) === JSON.stringify(prev) ? prev : newList;
       });
       setError('');
     } catch (err) {
-      if (err.response?.status === 401 || err.message === 'Private key missing') {
+      console.error('fetchChatList error:', err.message);
+      if (err.response?.status === 401) {
         setError('Session expired, please log in again');
         setTimeout(() => handleLogout(), 2000);
       } else {
-        setError('Failed to load chat list');
+        setError('Failed to load chat list: ' + err.message);
       }
     }
-  }, [token, userId, handleLogout]);
+  }, [isForgeReady, token, userId, handleLogout]);
 
   const fetchMessages = useCallback(async (chatId) => {
-    if (!isValidObjectId(chatId)) return;
+    if (!isForgeReady || !isValidObjectId(chatId)) return;
     try {
-      const privateKey = sessionStorage.getItem('privateKey');
-      if (!privateKey) throw new Error('Private key missing');
       const { data } = await axios.get(`${BASE_URL}/social/messages`, {
         headers: { Authorization: `Bearer ${token}` },
         params: { userId, chatId },
         timeout: 5000,
       });
-      const decryptedMessages = await Promise.all(
-        data.messages.map(async (msg) => {
-          if (msg.senderId !== userId && msg.contentType === 'text') {
-            msg.content = await decryptMessage(msg.content, privateKey);
-          }
-          return msg;
-        })
-      );
       setMessages((prev) => ({
         ...prev,
-        [chatId]: decryptedMessages,
+        [chatId]: data.messages,
       }));
       setUnreadMessages((prev) => ({ ...prev, [chatId]: 0 }));
-      if (decryptedMessages.length) {
+      if (data.messages.length) {
         socket?.emit('batchMessageStatus', {
-          messageIds: decryptedMessages.filter((m) => m.status !== 'read' && m.recipientId === userId).map((m) => m._id),
+          messageIds: data.messages.filter((m) => m.status !== 'read' && m.recipientId === userId).map((m) => m._id),
           status: 'read',
           recipientId: userId,
         });
       }
-      listRef.current?.scrollToItem(decryptedMessages.length, 'end');
+      listRef.current?.scrollToItem(data.messages.length, 'end');
     } catch (err) {
-      setError('Failed to load messages');
+      console.error('fetchMessages error:', err.message);
+      setError('Failed to load messages: ' + err.message);
     }
-  }, [token, userId, socket]);
-// Update sendMessage to guard against invalid public key
-const sendMessage = useCallback(async () => {
-  if (!message.trim() || !selectedChat || !isValidObjectId(selectedChat)) return;
-  const clientMessageId = generateClientMessageId();
-  const plaintextContent = message.trim();
-  try {
-    const recipientPublicKey = await getPublicKey(selectedChat);
-    if (!recipientPublicKey) {
-      throw new Error('Recipient public key not found');
-    }
-    const encryptedContent = await encryptMessage(plaintextContent, recipientPublicKey);
-    const messageData = {
-      senderId: userId,
-      recipientId: selectedChat,
-      content: encryptedContent,
-      contentType: 'text',
-      plaintextContent,
-      clientMessageId,
-      senderVirtualNumber: virtualNumber,
-      senderUsername: username,
-      senderPhoto: photo,
-    };
-    const tempMessage = {
-      _id: clientMessageId,
-      ...messageData,
-      status: 'pending',
-      createdAt: new Date(),
-    };
-    setMessages((prev) => ({
-      ...prev,
-      [selectedChat]: [...(prev[selectedChat] || []), tempMessage],
-    }));
-    socket?.emit('message', messageData, (ack) => {
-      if (ack?.error) {
-        setError('Failed to send message: ' + ack.error);
+  }, [isForgeReady, token, userId, socket]);
+
+  const sendMessage = useCallback(async () => {
+    if (!isForgeReady || !message.trim() || !selectedChat || !isValidObjectId(selectedChat)) return;
+    const clientMessageId = generateClientMessageId();
+    const plaintextContent = message.trim();
+    try {
+      const recipientPublicKey = await getPublicKey(selectedChat);
+      const encryptedContent = await encryptMessage(plaintextContent, recipientPublicKey);
+      const messageData = {
+        senderId: userId,
+        recipientId: selectedChat,
+        content: encryptedContent,
+        contentType: 'text',
+        plaintextContent,
+        clientMessageId,
+        senderVirtualNumber: virtualNumber,
+        senderUsername: username,
+        senderPhoto: photo,
+      };
+      const tempMessage = {
+        _id: clientMessageId,
+        ...messageData,
+        status: 'pending',
+        createdAt: new Date(),
+      };
+      setMessages((prev) => ({
+        ...prev,
+        [selectedChat]: [...(prev[selectedChat] || []), tempMessage],
+      }));
+      socket?.emit('message', messageData, (ack) => {
+        if (ack?.error) {
+          setError('Failed to send message: ' + ack.error);
+          setMessages((prev) => ({
+            ...prev,
+            [selectedChat]: prev[selectedChat].map((msg) => 
+              msg._id === clientMessageId ? { ...msg, status: 'failed' } : msg
+            ),
+          }));
+          return;
+        }
         setMessages((prev) => ({
           ...prev,
           [selectedChat]: prev[selectedChat].map((msg) => 
-            msg._id === clientMessageId ? { ...msg, status: 'failed' } : msg
+            msg._id === clientMessageId ? { ...ack.message, content: plaintextContent, status: 'sent' } : msg
           ),
         }));
-        return;
-      }
+      });
+      setMessage('');
+      inputRef.current?.focus();
+      listRef.current?.scrollToItem(messages[selectedChat]?.length ?? 0, 'end');
+    } catch (err) {
+      console.error('sendMessage error:', err.message);
+      setError('Failed to send message: ' + err.message);
       setMessages((prev) => ({
         ...prev,
         [selectedChat]: prev[selectedChat].map((msg) => 
-          msg._id === clientMessageId ? { ...ack.message, content: plaintextContent, status: 'sent' } : msg
+          msg._id === clientMessageId ? { ...msg, status: 'failed' } : msg
         ),
       }));
-    });
-    setMessage('');
-    inputRef.current?.focus();
-    listRef.current?.scrollToItem(messages[selectedChat]?.length ?? 0, 'end');
-  } catch (err) {
-    setError('Failed to send message: ' + err.message);
-    setMessages((prev) => ({
-      ...prev,
-      [selectedChat]: prev[selectedChat].map((msg) => 
-        msg._id === clientMessageId ? { ...msg, status: 'failed' } : msg
-      ),
-    }));
-  }
-}, [message, selectedChat, userId, virtualNumber, username, photo, socket, setError, setMessages, setMessage]);
+    }
+  }, [isForgeReady, message, selectedChat, userId, virtualNumber, username, photo, socket, getPublicKey, encryptMessage]);
 
-
-  const handleAddContact = async () => {
+  const handleAddContact = useCallback(async () => {
     if (!contactInput.trim()) {
       setContactError('Please enter a valid virtual number');
       return;
@@ -251,9 +241,10 @@ const sendMessage = useCallback(async () => {
       setShowAddContact(false);
       socket?.emit('newContact', { userId, contactData: response.data });
     } catch (err) {
+      console.error('handleAddContact error:', err.message);
       setContactError(err.response?.data?.error || 'Failed to add contact');
     }
-  };
+  }, [contactInput, token, userId, socket]);
 
   const handleLogout = useCallback(async () => {
     try {
@@ -272,30 +263,108 @@ const sendMessage = useCallback(async () => {
       setSelectedChatAndNotify(null);
       navigate('/');
     } catch (err) {
+      console.error('handleLogout error:', err.message);
       setError('Failed to logout');
     }
   }, [socket, userId, setAuth, token, navigate]);
 
+  // Socket event listeners
   useEffect(() => {
-    if (!token || !userId) {
+    if (!socket || !isForgeReady) return;
+
+    const handleNewContact = ({ contactData }) => {
+      setChatList((prev) => {
+        if (prev.find((chat) => chat.id === contactData.id)) return prev;
+        return [...prev, { ...contactData, _id: contactData.id }];
+      });
+    };
+
+    const handleChatListUpdated = ({ users }) => {
+      setChatList((prev) => {
+        const newChatMap = new Map(users.map((chat) => [chat.id, chat]));
+        const newList = [...newChatMap.values()];
+        return JSON.stringify(newList) === JSON.stringify(prev) ? prev : newList;
+      });
+    };
+
+    const handleMessage = (msg) => {
+      const senderId = typeof msg.senderId === 'object' ? msg.senderId._id.toString() : msg.senderId.toString();
+      setMessages((prev) => {
+        const prevMessages = prev[senderId] || [];
+        if (prevMessages.some((m) => m._id === msg._id)) return prev;
+        return {
+          ...prev,
+          [senderId]: [...prevMessages, msg],
+        };
+      });
+      if (selectedChat === senderId) {
+        socket.emit('batchMessageStatus', { messageIds: [msg._id], status: 'read', recipientId: userId });
+        setUnreadMessages((prev) => ({ ...prev, [senderId]: 0 }));
+        listRef.current?.scrollToItem(messages[senderId]?.length || 0, 'end');
+      } else {
+        setUnreadMessages((prev) => ({ ...prev, [senderId]: (prev[senderId] || 0) + 1 }));
+      }
+    };
+
+    const handleTyping = ({ userId: typingUserId }) => {
+      if (typingUserId === selectedChat) {
+        setIsTyping((prev) => ({ ...prev, [typingUserId]: true }));
+        setTimeout(() => setIsTyping((prev) => ({ ...prev, [typingUserId]: false })), 3000);
+      }
+    };
+
+    const handleStopTyping = ({ userId: typingUserId }) => {
+      if (typingUserId === selectedChat) {
+        setIsTyping((prev) => ({ ...prev, [typingUserId]: false }));
+      }
+    };
+
+    const handleMessageStatus = ({ messageIds, status }) => {
+      setMessages((prev) => {
+        const updatedMessages = { ...prev };
+        Object.keys(updatedMessages).forEach((chatId) => {
+          updatedMessages[chatId] = updatedMessages[chatId].map((msg) =>
+            messageIds.includes(msg._id) && msg.senderId === userId ? { ...msg, status } : msg
+          );
+        });
+        return JSON.stringify(updatedMessages) === JSON.stringify(prev) ? prev : updatedMessages;
+      });
+    };
+
+    socket.on('newContact', handleNewContact);
+    socket.on('chatListUpdated', handleChatListUpdated);
+    socket.on('message', handleMessage);
+    socket.on('typing', handleTyping);
+    socket.on('stopTyping', handleStopTyping);
+    socket.on('messageStatus', handleMessageStatus);
+
+    return () => {
+      socket.off('newContact', handleNewContact);
+      socket.off('chatListUpdated', handleChatListUpdated);
+      socket.off('message', handleMessage);
+      socket.off('typing', handleTyping);
+      socket.off('stopTyping', handleStopTyping);
+      socket.off('messageStatus', handleMessageStatus);
+    };
+  }, [socket, isForgeReady, selectedChat, userId]);
+
+  // Initial setup
+  useEffect(() => {
+    if (!token || !userId || !isForgeReady) {
       navigate('/');
       return;
     }
-    const privateKey = sessionStorage.getItem('privateKey');
-    if (!privateKey) {
-      setError('Private key missing, please log in again');
-      setTimeout(() => handleLogout(), 2000);
-    } else {
-      fetchChatList();
-    }
-  }, [fetchChatList, handleLogout, token, userId, navigate]);
+    fetchChatList();
+  }, [isForgeReady, fetchChatList, token, userId, navigate]);
 
+  // Fetch messages for selected chat
   useEffect(() => {
     if (selectedChat && !messages[selectedChat]) {
       fetchMessages(selectedChat);
     }
   }, [selectedChat, fetchMessages]);
 
+  // Handle click outside menu
   useEffect(() => {
     const handleClickOutside = (e) => {
       if (menuRef.current && !menuRef.current.contains(e.target)) {
@@ -307,87 +376,17 @@ const sendMessage = useCallback(async () => {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  useEffect(() => {
-    if (!socket) return;
-
-    socket.on('newContact', ({ contactData }) => {
-      setChatList((prev) => {
-        if (prev.find((chat) => chat.id === contactData.id)) return prev;
-        return [...prev, { ...contactData, _id: contactData.id }];
-      });
-    });
-
-    socket.on('chatListUpdated', ({ users }) => {
-      setChatList((prev) => {
-        const newChatMap = new Map(users.map((chat) => [chat.id, chat]));
-        return [...newChatMap.values()];
-      });
-    });
-
-    socket.on('message', async (msg) => {
-      const senderId = typeof msg.senderId === 'object' ? msg.senderId._id.toString() : msg.senderId.toString();
-      const privateKey = sessionStorage.getItem('privateKey');
-      if (!privateKey) {
-        setError('Private key missing, please log in again');
-        return;
-      }
-      const decryptedContent = msg.contentType === 'text' ? await decryptMessage(msg.content, privateKey) : msg.content;
-      setMessages((prev) => ({
-        ...prev,
-        [senderId]: [...(prev[senderId] || []), { ...msg, content: decryptedContent }],
-      }));
-      if (selectedChat === senderId) {
-        socket.emit('batchMessageStatus', { messageIds: [msg._id], status: 'read', recipientId: userId });
-        setUnreadMessages((prev) => ({ ...prev, [senderId]: 0 }));
-        listRef.current?.scrollToItem(messages[senderId]?.length || 0, 'end');
-      } else {
-        setUnreadMessages((prev) => ({ ...prev, [senderId]: (prev[senderId] || 0) + 1 }));
-      }
-    });
-
-    socket.on('typing', ({ userId: typingUserId }) => {
-      if (typingUserId === selectedChat) {
-        setIsTyping((prev) => ({ ...prev, [typingUserId]: true }));
-        setTimeout(() => setIsTyping((prev) => ({ ...prev, [typingUserId]: false })), 3000);
-      }
-    });
-
-    socket.on('stopTyping', ({ userId: typingUserId }) => {
-      if (typingUserId === selectedChat) {
-        setIsTyping((prev) => ({ ...prev, [typingUserId]: false }));
-      }
-    });
-
-    socket.on('messageStatus', ({ messageIds, status }) => {
-      setMessages((prev) => {
-        const updatedMessages = { ...prev };
-        Object.keys(updatedMessages).forEach((chatId) => {
-          updatedMessages[chatId] = updatedMessages[chatId].map((msg) =>
-            messageIds.includes(msg._id) && msg.senderId === userId ? { ...msg, status } : msg
-          );
-        });
-        return updatedMessages;
-      });
-    });
-
-    return () => {
-      socket.off('newContact');
-      socket.off('chatListUpdated');
-      socket.off('message');
-      socket.off('typing');
-      socket.off('stopTyping');
-      socket.off('messageStatus');
-    };
-  }, [socket, selectedChat, userId, messages]);
-
+  // Debounced typing handler
   const handleTyping = useCallback(() => {
-    if (socket && selectedChat) {
-      socket.emit('typing', { userId, recipientId: selectedChat });
-      setTimeout(() => socket.emit('stopTyping', { userId, recipientId: selectedChat }), 3000);
-    }
+    if (!socket || !selectedChat) return;
+    clearTimeout(typingTimeoutRef.current);
+    socket.emit('typing', { userId, recipientId: selectedChat });
+    typingTimeoutRef.current = setTimeout(() => {
+      socket.emit('stopTyping', { userId, recipientId: selectedChat });
+    }, 3000);
   }, [socket, selectedChat, userId]);
 
-  const selectChat = (chatId) => {
+  const selectChat = useCallback((chatId) => {
     setSelectedChatAndNotify(chatId);
     setSelectedChat(chatId);
     setShowMenu(false);
@@ -400,9 +399,21 @@ const sendMessage = useCallback(async () => {
       });
     }
     inputRef.current?.focus();
-  };
+  }, [socket, messages, userId, setSelectedChatAndNotify]);
 
-  const renderMessage = ({ index, style }) => {
+  // Calculate dynamic item size for messages
+  const getItemSize = useCallback((index) => {
+    const msg = messages[selectedChat]?.[index];
+    if (!msg) return 60;
+    const isMedia = ['image', 'video', 'audio', 'document'].includes(msg.contentType);
+    const baseHeight = 60;
+    const mediaHeight = isMedia ? 150 : 0;
+    const captionHeight = msg.caption ? 20 : 0;
+    return baseHeight + mediaHeight + captionHeight;
+  }, [messages, selectedChat]);
+
+  // Memoized message rendering component
+  const Row = useMemo(() => React.memo(({ index, style }) => {
     const msg = messages[selectedChat][index];
     const prevMsg = index > 0 ? messages[selectedChat][index - 1] : null;
     const showDate = !prevMsg || new Date(msg.createdAt).toDateString() !== new Date(prevMsg.createdAt).toDateString();
@@ -417,7 +428,21 @@ const sendMessage = useCallback(async () => {
         )}
         <div className="message-container" style={style}>
           <div className={`message ${isMine ? 'mine' : 'other'}`}>
-            <p className="message-content">{msg.content}</p>
+            {msg.contentType === 'text' ? (
+              <p className="message-content">{msg.content}</p>
+            ) : (
+              <>
+                {msg.contentType === 'image' && <img src={msg.content} alt="media" className="message-media" />}
+                {msg.contentType === 'video' && <video src={msg.content} controls className="message-media" />}
+                {msg.contentType === 'audio' && <audio src={msg.content} controls className="message-audio" />}
+                {msg.contentType === 'document' && (
+                  <a href={msg.content} className="message-document" target="_blank" rel="noopener noreferrer">
+                    {msg.originalFilename || 'Document'}
+                  </a>
+                )}
+                {msg.caption && <p className="message-caption">{msg.caption}</p>}
+              </>
+            )}
             <div className="message-meta">
               <span className="timestamp">{new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
               {isMine && (
@@ -430,7 +455,7 @@ const sendMessage = useCallback(async () => {
         </div>
       </>
     );
-  };
+  }, [messages, selectedChat, userId]), [messages, selectedChat, userId]);
 
   return (
     <div className="chat-screen">
@@ -508,7 +533,7 @@ const sendMessage = useCallback(async () => {
                   )}
                 </div>
                 {chat.latestMessage && (
-                  <p className="chat-list-preview">{chat.latestMessage.content}</p>
+                  <p className="chat-list-preview">{chat.latestMessage.plaintextContent || `[${chat.latestMessage.contentType}]`}</p>
                 )}
                 {!!unreadMessages[chat._id] && (
                   <span className="chat-list-unread">{unreadMessages[chat._id]}</span>
@@ -536,15 +561,16 @@ const sendMessage = useCallback(async () => {
                 {messages[selectedChat]?.length ? (
                   <AutoSizer>
                     {({ height, width }) => (
-                      <FixedSizeList
+                      <VariableSizeList
                         ref={listRef}
                         height={height}
                         width={width}
                         itemCount={messages[selectedChat].length}
-                        itemSize={60}
+                        itemSize={getItemSize}
+                        initialScrollOffset={messages[selectedChat].length * 60}
                       >
-                        {renderMessage}
-                      </FixedSizeList>
+                        {Row}
+                      </VariableSizeList>
                     )}
                   </AutoSizer>
                 ) : (
@@ -602,6 +628,6 @@ const sendMessage = useCallback(async () => {
       </div>
     </div>
   );
-};
+});
 
 export default ChatScreen;

@@ -17,7 +17,11 @@ const messageSchema = new mongoose.Schema({
   recipientId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   content: { type: String, required: true },
   contentType: { type: String, enum: ['text', 'image', 'video', 'audio', 'document'], required: true },
-  plaintextContent: { type: String, default: '' },
+  plaintextContent: { 
+    type: String, 
+    required: function() { return this.contentType === 'text'; }, 
+    default: function() { return this.contentType === 'text' ? undefined : ''; }
+  },
   status: { type: String, enum: ['sent', 'delivered', 'read'], default: 'sent' },
   caption: { type: String },
   replyTo: { type: mongoose.Schema.Types.ObjectId, ref: 'Message' },
@@ -37,25 +41,32 @@ messageSchema.index({ clientMessageId: 1 }, { unique: true });
 messageSchema.index({ senderId: 1, recipientId: 1, createdAt: -1 });
 messageSchema.index({ senderId: 1, status: 1 });
 messageSchema.index({ recipientId: 1, status: 1 });
+messageSchema.index({ senderId: 1, recipientId: 1, status: 1 });
 
 // Pre-save hook to validate senderId and recipientId
 messageSchema.pre('save', async function (next) {
   try {
-    const [sender, recipient] = await Promise.all([
-      User.findById(this.senderId).select('virtualNumber username photo').lean(),
-      User.findById(this.recipientId).select('_id').lean(),
-    ]);
-    if (!sender || !recipient) {
-      logger.error('Invalid sender or recipient', { senderId: this.senderId, recipientId: this.recipientId });
-      return next(new Error('Sender or recipient does not exist'));
+    // Only validate existence if sender details are missing
+    if (!this.senderVirtualNumber || !this.senderUsername || !this.senderPhoto) {
+      const sender = await User.findById(this.senderId).select('virtualNumber username photo').lean();
+      if (!sender) {
+        logger.error('Invalid sender', { senderId: this.senderId });
+        return next(new Error('Sender does not exist'));
+      }
+      this.senderVirtualNumber = this.senderVirtualNumber || sender.virtualNumber;
+      this.senderUsername = this.senderUsername || sender.username;
+      this.senderPhoto = this.senderPhoto || sender.photo;
     }
-    // Populate sender details if not provided
-    this.senderVirtualNumber = this.senderVirtualNumber || sender.virtualNumber;
-    this.senderUsername = this.senderUsername || sender.username;
-    this.senderPhoto = this.senderPhoto || sender.photo;
+
+    const recipient = await User.findById(this.recipientId).select('_id').lean();
+    if (!recipient) {
+      logger.error('Invalid recipient', { recipientId: this.recipientId });
+      return next(new Error('Recipient does not exist'));
+    }
+
     next();
   } catch (error) {
-    logger.error('Message pre-save validation failed', { error: error.message });
+    logger.error('Message pre-save validation failed', { error: error.message, senderId: this.senderId, recipientId: this.recipientId });
     next(error);
   }
 });
@@ -79,9 +90,13 @@ messageSchema.statics.cleanupOrphanedMessages = async function () {
       return { deletedCount: 0 };
     }
 
-    // Get existing user IDs
-    const existingUsers = await User.find({ _id: { $in: messageUsers } }).select('_id').lean();
-    const existingUserIds = new Set(existingUsers.map(user => user._id.toString()));
+    // Get existing user IDs in batches
+    const existingUserIds = new Set();
+    for (let i = 0; i < messageUsers.length; i += batchSize) {
+      const batch = messageUsers.slice(i, i + batchSize);
+      const users = await User.find({ _id: { $in: batch } }).select('_id').lean();
+      users.forEach(user => existingUserIds.add(user._id.toString()));
+    }
 
     // Identify orphaned user IDs
     const orphanedUserIds = messageUsers.filter(id => !existingUserIds.has(id));
@@ -92,13 +107,16 @@ messageSchema.statics.cleanupOrphanedMessages = async function () {
     }
 
     // Delete orphaned messages in batches
-    const result = await this.deleteMany({
-      $or: [
-        { senderId: { $in: orphanedUserIds } },
-        { recipientId: { $in: orphanedUserIds } },
-      ],
-    });
-    totalDeleted = result.deletedCount;
+    for (let i = 0; i < orphanedUserIds.length; i += batchSize) {
+      const batch = orphanedUserIds.slice(i, i + batchSize);
+      const result = await this.deleteMany({
+        $or: [
+          { senderId: { $in: batch } },
+          { recipientId: { $in: batch } },
+        ],
+      });
+      totalDeleted += result.deletedCount;
+    }
 
     logger.info('Orphaned messages cleanup completed', { deletedCount: totalDeleted });
     return { deletedCount: totalDeleted };

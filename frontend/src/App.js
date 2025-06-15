@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useCallback } from 'react';
 import { BrowserRouter as Router, Route, Routes, Navigate, NavLink, useLocation } from 'react-router-dom';
 import { motion } from 'framer-motion';
@@ -26,6 +25,8 @@ class ErrorBoundary extends React.Component {
     axios.post(`${BASE_URL}/social/log-error`, {
       error: error.message,
       stack: errorInfo.componentStack,
+      userId: sessionStorage.getItem('userId') || 'unknown',
+      route: window.location.pathname,
       timestamp: new Date().toISOString(),
     }).catch((err) => console.warn('Failed to log error:', err.message));
   }
@@ -142,8 +143,8 @@ const App = () => {
     const socketInstance = io(BASE_URL, {
       auth: { token },
       transports: ['websocket', 'polling'],
-      reconnectionAttempts: 10,
-      reconnectionDelay: 3000,
+      reconnectionAttempts: 5, // Reduced to prevent server overload
+      reconnectionDelay: 5000, // Increased delay to debounce reconnects
       timeout: 10000,
     });
 
@@ -165,7 +166,7 @@ const App = () => {
       isRefreshing = true;
       try {
         const expTime = getTokenExpiration(token);
-        if (expTime && expTime - Date.now() < 10 * 60 * 1000) {
+        if (expTime && expTime - Date.now() < 15 * 60 * 1000) { // Check 15 minutes before expiry
           const newToken = await refreshToken();
           if (newToken) {
             socket.auth.token = newToken;
@@ -178,7 +179,7 @@ const App = () => {
     };
 
     checkTokenExpiration();
-    const interval = setInterval(checkTokenExpiration, 5 * 60 * 1000);
+    const interval = setInterval(checkTokenExpiration, 10 * 60 * 1000); // Check every 10 minutes
     return () => clearInterval(interval);
   }, [isAuthenticated, token, userId, socket, refreshToken]);
 
@@ -214,11 +215,16 @@ const App = () => {
       }
     });
 
+    socket.on('chatListUpdated', () => {
+      // Trigger chat list refresh if needed
+    });
+
     return () => {
       socket.off('connect');
       socket.off('connect_error');
       socket.off('disconnect');
       socket.off('message');
+      socket.off('chatListUpdated');
     };
   }, [socket, userId, selectedChat, setAuth, refreshToken]);
 
@@ -227,8 +233,15 @@ const App = () => {
     localStorage.setItem('theme', theme);
   }, [theme]);
 
-  const toggleTheme = useCallback(() => setTheme(theme === 'light' ? 'dark' : 'light'), [theme]);
-  const handleChatNavigation = useCallback(() => setChatNotifications(0), []);
+  const toggleTheme = useCallback(() => {
+    setTheme((prev) => (prev === 'light' ? 'dark' : 'light'));
+  }, []);
+
+  const handleChatNavigation = useCallback(() => {
+    if (selectedChat) {
+      setChatNotifications(0); // Reset only when a chat is selected
+    }
+  }, [selectedChat]);
 
   if (!isAuthenticated) {
     return (
@@ -236,7 +249,7 @@ const App = () => {
         {error && (
           <div className="fixed top-0 left-0 right-0 bg-red-500 text-white p-2 text-center">
             {error}
-        </div>
+          </div>
         )}
         <LoginScreen setAuth={setAuth} />
       </ErrorBoundary>

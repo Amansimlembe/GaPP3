@@ -1,6 +1,5 @@
-
 const mongoose = require('mongoose');
-const { getCountries } = require('libphonenumber-js');
+const { getCountries, parsePhoneNumberFromString } = require('libphonenumber-js');
 const Message = require('./Message');
 const winston = require('winston');
 
@@ -55,8 +54,15 @@ const userSchema = new mongoose.Schema({
   virtualNumber: {
     type: String,
     unique: true,
-    match: /^\+\d{1,4}\d{6,14}$/,
     sparse: true,
+    validate: {
+      validator: function (value) {
+        if (!value) return true; // Allow null/undefined for sparse index
+        const phoneNumber = parsePhoneNumberFromString(value, this.country);
+        return phoneNumber ? phoneNumber.isValid() : false;
+      },
+      message: 'Invalid virtual number format for the specified country.',
+    },
   },
   contacts: [{
     type: mongoose.Schema.Types.ObjectId,
@@ -90,7 +96,7 @@ const userSchema = new mongoose.Schema({
 
 // Indexes for performance
 userSchema.index({ virtualNumber: 1 }, { unique: true, sparse: true });
-userSchema.index({ contacts: 1, _id: 1 });
+userSchema.index({ contacts: 1, status: 1 });
 userSchema.index({ status: 1, lastSeen: -1 });
 userSchema.index({ email: 1 }, { unique: true });
 userSchema.index({ username: 1 }, { unique: true });
@@ -109,13 +115,19 @@ userSchema.pre(['deleteOne', 'deleteMany', 'findOneAndDelete'], async function (
       return next();
     }
 
-    logger.info('Deleting users and related data', { userIds });
+    logger.info('Deleting users and related data', { userIds, operation: this.op });
 
-    // Delete messages
-    const result = await Message.deleteMany({
+    // Delete messages in batches
+    const batchSize = 1000;
+    const messageCount = await Message.countDocuments({
       $or: [{ senderId: { $in: userIds } }, { recipientId: { $in: userIds } }],
     }).session(session);
-    logger.info('Messages deleted for users', { userIds, deletedCount: result.deletedCount });
+    for (let i = 0; i < messageCount; i += batchSize) {
+      const result = await Message.deleteMany({
+        $or: [{ senderId: { $in: userIds } }, { recipientId: { $in: userIds } }],
+      }).limit(batchSize).session(session);
+      logger.info('Messages deleted for users', { userIds, deletedCount: result.deletedCount, batch: i / batchSize });
+    }
 
     // Remove users from contact lists
     const contactResult = await this.model.updateMany(
@@ -129,7 +141,7 @@ userSchema.pre(['deleteOne', 'deleteMany', 'findOneAndDelete'], async function (
     next();
   } catch (error) {
     await session.abortTransaction();
-    logger.error('User deletion failed', { error: error.message });
+    logger.error('User deletion failed', { error: error.message, filter, operation: this.op });
     next(error);
   } finally {
     session.endSession();
