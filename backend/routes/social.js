@@ -988,5 +988,25 @@ module.exports = (io) => {
     }
   });
 
+
+
+  router.post('/log-error', async (req, res) => {
+  try {
+    const { error, stack, userId, route, timestamp } = req.body;
+    logger.error('Client-side error reported', {
+      error,
+      stack,
+      userId,
+      route,
+      timestamp,
+    });
+    res.status(200).json({ message: 'Error logged successfully' });
+  } catch (err) {
+    logger.error('Failed to log client error', { error: err.message });
+    res.status(500).json({ error: 'Failed to log error' });
+  }
+});
+
+
   return router;
 };

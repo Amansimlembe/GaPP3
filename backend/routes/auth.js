@@ -186,7 +186,7 @@ const generateVirtualNumber = async (countryCode, userId) => {
     return formattedNumber;
   } catch (error) {
     logger.error('Virtual number generation failed', { error: error.message, countryCode, userId });
-    throw new Error(`Failed to generate virtual number: ${err.message}`);
+    throw new Error(`Failed to generate virtual number: ${error.message}`); // Fix: Use `error` instead of `err`
   }
 };
 

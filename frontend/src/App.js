@@ -294,27 +294,30 @@ const App = () => {
       </div>
       )}
       <Router>
-        <AuthenticatedApp
-          token={token}
-          userId={userId}
-          role={role}
-          photo={photo}
-          virtualNumber={virtualNumber}
-          username={username}
-          chatNotifications={chatNotifications}
-          setAuth={setAuth}
-          socket={socket}
-          toggleTheme={toggleTheme}
-          handleChatNavigation={handleChatNavigation}
-          theme={theme}
-          setSelectedChat={setSelectedChat}
-        />
+    <AuthenticatedApp
+  token={token}
+  userId={userId}
+  role={role}
+  photo={photo}
+  virtualNumber={virtualNumber}
+  username={username}
+  chatNotifications={chatNotifications}
+  setAuth={setAuth}
+  socket={socket}
+  toggleTheme={toggleTheme}
+  handleChatNavigation={handleChatNavigation}
+  theme={theme}
+  setSelectedChat={setSelectedChat}
+  selectedChat={selectedChat} // Add this
+/>
+
       </Router>
     </ErrorBoundary>
   );
 };
 
-const AuthenticatedApp = ({
+
+  const AuthenticatedApp = ({
   token,
   userId,
   role,
@@ -328,7 +331,10 @@ const AuthenticatedApp = ({
   handleChatNavigation,
   theme,
   setSelectedChat,
+  selectedChat, // Add this
 }) => {
+
+
   const location = useLocation();
 
   return (
