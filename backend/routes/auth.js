@@ -153,26 +153,45 @@ const updatePasswordSchema = Joi.object({
 const generateVirtualNumber = async (countryCode, userId) => {
   try {
     logger.info('Generating virtual number', { countryCode, userId });
+
+    // Validate country code
+    if (!getCountries().includes(countryCode.toUpperCase())) {
+      logger.error('Invalid country code provided', { countryCode, userId });
+      throw new Error(`Invalid country code: ${countryCode}`);
+    }
+
     const countryCallingCode = getCountryCallingCode(countryCode.toUpperCase());
     let virtualNumber;
     let attempts = 0;
     const maxAttempts = 20;
 
     do {
+      // Generate a 9-digit number (5 + 4) to ensure sufficient length
       let firstFive = '';
       for (let i = 0; i < 5; i++) {
-        firstFive += Math.floor(Math.random() * 9) + 1;
+        firstFive += Math.floor(Math.random() * 9) + 1; // Non-zero digits
       }
       const remainingFour = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
       virtualNumber = `+${countryCallingCode}${firstFive}${remainingFour}`;
+      
       const phoneNumber = parsePhoneNumberFromString(virtualNumber, countryCode.toUpperCase());
       if (!phoneNumber || !phoneNumber.isValid()) {
         attempts++;
-        logger.warn('Invalid virtual number format', { attempt: attempts, virtualNumber });
+        logger.warn('Invalid virtual number format', { attempt: attempts, virtualNumber, countryCode });
+        if (attempts >= maxAttempts) {
+          logger.error('Max attempts reached for virtual number generation', { countryCode, userId });
+          throw new Error('Unable to generate a valid virtual number after maximum attempts');
+        }
         continue;
       }
+
       const existingUser = await User.findOne({ virtualNumber }).lean();
-      if (!existingUser) break;
+      if (!existingUser) {
+        const formattedNumber = phoneNumber.formatInternational().replace(/\s/g, '');
+        logger.info('Virtual number generated', { virtualNumber: formattedNumber, attempts });
+        return formattedNumber;
+      }
+
       attempts++;
       logger.warn('Virtual number collision', { attempt: attempts, virtualNumber });
       if (attempts >= maxAttempts) {
@@ -180,13 +199,9 @@ const generateVirtualNumber = async (countryCode, userId) => {
         throw new Error('Unable to generate unique virtual number after maximum attempts');
       }
     } while (true);
-
-    const formattedNumber = phoneNumber.formatInternational().replace(/\s/g, '');
-    logger.info('Virtual number generated', { virtualNumber: formattedNumber, attempts });
-    return formattedNumber;
   } catch (error) {
     logger.error('Virtual number generation failed', { error: error.message, countryCode, userId });
-    throw new Error(`Failed to generate virtual number: ${error.message}`); // Fix: Use `error` instead of `err`
+    throw new Error(`Failed to generate virtual number: ${error.message}`);
   }
 };
 

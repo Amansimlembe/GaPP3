@@ -104,38 +104,41 @@ const LoginScreen = ({ setAuth }) => {
     }
   };
 
+ 
+ 
+
   const retryRequest = async (data, config, retries = 3, delay = 2000) => {
-    for (let i = 0; i < retries; i++) {
-      try {
-        const response = await axios.post(
-          `https://gapp-6yc3.onrender.com/auth/${isLogin ? 'login' : 'register'}`,
-          data,
-          config
-        );
-        return response.data;
-      } catch (err) {
-        console.error(`Attempt ${i + 1} failed:`, {
-          status: err.response?.status,
-          data: JSON.stringify(err.response?.data || {}),
-          message: err.message,
-          requestData: JSON.stringify(isLogin ? data : '[FormData/JSON]'),
-        });
-        if (
-          isLogin &&
-          err.response?.status === 401 &&
-          (err.response?.data?.error === 'Email not registered' ||
-            err.response?.data?.error === 'Wrong password')
-        ) {
-          throw err;
-        }
-        if ((err.response?.status === 429 || err.response?.status >= 500) && i < retries - 1) {
-          await new Promise((resolve) => setTimeout(resolve, delay * (i + 1)));
-          continue;
-        }
+  for (let i = 0; i < retries; i++) {
+    try {
+      const response = await axios.post(
+        `https://gapp-6yc3.onrender.com/auth/${isLogin ? 'login' : 'register'}`,
+        data,
+        config
+      );
+      return response.data;
+    } catch (err) {
+      console.error(`Attempt ${i + 1} failed:`, {
+        status: err.response?.status,
+        data: JSON.stringify(err.response?.data || {}),
+        message: err.message,
+        requestData: isLogin ? JSON.stringify(data) : JSON.stringify({ ...data, password: '[REDACTED]' }),
+      });
+      if (
+        isLogin &&
+        err.response?.status === 401 &&
+        (err.response?.data?.error === 'Email not registered' ||
+          err.response?.data?.error === 'Wrong password')
+      ) {
         throw err;
       }
+      if ((err.response?.status === 429 || err.response?.status >= 500) && i < retries - 1) {
+        await new Promise((resolve) => setTimeout(resolve, delay * (i + 1)));
+        continue;
+      }
+      throw err;
     }
-  };
+  }
+};
 
   const handleSubmit = async (e) => {
     e.preventDefault();
