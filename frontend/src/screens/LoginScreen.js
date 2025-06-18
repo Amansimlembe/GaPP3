@@ -59,7 +59,7 @@ const LoginScreen = ({ setAuth }) => {
         return false;
       }
       // Country: 2-letter ISO code
-      if (!selectedCountry || !countries.find((c) => c.code === selectedCountry)) {
+      if (!selectedCountry || !getCountries().includes(selectedCountry.toUpperCase())) {
         setError('Please select a valid country');
         return false;
       }
@@ -104,41 +104,39 @@ const LoginScreen = ({ setAuth }) => {
     }
   };
 
- 
- 
-
   const retryRequest = async (data, config, retries = 3, delay = 2000) => {
-  for (let i = 0; i < retries; i++) {
-    try {
-      const response = await axios.post(
-        `https://gapp-6yc3.onrender.com/auth/${isLogin ? 'login' : 'register'}`,
-        data,
-        config
-      );
-      return response.data;
-    } catch (err) {
-      console.error(`Attempt ${i + 1} failed:`, {
-        status: err.response?.status,
-        data: JSON.stringify(err.response?.data || {}),
-        message: err.message,
-        requestData: isLogin ? JSON.stringify(data) : JSON.stringify({ ...data, password: '[REDACTED]' }),
-      });
-      if (
-        isLogin &&
-        err.response?.status === 401 &&
-        (err.response?.data?.error === 'Email not registered' ||
-          err.response?.data?.error === 'Wrong password')
-      ) {
+    for (let i = 0; i < retries; i++) {
+      try {
+        const response = await axios.post(
+          `https://gapp-6yc3.onrender.com/auth/${isLogin ? 'login' : 'register'}`,
+          data,
+          config
+        );
+        return response.data;
+      } catch (err) {
+        const errorDetails = {
+          status: err.response?.status,
+          data: JSON.stringify(err.response?.data || {}, null, 2),
+          message: err.message,
+          requestData: isLogin ? JSON.stringify(data) : JSON.stringify({ ...data, password: '[REDACTED]' }),
+        };
+        console.error(`Attempt ${i + 1} failed:`, errorDetails);
+        if (
+          isLogin &&
+          err.response?.status === 401 &&
+          (err.response?.data?.error === 'Email not registered' ||
+            err.response?.data?.error === 'Wrong password')
+        ) {
+          throw new Error(err.response?.data?.error);
+        }
+        if ((err.response?.status === 429 || err.response?.status >= 500) && i < retries - 1) {
+          await new Promise((resolve) => setTimeout(resolve, delay * (i + 1)));
+          continue;
+        }
         throw err;
       }
-      if ((err.response?.status === 429 || err.response?.status >= 500) && i < retries - 1) {
-        await new Promise((resolve) => setTimeout(resolve, delay * (i + 1)));
-        continue;
-      }
-      throw err;
     }
-  }
-};
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -172,17 +170,22 @@ const LoginScreen = ({ setAuth }) => {
         response.username || ''
       );
     } catch (error) {
-      console.error(`${isLogin ? 'Login' : 'Register'} error:`, {
+      const errorDetails = {
         status: error.response?.status,
         message: error.response?.data?.error || error.message,
-        details: JSON.stringify(error.response?.data?.details || {}),
-      });
-      const errorMessage =
-        error.response?.status === 429
-          ? 'Too many requests. Please wait a few minutes and try again.'
-          : error.response?.data?.error ||
-            error.message ||
-            (isLogin ? 'Login failed' : 'Registration failed');
+        details: JSON.stringify(error.response?.data?.details || {}, null, 2),
+      };
+      console.error(`${isLogin ? 'Login' : 'Register'} error:`, errorDetails);
+      let errorMessage;
+      if (error.response?.status === 429) {
+        errorMessage = 'Too many requests. Please wait a few minutes and try again.';
+      } else if (error.response?.data?.error === 'Failed to generate virtual number') {
+        errorMessage = 'Unable to generate a phone number for your country. Please try a different country or contact support.';
+      } else if (error.response?.status === 400) {
+        errorMessage = error.response?.data?.error || 'Invalid registration data. Please check your inputs.';
+      } else {
+        errorMessage = error.response?.data?.error || (isLogin ? 'Login failed' : 'Registration failed');
+      }
       setError(errorMessage);
     } finally {
       setLoading(false);
@@ -357,8 +360,6 @@ const LoginScreen = ({ setAuth }) => {
               disabled={loading}
             >
               {showPassword ? <FaEyeSlash size={20} /> : <FaEye size={20} />}
-              
-              
             </button>
           </div>
           {!isLogin && (
