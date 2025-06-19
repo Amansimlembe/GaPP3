@@ -32,6 +32,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   const [isTyping, setIsTyping] = useState({});
   const [unreadMessages, setUnreadMessages] = useState({});
   const [isForgeReady, setIsForgeReady] = useState(false);
+  const [isLoading, setIsLoading] = useState(true); // New loading state
   const inputRef = useRef(null);
   const listRef = useRef(null);
   const menuRef = useRef(null);
@@ -40,9 +41,11 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   useEffect(() => {
     if (forge?.random && forge?.cipher && forge?.pki) {
       setIsForgeReady(true);
+      setIsLoading(false);
     } else {
       setError('Encryption library failed to load');
       console.error('node-forge initialization failed:', forge);
+      setIsLoading(false);
     }
   }, []);
 
@@ -62,7 +65,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       setAuth('', '', '', '', '', '');
       setChatList([]);
       dispatch(setSelectedChat(null));
-      navigate('/');
+      navigate('/'); // Navigate to login on logout
     } catch (err) {
       console.error('handleLogout error:', err.message);
       setError('Failed to logout');
@@ -304,13 +307,18 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     };
   }, [socket, isForgeReady, selectedChat, userId, chats, dispatch]);
 
+  // Removed premature navigation; handle loading state instead
   useEffect(() => {
-    if (!token || !userId || !isForgeReady) {
-      navigate('/');
+    if (!token || !userId) {
+      setError('Please log in to access chat');
+      setIsLoading(false);
       return;
     }
-    fetchChatList();
-  }, [token, userId, isForgeReady, navigate, fetchChatList]);
+    if (isForgeReady) {
+      fetchChatList();
+      setIsLoading(false);
+    }
+  }, [token, userId, isForgeReady, fetchChatList]);
 
   useEffect(() => {
     if (selectedChat && !chats[selectedChat]) {
@@ -411,6 +419,18 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     Component.displayName = 'MessageRow';
     return React.memo(Component);
   }, [chats, selectedChat, userId]);
+
+  if (isLoading) {
+    return <div className="chat-screen">Loading chat...</div>;
+  }
+
+  if (error) {
+    return (
+      <div className="chat-screen">
+        <div className="error-message">{error}</div>
+      </div>
+    );
+  }
 
   return (
     <div className="chat-screen">
