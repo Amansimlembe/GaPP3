@@ -12,8 +12,7 @@ import FeedScreen from './screens/FeedScreen';
 import ChatScreen from './screens/ChatScreen';
 import ProfileScreen from './screens/ProfileScreen';
 import CountrySelector from './components/CountrySelector';
-import { setAuth, clearAuth } from './store'; // Import Redux actions
-import { setSelectedChat } from './store'; // Import setSelectedChat
+import { setAuth, clearAuth, setSelectedChat } from './store';
 
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
 
