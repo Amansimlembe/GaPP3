@@ -4,7 +4,7 @@ import { motion } from 'framer-motion';
 import { FaHome, FaBriefcase, FaComments, FaUser } from 'react-icons/fa';
 import axios from 'axios';
 import io from 'socket.io-client';
-import { useSelector } from 'react-redux';
+import { useSelector, useDispatch } from 'react-redux';
 import LoginScreen from './screens/LoginScreen';
 import JobSeekerScreen from './screens/JobSeekerScreen';
 import EmployerScreen from './screens/EmployerScreen';
@@ -12,6 +12,8 @@ import FeedScreen from './screens/FeedScreen';
 import ChatScreen from './screens/ChatScreen';
 import ProfileScreen from './screens/ProfileScreen';
 import CountrySelector from './components/CountrySelector';
+import { setAuth, clearAuth } from './store'; // Import Redux actions
+import { setSelectedChat } from './store'; // Import setSelectedChat
 
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
 
@@ -22,15 +24,15 @@ class ErrorBoundary extends React.Component {
     return { hasError: true, error };
   }
 
-// In App.js, inside ErrorBoundary's componentDidCatch
-componentDidCatch(error, errorInfo) {
-  console.error('ErrorBoundary caught:', error, errorInfo);
-  axios.post(`${BASE_URL}/social/log-error`, { // Changed to /social/log-error
-    error: error.message,
-    stack: errorInfo.componentStack,
-    timestamp: new Date().toISOString(),
-  }).catch((err) => console.warn('Failed to log error:', err.message));
-}
+  componentDidCatch(error, errorInfo) {
+    console.error('ErrorBoundary caught:', error, errorInfo);
+    axios.post(`${BASE_URL}/social/log-error`, {
+      error: error.message,
+      stack: errorInfo.componentStack,
+      timestamp: new Date().toISOString(),
+    }).catch((err) => console.warn('Failed to log error:', err.message));
+  }
+
   render() {
     if (this.state.hasError) {
       return (
@@ -77,45 +79,38 @@ const getTokenExpiration = (token) => {
 };
 
 const App = () => {
-  const [token, setToken] = useState(localStorage.getItem('token') || '');
-  const [userId, setUserId] = useState(localStorage.getItem('userId') || '');
-  const [role, setRole] = useState(Number(localStorage.getItem('role')) || 0);
-  const [photo, setPhoto] = useState(localStorage.getItem('photo') || 'https://placehold.co/40x40');
-  const [virtualNumber, setVirtualNumber] = useState(localStorage.getItem('virtualNumber') || '');
-  const [username, setUsername] = useState(localStorage.getItem('username') || '');
+  const dispatch = useDispatch();
+  const { token, userId, role, photo, virtualNumber, username } = useSelector((state) => state.auth);
+  const { selectedChat } = useSelector((state) => state.messages);
   const [chatNotifications, setChatNotifications] = useState(0);
-  const [isAuthenticated, setIsAuthenticated] = useState(!!localStorage.getItem('token'));
+  const [isAuthenticated, setIsAuthenticated] = useState(!!token);
   const [socket, setSocket] = useState(null);
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
   const [error, setError] = useState(null);
-  const { selectedChat } = useSelector((state) => state.messages);
 
-  const setAuth = (newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername) => {
-    const token = newToken || '';
-    const userId = newUserId || '';
-    const role = Number(newRole) || 0;
-    const photo = newPhoto || 'https://placehold.co/40x40';
-    const virtualNumber = newVirtualNumber || '';
-    const username = newUsername || '';
-
-    setToken(token);
-    setUserId(userId);
-    setRole(role);
-    setPhoto(photo);
-    setVirtualNumber(virtualNumber);
-    setUsername(username);
-
-    if (token && userId) {
-      localStorage.setItem('token', token);
-      localStorage.setItem('userId', userId);
-      localStorage.setItem('role', String(role));
-      localStorage.setItem('photo', photo);
-      localStorage.setItem('virtualNumber', virtualNumber);
-      localStorage.setItem('username', username);
+  const setAuthData = (newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername, privateKey) => {
+    dispatch(setAuth({
+      token: newToken || null,
+      userId: newUserId || null,
+      role: Number(newRole) || null,
+      photo: newPhoto || 'https://placehold.co/40x40',
+      virtualNumber: newVirtualNumber || null,
+      username: newUsername || null,
+      privateKey: privateKey || null,
+    }));
+    if (newToken && newUserId) {
+      localStorage.setItem('token', newToken);
+      localStorage.setItem('userId', newUserId);
+      localStorage.setItem('role', String(newRole));
+      localStorage.setItem('photo', newPhoto || 'https://placehold.co/40x40');
+      localStorage.setItem('virtualNumber', newVirtualNumber || '');
+      localStorage.setItem('username', newUsername || '');
+      localStorage.setItem('privateKey', privateKey || '');
       setIsAuthenticated(true);
     } else {
       localStorage.clear();
       setIsAuthenticated(false);
+      dispatch(clearAuth());
       setChatNotifications(0);
       setSocket(null);
       setError('Authentication failed, please log in again');
@@ -123,19 +118,18 @@ const App = () => {
   };
 
   useEffect(() => {
-    if (!token || !userId || typeof token !== 'string') {
+    if (!token || !userId) {
       console.warn('Invalid token or userId, skipping socket initialization');
-      setAuth(null, null, null, null, null, null);
+      setAuthData(null, null, null, null, null, null, null);
       return;
     }
 
     const newSocket = io(BASE_URL, {
-      auth: { token,
-      },
+      auth: { token },
       transports: ['websocket', 'polling'],
-      reconnectionAttempts: 10, // Increased for Render stability
-      reconnectionDelay: 3000, // Increased delay
-      timeout: 10000, // Increased connection timeout
+      reconnectionAttempts: 10,
+      reconnectionDelay: 3000,
+      timeout: 10000,
     });
     setSocket(newSocket);
 
@@ -154,17 +148,16 @@ const App = () => {
         { userId },
         {
           headers: { Authorization: `Bearer ${token}` },
-          timeout: 15000, // Increased timeout
+          timeout: 15000,
         }
       );
       const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername, privateKey } = response.data;
-      setAuth(newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername);
-      localStorage.setItem('privateKey', privateKey);
+      setAuthData(newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername, privateKey);
       console.log('Token refreshed');
       return newToken;
     } catch (error) {
       console.error('Token refresh failed:', error.response?.data || error.message);
-      setAuth(null, null, null, null, null, null);
+      setAuthData(null, null, null, null, null, null, null);
       setError('Session expired, please log in again');
       return null;
     }
@@ -179,7 +172,7 @@ const App = () => {
       isRefreshing = true;
       try {
         const expTime = getTokenExpiration(token);
-        if (expTime && expTime - Date.now() < 10 * 60 * 1000) { // Check 10 minutes before expiry
+        if (expTime && expTime - Date.now() < 10 * 60 * 1000) {
           await refreshToken();
         }
       } catch (err) {
@@ -191,7 +184,7 @@ const App = () => {
     };
 
     checkTokenExpiration();
-    const interval = setInterval(checkTokenExpiration, 5 * 60 * 1000); // Check every 5 minutes
+    const interval = setInterval(checkTokenExpiration, 5 * 60 * 1000);
     return () => clearInterval(interval);
   }, [isAuthenticated, token, userId, socket]);
 
@@ -211,7 +204,7 @@ const App = () => {
           socket.auth.token = newToken;
           socket.disconnect().connect();
         } else {
-          setAuth(null, null, null, null, null, null);
+          setAuthData(null, null, null, null, null, null, null);
         }
       }
     });
@@ -248,7 +241,10 @@ const App = () => {
   }, [theme]);
 
   const toggleTheme = () => setTheme(theme === 'light' ? 'dark' : 'light');
-  const handleChatNavigation = () => setChatNotifications(0);
+  const handleChatNavigation = () => {
+    setChatNotifications(0);
+    dispatch(setSelectedChat(null)); // Reset selected chat on navigation
+  };
 
   if (!isAuthenticated) {
     return (
@@ -258,7 +254,7 @@ const App = () => {
             {error}
           </div>
         )}
-        <LoginScreen setAuth={setAuth} />
+        <LoginScreen setAuth={setAuthData} />
       </ErrorBoundary>
     );
   }
@@ -279,7 +275,7 @@ const App = () => {
           virtualNumber={virtualNumber}
           username={username}
           chatNotifications={chatNotifications}
-          setAuth={setAuth}
+          setAuth={setAuthData}
           socket={socket}
           toggleTheme={toggleTheme}
           handleChatNavigation={handleChatNavigation}
@@ -324,6 +320,7 @@ const AuthenticatedApp = ({
           <Route path="/feed" element={<FeedScreen token={token} userId={userId} />} />
           <Route path="/chat" element={<ChatScreen token={token} userId={userId} setAuth={setAuth} socket={socket} username={username} virtualNumber={virtualNumber} photo={photo} />} />
           <Route path="/profile" element={<ProfileScreen token={token} userId={userId} setAuth={setAuth} username={username} virtualNumber={virtualNumber} photo={photo} />} />
+          <Route path="*" element={<Navigate to="/feed" replace />} />
         </Routes>
       </div>
       <motion.nav
@@ -336,7 +333,7 @@ const AuthenticatedApp = ({
           <FaHome className="text-xl"/>
           <span className="text-xs">Feed</span>
         </NavLink>
-        <NavLink to="/jobs" className="flex flex-col items-center p-2 rounded">
+        <NavLink to="/jobs" className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}>
           <FaBriefcase className="text-xl" />
           <span className="text-xs">Jobs</span>
         </NavLink>
@@ -353,7 +350,7 @@ const AuthenticatedApp = ({
           )}
           <span className="text-xs">Chat</span>
         </NavLink>
-        <NavLink to="/profile" className="flex flex-col items-center p-2">
+        <NavLink to="/profile" className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}>
           <FaUser className="text-xl"/>
           <span className="text-xs">Profile</span>
         </NavLink>
