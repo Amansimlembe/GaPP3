@@ -56,32 +56,38 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
     []
   );
 
+
   const fetchFeed = useCallback(async (pageNum = 1, isRefresh = false) => {
-    if (!token || !userId || (loading && !isRefresh) || (!hasMore && !isRefresh)) return;
-    setLoading(true);
-    if (isRefresh) setRefreshing(true);
-    try {
-      const { data } = await axios.get(`https://gapp-6yc3.onrender.com/feed?page=${pageNum}&limit=10`, { timeout: 5000 });
-      const filteredPosts = Array.isArray(data.posts) ? data.posts.filter((post) => !post.isStory) : [];
-      setPosts((prev) => (pageNum === 1 || isRefresh ? filteredPosts : [...prev, ...filteredPosts]));
-      setHasMore(data.hasMore || false);
-      setError('');
-      if (filteredPosts.length > 0 && (pageNum === 1 || isRefresh)) {
-        setPlayingPostId(filteredPosts[0]._id.toString());
-      }
-    } catch (error) {
-      console.error('Failed to fetch feed:', error);
-      if (error.response?.status === 401) {
-        setError('Unauthorized. Please log in again.');
-        onUnauthorized?.();
-      } else {
-        setError(error.response?.data?.error || 'Failed to load feed');
-      }
-    } finally {
-      setLoading(false);
-      if (isRefresh) setRefreshing(false);
+  if (!token || !userId || (loading && !isRefresh) || (!hasMore && !isRefresh)) return;
+  setLoading(true);
+  if (isRefresh) setRefreshing(true);
+  try {
+    const { data } = await axios.get(`https://gapp-6yc3.onrender.com/feed?page=${pageNum}&limit=10`, {
+      headers: { Authorization: `Bearer ${token}` },
+      timeout: 5000,
+    });
+    const filteredPosts = Array.isArray(data.posts) ? data.posts.filter((post) => !post.isStory) : [];
+    setPosts((prev) => (pageNum === 1 || isRefresh ? filteredPosts : [...prev, ...filteredPosts]));
+    setHasMore(data.hasMore || false);
+    setError('');
+    if (filteredPosts.length > 0 && (pageNum === 1 || isRefresh)) {
+      setPlayingPostId(filteredPosts[0]._id.toString());
     }
-  }, [token, userId, loading, hasMore, onUnauthorized]);
+  } catch (error) {
+    console.error('Failed to fetch feed:', error);
+    if (error.response?.status === 401) {
+      setError('Unauthorized. Please log in again.');
+      onUnauthorized?.();
+    } else {
+      setError(error.response?.data?.error || 'Failed to load feed');
+    }
+  } finally {
+    setLoading(false);
+    if (isRefresh) setRefreshing(false);
+  }
+}, [token, userId, loading, hasMore, onUnauthorized]);
+
+
 
   useEffect(() => {
     if (token && userId && socket) {

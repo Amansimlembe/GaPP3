@@ -322,38 +322,47 @@ const AuthenticatedApp = ({
           <Route path="*" element={<Navigate to="/feed" replace />} />
         </Routes>
       </div>
+
+
+
+
+
       <motion.nav
-        initial={{ y: 0 }}
-        animate={{ y: isChatRouteWithSelectedChat ? 200 : 0 }}
-        transition={{ duration: 0.3 }}
-        className="fixed bottom-0 left-0 right-0 bg-primary text-white p-2 flex justify-around items-center shadow-lg z-20"
-      >
-        <NavLink to="/feed" className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}>
-          <FaHome className="text-xl"/>
-          <span className="text-xs">Feed</span>
-        </NavLink>
-        <NavLink to="/jobs" className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}>
-          <FaBriefcase className="text-xl" />
-          <span className="text-xs">Jobs</span>
-        </NavLink>
-        <NavLink
-          to="/chat"
-          onClick={handleChatNavigation}
-          className={({ isActive }) => `flex flex-col items-center p-2 rounded relative ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}
-        >
-          <FaComments className="text-xl"/>
-          {chatNotifications > 0 && (
-            <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
-              {chatNotifications}
-            </span>
-          )}
-          <span className="text-xs">Chat</span>
-        </NavLink>
-        <NavLink to="/profile" className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}>
-          <FaUser className="text-xl"/>
-          <span className="text-xs">Profile</span>
-        </NavLink>
-      </motion.nav>
+  initial={{ y: 0 }}
+  animate={{ y: isChatRouteWithSelectedChat ? 200 : 0 }}
+  transition={{ duration: 0.3 }}
+  className="fixed bottom-0 left-0 right-0 bg-primary text-white p-2 flex justify-around items-center shadow-lg z-20"
+>
+  <NavLink to="/feed" className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}>
+    <FaHome className="text-xl"/>
+    <span className="text-xs">Feed</span>
+  </NavLink>
+  <NavLink to="/jobs" className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}>
+    <FaBriefcase className="text-xl" />
+    <span className="text-xs">Jobs</span>
+  </NavLink>
+  <NavLink
+    to="/chat"
+    onClick={() => {
+      handleChatNavigation();
+      dispatch(setSelectedChat(null)); // Ensure chat state is reset
+    }}
+    className={({ isActive }) => `flex flex-col items-center p-2 rounded relative ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}
+  >
+    <FaComments className="text-xl"/>
+    {chatNotifications > 0 && (
+      <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
+        {chatNotifications}
+      </span>
+    )}
+    <span className="text-xs">Chat</span>
+  </NavLink>
+  <NavLink to="/profile" className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}>
+    <FaUser className="text-xl"/>
+    <span className="text-xs">Profile</span>
+  </NavLink>
+</motion.nav>
+
     </div>
   );
 };
