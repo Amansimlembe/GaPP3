@@ -324,8 +324,6 @@ const AuthenticatedApp = ({
           <Route path="/feed" element={<FeedScreen token={token} userId={userId} />} />
           <Route path="/chat" element={<ChatScreen token={token} userId={userId} setAuth={setAuth} socket={socket} username={username} virtualNumber={virtualNumber} photo={photo} />} />
           <Route path="/profile" element={<ProfileScreen token={token} userId={userId} setAuth={setAuth} username={username} virtualNumber={virtualNumber} photo={photo} />} />
-          <Route path="/" element={<Navigate to="/feed" replace />} />
-          <Route path="*" element={<Navigate to="/feed" replace />} />
         </Routes>
       </div>
       <motion.nav
