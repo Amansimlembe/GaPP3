@@ -8,7 +8,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import Picker from 'emoji-picker-react';
 import { VariableSizeList } from 'react-window';
 import AutoSizer from 'react-virtualized-auto-sizer';
-import { setMessages, addMessage, replaceMessage, updateMessageStatus, setSelectedChat, resetState } from './store';
+import { setMessages, addMessage, replaceMessage, updateMessageStatus, setSelectedChat, resetState } from '../store';
 import './ChatScreen.css';
 
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
