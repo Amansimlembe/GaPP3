@@ -171,11 +171,7 @@ module.exports = (io) => {
 
       const contactUsers = await User.find({ _id: { $in: contacts } })
         .select('username virtualNumber photo status lastSeen')
-        .lean()
-        .catch((err) => {
-          logger.error('Failed to fetch contact users', { error: err.message, userId });
-          throw err;
-        });
+        .lean();
 
       if (!contactUsers.length) {
         io.to(userId).emit('chatListUpdated', { userId, users: [] });
@@ -259,7 +255,7 @@ module.exports = (io) => {
       io.to(userId).emit('chatListUpdated', { userId, users: chatList });
       logger.info('Emitted updated chat list', { userId, chatCount: chatList.length });
     } catch (error) {
-      logger.error('Failed to emit updated chat list', { error: error.message, userId });
+      logger.error('Failed to emit updated chat list', { error: error.message, stack: error.stack, userId });
     }
   };
 
@@ -280,7 +276,7 @@ module.exports = (io) => {
             logger.info('User joined room', { socketId: socket.id, userId });
           }
         })
-        .catch((err) => logger.error('User join failed', { error: err.message, userId }));
+        .catch((err) => logger.error('User join failed', { error: err.message, stack: err.stack, userId }));
     });
 
     socket.on('leave', (userId) => {
@@ -295,7 +291,7 @@ module.exports = (io) => {
             logger.info('User left room', { socketId: socket.id, userId });
           }
         })
-        .catch((err) => logger.error('User leave failed', { error: err.message, userId }));
+        .catch((err) => logger.error('User leave failed', { error: err.message, stack: err.stack, userId }));
       socket.leave(userId);
     });
 
@@ -323,23 +319,32 @@ module.exports = (io) => {
         if (contact) {
           const contactObj = {
             id: contact._id.toString(),
-            username: contact.username,
-            virtualNumber: contact.virtualNumber,
+            username: contact.username || 'Unknown',
+            virtualNumber: contact.virtualNumber || '',
             photo: contact.photo || 'https://placehold.co/40x40',
-            status: contact.status,
-            lastSeen: contact.lastSeen,
+            status: contact.status || 'offline',
+            lastSeen: contact.lastSeen || null,
             latestMessage: null,
             unreadCount: 0,
           };
           io.to(userId).emit('contactData', { userId, contactData: contactObj });
           io.to(contactData.id).emit('contactData', {
             userId: contactData.id,
-            contactData: contactObj,
+            contactData: {
+              id: userId,
+              username: (await User.findById(userId).select('username')).username || 'Unknown',
+              virtualNumber: (await User.findById(userId).select('virtualNumber')).virtualNumber || '',
+              photo: (await User.findById(userId).select('photo')).photo || 'https://placehold.co/40x40',
+              status: (await User.findById(userId).select('status')).status || 'offline',
+              lastSeen: (await User.findById(userId).select('lastSeen')).lastSeen || null,
+              latestMessage: null,
+              unreadCount: 0,
+            },
           });
           await Promise.all([emitUpdatedChatList(userId), emitUpdatedChatList(contactData.id)]);
         }
       } catch (err) {
-        logger.error('Contact data emission failed', { error: err.message, userId });
+        logger.error('Contact data emission failed', { error: err.message, stack: err.stack, userId });
       }
     });
 
@@ -383,6 +388,7 @@ module.exports = (io) => {
           return callback({ message: existingMessage });
         }
 
+        const sender = await User.findById(senderId).select('virtualNumber username photo').lean();
         const message = new Message({
           senderId,
           recipientId,
@@ -394,9 +400,9 @@ module.exports = (io) => {
           replyTo: replyTo && mongoose.isValidObjectId(replyTo) ? replyTo : undefined,
           originalFilename: messageData.originalFilename || undefined,
           clientMessageId,
-          senderVirtualNumber: senderVirtualNumber || (await User.findById(senderId).select('virtualNumber')).virtualNumber,
-          senderUsername: senderUsername || (await User.findById(senderId).select('username')).username,
-          senderPhoto: senderPhoto || (await User.findById(senderId).select('photo')).photo,
+          senderVirtualNumber: senderVirtualNumber || sender.virtualNumber,
+          senderUsername: senderUsername || sender.username,
+          senderPhoto: senderPhoto || sender.photo,
         });
 
         await message.save({ session });
@@ -418,7 +424,7 @@ module.exports = (io) => {
         callback({ message: populatedMessage });
       } catch (err) {
         await session.abortTransaction();
-        logger.error('Message send failed', { error: err.message, senderId: messageData.senderId });
+        logger.error('Message send failed', { error: err.message, stack: err.stack, senderId: messageData.senderId });
         callback({ error: err.message });
       } finally {
         session.endSession();
@@ -465,7 +471,7 @@ module.exports = (io) => {
         callback({ message: populatedMessage });
       } catch (err) {
         await session.abortTransaction();
-        logger.error('Edit message failed', { error: err.message, messageId });
+        logger.error('Edit message failed', { error: err.message, stack: err.stack, messageId });
         callback({ error: 'Failed to edit message' });
       } finally {
         session.endSession();
@@ -503,7 +509,7 @@ module.exports = (io) => {
         callback({ status: 'success' });
       } catch (err) {
         await session.abortTransaction();
-        logger.error('Delete message failed', { error: err.message, messageId });
+        logger.error('Delete message failed', { error: err.message, stack: err.stack, messageId });
         callback({ error: 'Failed to delete message' });
       } finally {
         session.endSession();
@@ -538,7 +544,7 @@ module.exports = (io) => {
         io.to(message.senderId.toString()).emit('messageStatus', { messageId, status });
       } catch (err) {
         await session.abortTransaction();
-        logger.error('Message status update failed', { error: err.message, messageId });
+        logger.error('Message status update failed', { error: err.message, stack: err.stack, messageId });
       } finally {
         session.endSession();
       }
@@ -578,7 +584,7 @@ module.exports = (io) => {
         });
       } catch (err) {
         await session.abortTransaction();
-        logger.error('Batch message status update failed', { error: err.message, recipientId });
+        logger.error('Batch message status update failed', { error: err.message, stack: err.stack, recipientId });
       } finally {
         session.endSession();
       }
@@ -592,7 +598,7 @@ module.exports = (io) => {
               io.to(socket.user.id).emit('userStatus', { userId: socket.user.id, status: 'offline', lastSeen: user.lastSeen });
             }
           })
-          .catch((err) => logger.error('User disconnect status update failed', { error: err.message, userId: socket.user.id }));
+          .catch((err) => logger.error('User disconnect status update failed', { error: err.message, stack: err.stack, userId: socket.user.id }));
       }
       logger.info('Socket.IO disconnected', { socketId: socket.id, userId: socket.user?.id });
     });
@@ -608,7 +614,7 @@ module.exports = (io) => {
     try {
       const { error } = messageSchema.validate(req.body);
       if (error) {
-        await session.endSession();
+        await session.abortTransaction();
         return res.status(400).json({ error: error.details[0].message });
       }
 
@@ -627,12 +633,12 @@ module.exports = (io) => {
       } = req.body;
 
       if (senderId !== req.user.id) {
-        await session.endSession();
+        await session.abortTransaction();
         return res.status(403).json({ error: 'Unauthorized sender' });
       }
 
       if (contentType === 'text' && !plaintextContent) {
-        await session.endSession();
+        await session.abortTransaction();
         return res.status(400).json({ error: 'plaintextContent required for text messages' });
       }
 
@@ -642,6 +648,7 @@ module.exports = (io) => {
         return res.status(200).json({ message: existingMessage });
       }
 
+      const sender = await User.findById(senderId).select('virtualNumber username photo').lean();
       const message = new Message({
         senderId,
         recipientId,
@@ -653,9 +660,9 @@ module.exports = (io) => {
         replyTo: replyTo && mongoose.isValidObjectId(replyTo) ? replyTo : undefined,
         originalFilename: req.body.originalFilename || undefined,
         clientMessageId,
-        senderVirtualNumber: senderVirtualNumber || (await User.findById(senderId).select('virtualNumber')).virtualNumber,
-        senderUsername: senderUsername || (await User.findById(senderId).select('username')).username,
-        senderPhoto: senderPhoto || (await User.findById(senderId).select('photo')).photo,
+        senderVirtualNumber: senderVirtualNumber || sender.virtualNumber,
+        senderUsername: senderUsername || sender.username,
+        senderPhoto: senderPhoto || sender.photo,
       });
 
       await message.save({ session });
@@ -677,7 +684,7 @@ module.exports = (io) => {
       res.status(201).json({ message: populatedMessage });
     } catch (error) {
       await session.abortTransaction();
-      logger.error('Save message error:', { error: error.message });
+      logger.error('Save message error:', { error: error.message, stack: error.stack });
       res.status(500).json({ error: 'Failed to save message', details: error.message });
     } finally {
       session.endSession();
@@ -708,11 +715,7 @@ module.exports = (io) => {
 
       const contactUsers = await User.find({ _id: { $in: contacts } })
         .select('username virtualNumber photo status lastSeen')
-        .lean()
-        .catch((err) => {
-          logger.error('Failed to fetch contact users', { error: err.message, userId });
-          throw err;
-        });
+        .lean();
 
       if (!contactUsers.length) {
         logger.info('No contact users found', { userId });
@@ -760,7 +763,7 @@ module.exports = (io) => {
             },
           },
         ]).catch((err) => {
-          logger.error('Latest messages aggregation failed', { error: err.message, userId });
+          logger.error('Latest messages aggregation failed', { error: err.message, stack: err.stack, userId });
           return [];
         }),
         Message.aggregate([
@@ -773,7 +776,7 @@ module.exports = (io) => {
           },
           { $group: { _id: '$senderId', unreadCount: { $sum: 1 } } },
         ]).catch((err) => {
-          logger.error('Unread counts aggregation failed', { error: err.message, userId });
+          logger.error('Unread counts aggregation failed', { error: err.message, stack: err.stack, userId });
           return [];
         }),
       ]);
@@ -796,7 +799,7 @@ module.exports = (io) => {
       logger.info('Chat list fetched successfully', { userId, chatCount: chatList.length });
       res.json(chatList);
     } catch (err) {
-      logger.error('Chat list failed', { error: err.message, userId });
+      logger.error('Chat list failed', { error: err.message, stack: err.stack, userId });
       res.status(500).json({ error: 'Failed to fetch chat list', details: err.message });
     }
   });
@@ -831,110 +834,110 @@ module.exports = (io) => {
 
       res.json({ messages, total });
     } catch (err) {
-      logger.error('Messages fetch failed', { error: err.message });
-      res.status(500).json({ error: 'Failed to fetch messages' });
+      logger.error('Messages fetch failed', { error: err.message, stack: err.stack });
+      res.status(500).json({ error: 'Failed to fetch messages', details: err.message });
     }
   });
 
   router.post('/add_contact', authMiddleware, async (req, res) => {
-  const session = await mongoose.startSession();
-  try {
-    session.startTransaction();
+    const session = await mongoose.startSession();
+    try {
+      session.startTransaction();
 
-    const { error } = addContactSchema.validate(req.body);
-    if (error) {
-      await session.abortTransaction();
-      return res.status(400).json({ error: error.details[0].message });
-    }
+      const { error } = addContactSchema.validate(req.body);
+      if (error) {
+        await session.abortTransaction();
+        return res.status(400).json({ error: error.details[0].message });
+      }
 
-    const { userId, virtualNumber } = req.body;
-    if (userId !== req.user.id) {
-      await session.abortTransaction();
-      return res.status(403).json({ error: 'Unauthorized' });
-    }
+      const { userId, virtualNumber } = req.body;
+      if (userId !== req.user.id) {
+        await session.abortTransaction();
+        return res.status(403).json({ error: 'Unauthorized' });
+      }
 
-    const user = await User.findById(userId).session(session);
-    if (!user) {
-      await session.abortTransaction();
-      return res.status(404).json({ error: 'User not found' });
-    }
+      const user = await User.findById(userId).session(session);
+      if (!user) {
+        await session.abortTransaction();
+        return res.status(404).json({ error: 'User not found' });
+      }
 
-    const contact = await User.findOne({ virtualNumber }).session(session);
-    if (!contact) {
-      await session.abortTransaction();
-      return res.status(404).json({ error: 'Contact not found' });
-    }
+      const contact = await User.findOne({ virtualNumber }).session(session);
+      if (!contact) {
+        await session.abortTransaction();
+        return res.status(404).json({ error: 'Contact not found' });
+      }
 
-    if (contact._id.toString() === userId) {
-      await session.abortTransaction();
-      return res.status(400).json({ error: 'Cannot add self as contact' });
-    }
+      if (contact._id.toString() === userId) {
+        await session.abortTransaction();
+        return res.status(400).json({ error: 'Cannot add self as contact' });
+      }
 
-    let updated = false;
-    if (!user.contacts.some((id) => id.equals(contact._id))) {
-      user.contacts.push(contact._id);
-      updated = true;
-    }
-    if (!contact.contacts.some((id) => id.equals(user._id))) {
-      contact.contacts.push(user._id);
-      updated = true;
-    }
+      if (!Array.isArray(user.contacts)) user.contacts = [];
+      if (!Array.isArray(contact.contacts)) contact.contacts = [];
 
-    if (updated) {
-      await Promise.all([user.save({ session }), contact.save({ session })]);
-    }
+      let updated = false;
+      if (!user.contacts.some((id) => id.equals(contact._id))) {
+        user.contacts.push(contact._id);
+        updated = true;
+      }
+      if (!contact.contacts.some((id) => id.equals(user._id))) {
+        contact.contacts.push(user._id);
+        updated = true;
+      }
 
-    await session.commitTransaction();
+      if (updated) {
+        await Promise.all([user.save({ session }), contact.save({ session })]);
+      }
 
-    const contactData = {
-      id: contact._id.toString(),
-      _id: contact._id.toString(),
-      username: contact.username || 'Unknown',
-      virtualNumber: contact.virtualNumber || '',
-      photo: contact.photo || 'https://placehold.co/40x40',
-      status: contact.status || 'offline',
-      lastSeen: contact.lastSeen || null,
-      latestMessage: null,
-      unreadCount: 0,
-    };
+      await session.commitTransaction();
 
-    // Emit contact data and updated chat list for both users
-    io.to(userId).emit('contactData', { userId, contactData });
-    io.to(contact._id.toString()).emit('contactData', {
-      userId: contact._id.toString(),
-      contactData: {
-        id: user._id.toString(),
-        _id: user._id.toString(),
-        username: user.username || 'Unknown',
-        virtualNumber: user.virtualNumber || '',
-        photo: user.photo || 'https://placehold.co/40x40',
-        status: user.status || 'offline',
-        lastSeen: user.lastSeen || null,
+      const contactData = {
+        id: contact._id.toString(),
+        username: contact.username || 'Unknown',
+        virtualNumber: contact.virtualNumber || '',
+        photo: contact.photo || 'https://placehold.co/40x40',
+        status: contact.status || 'offline',
+        lastSeen: contact.lastSeen || null,
         latestMessage: null,
         unreadCount: 0,
-      },
-    });
+      };
 
-    await Promise.all([emitUpdatedChatList(userId), emitUpdatedChatList(contact._id.toString())]);
+      io.to(userId).emit('contactData', { userId, contactData });
+      io.to(contact._id.toString()).emit('contactData', {
+        userId: contact._id.toString(),
+        contactData: {
+          id: user._id.toString(),
+          username: user.username || 'Unknown',
+          virtualNumber: user.virtualNumber || '',
+          photo: user.photo || 'https://placehold.co/40x40',
+          status: user.status || 'offline',
+          lastSeen: user.lastSeen || null,
+          latestMessage: null,
+          unreadCount: 0,
+        },
+      });
 
-    logger.info('Contact added successfully', { userId, contactId: contact._id });
-    res.status(201).json(contactData);
-  } catch (err) {
-    await session.abortTransaction();
-    logger.error('Add contact failed', {
-      error: err.message,
-      stack: err.stack,
-      userId: req.body.userId,
-      virtualNumber: req.body.virtualNumber,
-    });
-    if (err.code === 11000) {
-      return res.status(400).json({ error: 'Contact already exists' });
+      await Promise.all([emitUpdatedChatList(userId), emitUpdatedChatList(contact._id.toString())]);
+
+      logger.info('Contact added successfully', { userId, contactId: contact._id });
+      res.status(201).json(contactData);
+    } catch (err) {
+      await session.abortTransaction();
+      logger.error('Add contact failed', {
+        error: err.message,
+        stack: err.stack,
+        userId: req.body.userId,
+        virtualNumber: req.body.virtualNumber,
+      });
+      if (err.code === 11000) {
+        return res.status(400).json({ error: 'Contact already exists' });
+      }
+      res.status(500).json({ error: 'Failed to add contact', details: err.message });
+    } finally {
+      session.endSession();
     }
-    res.status(500).json({ error: 'Failed to add contact', details: err.message });
-  } finally {
-    session.endSession();
-  }
-});
+  });
 
   router.post('/upload', authMiddleware, upload.single('file'), async (req, res) => {
     const session = await mongoose.startSession();
@@ -971,6 +974,7 @@ module.exports = (io) => {
         require('stream').Readable.from(req.file.buffer).pipe(uploadStream);
       });
 
+      const sender = await User.findById(userId).select('virtualNumber username photo').lean();
       const message = new Message({
         senderId: userId,
         recipientId,
@@ -981,9 +985,9 @@ module.exports = (io) => {
         caption: caption || undefined,
         originalFilename: req.file.originalname,
         clientMessageId,
-        senderVirtualNumber: senderVirtualNumber || (await User.findById(userId).select('virtualNumber')).virtualNumber,
-        senderUsername: senderUsername || (await User.findById(userId).select('username')).username,
-        senderPhoto: senderPhoto || (await User.findById(userId).select('photo')).photo,
+        senderVirtualNumber: senderVirtualNumber || sender.virtualNumber,
+        senderUsername: senderUsername || sender.username,
+        senderPhoto: senderPhoto || sender.photo,
       });
 
       await message.save({ session });
@@ -1005,8 +1009,8 @@ module.exports = (io) => {
       res.json({ message: populatedMessage });
     } catch (err) {
       await session.abortTransaction();
-      logger.error('Media upload failed', { error: err.message });
-      res.status(500).json({ error: 'Failed to upload media' });
+      logger.error('Media upload failed', { error: err.message, stack: err.stack });
+      res.status(500).json({ error: 'Failed to upload media', details: err.message });
     } finally {
       session.endSession();
     }
@@ -1062,8 +1066,8 @@ module.exports = (io) => {
       res.json({ message: 'User deleted successfully' });
     } catch (err) {
       await session.abortTransaction();
-      logger.error('User deletion failed', { error: err.message });
-      res.status(500).json({ error: 'Failed to delete user' });
+      logger.error('User deletion failed', { error: err.message, stack: err.stack });
+      res.status(500).json({ error: 'Failed to delete user', details: err.message });
     } finally {
       session.endSession();
     }
@@ -1081,8 +1085,8 @@ module.exports = (io) => {
       });
       res.status(200).json({ message: 'Error logged successfully' });
     } catch (err) {
-      logger.error('Failed to log client error', { error: err.message });
-      res.status(500).json({ error: 'Failed to log error' });
+      logger.error('Failed to log client error', { error: err.message, stack: err.stack });
+      res.status(500).json({ error: 'Failed to log error', details: err.message });
     }
   });
 
