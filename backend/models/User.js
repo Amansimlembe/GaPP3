@@ -1,4 +1,3 @@
-
 const mongoose = require('mongoose');
 const { getCountries, parsePhoneNumberFromString } = require('libphonenumber-js');
 const winston = require('winston');
@@ -64,22 +63,19 @@ const userSchema = new mongoose.Schema({
       message: 'Invalid virtual number format for the specified country.',
     },
   },
-
-
-  contacts: [{
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User',
+  contacts: {
+    type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
     default: [],
     validate: {
       validator: async function (value) {
-        const user = await mongoose.model('User').findById(value).select('_id').lean();
-        return !!user;
+        if (!value.length) return true;
+        const users = await mongoose.model('User').find({ _id: { $in: value } }).select('_id').lean();
+        const validIds = new Set(users.map((user) => user._id.toString()));
+        return value.every((id) => validIds.has(id.toString()));
       },
-      message: 'Invalid contact ID.',
+      message: 'One or more invalid contact IDs.',
     },
-  }],
-
-
+  },
   role: {
     type: Number,
     enum: [0, 1], // 0: Job Seeker, 1: Employer
@@ -113,25 +109,34 @@ userSchema.index({ virtualNumber: 1 });
 userSchema.index({ contacts: 1, status: 1 });
 userSchema.index({ status: 1, lastSeen: -1 });
 
-// Pre-save hook to validate contacts
+// Pre-save hook to validate and clean contacts
 userSchema.pre('save', async function (next) {
   try {
     if (this.isModified('contacts') && this.contacts.length) {
-      const uniqueContacts = [...new Set(this.contacts.map(id => id.toString()))];
-      this.contacts = uniqueContacts.map(id => new mongoose.Types.ObjectId(id));
-      
+      // Remove duplicates
+      const uniqueContacts = [...new Set(this.contacts.map((id) => id.toString()))];
+      this.contacts = uniqueContacts.map((id) => new mongoose.Types.ObjectId(id));
+
+      // Validate contacts in bulk
       const existingUsers = await this.constructor.find({ _id: { $in: this.contacts } }).select('_id').lean();
-      const existingIds = new Set(existingUsers.map(user => user._id.toString()));
-      const invalidContacts = uniqueContacts.filter(id => !existingIds.has(id));
-      
+      const existingIds = new Set(existingUsers.map((user) => user._id.toString()));
+      const invalidContacts = uniqueContacts.filter((id) => !existingIds.has(id));
+
       if (invalidContacts.length) {
-        logger.error('Invalid contacts found', { invalidContacts });
+        logger.error('Invalid contacts found during save', {
+          userId: this._id?.toString(),
+          invalidContacts,
+        });
         return next(new Error(`Invalid contact IDs: ${invalidContacts.join(', ')}`));
       }
     }
     next();
   } catch (error) {
-    logger.error('User pre-save validation failed', { error: error.message, userId: this._id });
+    logger.error('User pre-save validation failed', {
+      error: error.message,
+      stack: error.stack,
+      userId: this._id?.toString(),
+    });
     next(error);
   }
 });
@@ -151,17 +156,18 @@ userSchema.statics.cleanupInvalidContacts = async function () {
 
     for (let i = 0; i < usersWithContacts.length; i += batchSize) {
       const batch = usersWithContacts.slice(i, i + batchSize);
-      const contactIds = [...new Set(batch.flatMap(user => user.contacts.map(id => id.toString())))];
+      const contactIds = [...new Set(batch.flatMap((user) => user.contacts.map((id) => id.toString())))];
       
       const existingUsers = await this.find({ _id: { $in: contactIds } }).select('_id').lean();
-      const existingIds = new Set(existingUsers.map(user => user._id.toString()));
+      const existingIds = new Set(existingUsers.map((user) => user._id.toString()));
 
       for (const user of batch) {
-        const validContacts = user.contacts.filter(id => existingIds.has(id.toString()));
+        const validContacts = user.contacts.filter((id) => existingIds.has(id.toString()));
         if (validContacts.length !== user.contacts.length) {
           const result = await this.updateOne(
             { _id: user._id },
-            { $set: { contacts: validContacts } }
+            { $set: { contacts: validContacts } },
+            { session: null }
           );
           totalUpdated += result.modifiedCount || 0;
         }
@@ -171,7 +177,7 @@ userSchema.statics.cleanupInvalidContacts = async function () {
     logger.info('Invalid contacts cleanup completed', { updatedCount: totalUpdated });
     return { updatedCount: totalUpdated };
   } catch (error) {
-    logger.error('Invalid contacts cleanup failed', { error: error.message });
+    logger.error('Invalid contacts cleanup failed', { error: error.message, stack: error.stack });
     throw error;
   }
 };
