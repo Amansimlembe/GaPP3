@@ -1,3 +1,4 @@
+
 const mongoose = require('mongoose');
 const User = require('./User');
 const winston = require('winston');
@@ -17,16 +18,16 @@ const messageSchema = new mongoose.Schema({
   recipientId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   content: { type: String, required: true },
   contentType: { type: String, enum: ['text', 'image', 'video', 'audio', 'document'], required: true },
-  plaintextContent: { 
-    type: String, 
-    required: function() { return this.contentType === 'text'; }, 
-    default: function() { return this.contentType === 'text' ? undefined : ''; }
+  plaintextContent: {
+    type: String,
+    required: function () { return this.contentType === 'text'; },
+    default: function () { return this.contentType === 'text' ? undefined : ''; },
   },
   status: { type: String, enum: ['sent', 'delivered', 'read'], default: 'sent' },
   caption: { type: String },
   replyTo: { type: mongoose.Schema.Types.ObjectId, ref: 'Message' },
   originalFilename: { type: String },
-  clientMessageId: { type: String, required: true, unique: true },
+  clientMessageId: { type: String, required: true, unique: true, index: true },
   senderVirtualNumber: { type: String },
   senderUsername: { type: String },
   senderPhoto: { type: String },
@@ -45,26 +46,38 @@ messageSchema.index({ senderId: 1, recipientId: 1, status: 1 });
 // Pre-save hook to validate senderId and recipientId
 messageSchema.pre('save', async function (next) {
   try {
+    // Only fetch sender data if fields are missing
     if (!this.senderVirtualNumber || !this.senderUsername || !this.senderPhoto) {
       const sender = await User.findById(this.senderId).select('virtualNumber username photo').lean();
       if (!sender) {
         logger.error('Invalid sender', { senderId: this.senderId });
         return next(new Error('Sender does not exist'));
       }
-      this.senderVirtualNumber = this.senderVirtualNumber || sender.virtualNumber;
-      this.senderUsername = this.senderUsername || sender.username;
-      this.senderPhoto = this.senderPhoto || sender.photo;
+      this.senderVirtualNumber = this.senderVirtualNumber || sender.virtualNumber || '';
+      this.senderUsername = this.senderUsername || sender.username || 'Unknown';
+      this.senderPhoto = this.senderPhoto || sender.photo || 'https://placehold.co/40x40';
     }
 
+    // Validate recipient exists
     const recipient = await User.findById(this.recipientId).select('_id').lean();
     if (!recipient) {
       logger.error('Invalid recipient', { recipientId: this.recipientId });
       return next(new Error('Recipient does not exist'));
     }
 
+    // Validate replyTo if present
+    if (this.replyTo && !mongoose.isValidObjectId(this.replyTo)) {
+      logger.error('Invalid replyTo ID', { replyTo: this.replyTo });
+      return next(new Error('Invalid replyTo ID'));
+    }
+
     next();
   } catch (error) {
-    logger.error('Message pre-save validation failed', { error: error.message, senderId: this.senderId, recipientId: this.recipientId });
+    logger.error('Message pre-save validation failed', {
+      error: error.message,
+      senderId: this.senderId,
+      recipientId: this.recipientId,
+    });
     next(error);
   }
 });
@@ -109,7 +122,7 @@ messageSchema.statics.cleanupOrphanedMessages = async function () {
           { recipientId: { $in: batch } },
         ],
       });
-      totalDeleted += result.deletedCount;
+      totalDeleted += result.deletedCount || 0;
     }
 
     logger.info('Orphaned messages cleanup completed', { deletedCount: totalDeleted });
@@ -120,4 +133,5 @@ messageSchema.statics.cleanupOrphanedMessages = async function () {
   }
 };
 
-module.exports = mongoose.model('Message', messageSchema);
+const Message = mongoose.model('Message', messageSchema);
+module.exports = Message;
