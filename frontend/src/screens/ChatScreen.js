@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
@@ -131,7 +130,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         const newList = [...newChatMap.values()];
         return JSON.stringify(newList) === JSON.stringify(prev) ? prev : newList;
       });
-      setError(''); // Clear error on success
+      setError('');
     } catch (err) {
       console.error('ChatList error:', err.message);
       if (err.response?.status === 401) {
@@ -139,7 +138,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         setTimeout(() => handleLogout(), 2000);
       } else {
         setError(`Failed to load chat list: ${err.response?.data?.details || err.message}. Click to retry.`);
-        setChatList([]); // Ensure "No contacts" message shows
+        setChatList([]);
       }
     }
   }, [isForgeReady, token, userId, handleLogout]);
@@ -214,68 +213,77 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     }
   }, [isForgeReady, message, selectedChat, userId, virtualNumber, username, photo, socket, getPublicKey, encryptMessage, dispatch, chats]);
 
+  const handleAddContact = useCallback(async () => {
+    if (!contactInput.trim()) {
+      setContactError('Please enter a valid virtual number');
+      return;
+    }
+    try {
+      const response = await axios.post(
+        `${BASE_URL}/social/add_contact`,
+        { userId, virtualNumber: contactInput.trim() },
+        { headers: { Authorization: `Bearer ${token}` }, timeout: 5000 }
+      );
+      setChatList((prev) => {
+        if (prev.find((chat) => chat.id === response.data.id)) return prev;
+        const newChat = {
+          id: response.data.id,
+          _id: response.data.id,
+          username: response.data.username || 'Unknown',
+          virtualNumber: response.data.virtualNumber || '',
+          photo: response.data.photo || 'https://placehold.co/40x40',
+          status: response.data.status || 'offline',
+          lastSeen: response.data.lastSeen || null,
+          latestMessage: null,
+          unreadCount: 0,
+        };
+        return [...prev, newChat];
+      });
+      setContactInput('');
+      setContactError('');
+      setShowAddContact(false);
+      setError('');
+    } catch (err) {
+      console.error('handleAddContact error:', err.message);
+      setContactError(err.response?.data?.error || 'Failed to add contact');
+    }
+  }, [contactInput, token, userId]);
 
+  useEffect(() => {
+    if (!socket || !isForgeReady) return;
 
-const handleAddContact = useCallback(async () => {
-  if (!contactInput.trim()) {
-    setContactError('Please enter a valid virtual number');
-    return;
-  }
-  try {
-    const response = await axios.post(
-      `${BASE_URL}/social/add_contact`,
-      { userId, virtualNumber: contactInput.trim() },
-      { headers: { Authorization: `Bearer ${token}` }, timeout: 5000 }
-    );
-    setChatList((prev) => {
-      if (prev.find((chat) => chat.id === response.data.id)) return prev;
-      const newChat = {
-        ...response.data,
-        _id: response.data.id,
-        status: response.data.status || 'offline',
-        lastSeen: response.data.lastSeen || null,
-        latestMessage: null,
-        unreadCount: 0,
-      };
-      return [...prev, newChat];
-    });
-    setContactInput('');
-    setContactError('');
-    setShowAddContact(false);
-    setError('');
-  } catch (err) {
-    console.error('handleAddContact error:', err.message);
-    setContactError(err.response?.data?.error || 'Failed to add contact');
-  }
-}, [contactInput, token, userId]);
+    const handleNewContact = ({ userId: emitterId, contactData }) => {
+      if (!contactData?.id || !isValidObjectId(contactData.id)) {
+        console.error('Invalid contactData received:', contactData);
+        return;
+      }
+      setChatList((prev) => {
+        if (prev.find((chat) => chat.id === contactData.id)) return prev;
+        const newChat = {
+          id: contactData.id,
+          _id: contactData.id,
+          username: contactData.username || 'Unknown',
+          virtualNumber: contactData.virtualNumber || '',
+          photo: contactData.photo || 'https://placehold.co/40x40',
+          status: contactData.status || 'offline',
+          lastSeen: contactData.lastSeen || null,
+          latestMessage: null,
+          unreadCount: 0,
+        };
+        return [...prev, newChat];
+      });
+    };
 
-useEffect(() => {
-  if (!socket || !isForgeReady) return;
-
-  const handleNewContact = ({ contactData }) => {
-    setChatList((prev) => {
-      if (prev.find((chat) => chat.id === contactData.id)) return prev;
-      const newChat = {
-        ...contactData,
-        _id: contactData.id,
-        status: contactData.status || 'offline',
-        lastSeen: contactData.lastSeen || null,
-        latestMessage: null,
-        unreadCount: 0,
-      };
-      return [...prev, newChat];
-    });
-  };
-
-  const handleChatListUpdated = ({ users }) => {
-    setChatList((prev) => {
-      const newChatMap = new Map(users.map((chat) => [chat.id, chat]));
-      const newList = [...newChatMap.values()];
-      return JSON.stringify(newList) === JSON.stringify(prev) ? prev : newList;
-    });
-  };
-
-  
+    const handleChatListUpdated = ({ users }) => {
+      setChatList((prev) => {
+        const newChatMap = new Map(users.map((chat) => [chat.id, {
+          ...chat,
+          _id: chat.id,
+        }]));
+        const newList = [...newChatMap.values()];
+        return JSON.stringify(newList) === JSON.stringify(prev) ? prev : newList;
+      });
+    };
 
     const handleMessage = (msg) => {
       const senderId = typeof msg.senderId === 'object' ? msg.senderId._id.toString() : msg.senderId.toString();
@@ -312,33 +320,22 @@ useEffect(() => {
       });
     };
 
-  socket.on('contactData', handleNewContact);
-  socket.on('chatListUpdated', handleChatListUpdated);
-  socket.on('message', handleMessage);
-  socket.on('typing', handleTyping);
-  socket.on('stopTyping', handleStopTyping);
-  socket.on('messageStatus', handleMessageStatus);
+    socket.on('contactData', handleNewContact);
+    socket.on('chatListUpdated', handleChatListUpdated);
+    socket.on('message', handleMessage);
+    socket.on('typing', handleTyping);
+    socket.on('stopTyping', handleStopTyping);
+    socket.on('messageStatus', handleMessageStatus);
 
-  return () => {
-    socket.off('contactData');
-    socket.off('chatListUpdated');
-    socket.off('message');
-    socket.off('typing');
-    socket.off('stopTyping');
-    socket.off('messageStatus');
-  };
-}, [socket, isForgeReady, selectedChat, userId, chats, dispatch]);
-
-
-
-
- 
-
-    
-
-
-  
-  
+    return () => {
+      socket.off('contactData');
+      socket.off('chatListUpdated');
+      socket.off('message');
+      socket.off('typing');
+      socket.off('stopTyping');
+      socket.off('messageStatus');
+    };
+  }, [socket, isForgeReady, selectedChat, userId, chats, dispatch]);
 
   useEffect(() => {
     if (!token || !userId) {
@@ -381,7 +378,7 @@ useEffect(() => {
   const selectChat = useCallback((chatId) => {
     dispatch(setSelectedChat(chatId));
     setShowMenu(false);
-    setError(''); // Clear error when selecting a chat
+    setError('');
     if (chatId && socket) {
       socket.emit('batchMessageStatus', {
         messageIds: (chats[chatId] || []).filter((m) => m.status !== 'read' && m.recipientId.toString() === userId).map((m) => m._id),
@@ -664,4 +661,3 @@ useEffect(() => {
 });
 
 export default ChatScreen;
-
