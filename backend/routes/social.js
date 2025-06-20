@@ -1,3 +1,4 @@
+
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const { authMiddleware } = require('./auth');
@@ -149,12 +150,20 @@ module.exports = (io) => {
 
   const emitUpdatedChatList = async (userId) => {
     try {
-      if (!mongoose.isValidObjectId(userId)) return;
+      if (!mongoose.isValidObjectId(userId)) {
+        logger.warn('Invalid userId in emitUpdatedChatList', { userId });
+        return;
+      }
+
       const user = await User.findById(userId).select('contacts').lean();
-      if (!user) return;
+      if (!user) {
+        logger.warn('User not found in emitUpdatedChatList', { userId });
+        io.to(userId).emit('chatListUpdated', { userId, users: [] });
+        return;
+      }
 
       const contacts = Array.isArray(user.contacts)
-        ? user.contacts.filter((id) => mongoose.isValidObjectId(id))
+        ? user.contacts.filter((id) => mongoose.isValidObjectId(id.toString()))
         : [];
       if (!contacts.length) {
         io.to(userId).emit('chatListUpdated', { userId, users: [] });
@@ -164,6 +173,11 @@ module.exports = (io) => {
       const contactUsers = await User.find({ _id: { $in: contacts } })
         .select('username virtualNumber photo status lastSeen')
         .lean();
+
+      if (!contactUsers.length) {
+        io.to(userId).emit('chatListUpdated', { userId, users: [] });
+        return;
+      }
 
       const contactIds = contactUsers.map((c) => c._id);
       const [latestMessages, unreadCounts] = await Promise.all([
@@ -226,7 +240,7 @@ module.exports = (io) => {
 
       const chatList = contactUsers.map((contact) => {
         const messageData = latestMessages.find((m) => m.contactId.toString() === contact._id.toString());
-        const unreadData = unreadCounts.find((u) => u._id.toString() === contact._id.toString());
+        const unreadData = unreadCounts.find((u) => u._id?.toString() === contact._id.toString());
         return {
           id: contact._id.toString(),
           username: contact.username || 'Unknown',
@@ -679,7 +693,7 @@ module.exports = (io) => {
       }
 
       const contacts = Array.isArray(user.contacts)
-        ? user.contacts.filter((id) => mongoose.isValidObjectId(id))
+        ? user.contacts.filter((id) => mongoose.isValidObjectId(id.toString()))
         : [];
       if (!contacts.length) {
         logger.info('No valid contacts found for user', { userId });
@@ -689,6 +703,11 @@ module.exports = (io) => {
       const contactUsers = await User.find({ _id: { $in: contacts } })
         .select('username virtualNumber photo status lastSeen')
         .lean();
+
+      if (!contactUsers.length) {
+        logger.info('No contact users found', { userId });
+        return res.json([]);
+      }
 
       const contactIds = contactUsers.map((c) => c._id);
       const [latestMessages, unreadCounts] = await Promise.all([
@@ -751,7 +770,7 @@ module.exports = (io) => {
 
       const chatList = contactUsers.map((contact) => {
         const messageData = latestMessages.find((m) => m.contactId.toString() === contact._id.toString());
-        const unreadData = unreadCounts.find((u) => u._id.toString() === contact._id.toString());
+        const unreadData = unreadCounts.find((u) => u._id?.toString() === contact._id.toString());
         return {
           id: contact._id.toString(),
           username: contact.username || 'Unknown',
