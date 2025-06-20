@@ -14,6 +14,7 @@ import './ChatScreen.css';
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
 
 const isValidObjectId = (id) => /^[0-9a-fA-F]{24}$/.test(id);
+const isValidVirtualNumber = (number) => /^\+\d{10,15}$/.test(number.trim());
 const generateClientMessageId = () => `${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
 
 const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtualNumber, photo }) => {
@@ -32,20 +33,23 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   const [isTyping, setIsTyping] = useState({});
   const [unreadMessages, setUnreadMessages] = useState({});
   const [isForgeReady, setIsForgeReady] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoadingChatList, setIsLoadingChatList] = useState(true);
+  const [isLoadingAddContact, setIsLoadingAddContact] = useState(false);
   const inputRef = useRef(null);
   const listRef = useRef(null);
   const menuRef = useRef(null);
   const typingTimeoutRef = useRef(null);
+  const retryCountRef = useRef(0);
+  const maxRetries = 3;
 
   useEffect(() => {
     if (forge?.random && forge?.cipher && forge?.pki) {
       setIsForgeReady(true);
-      setIsLoading(false);
+      setIsLoadingChatList(true);
     } else {
       setError('Encryption library failed to load');
       console.error('node-forge initialization failed:', forge);
-      setIsLoading(false);
+      setIsLoadingChatList(false);
     }
   }, []);
 
@@ -117,8 +121,9 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     }
   }, [isForgeReady]);
 
-  const fetchChatList = useCallback(async () => {
+  const fetchChatList = useCallback(async (isRetry = false) => {
     if (!isForgeReady) return;
+    setIsLoadingChatList(true);
     try {
       const { data } = await axios.get(`${BASE_URL}/social/chat-list`, {
         headers: { Authorization: `Bearer ${token}` },
@@ -126,22 +131,33 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         timeout: 5000,
       });
       setChatList((prev) => {
-        const newChatMap = new Map(data.map((chat) => [chat.id, chat]));
-        const newList = [...newChatMap.values()];
-        return JSON.stringify(newList) === JSON.stringify(prev) ? prev : newList;
+        const newChatMap = new Map(data.map((chat) => [chat.id, { ...chat, _id: chat.id }]));
+        prev.forEach((chat) => {
+          if (newChatMap.has(chat.id)) {
+            newChatMap.set(chat.id, { ...newChatMap.get(chat.id), unreadCount: unreadMessages[chat.id] || 0 });
+          }
+        });
+        return [...newChatMap.values()];
       });
       setError('');
+      retryCountRef.current = 0;
     } catch (err) {
       console.error('ChatList fetch error:', err.message);
       if (err.response?.status === 401) {
         setError('Session expired');
         setTimeout(() => handleLogout(), 5000);
+      } else if (err.response?.status === 500 && !isRetry && retryCountRef.current < maxRetries) {
+        retryCountRef.current += 1;
+        setTimeout(() => fetchChatList(true), 1000 * retryCountRef.current);
+        setError(`Retrying chat list fetch (${retryCountRef.current}/${maxRetries})...`);
       } else {
         setError(`Failed to load chat list: ${err.response?.data?.error || 'Unknown error'}. Click to retry...`);
-        setChatList([]);
+        retryCountRef.current = 0;
       }
+    } finally {
+      setIsLoadingChatList(false);
     }
-  }, [isForgeReady, token, userId, handleLogout]);
+  }, [isForgeReady, token, userId, handleLogout, unreadMessages]);
 
   const fetchMessages = useCallback(async (chatId) => {
     if (!isForgeReady || !isValidObjectId(chatId)) return;
@@ -215,9 +231,14 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
 
   const handleAddContact = useCallback(async () => {
     if (!contactInput.trim()) {
-      setContactError('Please enter a valid virtual number');
+      setContactError('Please enter a virtual number');
       return;
     }
+    if (!isValidVirtualNumber(contactInput)) {
+      setContactError('Invalid virtual number format (e.g., +123456789012)');
+      return;
+    }
+    setIsLoadingAddContact(true);
     try {
       const response = await axios.post(
         `${BASE_URL}/social/add_contact`,
@@ -235,7 +256,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
           status: response.data.status || 'offline',
           lastSeen: response.data.lastSeen || null,
           latestMessage: null,
-          unreadCount: 0,
+          unreadCount: unreadMessages[response.data.id] || 0,
         };
         return [...prev, newChat];
       });
@@ -245,9 +266,19 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       setError('');
     } catch (err) {
       console.error('handleAddContact error:', err.message);
-      setContactError(err.response?.data?.error || 'Failed to add contact');
+      const errorMsg = err.response?.data?.error || 'Failed to add contact';
+      setContactError(errorMsg);
+      if (err.response?.status === 500 && retryCountRef.current < maxRetries) {
+        retryCountRef.current += 1;
+        setTimeout(() => handleAddContact(), 1000 * retryCountRef.current);
+        setContactError(`Retrying (${retryCountRef.current}/${maxRetries})...`);
+      } else {
+        retryCountRef.current = 0;
+      }
+    } finally {
+      setIsLoadingAddContact(false);
     }
-  }, [contactInput, token, userId]);
+  }, [contactInput, token, userId, unreadMessages]);
 
   useEffect(() => {
     if (!socket || !isForgeReady || !userId) return;
@@ -268,7 +299,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
           status: contactData.status || 'offline',
           lastSeen: contactData.lastSeen || null,
           latestMessage: null,
-          unreadCount: 0,
+          unreadCount: unreadMessages[contactData.id] || 0,
         };
         return [...prev, newChat];
       });
@@ -276,9 +307,8 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
 
     const handleChatListUpdated = ({ users }) => {
       setChatList((prev) => {
-        const newChatMap = new Map(users.map((chat) => [chat.id, { ...chat, _id: chat.id }]));
-        const newList = [...newChatMap.values()];
-        return JSON.stringify(newList) === JSON.stringify(prev) ? prev : newList;
+        const newChatMap = new Map(users.map((chat) => [chat.id, { ...chat, _id: chat.id, unreadCount: unreadMessages[chat.id] || 0 }]));
+        return [...newChatMap.values()];
       });
     };
 
@@ -301,7 +331,10 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     const handleTyping = ({ userId: typingUserId }) => {
       if (typingUserId === selectedChat) {
         setIsTyping((prev) => ({ ...prev, [typingUserId]: true }));
-        setTimeout(() => setIsTyping((prev) => ({ ...prev, [typingUserId]: false })), 3000);
+        clearTimeout(typingTimeoutRef.current);
+        typingTimeoutRef.current = setTimeout(() => {
+          setIsTyping((prev) => ({ ...prev, [typingUserId]: false }));
+        }, 3000);
       }
     };
 
@@ -336,18 +369,17 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       socket.off('stopTyping');
       socket.off('messageStatus');
     };
-  }, [socket, isForgeReady, selectedChat, userId, chats, dispatch]);
+  }, [socket, isForgeReady, selectedChat, userId, chats, dispatch, unreadMessages]);
 
   useEffect(() => {
     if (!token || !userId) {
       setError('Please log in to access chat');
-      setIsLoading(false);
+      setIsLoadingChatList(false);
       return;
     }
     if (isForgeReady) {
       socket.emit('join', userId);
       fetchChatList();
-      setIsLoading(false);
     }
   }, [token, userId, isForgeReady, fetchChatList, socket]);
 
@@ -392,14 +424,16 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     inputRef.current?.focus();
   }, [socket, chats, userId, dispatch]);
 
-  const getItemSize = useCallback((index) => {
-    const msg = chats[selectedChat]?.[index];
-    if (!msg) return 60;
-    const isMedia = ['image', 'video', 'audio', 'document'].includes(msg.contentType);
-    const baseHeight = 60;
-    const mediaHeight = isMedia ? 150 : 0;
-    const captionHeight = msg.caption ? 20 : 0;
-    return baseHeight + mediaHeight + captionHeight;
+  const getItemSize = useMemo(() => {
+    return (index) => {
+      const msg = chats[selectedChat]?.[index];
+      if (!msg) return 60;
+      const isMedia = ['image', 'video', 'audio', 'document'].includes(msg.contentType);
+      const baseHeight = 60;
+      const mediaHeight = isMedia ? 150 : 0;
+      const captionHeight = msg.caption ? 20 : 0;
+      return baseHeight + mediaHeight + captionHeight;
+    };
   }, [chats, selectedChat]);
 
   const Row = useMemo(() => {
@@ -451,10 +485,10 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     return React.memo(Component);
   }, [chats, selectedChat, userId]);
 
-  if (isLoading) {
+  if (!isForgeReady) {
     return (
       <div className="chat-screen">
-        <div className="loading-screen">Loading chat...</div>
+        <div className="loading-screen">Encryption library failed to load</div>
       </div>
     );
   }
@@ -511,6 +545,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
                         value={contactInput}
                         onChange={(e) => setContactInput(e.target.value)}
                         placeholder="Enter virtual number (e.g., +123456789012)"
+                        disabled={isLoadingAddContact}
                       />
                       {contactInput && (
                         <FaTimes
@@ -523,9 +558,9 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
                     <button
                       className="contact-button"
                       onClick={handleAddContact}
-                      disabled={!contactInput.trim()}
+                      disabled={!contactInput.trim() || isLoadingAddContact}
                     >
-                      Add Contact
+                      {isLoadingAddContact ? 'Adding...' : 'Add Contact'}
                     </button>
                   </div>
                 )}
@@ -536,7 +571,9 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       </div>
       <div className="chat-content">
         <div className={`chat-list ${selectedChat ? 'hidden md:block' : 'block'}`}>
-          {chatList.length === 0 ? (
+          {isLoadingChatList ? (
+            <div className="loading-screen">Loading contacts...</div>
+          ) : chatList.length === 0 ? (
             <div className="no-contacts-message">
               <p>No contacts to display. Add a contact to start chatting!</p>
               <button

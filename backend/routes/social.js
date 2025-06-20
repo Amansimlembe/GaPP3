@@ -169,88 +169,46 @@ module.exports = (io) => {
         return;
       }
 
-      const contactUsers = await User.find({ _id: { $in: contacts } })
-        .select('username virtualNumber photo status lastSeen')
-        .lean();
+      const contactUsers = [];
+      for (const contactId of contacts) {
+        const contact = await User.findById(contactId).select('username virtualNumber photo status lastSeen').lean();
+        if (contact) contactUsers.push(contact);
+      }
 
       if (!contactUsers.length) {
         io.to(userId).emit('chatListUpdated', { userId, users: [] });
         return;
       }
 
-      const contactIds = contactUsers.map((c) => c._id);
-      const [latestMessages, unreadCounts] = await Promise.all([
-        Message.aggregate([
-          {
-            $match: {
-              $or: [
-                { senderId: new mongoose.Types.ObjectId(userId), recipientId: { $in: contactIds } },
-                { senderId: { $in: contactIds }, recipientId: new mongoose.Types.ObjectId(userId) },
-              ],
-            },
-          },
-          { $sort: { createdAt: -1 } },
-          {
-            $group: {
-              _id: {
-                $cond: [
-                  { $eq: ['$senderId', new mongoose.Types.ObjectId(userId)] },
-                  '$recipientId',
-                  '$senderId',
-                ],
-              },
-              latestMessage: { $first: '$$ROOT' },
-            },
-          },
-          {
-            $project: {
-              contactId: '$_id',
-              latestMessage: {
-                content: 1,
-                contentType: 1,
-                senderId: 1,
-                recipientId: 1,
-                createdAt: 1,
-                plaintextContent: 1,
-                senderVirtualNumber: 1,
-                senderUsername: 1,
-                senderPhoto: 1,
-              },
-            },
-          },
-        ]).catch((err) => {
-          logger.error('Latest messages aggregation failed', { error: err.message, userId });
-          return [];
-        }),
-        Message.aggregate([
-          {
-            $match: {
-              senderId: { $in: contactIds },
-              recipientId: new mongoose.Types.ObjectId(userId),
-              status: { $ne: 'read' },
-            },
-          },
-          { $group: { _id: '$senderId', unreadCount: { $sum: 1 } } },
-        ]).catch((err) => {
-          logger.error('Unread counts aggregation failed', { error: err.message, userId });
-          return [];
-        }),
-      ]);
+      const chatList = [];
+      for (const contact of contactUsers) {
+        const latestMessage = await Message.findOne({
+          $or: [
+            { senderId: userId, recipientId: contact._id },
+            { senderId: contact._id, recipientId: userId },
+          ],
+        })
+          .sort({ createdAt: -1 })
+          .select('content contentType senderId recipientId createdAt plaintextContent senderVirtualNumber senderUsername senderPhoto')
+          .lean();
 
-      const chatList = contactUsers.map((contact) => {
-        const messageData = latestMessages.find((m) => m.contactId.toString() === contact._id.toString());
-        const unreadData = unreadCounts.find((u) => u._id?.toString() === contact._id.toString());
-        return {
+        const unreadCount = await Message.countDocuments({
+          senderId: contact._id,
+          recipientId: userId,
+          status: { $ne: 'read' },
+        });
+
+        chatList.push({
           id: contact._id.toString(),
           username: contact.username || 'Unknown',
           virtualNumber: contact.virtualNumber || '',
           photo: contact.photo || 'https://placehold.co/40x40',
           status: contact.status || 'offline',
           lastSeen: contact.lastSeen || null,
-          latestMessage: messageData ? messageData.latestMessage : null,
-          unreadCount: unreadData ? unreadData.unreadCount : 0,
-        };
-      });
+          latestMessage: latestMessage || null,
+          unreadCount: unreadCount || 0,
+        });
+      }
 
       io.to(userId).emit('chatListUpdated', { userId, users: chatList });
       logger.info('Emitted updated chat list', { userId, chatCount: chatList.length });
@@ -349,12 +307,9 @@ module.exports = (io) => {
     });
 
     socket.on('message', async (messageData, callback) => {
-      const session = await mongoose.startSession();
-      session.startTransaction();
       try {
         const { error } = messageSchema.validate(messageData);
         if (error) {
-          await session.abortTransaction();
           return callback({ error: error.details[0].message });
         }
 
@@ -373,18 +328,15 @@ module.exports = (io) => {
         } = messageData;
 
         if (senderId !== socket.user.id) {
-          await session.abortTransaction();
           return callback({ error: 'Unauthorized sender' });
         }
 
         if (contentType === 'text' && !plaintextContent) {
-          await session.abortTransaction();
           return callback({ error: 'plaintextContent required for text messages' });
         }
 
-        const existingMessage = await Message.findOne({ clientMessageId }).session(session).lean();
+        const existingMessage = await Message.findOne({ clientMessageId }).lean();
         if (existingMessage) {
-          await session.commitTransaction();
           return callback({ message: existingMessage });
         }
 
@@ -405,16 +357,13 @@ module.exports = (io) => {
           senderPhoto: senderPhoto || sender.photo,
         });
 
-        await message.save({ session });
+        await message.save();
 
         const populatedMessage = await Message.findById(message._id)
-          .session(session)
           .populate('senderId', 'username virtualNumber photo')
           .populate('recipientId', 'username virtualNumber photo')
           .populate('replyTo', 'content contentType senderId recipientId createdAt')
           .lean();
-
-        await session.commitTransaction();
 
         io.to(recipientId).emit('message', populatedMessage);
         io.to(senderId).emit('message', populatedMessage);
@@ -423,83 +372,63 @@ module.exports = (io) => {
 
         callback({ message: populatedMessage });
       } catch (err) {
-        await session.abortTransaction();
         logger.error('Message send failed', { error: err.message, stack: err.stack, senderId: messageData.senderId });
         callback({ error: err.message });
-      } finally {
-        session.endSession();
       }
     });
 
     socket.on('editMessage', async ({ messageId, newContent, plaintextContent }, callback) => {
-      const session = await mongoose.startSession();
-      session.startTransaction();
       try {
         if (!mongoose.isValidObjectId(messageId)) {
-          await session.abortTransaction();
           return callback({ error: 'Invalid messageId' });
         }
 
-        const message = await Message.findById(messageId).session(session);
+        const message = await Message.findById(messageId);
         if (!message) {
-          await session.abortTransaction();
           return callback({ error: 'Message not found' });
         }
 
         if (message.senderId.toString() !== socket.user.id) {
-          await session.abortTransaction();
           return callback({ error: 'Unauthorized to edit message' });
         }
 
         message.content = newContent;
         message.plaintextContent = plaintextContent || '';
         message.updatedAt = new Date();
-        await message.save({ session });
+        await message.save();
 
         const populatedMessage = await Message.findById(message._id)
-          .session(session)
           .populate('senderId', 'username virtualNumber photo')
           .populate('recipientId', 'username virtualNumber photo')
           .populate('replyTo', 'content contentType senderId recipientId createdAt')
           .lean();
-
-        await session.commitTransaction();
 
         io.to(message.recipientId.toString()).emit('editMessage', populatedMessage);
         io.to(message.senderId.toString()).emit('editMessage', populatedMessage);
 
         callback({ message: populatedMessage });
       } catch (err) {
-        await session.abortTransaction();
         logger.error('Edit message failed', { error: err.message, stack: err.stack, messageId });
         callback({ error: 'Failed to edit message' });
-      } finally {
-        session.endSession();
       }
     });
 
     socket.on('deleteMessage', async ({ messageId, recipientId }, callback) => {
-      const session = await mongoose.startSession();
-      session.startTransaction();
       try {
         if (!mongoose.isValidObjectId(messageId) || !mongoose.isValidObjectId(recipientId)) {
-          await session.abortTransaction();
           return callback({ error: 'Invalid messageId or recipientId' });
         }
 
-        const message = await Message.findById(messageId).session(session);
+        const message = await Message.findById(messageId);
         if (!message) {
-          await session.abortTransaction();
           return callback({ error: 'Message not found' });
         }
 
         if (message.senderId.toString() !== socket.user.id) {
-          await session.abortTransaction();
           return callback({ error: 'Unauthorized to delete message' });
         }
 
-        await Message.findByIdAndDelete(messageId, { session });
-        await session.commitTransaction();
+        await Message.findByIdAndDelete(messageId);
 
         io.to(recipientId).emit('deleteMessage', { messageId, recipientId });
         io.to(message.senderId.toString()).emit('deleteMessage', { messageId, recipientId: message.senderId.toString() });
@@ -508,85 +437,61 @@ module.exports = (io) => {
 
         callback({ status: 'success' });
       } catch (err) {
-        await session.abortTransaction();
         logger.error('Delete message failed', { error: err.message, stack: err.stack, messageId });
         callback({ error: 'Failed to delete message' });
-      } finally {
-        session.endSession();
       }
     });
 
     socket.on('messageStatus', async ({ messageId, status }) => {
-      const session = await mongoose.startSession();
-      session.startTransaction();
       try {
         if (!mongoose.isValidObjectId(messageId) || !['sent', 'delivered', 'read'].includes(status)) {
-          await session.abortTransaction();
           return;
         }
 
-        const message = await Message.findById(messageId).session(session);
+        const message = await Message.findById(messageId);
         if (!message) {
-          await session.abortTransaction();
           return;
         }
 
         if (message.recipientId.toString() !== socket.user.id) {
-          await session.abortTransaction();
           return;
         }
 
         message.status = status;
-        await message.save({ session });
-
-        await session.commitTransaction();
+        await message.save();
 
         io.to(message.senderId.toString()).emit('messageStatus', { messageId, status });
       } catch (err) {
-        await session.abortTransaction();
         logger.error('Message status update failed', { error: err.message, stack: err.stack, messageId });
-      } finally {
-        session.endSession();
       }
     });
 
     socket.on('batchMessageStatus', async ({ messageIds, status, recipientId }) => {
-      const session = await mongoose.startSession();
-      session.startTransaction();
       try {
         if (!messageIds.every((id) => mongoose.isValidObjectId(id)) || !mongoose.isValidObjectId(recipientId)) {
-          await session.abortTransaction();
           return;
         }
 
         if (recipientId !== socket.user.id) {
-          await session.abortTransaction();
           return;
         }
 
-        const messages = await Message.find({ _id: { $in: messageIds }, recipientId }).session(session);
+        const messages = await Message.find({ _id: { $in: messageIds }, recipientId });
         if (!messages.length) {
-          await session.abortTransaction();
           return;
         }
 
         await Message.updateMany(
           { _id: { $in: messageIds }, recipientId },
-          { status, updatedAt: new Date() },
-          { session }
+          { status, updatedAt: new Date() }
         );
-
-        await session.commitTransaction();
 
         const senderIds = [...new Set(messages.map((msg) => msg.senderId.toString()))];
         senderIds.forEach((senderId) => {
           io.to(senderId).emit('messageStatus', { messageIds, status });
         });
       } catch (err) {
-        await session.abortTransaction();
         logger.error('Batch message status update failed', { error: err.message, stack: err.stack, recipientId });
-      } finally {
-        session.endSession();
       }
     });
 
@@ -609,12 +514,9 @@ module.exports = (io) => {
   });
 
   router.post('/messages', authMiddleware, async (req, res) => {
-    const session = await mongoose.startSession();
-    session.startTransaction();
     try {
       const { error } = messageSchema.validate(req.body);
       if (error) {
-        await session.abortTransaction();
         return res.status(400).json({ error: error.details[0].message });
       }
 
@@ -633,18 +535,15 @@ module.exports = (io) => {
       } = req.body;
 
       if (senderId !== req.user.id) {
-        await session.abortTransaction();
         return res.status(403).json({ error: 'Unauthorized sender' });
       }
 
       if (contentType === 'text' && !plaintextContent) {
-        await session.abortTransaction();
         return res.status(400).json({ error: 'plaintextContent required for text messages' });
       }
 
-      const existingMessage = await Message.findOne({ clientMessageId }).session(session).lean();
+      const existingMessage = await Message.findOne({ clientMessageId }).lean();
       if (existingMessage) {
-        await session.commitTransaction();
         return res.status(200).json({ message: existingMessage });
       }
 
@@ -665,16 +564,13 @@ module.exports = (io) => {
         senderPhoto: senderPhoto || sender.photo,
       });
 
-      await message.save({ session });
+      await message.save();
 
       const populatedMessage = await Message.findById(message._id)
-        .session(session)
         .populate('senderId', 'username virtualNumber photo')
         .populate('recipientId', 'username virtualNumber photo')
         .populate('replyTo', 'content contentType senderId recipientId createdAt')
         .lean();
-
-      await session.commitTransaction();
 
       io.to(recipientId).emit('message', populatedMessage);
       io.to(senderId).emit('message', populatedMessage);
@@ -683,11 +579,8 @@ module.exports = (io) => {
 
       res.status(201).json({ message: populatedMessage });
     } catch (error) {
-      await session.abortTransaction();
       logger.error('Save message error:', { error: error.message, stack: error.stack });
       res.status(500).json({ error: 'Failed to save message', details: error.message });
-    } finally {
-      session.endSession();
     }
   });
 
@@ -713,88 +606,46 @@ module.exports = (io) => {
         return res.json([]);
       }
 
-      const contactUsers = await User.find({ _id: { $in: contacts } })
-        .select('username virtualNumber photo status lastSeen')
-        .lean();
+      const contactUsers = [];
+      for (const contactId of contacts) {
+        const contact = await User.findById(contactId).select('username virtualNumber photo status lastSeen').lean();
+        if (contact) contactUsers.push(contact);
+      }
 
       if (!contactUsers.length) {
         logger.info('No contact users found', { userId });
         return res.json([]);
       }
 
-      const contactIds = contactUsers.map((c) => c._id);
-      const [latestMessages, unreadCounts] = await Promise.all([
-        Message.aggregate([
-          {
-            $match: {
-              $or: [
-                { senderId: new mongoose.Types.ObjectId(userId), recipientId: { $in: contactIds } },
-                { senderId: { $in: contactIds }, recipientId: new mongoose.Types.ObjectId(userId) },
-              ],
-            },
-          },
-          { $sort: { createdAt: -1 } },
-          {
-            $group: {
-              _id: {
-                $cond: [
-                  { $eq: ['$senderId', new mongoose.Types.ObjectId(userId)] },
-                  '$recipientId',
-                  '$senderId',
-                ],
-              },
-              latestMessage: { $first: '$$ROOT' },
-            },
-          },
-          {
-            $project: {
-              contactId: '$_id',
-              latestMessage: {
-                content: 1,
-                contentType: 1,
-                senderId: 1,
-                recipientId: 1,
-                createdAt: 1,
-                plaintextContent: 1,
-                senderVirtualNumber: 1,
-                senderUsername: 1,
-                senderPhoto: 1,
-              },
-            },
-          },
-        ]).catch((err) => {
-          logger.error('Latest messages aggregation failed', { error: err.message, stack: err.stack, userId });
-          return [];
-        }),
-        Message.aggregate([
-          {
-            $match: {
-              senderId: { $in: contactIds },
-              recipientId: new mongoose.Types.ObjectId(userId),
-              status: { $ne: 'read' },
-            },
-          },
-          { $group: { _id: '$senderId', unreadCount: { $sum: 1 } } },
-        ]).catch((err) => {
-          logger.error('Unread counts aggregation failed', { error: err.message, stack: err.stack, userId });
-          return [];
-        }),
-      ]);
+      const chatList = [];
+      for (const contact of contactUsers) {
+        const latestMessage = await Message.findOne({
+          $or: [
+            { senderId: userId, recipientId: contact._id },
+            { senderId: contact._id, recipientId: userId },
+          ],
+        })
+          .sort({ createdAt: -1 })
+          .select('content contentType senderId recipientId createdAt plaintextContent senderVirtualNumber senderUsername senderPhoto')
+          .lean();
 
-      const chatList = contactUsers.map((contact) => {
-        const messageData = latestMessages.find((m) => m.contactId.toString() === contact._id.toString());
-        const unreadData = unreadCounts.find((u) => u._id?.toString() === contact._id.toString());
-        return {
+        const unreadCount = await Message.countDocuments({
+          senderId: contact._id,
+          recipientId: userId,
+          status: { $ne: 'read' },
+        });
+
+        chatList.push({
           id: contact._id.toString(),
           username: contact.username || 'Unknown',
           virtualNumber: contact.virtualNumber || '',
           photo: contact.photo || 'https://placehold.co/40x40',
           status: contact.status || 'offline',
           lastSeen: contact.lastSeen || null,
-          latestMessage: messageData ? messageData.latestMessage : null,
-          unreadCount: unreadData ? unreadData.unreadCount : 0,
-        };
-      });
+          latestMessage: latestMessage || null,
+          unreadCount: unreadCount || 0,
+        });
+      }
 
       logger.info('Chat list fetched successfully', { userId, chatCount: chatList.length });
       res.json(chatList);
@@ -838,132 +689,164 @@ module.exports = (io) => {
       res.status(500).json({ error: 'Failed to fetch messages', details: err.message });
     }
   });
-router.post('/add_contact', authMiddleware, async (req, res) => {
-  const session = await mongoose.startSession();
-  try {
-    session.startTransaction();
 
-    const { error } = addContactSchema.validate(req.body);
-    if (error) {
-      await session.abortTransaction();
-      return res.status(400).json({ error: error.details[0].message });
-    }
-
-    const { userId, virtualNumber } = req.body;
-    if (userId !== req.user.id) {
-      await session.abortTransaction();
-      return res.status(403).json({ error: 'Unauthorized' });
-    }
-
-    const user = await User.findById(userId).session(session);
-    if (!user) {
-      await session.abortTransaction();
-      return res.status(404).json({ error: 'User not found' });
-    }
-
-    const contact = await User.findOne({ virtualNumber }).session(session);
-    if (!contact) {
-      await session.abortTransaction();
-      return res.status(404).json({ error: 'The contact is not registered' });
-    }
-
-    if (contact._id.toString() === userId) {
-      await session.abortTransaction();
-      return res.status(400).json({ error: 'Cannot add self as contact' });
-    }
-
-    if (!Array.isArray(user.contacts)) user.contacts = [];
-    if (!Array.isArray(contact.contacts)) contact.contacts = [];
-
-    let updated = false;
-    if (!user.contacts.some((id) => id.equals(contact._id))) {
-      user.contacts.push(contact._id);
-      updated = true;
-    }
-    if (!contact.contacts.some((id) => id.equals(user._id))) {
-      contact.contacts.push(user._id);
-      updated = true;
-    }
-
-    if (updated) {
-      try {
-        await Promise.all([user.save({ session, validateBeforeSave: true }), contact.save({ session, validateBeforeSave: true })]);
-      } catch (saveError) {
-        logger.error('Failed to save user/contact documents', {
-          error: saveError.message,
-          stack: saveError.stack,
-          userId,
-          contactId: contact._id.toString(),
-        });
-        throw saveError; // Rethrow to trigger transaction abort
+  router.post('/add_contact', authMiddleware, async (req, res) => {
+    try {
+      const { error } = addContactSchema.validate(req.body);
+      if (error) {
+        logger.warn('Invalid request body', { error: error.details[0].message, userId: req.body.userId });
+        return res.status(400).json({ error: 'Invalid request data' });
       }
-    }
 
-    await session.commitTransaction();
+      const { userId, virtualNumber } = req.body;
+      if (!userId || userId !== req.user.id) {
+        logger.warn('Unauthorized user', { userId, authenticatedUser: req.user.id });
+        return res.status(403).json({ error: 'Unauthorized' });
+      }
 
-    const contactData = {
-      id: contact._id.toString(),
-      username: contact.username || 'Unknown',
-      virtualNumber: contact.virtualNumber || '',
-      photo: contact.photo || 'https://placehold.co/40x40',
-      status: contact.status || 'offline',
-      lastSeen: contact.lastSeen || null,
-      latestMessage: null,
-      unreadCount: 0,
-    };
+      // Fetch user
+      const user = await User.findById(userId).select('_id username virtualNumber photo status lastSeen contacts');
+      if (!user) {
+        logger.warn('User not found', { userId });
+        return res.status(404).json({ error: 'User not found' });
+      }
 
-    io.to(userId).emit('contactData', { userId, contactData });
-    io.to(contact._id.toString()).emit('contactData', {
-      userId: contact._id.toString(),
-      contactData: {
-        id: user._id.toString(),
-        username: user.username || 'Unknown',
-        virtualNumber: user.virtualNumber || '',
-        photo: user.photo || 'https://placehold.co/40x40',
-        status: user.status || 'offline',
-        lastSeen: user.lastSeen || null,
+      // Fetch contact by virtualNumber
+      const contact = await User.findOne({ virtualNumber }).select('_id username virtualNumber photo status lastSeen contacts');
+      if (!contact) {
+        logger.info('Contact not found', { userId, virtualNumber });
+        return res.status(404).json({ error: 'The contact is not registered' });
+      }
+
+      // Check for self-addition
+      if (contact._id.toString() === userId) {
+        logger.warn('Attempt to add self as contact', { userId });
+        return res.status(400).json({ error: 'Cannot add self as contact' });
+      }
+
+      // Initialize contacts arrays if missing
+      user.contacts = Array.isArray(user.contacts) ? user.contacts : [];
+      contact.contacts = Array.isArray(contact.contacts) ? contact.contacts : [];
+
+      // Check for existing contact
+      const userHasContact = user.contacts.some((id) => id.toString() === contact._id.toString());
+      const contactHasUser = contact.contacts.some((id) => id.toString() === userId);
+
+      if (userHasContact && contactHasUser) {
+        logger.info('Contact already exists', { userId, contactId: contact._id });
+        const contactData = {
+          id: contact._id.toString(),
+          username: contact.username || 'Unknown',
+          virtualNumber: contact.virtualNumber || '',
+          photo: contact.photo || 'https://placehold.co/40x40',
+          status: contact.status || 'offline',
+          lastSeen: contact.lastSeen || null,
+          latestMessage: null,
+          unreadCount: 0,
+        };
+        return res.status(200).json(contactData);
+      }
+
+      // Update contacts
+      if (!userHasContact) {
+        user.contacts.push(contact._id);
+        try {
+          await user.save({ validateBeforeSave: true });
+        } catch (saveError) {
+          logger.error('Failed to save user contacts', {
+            error: saveError.message,
+            stack: saveError.stack,
+            userId,
+            contactId: contact._id.toString(),
+          });
+          return res.status(500).json({ error: 'Failed to update user contacts', details: saveError.message });
+        }
+      }
+
+      if (!contactHasUser) {
+        contact.contacts.push(user._id);
+        try {
+          await contact.save({ validateBeforeSave: true });
+        } catch (saveError) {
+          logger.error('Failed to save contact contacts', {
+            error: saveError.message,
+            stack: saveError.stack,
+            userId,
+            contactId: contact._id.toString(),
+          });
+          // Rollback user update if contact save fails
+          if (!userHasContact) {
+            user.contacts = user.contacts.filter((id) => id.toString() !== contact._id.toString());
+            await user.save({ validateBeforeSave: true }).catch((rollbackError) => {
+              logger.error('Failed to rollback user contacts', {
+                error: rollbackError.message,
+                stack: rollbackError.stack,
+                userId,
+              });
+            });
+          }
+          return res.status(500).json({ error: 'Failed to update contact contacts', details: saveError.message });
+        }
+      }
+
+      // Prepare response
+      const contactData = {
+        id: contact._id.toString(),
+        username: contact.username || 'Unknown',
+        virtualNumber: contact.virtualNumber || '',
+        photo: contact.photo || 'https://placehold.co/40x40',
+        status: contact.status || 'offline',
+        lastSeen: contact.lastSeen || null,
         latestMessage: null,
         unreadCount: 0,
-      },
-    });
+      };
 
-    await Promise.all([emitUpdatedChatList(userId), emitUpdatedChatList(contact._id.toString())]);
+      // Emit Socket.IO events
+      io.to(userId).emit('contactData', { userId, contactData });
+      io.to(contact._id.toString()).emit('contactData', {
+        userId: contact._id.toString(),
+        contactData: {
+          id: user._id.toString(),
+          username: user.username || 'Unknown',
+          virtualNumber: user.virtualNumber || '',
+          photo: user.photo || 'https://placehold.co/40x40',
+          status: user.status || 'offline',
+          lastSeen: user.lastSeen || null,
+          latestMessage: null,
+          unreadCount: 0,
+        },
+      });
 
-    logger.info('Contact added successfully', { userId, contactId: contact._id });
-    res.status(201).json(contactData);
-  } catch (err) {
-    await session.abortTransaction();
-    logger.error('Add contact failed', {
-      error: err.message,
-      stack: err.stack,
-      userId: req.body.userId,
-      virtualNumber: req.body.virtualNumber,
-    });
-    if (err.code === 11000) {
-      return res.status(400).json({ error: 'Contact already exists' });
+      await Promise.all([emitUpdatedChatList(userId), emitUpdatedChatList(contact._id.toString())]);
+
+      logger.info('Contact added successfully', { userId, contactId: contact._id.toString() });
+      res.status(201).json(contactData);
+    } catch (error) {
+      logger.error('Add contact failed', {
+        error: error.message,
+        stack: error.stack,
+        userId: req.body.userId,
+        virtualNumber: req.body.virtualNumber,
+      });
+      if (error.code === 11000) {
+        return res.status(409).json({ error: 'Contact already exists' });
+      }
+      if (error.message.includes('Invalid contact IDs')) {
+        return res.status(400).json({ error: 'Invalid contact data' });
+      }
+      return res.status(500).json({ error: 'Failed to add contact', details: error.message });
     }
-    if (err.message.includes('Invalid contact IDs')) {
-      return res.status(400).json({ error: 'Invalid contact data' });
-    }
-    res.status(500).json({ error: 'Failed to add contact', details: err.message });
-  } finally {
-    session.endSession();
-  }
-});
+  });
 
   router.post('/upload', authMiddleware, upload.single('file'), async (req, res) => {
-    const session = await mongoose.startSession();
-    session.startTransaction();
     try {
       const { userId, recipientId, clientMessageId, senderVirtualNumber, senderUsername, senderPhoto, caption } = req.body;
       if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId) || !clientMessageId || !req.file || userId !== req.user.id) {
-        await session.abortTransaction();
         return res.status(400).json({ error: 'Invalid or unauthorized parameters' });
       }
 
-      const existingMessage = await Message.findOne({ clientMessageId }).session(session).lean();
+      const existingMessage = await Message.findOne({ clientMessageId }).lean();
       if (existingMessage) {
-        await session.commitTransaction();
         return res.json({ message: existingMessage });
       }
 
@@ -1002,16 +885,13 @@ router.post('/add_contact', authMiddleware, async (req, res) => {
         senderPhoto: senderPhoto || sender.photo,
       });
 
-      await message.save({ session });
+      await message.save();
 
       const populatedMessage = await Message.findById(message._id)
-        .session(session)
         .populate('senderId', 'username virtualNumber photo')
         .populate('recipientId', 'username virtualNumber photo')
         .populate('replyTo', 'content contentType senderId recipientId createdAt')
         .lean();
-
-      await session.commitTransaction();
 
       io.to(recipientId).emit('message', populatedMessage);
       io.to(userId).emit('message', populatedMessage);
@@ -1020,53 +900,36 @@ router.post('/add_contact', authMiddleware, async (req, res) => {
 
       res.json({ message: populatedMessage });
     } catch (err) {
-      await session.abortTransaction();
       logger.error('Media upload failed', { error: err.message, stack: err.stack });
       res.status(500).json({ error: 'Failed to upload media', details: err.message });
-    } finally {
-      session.endSession();
     }
   });
 
   router.post('/delete_user', authMiddleware, async (req, res) => {
-    const session = await mongoose.startSession();
-    session.startTransaction();
     try {
       const { error } = deleteUserSchema.validate(req.body);
       if (error) {
-        await session.abortTransaction();
         return res.status(400).json({ error: error.details[0].message });
       }
 
       const { userId } = req.body;
       if (userId !== req.user.id) {
-        await session.abortTransaction();
         return res.status(403).json({ error: 'Unauthorized' });
       }
 
-      const user = await User.findById(userId).session(session);
+      const user = await User.findById(userId);
       if (!user) {
-        await session.abortTransaction();
         return res.status(404).json({ error: 'User not found' });
       }
 
-      const contacts = await User.find({ contacts: userId }).select('_id').session(session).lean();
+      const contacts = await User.find({ contacts: userId }).select('_id').lean();
       const contactIds = contacts.map((contact) => contact._id.toString());
 
-      await Message.deleteMany(
-        { $or: [{ senderId: userId }, { recipientId: userId }] },
-        { session }
-      );
+      await Message.deleteMany({ $or: [{ senderId: userId }, { recipientId: userId }] });
 
-      await User.updateMany(
-        { contacts: userId },
-        { $pull: { contacts: userId } },
-        { session }
-      );
+      await User.updateMany({ contacts: userId }, { $pull: { contacts: userId } });
 
-      await User.findByIdAndDelete(userId, { session });
-
-      await session.commitTransaction();
+      await User.findByIdAndDelete(userId);
 
       io.to(userId).emit('userStatus', { userId, status: 'offline', lastSeen: new Date() });
       contactIds.forEach((contactId) => {
@@ -1077,11 +940,8 @@ router.post('/add_contact', authMiddleware, async (req, res) => {
 
       res.json({ message: 'User deleted successfully' });
     } catch (err) {
-      await session.abortTransaction();
       logger.error('User deletion failed', { error: err.message, stack: err.stack });
       res.status(500).json({ error: 'Failed to delete user', details: err.message });
-    } finally {
-      session.endSession();
     }
   });
 
