@@ -213,127 +213,129 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     }
   }, [isForgeReady, message, selectedChat, userId, virtualNumber, username, photo, socket, getPublicKey, encryptMessage, dispatch, chats]);
 
-const handleAddContact = useCallback(async () => {
-  if (!contactInput.trim()) {
-    setContactError('Please enter a valid virtual number');
-    return;
-  }
-  try {
-    const response = await axios.post(
-      `${BASE_URL}/social/add_contact`,
-      { userId, virtualNumber: contactInput.trim() },
-      { headers: { Authorization: `Bearer ${token}` }, timeout: 5000 }
-    );
-    const newChat = {
-      id: response.data.id,
-      _id: response.data.id,
-      username: response.data.username || 'Unknown',
-      virtualNumber: response.data.virtualNumber || '',
-      photo: response.data.photo || 'https://placehold.co/40x40',
-      status: response.data.status || 'offline',
-      lastSeen: response.data.lastSeen || null,
-      latestMessage: null,
-      unreadCount: 0,
-    };
-    setChatList((prev) => {
-      if (prev.find((chat) => chat.id === newChat.id)) return prev;
-      return [...prev, newChat];
-    });
-    setContactInput('');
-    setContactError('');
-    setShowAddContact(false);
-    setShowMenu(false);
-    setError('');
-    // Automatically select the new chat to start messaging
-    selectChat(newChat.id);
-  } catch (err) {
-    console.error('handleAddContact error:', err.message);
-    setContactError(err.response?.data?.error || 'Failed to add contact');
-  }
-}, [contactInput, token, userId, selectChat]);
-useEffect(() => {
-  if (!socket || !isForgeReady) return;
-
-  const handleNewContact = ({ userId: emitterId, contactData }) => {
-    if (!contactData?.id || !isValidObjectId(contactData.id)) {
-      console.error('Invalid contactData received:', contactData);
+  const handleAddContact = useCallback(async () => {
+    if (!contactInput.trim()) {
+      setContactError('Please enter a valid virtual number');
       return;
     }
-    setChatList((prev) => {
-      if (prev.find((chat) => chat.id === contactData.id)) return prev;
-      return [...prev, {
-        id: contactData.id,
-        _id: contactData.id,
-        username: contactData.username || 'Unknown',
-        virtualNumber: contactData.virtualNumber || '',
-        photo: contactData.photo || 'https://placehold.co/40x40',
-        status: contactData.status || 'offline',
-        lastSeen: contactData.lastSeen || null,
-        latestMessage: null,
-        unreadCount: 0,
-      }];
-    });
-  };
-
-  const handleChatListUpdated = ({ users }) => {
-    setChatList((prev) => {
-      const newChatMap = new Map(users.map((chat) => [chat.id, { ...chat, _id: chat.id }]));
-      const newList = [...newChatMap.values()];
-      return JSON.stringify(newList) === JSON.stringify(prev) ? prev : newList;
-    });
-  };
-
-  const handleMessage = (msg) => {
-    const senderId = typeof msg.senderId === 'object' ? msg.senderId._id.toString() : msg.senderId.toString();
-    dispatch(addMessage({ recipientId: senderId, message: msg }));
-    if (selectedChat === senderId && document.hasFocus()) {
-      socket.emit('batchMessageStatus', { messageIds: [msg._id], status: 'read', recipientId: userId });
-      setUnreadMessages((prev) => ({ ...prev, [senderId]: 0 }));
-      listRef.current?.scrollToItem((chats[senderId]?.length || 0) + 1, 'end');
-    } else {
-      setUnreadMessages((prev) => ({ ...prev, [senderId]: (prev[senderId] || 0) + 1 }));
-    }
-  };
-
-  const handleTyping = ({ userId: typingUserId }) => {
-    if (typingUserId === selectedChat) {
-      setIsTyping((prev) => ({ ...prev, [typingUserId]: true }));
-      setTimeout(() => setIsTyping((prev) => ({ ...prev, [typingUserId]: false })), 3000);
-    }
-  };
-
-  const handleStopTyping = ({ userId: typingUserId }) => {
-    if (typingUserId === selectedChat) {
-      setIsTyping((prev) => ({ ...prev, [typingUserId]: false }));
-    }
-  };
-
-  const handleMessageStatus = ({ messageIds, status }) => {
-    messageIds.forEach((messageId) => {
-      Object.keys(chats).forEach((chatId) => {
-        if (chats[chatId].some((msg) => msg._id === messageId && msg.senderId.toString() === userId)) {
-          dispatch(updateMessageStatus({ recipientId: chatId, messageId, status }));
-        }
+    try {
+      const response = await axios.post(
+        `${BASE_URL}/social/add_contact`,
+        { userId, virtualNumber: contactInput.trim() },
+        { headers: { Authorization: `Bearer ${token}` }, timeout: 5000 }
+      );
+      setChatList((prev) => {
+        if (prev.find((chat) => chat.id === response.data.id)) return prev;
+        const newChat = {
+          id: response.data.id,
+          _id: response.data.id,
+          username: response.data.username || 'Unknown',
+          virtualNumber: response.data.virtualNumber || '',
+          photo: response.data.photo || 'https://placehold.co/40x40',
+          status: response.data.status || 'offline',
+          lastSeen: response.data.lastSeen || null,
+          latestMessage: null,
+          unreadCount: 0,
+        };
+        return [...prev, newChat];
       });
-    });
-  };
+      setContactInput('');
+      setContactError('');
+      setShowAddContact(false);
+      setError('');
+    } catch (err) {
+      console.error('handleAddContact error:', err.message);
+      setContactError(err.response?.data?.error || 'Failed to add contact');
+    }
+  }, [contactInput, token, userId]);
 
-  socket.on('contactData', handleNewContact);
-  socket.on('chatListUpdated', handleChatListUpdated);
-  socket.on('message', handleMessage);
-  socket.on('typing', handleTyping);
-  socket.on('stopTyping', handleStopTyping);
-  socket.on('messageStatus', handleMessageStatus);
+  useEffect(() => {
+    if (!socket || !isForgeReady) return;
 
-  return () => {
-    socket.off('contactData', handleNewContact);
-    socket.off('chatListUpdated', handleChatListUpdated);
-    socket.off('message', handleMessage);
-    socket.off('typing', handleTyping);
-    socket.off('stopTyping', handleStopTyping);
-    socket.off('messageStatus', handleMessageStatus);
-  };
-}, [socket, isForgeReady, selectedChat, userId, chats, dispatch]);
+    const handleNewContact = ({ userId: emitterId, contactData }) => {
+      if (!contactData?.id || !isValidObjectId(contactData.id)) {
+        console.error('Invalid contactData received:', contactData);
+        return;
+      }
+      setChatList((prev) => {
+        if (prev.find((chat) => chat.id === contactData.id)) return prev;
+        const newChat = {
+          id: contactData.id,
+          _id: contactData.id,
+          username: contactData.username || 'Unknown',
+          virtualNumber: contactData.virtualNumber || '',
+          photo: contactData.photo || 'https://placehold.co/40x40',
+          status: contactData.status || 'offline',
+          lastSeen: contactData.lastSeen || null,
+          latestMessage: null,
+          unreadCount: 0,
+        };
+        return [...prev, newChat];
+      });
+    };
+
+    const handleChatListUpdated = ({ users }) => {
+      setChatList((prev) => {
+        const newChatMap = new Map(users.map((chat) => [chat.id, {
+          ...chat,
+          _id: chat.id,
+        }]));
+        const newList = [...newChatMap.values()];
+        return JSON.stringify(newList) === JSON.stringify(prev) ? prev : newList;
+      });
+    };
+
+    const handleMessage = (msg) => {
+      const senderId = typeof msg.senderId === 'object' ? msg.senderId._id.toString() : msg.senderId.toString();
+      dispatch(addMessage({ recipientId: senderId, message: msg }));
+      if (selectedChat === senderId && document.hasFocus()) {
+        socket.emit('batchMessageStatus', { messageIds: [msg._id], status: 'read', recipientId: userId });
+        setUnreadMessages((prev) => ({ ...prev, [senderId]: 0 }));
+        listRef.current?.scrollToItem((chats[senderId]?.length || 0) + 1, 'end');
+      } else {
+        setUnreadMessages((prev) => ({ ...prev, [senderId]: (prev[senderId] || 0) + 1 }));
+      }
+    };
+
+    const handleTyping = ({ userId: typingUserId }) => {
+      if (typingUserId === selectedChat) {
+        setIsTyping((prev) => ({ ...prev, [typingUserId]: true }));
+        setTimeout(() => setIsTyping((prev) => ({ ...prev, [typingUserId]: false })), 3000);
+      }
+    };
+
+    const handleStopTyping = ({ userId: typingUserId }) => {
+      if (typingUserId === selectedChat) {
+        setIsTyping((prev) => ({ ...prev, [typingUserId]: false }));
+      }
+    };
+
+    const handleMessageStatus = ({ messageIds, status }) => {
+      messageIds.forEach((messageId) => {
+        Object.keys(chats).forEach((chatId) => {
+          if (chats[chatId].some((msg) => msg._id === messageId && msg.senderId.toString() === userId)) {
+            dispatch(updateMessageStatus({ recipientId: chatId, messageId, status }));
+          }
+        });
+      });
+    };
+
+    socket.on('contactData', handleNewContact);
+    socket.on('chatListUpdated', handleChatListUpdated);
+    socket.on('message', handleMessage);
+    socket.on('typing', handleTyping);
+    socket.on('stopTyping', handleStopTyping);
+    socket.on('messageStatus', handleMessageStatus);
+
+    return () => {
+      socket.off('contactData');
+      socket.off('chatListUpdated');
+      socket.off('message');
+      socket.off('typing');
+      socket.off('stopTyping');
+      socket.off('messageStatus');
+    };
+  }, [socket, isForgeReady, selectedChat, userId, chats, dispatch]);
 
   useEffect(() => {
     if (!token || !userId) {
@@ -477,7 +479,7 @@ useEffect(() => {
         </div>
       )}
       <div className="chat-header">
-        <h1 className="title">FoWeL Chat</h1>
+        <h1 className="title">Grok Chat</h1>
         <div className="chat-menu">
           <FaEllipsisV className="menu-icon" onClick={() => setShowMenu(!showMenu)} />
           <AnimatePresence>
