@@ -539,44 +539,45 @@ const handleAddContact = useCallback(async () => {
         <div className={`chat-list ${selectedChat ? 'hidden md:block' : 'block'}`}>
 
 
-          
+
+
           {chatList.length === 0 ? (
-            <div className="no-contacts-message">
-              <p>No contacts to display. Add a contact to start chatting!</p>
-              <button
-                className="add-contact-button bg-primary text-white px-4 py-2 rounded mt-2"
-                onClick={() => { setShowAddContact(true); setShowMenu(true); }}
-              >
-                Add Contact
-              </button>
-            </div>
-          ) : (
-            chatList.map((chat) => (
-              <div
-                key={chat.id}
-                className={`chat-list-item ${selectedChat === chat.id ? 'selected' : ''}`}
-                onClick={() => selectChat(chat.id)}
-              >
-                <img src={chat.photo || 'https://placehold.co/40x40'} alt="Avatar" className="chat-list-avatar" />
-                <div className="chat-list-info">
-                  <div className="chat-list-header">
-                    <span className="chat-list-username">{chat.username}</span>
-                    {chat.latestMessage && (
-                      <span className="chat-list-time">
-                        {new Date(chat.latestMessage.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                      </span>
-                    )}
-                  </div>
-                  {chat.latestMessage && (
-                    <p className="chat-list-preview">{chat.latestMessage.plaintextContent || `[${chat.latestMessage.contentType}]`}</p>
-                  )}
-                  {!!unreadMessages[chat.id] && (
-                    <span className="chat-list-unread">{unreadMessages[chat.id]}</span>
-                  )}
-                </div>
-              </div>
-            ))
+  <div className="no-contacts-message">
+    <p>No contacts to display. Add a contact to start chatting!</p>
+    <button
+      className="add-contact-button bg-primary text-white px-4 py-2 rounded mt-2"
+      onClick={() => { setShowAddContact(true); setShowMenu(true); }}
+    >
+      Add Contact
+    </button>
+  </div>
+) : (
+  chatList.map((chat) => (
+    <div
+      key={chat.id}
+      className={`chat-list-item ${selectedChat === chat.id ? 'selected' : ''}`}
+      onClick={() => selectChat(chat.id)} // Ensure selectChat is called with chat.id
+    >
+      <img src={chat.photo || 'https://placehold.co/40x40'} alt="Avatar" className="chat-list-avatar" />
+      <div className="chat-list-info">
+        <div className="chat-list-header">
+          <span className="chat-list-username">{chat.username}</span>
+          {chat.latestMessage && (
+            <span className="chat-list-time">
+              {new Date(chat.latestMessage.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            </span>
           )}
+        </div>
+        {chat.latestMessage && (
+          <p className="chat-list-preview">{chat.latestMessage.plaintextContent || `[${chat.latestMessage.contentType}]`}</p>
+        )}
+        {!!unreadMessages[chat.id] && (
+          <span className="chat-list-unread">{unreadMessages[chat.id]}</span>
+        )}
+      </div>
+    </div>
+  ))
+)}
         </div>
         <div className={`chat-conversation ${selectedChat ? 'block' : 'hidden md:block'}`}>
           {selectedChat ? (
