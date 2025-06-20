@@ -310,32 +310,7 @@ module.exports = (io) => {
       io.to(recipientId).emit('stopTyping', { userId });
     });
 
-    socket.on('newContact', async ({ userId, contactData }) => {
-      if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(contactData.id) || userId !== socket.user.id) {
-        return;
-      }
-      try {
-        const contact = await User.findById(contactData.id).select('username virtualNumber photo status lastSeen').lean();
-        if (contact) {
-          const contactObj = {
-            id: contact._id.toString(),
-            username: contact.username,
-            virtualNumber: contact.virtualNumber,
-            photo: contact.photo || 'https://placehold.co/40x40',
-            status: contact.status,
-            lastSeen: contact.lastSeen,
-          };
-          io.to(userId).emit('newContact', { userId, contactData: contactObj });
-          io.to(contactData.id).emit('newContact', {
-            userId: contactData.id,
-            contactData: contactObj,
-          });
-          await Promise.all([emitUpdatedChatList(userId), emitUpdatedChatList(contactData.id)]);
-        }
-      } catch (err) {
-        logger.error('New contact emission failed', { error: err.message, userId });
-      }
-    });
+  
 
     socket.on('message', async (messageData, callback) => {
       const session = await mongoose.startSession();
@@ -857,8 +832,7 @@ router.get('/chat-list', authMiddleware, async (req, res) => {
 
 
 
-
-  router.post('/add_contact', authMiddleware, async (req, res) => {
+router.post('/add_contact', authMiddleware, async (req, res) => {
   const session = await mongoose.startSession();
   try {
     session.startTransaction();
@@ -881,7 +855,7 @@ router.get('/chat-list', authMiddleware, async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    const contact = await User.findOne({ virtualNumber }).session(session).lean();
+    const contact = await User.findOne({ virtualNumber }).session(session);
     if (!contact) {
       await session.abortTransaction();
       return res.status(404).json({ error: 'Contact not found' });
@@ -892,14 +866,21 @@ router.get('/chat-list', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Cannot add self as contact' });
     }
 
+    let updated = false;
     if (!user.contacts.includes(contact._id)) {
       user.contacts.push(contact._id);
-      await user.save({ session });
+      updated = true;
     }
-    const contactDoc = await User.findById(contact._id).session(session);
-    if (!contactDoc.contacts.includes(user._id)) {
-      contactDoc.contacts.push(user._id);
-      await contactDoc.save({ session });
+    if (!contact.contacts.includes(user._id)) {
+      contact.contacts.push(user._id);
+      updated = true;
+    }
+
+    if (updated) {
+      await Promise.all([
+        user.save({ session }),
+        contact.save({ session }),
+      ]);
     }
 
     await session.commitTransaction();
@@ -913,6 +894,7 @@ router.get('/chat-list', authMiddleware, async (req, res) => {
       lastSeen: contact.lastSeen || null,
     };
 
+    // Emit to both users instantly
     io.to(userId).emit('contactData', { userId, contactData });
     io.to(contact._id.toString()).emit('contactData', {
       userId: contact._id.toString(),
@@ -926,8 +908,7 @@ router.get('/chat-list', authMiddleware, async (req, res) => {
       },
     });
 
-
-
+    // Update chat lists for both users
     await Promise.all([emitUpdatedChatList(userId), emitUpdatedChatList(contact._id.toString())]);
 
     logger.info('Contact added successfully', { userId, contactId: contact._id });
@@ -945,7 +926,6 @@ router.get('/chat-list', authMiddleware, async (req, res) => {
     session.endSession();
   }
 });
-
 
 
 
