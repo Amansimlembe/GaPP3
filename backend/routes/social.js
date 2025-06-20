@@ -678,118 +678,145 @@ module.exports = (io) => {
     }
   });
 
-  router.get('/chat-list', authMiddleware, async (req, res) => {
-    const { userId } = req.query;
+
+
+
+
+
+  
+router.get('/chat-list', authMiddleware, async (req, res) => {
+  const { userId } = req.query;
+  try {
+    if (!mongoose.isValidObjectId(userId) || userId !== req.user.id) {
+      logger.warn('Invalid or unauthorized userId', { userId, authenticatedUser: req.user.id });
+      return res.status(400).json({ error: 'Invalid or unauthorized userId' });
+    }
+
+    const user = await User.findById(userId).select('contacts').lean();
+    if (!user) {
+      logger.warn('User not found', { userId });
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Filter valid ObjectIds from contacts
+    const contacts = Array.isArray(user.contacts)
+      ? user.contacts.filter((id) => mongoose.isValidObjectId(id.toString()))
+      : [];
+    if (!contacts.length) {
+      logger.info('No valid contacts found for user', { userId });
+      return res.json([]);
+    }
+
+    // Fetch contact users
+    let contactUsers = [];
     try {
-      if (!mongoose.isValidObjectId(userId) || userId !== req.user.id) {
-        logger.warn('Invalid or unauthorized userId', { userId, authenticatedUser: req.user.id });
-        return res.status(400).json({ error: 'Invalid or unauthorized userId' });
-      }
-
-      const user = await User.findById(userId).select('contacts').lean();
-      if (!user) {
-        logger.warn('User not found', { userId });
-        return res.status(404).json({ error: 'User not found' });
-      }
-
-      const contacts = Array.isArray(user.contacts)
-        ? user.contacts.filter((id) => mongoose.isValidObjectId(id.toString()))
-        : [];
-      if (!contacts.length) {
-        logger.info('No valid contacts found for user', { userId });
-        return res.json([]);
-      }
-
-      const contactUsers = await User.find({ _id: { $in: contacts } })
+      contactUsers = await User.find({ _id: { $in: contacts } })
         .select('username virtualNumber photo status lastSeen')
         .lean();
+    } catch (err) {
+      logger.error('Failed to fetch contact users', { error: err.message, userId });
+      contactUsers = [];
+    }
 
-      if (!contactUsers.length) {
-        logger.info('No contact users found', { userId });
-        return res.json([]);
-      }
+    if (!contactUsers.length) {
+      logger.info('No contact users found', { userId });
+      return res.json([]);
+    }
 
-      const contactIds = contactUsers.map((c) => c._id);
-      const [latestMessages, unreadCounts] = await Promise.all([
-        Message.aggregate([
-          {
-            $match: {
-              $or: [
-                { senderId: new mongoose.Types.ObjectId(userId), recipientId: { $in: contactIds } },
-                { senderId: { $in: contactIds }, recipientId: new mongoose.Types.ObjectId(userId) },
+    const contactIds = contactUsers.map((c) => c._id);
+    let latestMessages = [];
+    let unreadCounts = [];
+
+    // Fetch latest messages
+    try {
+      latestMessages = await Message.aggregate([
+        {
+          $match: {
+            $or: [
+              { senderId: new mongoose.Types.ObjectId(userId), recipientId: { $in: contactIds } },
+              { senderId: { $in: contactIds }, recipientId: new mongoose.Types.ObjectId(userId) },
+            ],
+          },
+        },
+        { $sort: { createdAt: -1 } },
+        {
+          $group: {
+            _id: {
+              $cond: [
+                { $eq: ['$senderId', new mongoose.Types.ObjectId(userId)] },
+                '$recipientId',
+                '$senderId',
               ],
             },
+            latestMessage: { $first: '$$ROOT' },
           },
-          { $sort: { createdAt: -1 } },
-          {
-            $group: {
-              _id: {
-                $cond: [
-                  { $eq: ['$senderId', new mongoose.Types.ObjectId(userId)] },
-                  '$recipientId',
-                  '$senderId',
-                ],
-              },
-              latestMessage: { $first: '$$ROOT' },
+        },
+        {
+          $project: {
+            contactId: '$_id',
+            latestMessage: {
+              content: 1,
+              contentType: 1,
+              senderId: 1,
+              recipientId: 1,
+              createdAt: 1,
+              plaintextContent: 1,
+              senderVirtualNumber: 1,
+              senderUsername: 1,
+              senderPhoto: 1,
             },
           },
-          {
-            $project: {
-              contactId: '$_id',
-              latestMessage: {
-                content: 1,
-                contentType: 1,
-                senderId: 1,
-                recipientId: 1,
-                createdAt: 1,
-                plaintextContent: 1,
-                senderVirtualNumber: 1,
-                senderUsername: 1,
-                senderPhoto: 1,
-              },
-            },
-          },
-        ]).catch((err) => {
-          logger.error('Latest messages aggregation failed', { error: err.message, userId });
-          return [];
-        }),
-        Message.aggregate([
-          {
-            $match: {
-              senderId: { $in: contactIds },
-              recipientId: new mongoose.Types.ObjectId(userId),
-              status: { $ne: 'read' },
-            },
-          },
-          { $group: { _id: '$senderId', unreadCount: { $sum: 1 } } },
-        ]).catch((err) => {
-          logger.error('Unread counts aggregation failed', { error: err.message, userId });
-          return [];
-        }),
+        },
       ]);
-
-      const chatList = contactUsers.map((contact) => {
-        const messageData = latestMessages.find((m) => m.contactId.toString() === contact._id.toString());
-        const unreadData = unreadCounts.find((u) => u._id?.toString() === contact._id.toString());
-        return {
-          id: contact._id.toString(),
-          username: contact.username || 'Unknown',
-          virtualNumber: contact.virtualNumber || '',
-          photo: contact.photo || 'https://placehold.co/40x40',
-          status: contact.status || 'offline',
-          lastSeen: contact.lastSeen || null,
-          latestMessage: messageData ? messageData.latestMessage : null,
-          unreadCount: unreadData ? unreadData.unreadCount : 0,
-        };
-      });
-
-      logger.info('Chat list fetched successfully', { userId, chatCount: chatList.length });
-      res.json(chatList);
     } catch (err) {
-      logger.error('Chat list failed', { error: err.message, userId });
-      res.status(500).json({ error: 'Failed to fetch chat list', details: err.message });
+      logger.error('Latest messages aggregation failed', { error: err.message, userId });
+      latestMessages = [];
     }
-  });
+
+    // Fetch unread counts
+    try {
+      unreadCounts = await Message.aggregate([
+        {
+          $match: {
+            senderId: { $in: contactIds },
+            recipientId: new mongoose.Types.ObjectId(userId),
+            status: { $ne: 'read' },
+          },
+        },
+        { $group: { _id: '$senderId', unreadCount: { $sum: 1 } } },
+      ]);
+    } catch (err) {
+      logger.error('Unread counts aggregation failed', { error: err.message, userId });
+      unreadCounts = [];
+    }
+
+    const chatList = contactUsers.map((contact) => {
+      const messageData = latestMessages.find((m) => m.contactId.toString() === contact._id.toString());
+      const unreadData = unreadCounts.find((u) => u._id?.toString() === contact._id.toString());
+      return {
+        id: contact._id.toString(),
+        username: contact.username || 'Unknown',
+        virtualNumber: contact.virtualNumber || '',
+        photo: contact.photo || 'https://placehold.co/40x40',
+        status: contact.status || 'offline',
+        lastSeen: contact.lastSeen || null,
+        latestMessage: messageData ? messageData.latestMessage : null,
+        unreadCount: unreadData ? unreadData.unreadCount : 0,
+      };
+    });
+
+    logger.info('Chat list fetched successfully', { userId, chatCount: chatList.length });
+    res.json(chatList);
+  } catch (err) {
+    logger.error('Chat list failed', { error: err.message, userId });
+    res.status(500).json({ error: 'Failed to fetch chat list', details: err.message });
+  }
+});
+
+
+
+
+
 
   router.get('/messages', authMiddleware, async (req, res) => {
     const { userId, recipientId, limit = 50, skip = 0 } = req.query;

@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
@@ -130,14 +131,15 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         const newList = [...newChatMap.values()];
         return JSON.stringify(newList) === JSON.stringify(prev) ? prev : newList;
       });
-      setError('');
+      setError(''); // Clear error on success
     } catch (err) {
-      console.error('fetchChatList error:', err.message);
+      console.error('ChatList error:', err.message);
       if (err.response?.status === 401) {
-        setError('Session expired, please log in again');
+        setError('Session expired');
         setTimeout(() => handleLogout(), 2000);
       } else {
         setError(`Failed to load chat list: ${err.response?.data?.details || err.message}. Click to retry.`);
+        setChatList([]); // Ensure "No contacts" message shows
       }
     }
   }, [isForgeReady, token, userId, handleLogout]);
@@ -230,6 +232,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       setContactInput('');
       setContactError('');
       setShowAddContact(false);
+      setError(''); // Clear any existing error
       socket?.emit('newContact', { userId, contactData: response.data });
     } catch (err) {
       console.error('handleAddContact error:', err.message);
@@ -348,7 +351,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   const selectChat = useCallback((chatId) => {
     dispatch(setSelectedChat(chatId));
     setShowMenu(false);
-    setError('');
+    setError(''); // Clear error when selecting a chat
     if (chatId && socket) {
       socket.emit('batchMessageStatus', {
         messageIds: (chats[chatId] || []).filter((m) => m.status !== 'read' && m.recipientId.toString() === userId).map((m) => m._id),
@@ -420,29 +423,34 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   }, [chats, selectedChat, userId]);
 
   if (isLoading) {
-    return <div className="chat-screen">Loading chat...</div>;
-  }
-
-  if (error) {
     return (
       <div className="chat-screen">
-        <div className="error-message">
-          {error}
-          {error.includes('Click to retry') && (
-            <button
-              className="retry-button bg-primary text-white px-4 py-2 rounded mt-2"
-              onClick={() => fetchChatList()}
-            >
-              Retry
-            </button>
-          )}
-        </div>
+        <div className="loading-screen">Loading chat...</div>
       </div>
     );
   }
 
   return (
     <div className="chat-screen">
+      {error && (
+        <div className="error-banner">
+          <p>{error}</p>
+          <div className="error-actions">
+            {error.includes('Click to retry') && (
+              <button
+                className="retry-button bg-primary text-white px-4 py-2 rounded"
+                onClick={() => fetchChatList()}
+              >
+                Retry
+              </button>
+            )}
+            <FaTimes
+              className="dismiss-icon"
+              onClick={() => setError('')}
+            />
+          </div>
+        </div>
+      )}
       <div className="chat-header">
         <h1 className="title">Grok Chat</h1>
         <div className="chat-menu">
@@ -626,3 +634,4 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
 });
 
 export default ChatScreen;
+
