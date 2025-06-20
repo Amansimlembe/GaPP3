@@ -213,41 +213,44 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     }
   }, [isForgeReady, message, selectedChat, userId, virtualNumber, username, photo, socket, getPublicKey, encryptMessage, dispatch, chats]);
 
-  const handleAddContact = useCallback(async () => {
-    if (!contactInput.trim()) {
-      setContactError('Please enter a valid virtual number');
-      return;
-    }
-    try {
-      const response = await axios.post(
-        `${BASE_URL}/social/add_contact`,
-        { userId, virtualNumber: contactInput.trim() },
-        { headers: { Authorization: `Bearer ${token}` }, timeout: 5000 }
-      );
-      setChatList((prev) => {
-        if (prev.find((chat) => chat.id === response.data.id)) return prev;
-        const newChat = {
-          id: response.data.id,
-          _id: response.data.id,
-          username: response.data.username || 'Unknown',
-          virtualNumber: response.data.virtualNumber || '',
-          photo: response.data.photo || 'https://placehold.co/40x40',
-          status: response.data.status || 'offline',
-          lastSeen: response.data.lastSeen || null,
-          latestMessage: null,
-          unreadCount: 0,
-        };
-        return [...prev, newChat];
-      });
-      setContactInput('');
-      setContactError('');
-      setShowAddContact(false);
-      setError('');
-    } catch (err) {
-      console.error('handleAddContact error:', err.message);
-      setContactError(err.response?.data?.error || 'Failed to add contact');
-    }
-  }, [contactInput, token, userId]);
+const handleAddContact = useCallback(async () => {
+  if (!contactInput.trim()) {
+    setContactError('Please enter a valid virtual number');
+    return;
+  }
+  try {
+    const response = await axios.post(
+      `${BASE_URL}/social/add_contact`,
+      { userId, virtualNumber: contactInput.trim() },
+      { headers: { Authorization: `Bearer ${token}` }, timeout: 5000 }
+    );
+    const newChat = {
+      id: response.data.id,
+      _id: response.data.id,
+      username: response.data.username || 'Unknown',
+      virtualNumber: response.data.virtualNumber || '',
+      photo: response.data.photo || 'https://placehold.co/40x40',
+      status: response.data.status || 'offline',
+      lastSeen: response.data.lastSeen || null,
+      latestMessage: null,
+      unreadCount: 0,
+    };
+    setChatList((prev) => {
+      if (prev.find((chat) => chat.id === newChat.id)) return prev;
+      return [...prev, newChat];
+    });
+    setContactInput('');
+    setContactError('');
+    setShowAddContact(false);
+    setShowMenu(false);
+    setError('');
+    // Automatically select the new chat to start messaging
+    selectChat(newChat.id);
+  } catch (err) {
+    console.error('handleAddContact error:', err.message);
+    setContactError(err.response?.data?.error || 'Failed to add contact');
+  }
+}, [contactInput, token, userId, selectChat]);
 
   useEffect(() => {
     if (!socket || !isForgeReady) return;
@@ -479,7 +482,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         </div>
       )}
       <div className="chat-header">
-        <h1 className="title">Grok Chat</h1>
+        <h1 className="title">FoWeL Chat</h1>
         <div className="chat-menu">
           <FaEllipsisV className="menu-icon" onClick={() => setShowMenu(!showMenu)} />
           <AnimatePresence>
@@ -534,6 +537,9 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       </div>
       <div className="chat-content">
         <div className={`chat-list ${selectedChat ? 'hidden md:block' : 'block'}`}>
+
+
+          
           {chatList.length === 0 ? (
             <div className="no-contacts-message">
               <p>No contacts to display. Add a contact to start chatting!</p>
