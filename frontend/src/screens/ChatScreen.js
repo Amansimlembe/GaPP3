@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
 import axios from 'axios';
 import forge from 'node-forge';
-import { FaArrowLeft, FaEllipsisV, FaPaperclip, FaSmile, FaPaperPlane, FaTimes, FaSignOutAlt, FaPlus } from 'react-icons/fa';
+import { FaArrowLeft, FaEllipsisV, FaPaperclip, FaSmile, FaPaperPlane, FaTimes, FaSignOutAlt, FaPlus, FaImage, FaVideo, FaFile, FaMusic } from 'react-icons/fa';
 import { motion, AnimatePresence } from 'framer-motion';
 import Picker from 'emoji-picker-react';
 import { VariableSizeList } from 'react-window';
@@ -89,7 +89,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       console.error('getPublicKey error:', err.message);
       if (err.response?.status === 401) {
         setError('Session expired, please log in again');
-        setTimeout(() => handleLogout(), 2000);
+        setTimeout(() => handleLogout(), 5000);
       }
       throw new Error('Failed to fetch public key: ' + err.message);
     }
@@ -132,12 +132,12 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       });
       setError('');
     } catch (err) {
-      console.error('ChatList error:', err.message);
+      console.error('ChatList fetch error:', err.message);
       if (err.response?.status === 401) {
         setError('Session expired');
-        setTimeout(() => handleLogout(), 2000);
+        setTimeout(() => handleLogout(), 5000);
       } else {
-        setError(`Failed to load chat list: ${err.response?.data?.details || err.message}. Click to retry.`);
+        setError(`Failed to load chat list: ${err.response?.data?.error || 'Unknown error'}. Click to retry...`);
         setChatList([]);
       }
     }
@@ -155,7 +155,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       setUnreadMessages((prev) => ({ ...prev, [chatId]: 0 }));
       if (data.messages.length && socket) {
         socket.emit('batchMessageStatus', {
-          messageIds: data.messages.filter((m) => m.status !== 'read' && m.recipientId === userId).map((m) => m._id),
+          messageIds: data.messages.filter((m) => m.status !== 'read' && m.recipientId.toString() === userId).map((m) => m._id),
           status: 'read',
           recipientId: userId,
         });
@@ -165,12 +165,12 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       console.error('fetchMessages error:', err.message);
       if (err.response?.status === 401) {
         setError('Session expired, please log in again');
-        setTimeout(() => handleLogout(), 2000);
+        setTimeout(() => handleLogout(), 5000);
       } else {
-        setError('Failed to load messages: ' + err.message);
+        setError(`Failed to load messages: ${err.response?.data?.error || 'Unknown error'}`);
       }
     }
-  }, [isForgeReady, token, userId, socket, handleLogout, dispatch]);
+  }, [isForgeReady, token, userId, socket, dispatch]);
 
   const sendMessage = useCallback(async () => {
     if (!isForgeReady || !message.trim() || !selectedChat || !isValidObjectId(selectedChat)) return;
@@ -196,7 +196,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       dispatch(addMessage({ recipientId: selectedChat, message: messageData }));
       socket?.emit('message', messageData, (ack) => {
         if (ack?.error) {
-          setError('Failed to send message: ' + ack.error);
+          setError(`Failed to send message: ${ack.error}`);
           dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: clientMessageId, status: 'failed' }));
           return;
         }
@@ -250,7 +250,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   }, [contactInput, token, userId]);
 
   useEffect(() => {
-    if (!socket || !isForgeReady) return;
+    if (!socket || !isForgeReady || !userId) return;
 
     const handleNewContact = ({ userId: emitterId, contactData }) => {
       if (!contactData?.id || !isValidObjectId(contactData.id)) {
@@ -276,10 +276,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
 
     const handleChatListUpdated = ({ users }) => {
       setChatList((prev) => {
-        const newChatMap = new Map(users.map((chat) => [chat.id, {
-          ...chat,
-          _id: chat.id,
-        }]));
+        const newChatMap = new Map(users.map((chat) => [chat.id, { ...chat, _id: chat.id }]));
         const newList = [...newChatMap.values()];
         return JSON.stringify(newList) === JSON.stringify(prev) ? prev : newList;
       });
@@ -289,7 +286,11 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       const senderId = typeof msg.senderId === 'object' ? msg.senderId._id.toString() : msg.senderId.toString();
       dispatch(addMessage({ recipientId: senderId, message: msg }));
       if (selectedChat === senderId && document.hasFocus()) {
-        socket.emit('batchMessageStatus', { messageIds: [msg._id], status: 'read', recipientId: userId });
+        socket.emit('batchMessageStatus', {
+          messageIds: [msg._id],
+          status: 'read',
+          recipientId: userId,
+        });
         setUnreadMessages((prev) => ({ ...prev, [senderId]: 0 }));
         listRef.current?.scrollToItem((chats[senderId]?.length || 0) + 1, 'end');
       } else {
@@ -344,10 +345,11 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       return;
     }
     if (isForgeReady) {
+      socket.emit('join', userId);
       fetchChatList();
       setIsLoading(false);
     }
-  }, [token, userId, isForgeReady, fetchChatList]);
+  }, [token, userId, isForgeReady, fetchChatList, socket]);
 
   useEffect(() => {
     if (selectedChat && !chats[selectedChat]) {
@@ -463,7 +465,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         <div className="error-banner">
           <p>{error}</p>
           <div className="error-actions">
-            {error.includes('Click to retry') && (
+            {error.includes('retry') && (
               <button
                 className="retry-button bg-primary text-white px-4 py-2 rounded"
                 onClick={() => fetchChatList()}
@@ -508,7 +510,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
                         className={`contact-input input ${contactError ? 'error' : ''}`}
                         value={contactInput}
                         onChange={(e) => setContactInput(e.target.value)}
-                        placeholder="Enter virtual number (e.g., +25534567890)"
+                        placeholder="Enter virtual number (e.g., +123456789012)"
                       />
                       {contactInput && (
                         <FaTimes
@@ -551,7 +553,11 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
                 className={`chat-list-item ${selectedChat === chat.id ? 'selected' : ''}`}
                 onClick={() => selectChat(chat.id)}
               >
-                <img src={chat.photo || 'https://placehold.co/40x40'} alt="Avatar" className="chat-list-avatar" />
+                <img
+                  src={chat.photo || 'https://placehold.co/40x40'}
+                  alt="Avatar"
+                  className="chat-list-avatar"
+                />
                 <div className="chat-list-info">
                   <div className="chat-list-header">
                     <span className="chat-list-username">{chat.username}</span>
@@ -580,10 +586,10 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
                 <img
                   src={chatList.find((c) => c.id === selectedChat)?.photo || 'https://placehold.co/40x40'}
                   alt="Avatar"
-                  className="conversation-avatar"
+                  className="conversation-avatar-img"
                 />
                 <div className="conversation-info">
-                  <h2 className="title">{chatList.find((c) => c.id === selectedChat)?.username}</h2>
+                  <h2 className="title">{chatList.find((c) => c.id === selectedChat)?.username || ''}</h2>
                   {isTyping[selectedChat] && <span className="typing-indicator">Typing...</span>}
                 </div>
               </div>
@@ -618,7 +624,6 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
                       setMessage((prev) => prev + emojiObject.emoji);
                       setShowEmojiPicker(false);
                     }}
-                    className="emoji-picker"
                   />
                 )}
                 <FaPaperclip
@@ -636,7 +641,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
                 <input
                   ref={inputRef}
                   type="text"
-                  className="message-input"
+                  className="message-input input"
                   value={message}
                   onChange={(e) => setMessage(e.target.value)}
                   onKeyDown={(e) => {
