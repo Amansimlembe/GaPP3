@@ -32,7 +32,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   const [isTyping, setIsTyping] = useState({});
   const [unreadMessages, setUnreadMessages] = useState({});
   const [isForgeReady, setIsForgeReady] = useState(false);
-  const [isLoading, setIsLoading] = useState(true); // New loading state
+  const [isLoading, setIsLoading] = useState(true);
   const inputRef = useRef(null);
   const listRef = useRef(null);
   const menuRef = useRef(null);
@@ -65,7 +65,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       setAuth('', '', '', '', '', '');
       setChatList([]);
       dispatch(setSelectedChat(null));
-      navigate('/'); // Navigate to login on logout
+      navigate('/');
     } catch (err) {
       console.error('handleLogout error:', err.message);
       setError('Failed to logout');
@@ -137,7 +137,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         setError('Session expired, please log in again');
         setTimeout(() => handleLogout(), 2000);
       } else {
-        setError('Failed to load chat list: ' + err.message);
+        setError(`Failed to load chat list: ${err.response?.data?.details || err.message}. Click to retry.`);
       }
     }
   }, [isForgeReady, token, userId, handleLogout]);
@@ -307,7 +307,6 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     };
   }, [socket, isForgeReady, selectedChat, userId, chats, dispatch]);
 
-  // Removed premature navigation; handle loading state instead
   useEffect(() => {
     if (!token || !userId) {
       setError('Please log in to access chat');
@@ -427,7 +426,17 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   if (error) {
     return (
       <div className="chat-screen">
-        <div className="error-message">{error}</div>
+        <div className="error-message">
+          {error}
+          {error.includes('Click to retry') && (
+            <button
+              className="retry-button bg-primary text-white px-4 py-2 rounded mt-2"
+              onClick={() => fetchChatList()}
+            >
+              Retry
+            </button>
+          )}
+        </div>
       </div>
     );
   }
@@ -488,34 +497,45 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
           </AnimatePresence>
         </div>
       </div>
-      {error && <div className="error-message">{error}</div>}
       <div className="chat-content">
         <div className={`chat-list ${selectedChat ? 'hidden md:block' : 'block'}`}>
-          {chatList.map((chat) => (
-            <div
-              key={chat.id}
-              className={`chat-list-item ${selectedChat === chat.id ? 'selected' : ''}`}
-              onClick={() => selectChat(chat.id)}
-            >
-              <img src={chat.photo || 'https://placehold.co/40x40'} alt="Avatar" className="chat-list-avatar" />
-              <div className="chat-list-info">
-                <div className="chat-list-header">
-                  <span className="chat-list-username">{chat.username}</span>
+          {chatList.length === 0 ? (
+            <div className="no-contacts-message">
+              <p>No contacts to display. Add a contact to start chatting!</p>
+              <button
+                className="add-contact-button bg-primary text-white px-4 py-2 rounded mt-2"
+                onClick={() => { setShowAddContact(true); setShowMenu(true); }}
+              >
+                Add Contact
+              </button>
+            </div>
+          ) : (
+            chatList.map((chat) => (
+              <div
+                key={chat.id}
+                className={`chat-list-item ${selectedChat === chat.id ? 'selected' : ''}`}
+                onClick={() => selectChat(chat.id)}
+              >
+                <img src={chat.photo || 'https://placehold.co/40x40'} alt="Avatar" className="chat-list-avatar" />
+                <div className="chat-list-info">
+                  <div className="chat-list-header">
+                    <span className="chat-list-username">{chat.username}</span>
+                    {chat.latestMessage && (
+                      <span className="chat-list-time">
+                        {new Date(chat.latestMessage.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                    )}
+                  </div>
                   {chat.latestMessage && (
-                    <span className="chat-list-time">
-                      {new Date(chat.latestMessage.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                    </span>
+                    <p className="chat-list-preview">{chat.latestMessage.plaintextContent || `[${chat.latestMessage.contentType}]`}</p>
+                  )}
+                  {!!unreadMessages[chat.id] && (
+                    <span className="chat-list-unread">{unreadMessages[chat.id]}</span>
                   )}
                 </div>
-                {chat.latestMessage && (
-                  <p className="chat-list-preview">{chat.latestMessage.plaintextContent || `[${chat.latestMessage.contentType}]`}</p>
-                )}
-                {!!unreadMessages[chat.id] && (
-                  <span className="chat-list-unread">{unreadMessages[chat.id]}</span>
-                )}
               </div>
-            </div>
-          ))}
+            ))
+          )}
         </div>
         <div className={`chat-conversation ${selectedChat ? 'block' : 'hidden md:block'}`}>
           {selectedChat ? (

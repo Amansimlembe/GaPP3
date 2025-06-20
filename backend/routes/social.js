@@ -153,11 +153,19 @@ module.exports = (io) => {
       const user = await User.findById(userId).select('contacts').lean();
       if (!user) return;
 
-      const contacts = await User.find({ _id: { $in: user.contacts } })
+      const contacts = Array.isArray(user.contacts)
+        ? user.contacts.filter((id) => mongoose.isValidObjectId(id))
+        : [];
+      if (!contacts.length) {
+        io.to(userId).emit('chatListUpdated', { userId, users: [] });
+        return;
+      }
+
+      const contactUsers = await User.find({ _id: { $in: contacts } })
         .select('username virtualNumber photo status lastSeen')
         .lean();
 
-      const contactIds = contacts.map((c) => c._id);
+      const contactIds = contactUsers.map((c) => c._id);
       const [latestMessages, unreadCounts] = await Promise.all([
         Message.aggregate([
           {
@@ -197,7 +205,10 @@ module.exports = (io) => {
               },
             },
           },
-        ]),
+        ]).catch((err) => {
+          logger.error('Latest messages aggregation failed', { error: err.message, userId });
+          return [];
+        }),
         Message.aggregate([
           {
             $match: {
@@ -207,28 +218,31 @@ module.exports = (io) => {
             },
           },
           { $group: { _id: '$senderId', unreadCount: { $sum: 1 } } },
-        ]),
+        ]).catch((err) => {
+          logger.error('Unread counts aggregation failed', { error: err.message, userId });
+          return [];
+        }),
       ]);
 
-      const chatList = contacts.map((contact) => {
+      const chatList = contactUsers.map((contact) => {
         const messageData = latestMessages.find((m) => m.contactId.toString() === contact._id.toString());
         const unreadData = unreadCounts.find((u) => u._id.toString() === contact._id.toString());
         return {
           id: contact._id.toString(),
-          username: contact.username,
-          virtualNumber: contact.virtualNumber,
-          photo: contact.photo,
-          status: contact.status,
-          lastSeen: contact.lastSeen,
+          username: contact.username || 'Unknown',
+          virtualNumber: contact.virtualNumber || '',
+          photo: contact.photo || 'https://placehold.co/40x40',
+          status: contact.status || 'offline',
+          lastSeen: contact.lastSeen || null,
           latestMessage: messageData ? messageData.latestMessage : null,
           unreadCount: unreadData ? unreadData.unreadCount : 0,
         };
       });
 
       io.to(userId).emit('chatListUpdated', { userId, users: chatList });
-      logger.info('Emitted updated chat list', { userId });
+      logger.info('Emitted updated chat list', { userId, chatCount: chatList.length });
     } catch (error) {
-      logger.error('Failed to emit updated chat list', { error: error.message });
+      logger.error('Failed to emit updated chat list', { error: error.message, userId });
     }
   };
 
@@ -654,19 +668,29 @@ module.exports = (io) => {
     const { userId } = req.query;
     try {
       if (!mongoose.isValidObjectId(userId) || userId !== req.user.id) {
+        logger.warn('Invalid or unauthorized userId', { userId, authenticatedUser: req.user.id });
         return res.status(400).json({ error: 'Invalid or unauthorized userId' });
       }
 
       const user = await User.findById(userId).select('contacts').lean();
       if (!user) {
+        logger.warn('User not found', { userId });
         return res.status(404).json({ error: 'User not found' });
       }
 
-      const contacts = await User.find({ _id: { $in: user.contacts } })
+      const contacts = Array.isArray(user.contacts)
+        ? user.contacts.filter((id) => mongoose.isValidObjectId(id))
+        : [];
+      if (!contacts.length) {
+        logger.info('No valid contacts found for user', { userId });
+        return res.json([]);
+      }
+
+      const contactUsers = await User.find({ _id: { $in: contacts } })
         .select('username virtualNumber photo status lastSeen')
         .lean();
 
-      const contactIds = contacts.map((c) => c._id);
+      const contactIds = contactUsers.map((c) => c._id);
       const [latestMessages, unreadCounts] = await Promise.all([
         Message.aggregate([
           {
@@ -706,7 +730,10 @@ module.exports = (io) => {
               },
             },
           },
-        ]),
+        ]).catch((err) => {
+          logger.error('Latest messages aggregation failed', { error: err.message, userId });
+          return [];
+        }),
         Message.aggregate([
           {
             $match: {
@@ -716,28 +743,32 @@ module.exports = (io) => {
             },
           },
           { $group: { _id: '$senderId', unreadCount: { $sum: 1 } } },
-        ]),
+        ]).catch((err) => {
+          logger.error('Unread counts aggregation failed', { error: err.message, userId });
+          return [];
+        }),
       ]);
 
-      const chatList = contacts.map((contact) => {
+      const chatList = contactUsers.map((contact) => {
         const messageData = latestMessages.find((m) => m.contactId.toString() === contact._id.toString());
         const unreadData = unreadCounts.find((u) => u._id.toString() === contact._id.toString());
         return {
           id: contact._id.toString(),
-          username: contact.username,
-          virtualNumber: contact.virtualNumber,
-          photo: contact.photo,
-          status: contact.status,
-          lastSeen: contact.lastSeen,
+          username: contact.username || 'Unknown',
+          virtualNumber: contact.virtualNumber || '',
+          photo: contact.photo || 'https://placehold.co/40x40',
+          status: contact.status || 'offline',
+          lastSeen: contact.lastSeen || null,
           latestMessage: messageData ? messageData.latestMessage : null,
           unreadCount: unreadData ? unreadData.unreadCount : 0,
         };
       });
 
+      logger.info('Chat list fetched successfully', { userId, chatCount: chatList.length });
       res.json(chatList);
     } catch (err) {
-      logger.error('Chat list failed', { error: err.message });
-      res.status(500).json({ error: 'Failed to fetch chat list' });
+      logger.error('Chat list failed', { error: err.message, userId });
+      res.status(500).json({ error: 'Failed to fetch chat list', details: err.message });
     }
   });
 
@@ -988,25 +1019,22 @@ module.exports = (io) => {
     }
   });
 
-
-
   router.post('/log-error', async (req, res) => {
-  try {
-    const { error, stack, userId, route, timestamp } = req.body;
-    logger.error('Client-side error reported', {
-      error,
-      stack,
-      userId,
-      route,
-      timestamp,
-    });
-    res.status(200).json({ message: 'Error logged successfully' });
-  } catch (err) {
-    logger.error('Failed to log client error', { error: err.message });
-    res.status(500).json({ error: 'Failed to log error' });
-  }
-});
-
+    try {
+      const { error, stack, userId, route, timestamp } = req.body;
+      logger.error('Client-side error reported', {
+        error,
+        stack,
+        userId,
+        route,
+        timestamp,
+      });
+      res.status(200).json({ message: 'Error logged successfully' });
+    } catch (err) {
+      logger.error('Failed to log client error', { error: err.message });
+      res.status(500).json({ error: 'Failed to log error' });
+    }
+  });
 
   return router;
 };
