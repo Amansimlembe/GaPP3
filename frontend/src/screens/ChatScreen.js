@@ -214,42 +214,62 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     }
   }, [isForgeReady, message, selectedChat, userId, virtualNumber, username, photo, socket, getPublicKey, encryptMessage, dispatch, chats]);
 
-  const handleAddContact = useCallback(async () => {
-    if (!contactInput.trim()) {
-      setContactError('Please enter a valid virtual number');
-      return;
-    }
-    try {
-      const response = await axios.post(
-        `${BASE_URL}/social/add_contact`,
-        { userId, virtualNumber: contactInput.trim() },
-        { headers: { Authorization: `Bearer ${token}` }, timeout: 5000 }
-      );
-      setChatList((prev) => {
-        if (prev.find((chat) => chat.id === response.data.id)) return prev;
-        return [...prev, { ...response.data, _id: response.data.id }];
-      });
-      setContactInput('');
-      setContactError('');
-      setShowAddContact(false);
-      setError(''); // Clear any existing error
-      socket?.emit('newContact', { userId, contactData: response.data });
-    } catch (err) {
-      console.error('handleAddContact error:', err.message);
-      setContactError(err.response?.data?.error || 'Failed to add contact');
-    }
-  }, [contactInput, token, userId, socket]);
 
-  useEffect(() => {
-    if (!socket || !isForgeReady) return;
 
-    const handleNewContact = ({ contactData }) => {
-      setChatList((prev) => {
-        if (prev.find((chat) => chat.id === contactData.id)) return prev;
-        return [...prev, { ...contactData, _id: contactData.id }];
-      });
-    };
 
+  // In the handleAddContact function
+const handleAddContact = useCallback(async () => {
+  if (!contactInput.trim()) {
+    setContactError('Please enter a valid virtual number');
+    return;
+  }
+  try {
+    const response = await axios.post(
+      `${BASE_URL}/social/add_contact`,
+      { userId, virtualNumber: contactInput.trim() },
+      { headers: { Authorization: `Bearer ${token}` }, timeout: 5000 }
+    );
+    setChatList((prev) => {
+      if (prev.find((chat) => chat.id === response.data.id)) return prev;
+      const newChat = {
+        ...response.data,
+        _id: response.data.id,
+        status: response.data.status || 'offline',
+        lastSeen: response.data.lastSeen || null,
+      };
+      return [...prev, newChat];
+    });
+    setContactInput('');
+    setContactError('');
+    setShowAddContact(false);
+    setError('');
+    socket?.emit('contactData', { userId, contactData: response.data });
+  } catch (err) {
+    console.error('handleAddContact error:', err.message);
+    setContactError(err.response?.data?.error || 'Failed to add contact');
+  }
+}, [contactInput, token, userId, socket]);
+
+// Update socket event listener in useEffect
+
+
+
+
+useEffect(() => {
+  if (!socket || !isForgeReady) return;
+
+  const handleNewContact = ({ contactData }) => {
+    setChatList((prev) => {
+      if (prev.find((chat) => chat.id === contactData.id)) return prev;
+      const newChat = {
+        ...contactData,
+        _id: contactData.id,
+        status: contactData.status || 'offline',
+        lastSeen: contactData.lastSeen || null,
+      };
+      return [...prev, newChat];
+    });
+  };
     const handleChatListUpdated = ({ users }) => {
       setChatList((prev) => {
         const newChatMap = new Map(users.map((chat) => [chat.id, chat]));
@@ -293,22 +313,26 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       });
     };
 
-    socket.on('newContact', handleNewContact);
-    socket.on('chatListUpdated', handleChatListUpdated);
-    socket.on('message', handleMessage);
-    socket.on('typing', handleTyping);
-    socket.on('stopTyping', handleStopTyping);
-    socket.on('messageStatus', handleMessageStatus);
+ 
 
-    return () => {
-      socket.off('newContact');
-      socket.off('chatListUpdated');
-      socket.off('message');
-      socket.off('typing');
-      socket.off('stopTyping');
-      socket.off('messageStatus');
-    };
-  }, [socket, isForgeReady, selectedChat, userId, chats, dispatch]);
+    
+  socket.on('contactData', handleNewContact);
+  socket.on('chatListUpdated', handleChatListUpdated);
+  socket.on('message', handleMessage);
+  socket.on('typing', handleTyping);
+  socket.on('stopTyping', handleStopTyping);
+  socket.on('messageStatus', handleMessageStatus);
+
+  
+  return () => {
+    socket.off('contactData');
+    socket.off('chatListUpdated');
+    socket.off('message');
+    socket.off('typing');
+    socket.off('stopTyping');
+    socket.off('messageStatus');
+  };
+}, [socket, isForgeReady, selectedChat, userId, chats, dispatch]);
 
   useEffect(() => {
     if (!token || !userId) {

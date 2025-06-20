@@ -64,9 +64,12 @@ const userSchema = new mongoose.Schema({
       message: 'Invalid virtual number format for the specified country.',
     },
   },
+
+
   contacts: [{
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
+    default: [],
     validate: {
       validator: async function (value) {
         const user = await mongoose.model('User').findById(value).select('_id').lean();
@@ -75,6 +78,8 @@ const userSchema = new mongoose.Schema({
       message: 'Invalid contact ID.',
     },
   }],
+
+
   role: {
     type: Number,
     enum: [0, 1], // 0: Job Seeker, 1: Employer
