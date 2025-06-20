@@ -249,38 +249,34 @@
 }
 
 .no-contacts-message {
-  display:  flex;
-  flex-direction:  column;
-  align-items:  center;
-  justify-content:  center;
-  height:  100%;
-  text-align:  center;
-  padding:  20px;
-  color:  #666;
-  font-size:  16px;
-  animation:  fadeIn  0.3s  ease-in;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  text-align: center;
+  padding: 20px;
+  color: #666;
+  font-size: 16px;
+  animation: fadeIn 0.3s ease-in;
 }
 
-.dark  .no-contacts-message {
-  color:  #aaa;
+.dark .no-contacts-message {
+  color: #aaa;
 }
 
-@keyframes  fadeIn {
-  from  {  opacity:  0;  }
-  to  {  opacity:  1;  }
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
-.add-contact-button {
-  @apply  bg-primary  text-white  px-4  py-2  rounded  mt-2  text-sm;
-}
+
 
 .add-contact-button:hover {
-  @apply  bg-primary-dark;
+  background-color: #0056b3; /* Fallback to custom CSS */
 }
 
-.add-contact-button:disabled {
-  @apply  bg-gray-300  cursor-not-allowed;
-}
+
 
 .chat-list-item {
   display:  flex;
