@@ -251,94 +251,89 @@ const handleAddContact = useCallback(async () => {
     setContactError(err.response?.data?.error || 'Failed to add contact');
   }
 }, [contactInput, token, userId, selectChat]);
+useEffect(() => {
+  if (!socket || !isForgeReady) return;
 
-  useEffect(() => {
-    if (!socket || !isForgeReady) return;
+  const handleNewContact = ({ userId: emitterId, contactData }) => {
+    if (!contactData?.id || !isValidObjectId(contactData.id)) {
+      console.error('Invalid contactData received:', contactData);
+      return;
+    }
+    setChatList((prev) => {
+      if (prev.find((chat) => chat.id === contactData.id)) return prev;
+      return [...prev, {
+        id: contactData.id,
+        _id: contactData.id,
+        username: contactData.username || 'Unknown',
+        virtualNumber: contactData.virtualNumber || '',
+        photo: contactData.photo || 'https://placehold.co/40x40',
+        status: contactData.status || 'offline',
+        lastSeen: contactData.lastSeen || null,
+        latestMessage: null,
+        unreadCount: 0,
+      }];
+    });
+  };
 
-    const handleNewContact = ({ userId: emitterId, contactData }) => {
-      if (!contactData?.id || !isValidObjectId(contactData.id)) {
-        console.error('Invalid contactData received:', contactData);
-        return;
-      }
-      setChatList((prev) => {
-        if (prev.find((chat) => chat.id === contactData.id)) return prev;
-        const newChat = {
-          id: contactData.id,
-          _id: contactData.id,
-          username: contactData.username || 'Unknown',
-          virtualNumber: contactData.virtualNumber || '',
-          photo: contactData.photo || 'https://placehold.co/40x40',
-          status: contactData.status || 'offline',
-          lastSeen: contactData.lastSeen || null,
-          latestMessage: null,
-          unreadCount: 0,
-        };
-        return [...prev, newChat];
+  const handleChatListUpdated = ({ users }) => {
+    setChatList((prev) => {
+      const newChatMap = new Map(users.map((chat) => [chat.id, { ...chat, _id: chat.id }]));
+      const newList = [...newChatMap.values()];
+      return JSON.stringify(newList) === JSON.stringify(prev) ? prev : newList;
+    });
+  };
+
+  const handleMessage = (msg) => {
+    const senderId = typeof msg.senderId === 'object' ? msg.senderId._id.toString() : msg.senderId.toString();
+    dispatch(addMessage({ recipientId: senderId, message: msg }));
+    if (selectedChat === senderId && document.hasFocus()) {
+      socket.emit('batchMessageStatus', { messageIds: [msg._id], status: 'read', recipientId: userId });
+      setUnreadMessages((prev) => ({ ...prev, [senderId]: 0 }));
+      listRef.current?.scrollToItem((chats[senderId]?.length || 0) + 1, 'end');
+    } else {
+      setUnreadMessages((prev) => ({ ...prev, [senderId]: (prev[senderId] || 0) + 1 }));
+    }
+  };
+
+  const handleTyping = ({ userId: typingUserId }) => {
+    if (typingUserId === selectedChat) {
+      setIsTyping((prev) => ({ ...prev, [typingUserId]: true }));
+      setTimeout(() => setIsTyping((prev) => ({ ...prev, [typingUserId]: false })), 3000);
+    }
+  };
+
+  const handleStopTyping = ({ userId: typingUserId }) => {
+    if (typingUserId === selectedChat) {
+      setIsTyping((prev) => ({ ...prev, [typingUserId]: false }));
+    }
+  };
+
+  const handleMessageStatus = ({ messageIds, status }) => {
+    messageIds.forEach((messageId) => {
+      Object.keys(chats).forEach((chatId) => {
+        if (chats[chatId].some((msg) => msg._id === messageId && msg.senderId.toString() === userId)) {
+          dispatch(updateMessageStatus({ recipientId: chatId, messageId, status }));
+        }
       });
-    };
+    });
+  };
 
-    const handleChatListUpdated = ({ users }) => {
-      setChatList((prev) => {
-        const newChatMap = new Map(users.map((chat) => [chat.id, {
-          ...chat,
-          _id: chat.id,
-        }]));
-        const newList = [...newChatMap.values()];
-        return JSON.stringify(newList) === JSON.stringify(prev) ? prev : newList;
-      });
-    };
+  socket.on('contactData', handleNewContact);
+  socket.on('chatListUpdated', handleChatListUpdated);
+  socket.on('message', handleMessage);
+  socket.on('typing', handleTyping);
+  socket.on('stopTyping', handleStopTyping);
+  socket.on('messageStatus', handleMessageStatus);
 
-    const handleMessage = (msg) => {
-      const senderId = typeof msg.senderId === 'object' ? msg.senderId._id.toString() : msg.senderId.toString();
-      dispatch(addMessage({ recipientId: senderId, message: msg }));
-      if (selectedChat === senderId && document.hasFocus()) {
-        socket.emit('batchMessageStatus', { messageIds: [msg._id], status: 'read', recipientId: userId });
-        setUnreadMessages((prev) => ({ ...prev, [senderId]: 0 }));
-        listRef.current?.scrollToItem((chats[senderId]?.length || 0) + 1, 'end');
-      } else {
-        setUnreadMessages((prev) => ({ ...prev, [senderId]: (prev[senderId] || 0) + 1 }));
-      }
-    };
-
-    const handleTyping = ({ userId: typingUserId }) => {
-      if (typingUserId === selectedChat) {
-        setIsTyping((prev) => ({ ...prev, [typingUserId]: true }));
-        setTimeout(() => setIsTyping((prev) => ({ ...prev, [typingUserId]: false })), 3000);
-      }
-    };
-
-    const handleStopTyping = ({ userId: typingUserId }) => {
-      if (typingUserId === selectedChat) {
-        setIsTyping((prev) => ({ ...prev, [typingUserId]: false }));
-      }
-    };
-
-    const handleMessageStatus = ({ messageIds, status }) => {
-      messageIds.forEach((messageId) => {
-        Object.keys(chats).forEach((chatId) => {
-          if (chats[chatId].some((msg) => msg._id === messageId && msg.senderId.toString() === userId)) {
-            dispatch(updateMessageStatus({ recipientId: chatId, messageId, status }));
-          }
-        });
-      });
-    };
-
-    socket.on('contactData', handleNewContact);
-    socket.on('chatListUpdated', handleChatListUpdated);
-    socket.on('message', handleMessage);
-    socket.on('typing', handleTyping);
-    socket.on('stopTyping', handleStopTyping);
-    socket.on('messageStatus', handleMessageStatus);
-
-    return () => {
-      socket.off('contactData');
-      socket.off('chatListUpdated');
-      socket.off('message');
-      socket.off('typing');
-      socket.off('stopTyping');
-      socket.off('messageStatus');
-    };
-  }, [socket, isForgeReady, selectedChat, userId, chats, dispatch]);
+  return () => {
+    socket.off('contactData', handleNewContact);
+    socket.off('chatListUpdated', handleChatListUpdated);
+    socket.off('message', handleMessage);
+    socket.off('typing', handleTyping);
+    socket.off('stopTyping', handleStopTyping);
+    socket.off('messageStatus', handleMessageStatus);
+  };
+}, [socket, isForgeReady, selectedChat, userId, chats, dispatch]);
 
   useEffect(() => {
     if (!token || !userId) {
@@ -537,47 +532,43 @@ const handleAddContact = useCallback(async () => {
       </div>
       <div className="chat-content">
         <div className={`chat-list ${selectedChat ? 'hidden md:block' : 'block'}`}>
-
-
-
-
           {chatList.length === 0 ? (
-  <div className="no-contacts-message">
-    <p>No contacts to display. Add a contact to start chatting!</p>
-    <button
-      className="add-contact-button bg-primary text-white px-4 py-2 rounded mt-2"
-      onClick={() => { setShowAddContact(true); setShowMenu(true); }}
-    >
-      Add Contact
-    </button>
-  </div>
-) : (
-  chatList.map((chat) => (
-    <div
-      key={chat.id}
-      className={`chat-list-item ${selectedChat === chat.id ? 'selected' : ''}`}
-      onClick={() => selectChat(chat.id)} // Ensure selectChat is called with chat.id
-    >
-      <img src={chat.photo || 'https://placehold.co/40x40'} alt="Avatar" className="chat-list-avatar" />
-      <div className="chat-list-info">
-        <div className="chat-list-header">
-          <span className="chat-list-username">{chat.username}</span>
-          {chat.latestMessage && (
-            <span className="chat-list-time">
-              {new Date(chat.latestMessage.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-            </span>
+            <div className="no-contacts-message">
+              <p>No contacts to display. Add a contact to start chatting!</p>
+              <button
+                className="add-contact-button bg-primary text-white px-4 py-2 rounded mt-2"
+                onClick={() => { setShowAddContact(true); setShowMenu(true); }}
+              >
+                Add Contact
+              </button>
+            </div>
+          ) : (
+            chatList.map((chat) => (
+              <div
+                key={chat.id}
+                className={`chat-list-item ${selectedChat === chat.id ? 'selected' : ''}`}
+                onClick={() => selectChat(chat.id)}
+              >
+                <img src={chat.photo || 'https://placehold.co/40x40'} alt="Avatar" className="chat-list-avatar" />
+                <div className="chat-list-info">
+                  <div className="chat-list-header">
+                    <span className="chat-list-username">{chat.username}</span>
+                    {chat.latestMessage && (
+                      <span className="chat-list-time">
+                        {new Date(chat.latestMessage.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                    )}
+                  </div>
+                  {chat.latestMessage && (
+                    <p className="chat-list-preview">{chat.latestMessage.plaintextContent || `[${chat.latestMessage.contentType}]`}</p>
+                  )}
+                  {!!unreadMessages[chat.id] && (
+                    <span className="chat-list-unread">{unreadMessages[chat.id]}</span>
+                  )}
+                </div>
+              </div>
+            ))
           )}
-        </div>
-        {chat.latestMessage && (
-          <p className="chat-list-preview">{chat.latestMessage.plaintextContent || `[${chat.latestMessage.contentType}]`}</p>
-        )}
-        {!!unreadMessages[chat.id] && (
-          <span className="chat-list-unread">{unreadMessages[chat.id]}</span>
-        )}
-      </div>
-    </div>
-  ))
-)}
         </div>
         <div className={`chat-conversation ${selectedChat ? 'block' : 'hidden md:block'}`}>
           {selectedChat ? (
