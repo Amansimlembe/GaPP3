@@ -295,7 +295,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       socket?.emit('message', messageData, (ack) => {
         if (ack?.error) {
           console.error('Socket message error:', ack.error);
-          setError(`Failed to send message: ${ack.error}`);
+          //setError(`Failed to send message: ${ack.error}`);
           dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: clientMessageId, status: 'failed' }));
           logClientError('Socket message failed', new Error(ack.error));
           return;
@@ -343,7 +343,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       socket.emit('message', messageData, (ack) => {
         if (ack?.error) {
           console.error('Retry socket message error:', ack.error);
-          setError(`Failed to retry message: ${ack.error}`);
+          //setError(`Failed to retry message: ${ack.error}`);
           dispatch(updateMessageStatus({
             recipientId: message.recipientId,
             messageId: message.clientMessageId,
@@ -360,7 +360,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       });
     } catch (err) {
       console.error('retrySendMessage error:', err.message);
-      setError('Failed to retry message');
+      //setError('Failed to retry message');
       dispatch(updateMessageStatus({
         recipientId: message.recipientId,
         messageId: message.clientMessageId,
