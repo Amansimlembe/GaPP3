@@ -2,20 +2,6 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Custom Tailwind configuration (assumed in tailwind.config.js) */
-/* 
-theme: {
-  extend: {
-    colors: {
-      primary: '#2563eb',
-      secondary: '#1e40af',
-      error: '#e53935',
-      success: '#4caf50',
-    },
-  },
-}
-*/
-
 /* Global variables */
 :root {
   --header-height: 64px;
@@ -98,12 +84,6 @@ theme: {
 
 .contact-input.error {
   @apply border-error animate-shake;
-}
-
-@keyframes shake {
-  0%, 100% { transform: translateX(0); }
-  25% { transform: translateX(-3px); }
-  75% { transform: translateX(3px); }
 }
 
 .clear-input-icon {
@@ -242,7 +222,8 @@ theme: {
   @apply text-sm;
 }
 
-.message-media, .message-audio {
+.message-media,
+.message-audio {
   @apply max-w-full rounded-lg;
 }
 
@@ -266,7 +247,9 @@ theme: {
   @apply flex items-center p-3 bg-white dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700 sticky bottom-0;
 }
 
-.emoji-icon, .attachment-icon, .send-icon {
+.emoji-icon,
+.attachment-icon,
+.send-icon {
   @apply text-lg mx-2 cursor-pointer text-gray-500 hover:text-primary;
 }
 
