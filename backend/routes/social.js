@@ -112,11 +112,7 @@ const messageSchema = Joi.object({
   contentType: Joi.string().valid(...validContentTypes).required().messages({
     'any.only': `contentType must be one of: ${validContentTypes.join(', ')}`,
   }),
-  plaintextContent: Joi.string().when('contentType', {
-    is: 'text',
-    then: Joi.string().required(),
-    otherwise: Joi.string().allow('').optional(),
-  }).messages({ 'string.empty': 'plaintextContent required for text messages' }),
+  plaintextContent: Joi.string().allow('').optional(), // --- Updated: Optional for all contentTypes ---
   caption: Joi.string().optional(),
   replyTo: Joi.string().custom((value, helpers) => {
     if (value && !mongoose.isValidObjectId(value)) return helpers.error('any.invalid');
@@ -127,7 +123,8 @@ const messageSchema = Joi.object({
   senderVirtualNumber: Joi.string().optional(),
   senderUsername: Joi.string().optional(),
   senderPhoto: Joi.string().optional(),
-});
+  _id: Joi.any().strip(), // --- Updated: Explicitly strip _id ---
+}).unknown(false); // --- Updated: Disallow unknown fields to prevent errors ---
 
 const addContactSchema = Joi.object({
   userId: Joi.string().custom((value, helpers) => {
@@ -274,21 +271,41 @@ module.exports = (app) => {
       socket.join(userId);
       await User.findByIdAndUpdate(userId, { status: 'online', lastSeen: new Date() }, { new: true, lean: true });
       io.to(userId).emit('userStatus', { userId, status: 'online', lastSeen: new Date() });
-      
-      // --- Updated: Emit pending messages when user joins ---
-      const pendingMessages = await Message.find({
-        recipientId: userId,
-        status: { $in: ['sent', 'delivered'] },
+
+      // --- Updated: Fetch and emit all relevant messages ---
+      const messages = await Message.find({
+        $or: [
+          { senderId: userId },
+          { recipientId: userId },
+        ],
       })
+        .sort({ createdAt: 1 })
         .populate('senderId', 'username virtualNumber photo')
         .populate('recipientId', 'username virtualNumber photo')
         .populate('replyTo', 'content contentType senderId recipientId createdAt')
         .lean();
-      if (pendingMessages.length) {
-        pendingMessages.forEach((message) => {
+      if (messages.length) {
+        // --- Updated: Mark delivered messages as read if user is viewing ---
+        const deliveredMessageIds = messages
+          .filter((msg) => msg.recipientId.toString() === userId && msg.status === 'delivered')
+          .map((msg) => msg._id);
+        if (deliveredMessageIds.length) {
+          await Message.updateMany(
+            { _id: { $in: deliveredMessageIds }, recipientId: userId },
+            { status: 'read', updatedAt: new Date() }
+          );
+          const senderIds = [...new Set(messages
+            .filter((msg) => deliveredMessageIds.includes(msg._id))
+            .map((msg) => msg.senderId.toString())
+          )];
+          senderIds.forEach((senderId) => {
+            io.to(senderId).emit('messageStatus', { messageIds: deliveredMessageIds, status: 'read' });
+          });
+        }
+        messages.forEach((message) => {
           io.to(userId).emit('message', message);
         });
-        logger.info('Emitted pending messages', { userId, count: pendingMessages.length });
+        logger.info('Emitted messages on join', { userId, count: messages.length });
       }
       // --- End Update ---
 
@@ -365,6 +382,7 @@ module.exports = (app) => {
       try {
         const { error } = messageSchema.validate(messageData);
         if (error) {
+          logger.warn('Invalid message data in socket', { error: error.details[0].message, senderId: messageData.senderId });
           return callback({ error: error.details[0].message });
         }
         const {
@@ -381,10 +399,16 @@ module.exports = (app) => {
           senderPhoto,
         } = messageData;
         if (senderId !== socket.user.id) {
+          logger.warn('Unauthorized message sender in socket', { senderId, socketUserId: socket.user.id });
           return callback({ error: 'Unauthorized sender' });
         }
-        const existingMessage = await Message.findOne({ clientMessageId }).lean();
+        const existingMessage = await Message.findOne({ clientMessageId })
+          .populate('senderId', 'username virtualNumber photo')
+          .populate('recipientId', 'username virtualNumber photo')
+          .populate('replyTo', 'content contentType senderId recipientId createdAt')
+          .lean();
         if (existingMessage) {
+          logger.info('Duplicate message detected', { clientMessageId, senderId });
           return callback({ message: existingMessage });
         }
         const sender = await User.findById(senderId).select('virtualNumber username photo').lean();
@@ -393,7 +417,7 @@ module.exports = (app) => {
           recipientId,
           content,
           contentType,
-          plaintextContent,
+          plaintextContent: plaintextContent || '',
           status: 'sent',
           caption: caption || undefined,
           replyTo: replyTo && mongoose.isValidObjectId(replyTo) ? replyTo : undefined,
@@ -412,9 +436,10 @@ module.exports = (app) => {
         io.to(recipientId).emit('message', populatedMessage);
         io.to(senderId).emit('message', populatedMessage);
         await Promise.all([emitUpdatedChatList(io, senderId), emitUpdatedChatList(io, recipientId)]);
+        logger.info('Message sent via socket', { messageId: message._id, senderId, recipientId });
         callback({ message: populatedMessage });
       } catch (err) {
-        logger.error('Message send failed', { error: err.message, stack: err.stack, senderId: messageData.senderId });
+        logger.error('Message send failed in socket', { error: err.message, stack: err.stack, senderId: messageData.senderId });
         callback({ error: err.message });
       }
     });
@@ -556,8 +581,13 @@ module.exports = (app) => {
         logger.warn('Unauthorized message sender', { senderId, authUserId: req.user._id });
         return res.status(403).json({ error: 'Unauthorized sender' });
       }
-      const existingMessage = await Message.findOne({ clientMessageId }).lean();
+      const existingMessage = await Message.findOne({ clientMessageId })
+        .populate('senderId', 'username virtualNumber photo')
+        .populate('recipientId', 'username virtualNumber photo')
+        .populate('replyTo', 'content contentType senderId recipientId createdAt')
+        .lean();
       if (existingMessage) {
+        logger.info('Duplicate message detected in /messages', { clientMessageId, senderId });
         return res.status(200).json({ message: existingMessage });
       }
       const sender = await User.findById(senderId).select('virtualNumber username photo').lean();
@@ -566,7 +596,7 @@ module.exports = (app) => {
         recipientId,
         content,
         contentType,
-        plaintextContent,
+        plaintextContent: plaintextContent || '',
         status: 'sent',
         caption: caption || undefined,
         replyTo: replyTo && mongoose.isValidObjectId(replyTo) ? replyTo : undefined,
@@ -585,6 +615,7 @@ module.exports = (app) => {
       io.to(recipientId).emit('message', populatedMessage);
       io.to(senderId).emit('message', populatedMessage);
       await Promise.all([emitUpdatedChatList(io, senderId), emitUpdatedChatList(io, recipientId)]);
+      logger.info('Message saved via /messages', { messageId: message._id, senderId, recipientId });
       res.status(201).json({ message: populatedMessage });
     } catch (error) {
       logger.error('Save message error', { error: error.message, stack: error.stack, senderId: req.body.senderId });
@@ -592,90 +623,8 @@ module.exports = (app) => {
     }
   });
 
-  router.get('/chat-list', authMiddleware, async (req, res) => {
-    const { userId } = req.query;
-    try {
-      if (!req.user || !req.user._id) {
-        logger.warn('User not authenticated in chat-list request', { userId });
-        return res.status(401).json({ error: 'Unauthorized: User not authenticated' });
-      }
-      if (!mongoose.isValidObjectId(userId) || userId !== req.user._id.toString()) {
-        logger.warn('Invalid or unauthorized chat-list request', { userId, authUserId: req.user._id });
-        return res.status(400).json({ error: 'Invalid or unauthorized request' });
-      }
-      const cacheKey = `chatList:${userId}`;
-      const cached = chatListCache.get(cacheKey);
-      if (cached && cached.timestamp > Date.now() - CACHE_TTL) {
-        logger.info('Served cached chat list', { userId, chatCount: cached.chatList.length });
-        return res.status(200).json(cached.chatList);
-      }
-      const user = await User.findById(userId)
-        .populate({
-          path: 'contacts',
-          select: 'username virtualNumber photo status lastSeen',
-        })
-        .lean();
-      if (!user || !user.contacts?.length) {
-        logger.info('No contacts found for chat list', { userId });
-        chatListCache.set(cacheKey, { chatList: [], timestamp: Date.now() });
-        return res.status(200).json([]);
-      }
-      const latestMessages = await Message.aggregate([
-        {
-          $match: {
-            $or: [
-              { senderId: new mongoose.Types.ObjectId(userId), recipientId: { $in: user.contacts.map((c) => c._id) } },
-              { recipientId: new mongoose.Types.ObjectId(userId), senderId: { $in: user.contacts.map((c) => c._id) } },
-            ],
-          },
-        },
-        { $sort: { createdAt: -1 } },
-        {
-          $group: {
-            _id: {
-              $cond: [
-                { $eq: ['$senderId', new mongoose.Types.ObjectId(userId)] },
-                '$recipientId',
-                '$senderId',
-              ],
-            },
-            latestMessage: { $first: '$$ROOT' },
-            unreadCount: {
-              $sum: {
-                $cond: [
-                  { $and: [{ $eq: ['$recipientId', new mongoose.Types.ObjectId(userId)] }, { $eq: ['$status', 'delivered'] }] },
-                  1,
-                  0,
-                ],
-              },
-            },
-          },
-        },
-      ]);
-      const chatList = user.contacts.map((contact) => {
-        const messageData = latestMessages.find((m) => m._id.toString() === contact._id.toString());
-        return {
-          id: contact._id.toString(),
-          username: contact.username || 'Unknown',
-          virtualNumber: contact.virtualNumber || '',
-          photo: contact.photo || 'https://placehold.co/40x40',
-          status: contact.status || 'offline',
-          lastSeen: contact.lastSeen || null,
-          latestMessage: messageData?.latestMessage || null,
-          unreadCount: messageData?.unreadCount || 0,
-        };
-      });
-      chatListCache.set(cacheKey, { chatList, timestamp: Date.now() });
-      logger.info('Chat list fetched successfully', { userId, chatCount: chatList.length });
-      res.status(200).json(chatList);
-    } catch (error) {
-      logger.error('Chat list fetch failed', { userId, error: error.message, stack: error.stack });
-      res.status(500).json({ error: 'Failed to fetch chat list', details: error.message });
-    }
-  });
-
   router.get('/messages', authMiddleware, async (req, res) => {
-    const { userId, recipientId, limit = 50, skip = 0 } = req.query;
+    const { userId, recipientId, limit = 100, skip = 0 } = req.query; // --- Updated: Increased default limit ---
     try {
       if (!req.user || !req.user._id) {
         logger.warn('User not authenticated in messages fetch request', { userId, recipientId });
@@ -698,6 +647,23 @@ module.exports = (app) => {
         .populate('recipientId', 'username virtualNumber photo')
         .populate('replyTo', 'content contentType senderId recipientId createdAt')
         .lean();
+      // --- Updated: Mark delivered messages as read ---
+      const deliveredMessageIds = messages
+        .filter((msg) => msg.recipientId.toString() === userId && msg.status === 'delivered')
+        .map((msg) => msg._id);
+      if (deliveredMessageIds.length) {
+        await Message.updateMany(
+          { _id: { $in: deliveredMessageIds }, recipientId: userId },
+          { status: 'read', updatedAt: new Date() }
+        );
+        const senderIds = [...new Set(messages
+          .filter((msg) => deliveredMessageIds.includes(msg._id))
+          .map((msg) => msg.senderId.toString())
+        )];
+        senderIds.forEach((senderId) => {
+          io.to(senderId).emit('messageStatus', { messageIds: deliveredMessageIds, status: 'read' });
+        });
+      }
       const total = await Message.countDocuments({
         $or: [
           { senderId: userId, recipientId },
@@ -808,8 +774,13 @@ module.exports = (app) => {
         logger.warn('Invalid upload parameters', { userId, recipientId, clientMessageId, hasFile: !!req.file });
         return res.status(400).json({ error: 'Invalid or unauthorized parameters' });
       }
-      const existingMessage = await Message.findOne({ clientMessageId }).lean();
+      const existingMessage = await Message.findOne({ clientMessageId })
+        .populate('senderId', 'username virtualNumber photo')
+        .populate('recipientId', 'username virtualNumber photo')
+        .populate('replyTo', 'content contentType senderId recipientId createdAt')
+        .lean();
       if (existingMessage) {
+        logger.info('Duplicate upload message detected', { clientMessageId, userId });
         return res.json({ message: existingMessage });
       }
       const contentType = req.file.mimetype.startsWith('image/') ? 'image' :
@@ -900,7 +871,6 @@ module.exports = (app) => {
     }
   });
 
-  // --- Updated: Add /logout route to handle token blacklisting ---
   router.post('/logout', authMiddleware, async (req, res) => {
     try {
       const token = req.token;
@@ -908,25 +878,27 @@ module.exports = (app) => {
         logger.warn('No token provided for logout', { userId: req.user?.id });
         return res.status(400).json({ error: 'No token provided' });
       }
-
-      // Check if token is already blacklisted
       const blacklisted = await TokenBlacklist.findOne({ token }).lean();
       if (blacklisted) {
         logger.info('Token already blacklisted', { userId: req.user.id });
         return res.status(200).json({ message: 'Already logged out' });
       }
-
-      // Blacklist the token
       await TokenBlacklist.create({ token });
-      logger.info('Token blacklisted during logout', { userId: req.user.id });
+      // --- Updated: Disconnect Socket.IO sessions for the user ---
+      const sockets = await io.in(req.user.id).fetchSockets();
+      sockets.forEach((socket) => {
+        socket.disconnect(true);
+        logger.info('Disconnected socket on logout', { socketId: socket.id, userId: req.user.id });
+      });
+      await User.findByIdAndUpdate(req.user.id, { status: 'offline', lastSeen: new Date() }, { new: true, lean: true });
       io.to(req.user.id).emit('userStatus', { userId: req.user.id, status: 'offline', lastSeen: new Date() });
+      logger.info('Token blacklisted during logout', { userId: req.user.id });
       res.status(200).json({ message: 'Logged out successfully' });
     } catch (error) {
-      logger.error('Logout error:', { error: error.message, userId: req.user?.id, stack: error.stack });
+      logger.error('Logout error', { error: error.message, userId: req.user?.id, stack: error.stack });
       res.status(500).json({ error: 'Failed to logout', details: error.message });
     }
   });
-  // --- End Update ---
 
   router.post('/log-error', async (req, res) => {
     try {

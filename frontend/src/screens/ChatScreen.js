@@ -43,7 +43,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   const typingTimeoutRef = useRef(null);
   const typingDebounceRef = useRef(null);
   const sentStatusesRef = useRef(new Set());
-  const retryCountRef = useRef({ chatList: 0, addContact: 0, messages: 0 }); // --- Updated: Add messages retry ---
+  const retryCountRef = useRef({ chatList: 0, addContact: 0, messages: 0 });
   const maxRetries = 3;
 
   useEffect(() => {
@@ -94,7 +94,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       logClientError('Failed to fetch public key', err);
       throw new Error('Failed to fetch public key');
     }
-  }, [token, logClientError]); // --- Updated: Remove handleLogout dependency ---
+  }, [token, logClientError]);
 
   const encryptMessage = useCallback(async (content, recipientPublicKey, isMedia = false) => {
     if (!isForgeReady || !recipientPublicKey) {
@@ -170,13 +170,12 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     } finally {
       setIsLoadingChatList(false);
     }
-  }, [isForgeReady, token, userId, unreadMessages, logClientError]); // --- Updated: Remove handleLogout dependency ---
+  }, [isForgeReady, token, userId, unreadMessages, logClientError]);
 
   const handleLogout = useCallback(async () => {
     try {
       if (socket) {
         socket.emit('leave', userId);
-        // --- Updated: Use /social/logout route ---
         await axios.post(`${BASE_URL}/social/logout`, {}, {
           headers: { Authorization: `Bearer ${token}` },
           timeout: 5000,
@@ -186,12 +185,9 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       dispatch(clearAuth());
       dispatch(resetState());
       setAuth('', '', '', '', '', '');
-      // --- Updated: Do not clear chatList to preserve UI state ---
-      // setChatList([]);
       navigate('/');
     } catch (err) {
       console.error('handleLogout error:', err.message);
-      // --- Updated: Handle 401 gracefully ---
       if (err.response?.status === 401) {
         console.log('Token already invalidated, proceeding with logout');
         dispatch(clearAuth());
@@ -210,13 +206,30 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     try {
       const { data } = await axios.get(`${BASE_URL}/social/messages`, {
         headers: { Authorization: `Bearer ${token}` },
-        params: { userId, recipientId: chatId, limit: 50, skip: 0 },
+        params: { userId, recipientId: chatId, limit: 100, skip: 0 },
         timeout: 5000,
       });
-      dispatch(setMessages({ recipientId: chatId, messages: data.messages }));
-      // --- Updated: Update unread count ---
+      // --- Updated: Merge server messages with existing to preserve pending/failed ---
+      const existingMessages = chats[chatId] || [];
+      const existingIds = new Set(existingMessages.map((msg) => msg._id || msg.clientMessageId));
+      const newMessages = data.messages
+        .filter((msg) => !existingIds.has(msg._id))
+        .map((msg) => ({
+          ...msg,
+          plaintextContent: msg.plaintextContent || '[Message not decrypted]',
+          status: msg.status || 'sent',
+          createdAt: new Date(msg.createdAt),
+          updatedAt: msg.updatedAt ? new Date(msg.updatedAt) : undefined,
+        }));
+      dispatch(setMessages({
+        recipientId: chatId,
+        messages: [...existingMessages, ...newMessages],
+      }));
       setUnreadMessages((prev) => ({ ...prev, [chatId]: 0 }));
       retryCountRef.current.messages = 0;
+      // --- Updated: Retry failed messages ---
+      const failedMessages = (chats[chatId] || []).filter((m) => m.status === 'failed');
+      failedMessages.forEach((msg) => retrySendMessage(msg));
     } catch (err) {
       console.error('fetchMessages error:', err.message, err.response?.data);
       logClientError('Messages fetch failed', err);
@@ -232,14 +245,13 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         retryCountRef.current.messages = 0;
       }
     }
-  }, [token, userId, dispatch, logClientError]); // --- Updated: Remove handleLogout dependency ---
+  }, [token, userId, dispatch, chats, logClientError]);
 
   const selectChat = useCallback((chatId) => {
     dispatch(setSelectedChat(chatId));
     setShowMenu(false);
     setError('');
     if (chatId && socket && isValidObjectId(chatId)) {
-      // --- Updated: Fetch messages only if not already loaded ---
       if (!chats[chatId]) {
         fetchMessages(chatId);
       }
@@ -276,7 +288,6 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         senderVirtualNumber: virtualNumber,
         senderUsername: username,
         senderPhoto: photo,
-        _id: clientMessageId,
         status: 'pending',
         createdAt: new Date(),
       };
@@ -289,7 +300,11 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
           logClientError('Socket message failed', new Error(ack.error));
           return;
         }
-        dispatch(replaceMessage({ recipientId: selectedChat, message: { ...ack.message, plaintextContent }, replaceId: clientMessageId }));
+        dispatch(replaceMessage({
+          recipientId: selectedChat,
+          message: { ...ack.message, plaintextContent, status: 'sent' },
+          replaceId: clientMessageId,
+        }));
         dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: ack.message._id, status: 'sent' }));
       });
       setMessage('');
@@ -302,6 +317,58 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       logClientError('Send message failed', err);
     }
   }, [isForgeReady, message, selectedChat, userId, virtualNumber, username, photo, socket, getPublicKey, encryptMessage, dispatch, chats, logClientError]);
+
+  // --- New: Retry failed messages ---
+  const retrySendMessage = useCallback(async (message) => {
+    if (!socket || !isValidObjectId(message.recipientId)) return;
+    try {
+      const messageData = {
+        senderId: message.senderId,
+        recipientId: message.recipientId,
+        content: message.content,
+        contentType: message.contentType,
+        plaintextContent: message.plaintextContent,
+        clientMessageId: message.clientMessageId,
+        senderVirtualNumber: message.senderVirtualNumber,
+        senderUsername: message.senderUsername,
+        senderPhoto: message.senderPhoto,
+        status: 'pending',
+        createdAt: message.createdAt,
+      };
+      dispatch(updateMessageStatus({
+        recipientId: message.recipientId,
+        messageId: message.clientMessageId,
+        status: 'pending',
+      }));
+      socket.emit('message', messageData, (ack) => {
+        if (ack?.error) {
+          console.error('Retry socket message error:', ack.error);
+          setError(`Failed to retry message: ${ack.error}`);
+          dispatch(updateMessageStatus({
+            recipientId: message.recipientId,
+            messageId: message.clientMessageId,
+            status: 'failed',
+          }));
+          logClientError('Retry socket message failed', new Error(ack.error));
+          return;
+        }
+        dispatch(replaceMessage({
+          recipientId: message.recipientId,
+          message: { ...ack.message, plaintextContent: message.plaintextContent, status: 'sent' },
+          replaceId: message.clientMessageId,
+        }));
+      });
+    } catch (err) {
+      console.error('retrySendMessage error:', err.message);
+      setError('Failed to retry message');
+      dispatch(updateMessageStatus({
+        recipientId: message.recipientId,
+        messageId: message.clientMessageId,
+        status: 'failed',
+      }));
+      logClientError('Retry send message failed', err);
+    }
+  }, [socket, dispatch, logClientError]);
 
   const handleAttachment = useCallback(async (e) => {
     const selectedFile = e.target.files[0];
@@ -455,13 +522,15 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       const senderId = typeof msg.senderId === 'object' ? msg.senderId._id.toString() : msg.senderId.toString();
       const recipientId = typeof msg.recipientId === 'object' ? msg.recipientId._id.toString() : msg.recipientId.toString();
       const targetId = senderId === userId ? recipientId : senderId;
-      // --- Updated: Ensure plaintextContent is preserved ---
-      dispatch(addMessage({ 
-        recipientId: targetId, 
+      dispatch(addMessage({
+        recipientId: targetId,
         message: {
           ...msg,
           plaintextContent: msg.plaintextContent || '[Message not decrypted]',
-        }
+          status: msg.status || 'sent',
+          createdAt: new Date(msg.createdAt),
+          updatedAt: msg.updatedAt ? new Date(msg.updatedAt) : undefined,
+        },
       }));
       if (selectedChat === targetId && document.hasFocus()) {
         if (!sentStatusesRef.current.has(msg._id)) {
@@ -533,12 +602,11 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       console.log('Connecting to Socket.IO at:', BASE_URL);
       socket.emit('join', userId);
       fetchChatList();
-      // --- Updated: Fetch messages for persisted selectedChat only if not loaded ---
-      if (selectedChat && isValidObjectId(selectedChat) && !chats[selectedChat]) {
-        fetchMessages(selectedChat);
+      if (selectedChat && isValidObjectId(selectedChat)) {
+        fetchMessages(selectedChat); // --- Updated: Always fetch messages to ensure sync ---
       }
     }
-  }, [token, userId, isForgeReady, fetchChatList, socket, selectedChat, fetchMessages, chats]);
+  }, [token, userId, isForgeReady, fetchChatList, socket, selectedChat, fetchMessages]);
 
   useEffect(() => {
     const handleClickOutside = (e) => {
@@ -614,7 +682,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
                 <span className="timestamp">{new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                 {isMine && (
                   <span className="message-status">
-                    {msg.status === 'pending' ? '⌛' : msg.status === 'sent' ? '✓' : msg.status === 'delivered' ? '✓✓' : '👀'}
+                    {msg.status === 'pending' ? '⌛' : msg.status === 'sent' ? '✓' : msg.status === 'delivered' ? '✓✓' : msg.status === 'read' ? '👀' : '❌'}
                   </span>
                 )}
               </div>

@@ -24,7 +24,7 @@ const authSlice = createSlice({
       state.virtualNumber = virtualNumber;
       state.username = username;
       state.privateKey = privateKey;
-      console.log('Auth state updated:', { userId, username });
+      console.debug('Auth state updated:', { userId, username });
     },
     clearAuth: (state) => {
       state.token = null;
@@ -34,7 +34,7 @@ const authSlice = createSlice({
       state.virtualNumber = null;
       state.username = null;
       state.privateKey = null;
-      console.log('Auth state cleared');
+      console.debug('Auth state cleared');
     },
   },
 });
@@ -48,38 +48,48 @@ const messageSlice = createSlice({
   reducers: {
     setMessages: (state, action) => {
       const { recipientId, messages } = action.payload;
-      if (!recipientId || !Array.isArray(messages)) {
+      if (!recipientId || !isValidObjectId(recipientId) || !Array.isArray(messages)) {
         console.warn('Invalid setMessages payload:', action.payload);
         return;
       }
-      state.chats = {
-        ...state.chats,
-        [recipientId]: messages.map((msg) => ({
-          ...msg,
+      // --- Updated: Normalize and merge messages ---
+      const existingMessages = state.chats[recipientId] || [];
+      const messageMap = new Map(existingMessages.map((msg) => [msg._id || msg.clientMessageId, msg]));
+      messages.forEach((msg) => {
+        const key = msg._id || msg.clientMessageId;
+        if (!key) {
+          console.warn('Message missing _id or clientMessageId:', msg);
+          return;
+        }
+        const normalizedMsg = {
           _id: msg._id || msg.clientMessageId,
           clientMessageId: msg.clientMessageId || msg._id,
           content: msg.content || '',
-          status: msg.status || 'pending',
-          // --- Updated: Ensure consistent message structure ---
-          senderId: msg.senderId,
-          recipientId: msg.recipientId,
+          status: ['sent', 'delivered', 'read'].includes(msg.status) ? msg.status : messageMap.get(key)?.status || 'sent',
+          senderId: msg.senderId?._id || msg.senderId, // --- Updated: Handle populated senderId ---
+          recipientId: msg.recipientId?._id || msg.recipientId, // --- Updated: Handle populated recipientId ---
           contentType: msg.contentType || 'text',
-          plaintextContent: msg.plaintextContent || '',
+          plaintextContent: msg.plaintextContent || '[Message not decrypted]',
           caption: msg.caption || undefined,
           replyTo: msg.replyTo && isValidObjectId(msg.replyTo) ? msg.replyTo : null,
           originalFilename: msg.originalFilename || undefined,
-          senderVirtualNumber: msg.senderVirtualNumber || undefined,
-          senderUsername: msg.senderUsername || undefined,
-          senderPhoto: msg.senderPhoto || undefined,
+          senderVirtualNumber: msg.senderVirtualNumber || msg.senderId?.virtualNumber || undefined,
+          senderUsername: msg.senderUsername || msg.senderId?.username || undefined,
+          senderPhoto: msg.senderPhoto || msg.senderId?.photo || undefined,
           createdAt: msg.createdAt ? new Date(msg.createdAt) : new Date(),
           updatedAt: msg.updatedAt ? new Date(msg.updatedAt) : undefined,
-        })),
+        };
+        messageMap.set(key, { ...messageMap.get(key), ...normalizedMsg });
+      });
+      state.chats = {
+        ...state.chats,
+        [recipientId]: Array.from(messageMap.values()).sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt)),
       };
-      console.log(`Set ${messages.length} messages for ${recipientId}`);
+      console.debug(`Set ${messages.length} messages for ${recipientId}, total: ${state.chats[recipientId].length}`);
     },
     addMessage: (state, action) => {
       const { recipientId, message } = action.payload;
-      if (!recipientId || !message || !message._id || !message.clientMessageId) {
+      if (!recipientId || !isValidObjectId(recipientId) || !message || !message.clientMessageId) {
         console.warn('Invalid addMessage payload:', action.payload);
         return;
       }
@@ -91,38 +101,61 @@ const messageSlice = createSlice({
         console.warn('Duplicate message:', message._id || message.clientMessageId);
         return;
       }
-      state.chats[recipientId] = [...state.chats[recipientId], { ...message }];
-      console.log(`Added message ${message._id} (clientMessageId: ${message.clientMessageId}) to ${recipientId}`);
+      const normalizedMsg = {
+        ...message,
+        _id: message._id || message.clientMessageId,
+        status: ['pending', 'sent', 'delivered', 'read', 'failed'].includes(message.status) ? message.status : 'pending',
+        senderId: message.senderId?._id || message.senderId,
+        recipientId: message.recipientId?._id || message.recipientId,
+        contentType: message.contentType || 'text',
+        plaintextContent: message.plaintextContent || '',
+        createdAt: message.createdAt ? new Date(message.createdAt) : new Date(),
+        updatedAt: message.updatedAt ? new Date(message.updatedAt) : undefined,
+      };
+      state.chats[recipientId].push(normalizedMsg);
+      console.debug(`Added message ${message._id || message.clientMessageId} to ${recipientId}`);
     },
     replaceMessage: (state, action) => {
       const { recipientId, message, replaceId } = action.payload;
-      if (!recipientId || !message || !replaceId || !message._id || !message.clientMessageId) {
+      if (!recipientId || !isValidObjectId(recipientId) || !message || !replaceId || !message.clientMessageId) {
         console.warn('Invalid replaceMessage payload:', action.payload);
         return;
       }
       if (!state.chats[recipientId]) {
-        console.warn(`No chat found for recipientId ${recipientId}`);
+        console.debug(`No chat found for ${recipientId}, initializing`);
         state.chats[recipientId] = [];
       }
-      const index = state.chats[recipientId]?.findIndex(
+      const index = state.chats[recipientId].findIndex(
         (msg) => msg._id === replaceId || msg.clientMessageId === replaceId
       );
+      const normalizedMsg = {
+        ...message,
+        _id: message._id || message.clientMessageId,
+        clientMessageId: message.clientMessageId || message._id,
+        status: ['sent', 'delivered', 'read'].includes(message.status) ? message.status : 'sent',
+        senderId: message.senderId?._id || message.senderId,
+        recipientId: message.recipientId?._id || message.recipientId,
+        contentType: message.contentType || 'text',
+        plaintextContent: message.plaintextContent || '',
+        createdAt: message.createdAt ? new Date(message.createdAt) : new Date(),
+        updatedAt: message.updatedAt ? new Date(message.updatedAt) : undefined,
+      };
       if (index !== -1) {
-        state.chats[recipientId][index] = { ...message };
-        console.log(`Replaced message ${replaceId} with ${message._id} (clientMessageId: ${message.clientMessageId}) in ${recipientId}`);
+        state.chats[recipientId][index] = normalizedMsg;
+        console.debug(`Replaced message ${replaceId} with ${message._id} in ${recipientId}`);
       } else {
-        console.warn(`Message ${replaceId} not found for replacement in ${recipientId}, adding as new`);
-        state.chats[recipientId].push({ ...message });
+        state.chats[recipientId].push(normalizedMsg);
+        console.debug(`Message ${replaceId} not found, added ${message._id} to ${recipientId}`);
       }
     },
     updateMessageStatus: (state, action) => {
       const { recipientId, messageId, status, uploadProgress } = action.payload;
-      if (!recipientId || !messageId || !state.chats[recipientId]) {
+      if (!recipientId || !isValidObjectId(recipientId) || !messageId || !state.chats[recipientId] || !['pending', 'sent', 'delivered', 'read', 'failed'].includes(status)) {
         console.warn('Invalid updateMessageStatus payload:', action.payload);
         return;
       }
       state.chats[recipientId] = state.chats[recipientId].map((msg) =>
-        msg._id === messageId || msg.clientMessageId === messageId
+        (msg._id === messageId || msg.clientMessageId === messageId)
           ? {
               ...msg,
               status,
@@ -130,39 +163,39 @@ const messageSlice = createSlice({
             }
           : msg
       );
-      console.log(`Updated status for message ${messageId} in ${recipientId} to ${status}`);
+      console.debug(`Updated status for ${messageId} in ${recipientId} to ${status}`);
     },
     deleteMessage: (state, action) => {
       const { recipientId, messageId } = action.payload;
-      if (!recipientId || !messageId || !state.chats[recipientId]) {
+      if (!recipientId || !isValidObjectId(recipientId) || !messageId || !state.chats[recipientId]) {
         console.warn('Invalid deleteMessage payload:', action.payload);
         return;
       }
       state.chats[recipientId] = state.chats[recipientId].filter(
         (msg) => msg._id !== messageId && msg.clientMessageId !== messageId
       );
-      console.log(`Deleted message ${messageId} from ${recipientId}`);
+      console.debug(`Deleted message ${messageId} from ${recipientId}`);
     },
     setSelectedChat: (state, action) => {
       const recipientId = action.payload;
       if (recipientId === null) {
         state.selectedChat = null;
-        console.log('Cleared selected chat');
-      } else if (typeof recipientId === 'string' && isValidObjectId(recipientId)) {
+        console.debug('Cleared selected chat');
+      } else if (isValidObjectId(recipientId)) {
         state.chats = {
           ...state.chats,
           [recipientId]: state.chats[recipientId] || [],
         };
         state.selectedChat = recipientId;
-        console.log(`Selected chat: ${recipientId}`);
+        console.debug(`Selected chat: ${recipientId}`);
       } else {
         console.warn(`Invalid recipientId: ${recipientId}`);
       }
     },
     resetState: (state) => {
-      // --- Updated: Preserve chats state instead of clearing ---
-      console.log('Reset messages state, preserving chats');
       state.selectedChat = null;
+      state.chats = {}; // --- Updated: Clear chats on reset ---
+      console.debug('Reset messages state');
     },
   },
 });
@@ -181,35 +214,44 @@ export const { setAuth, clearAuth } = authSlice.actions;
 
 const persistenceMiddleware = (store) => (next) => (action) => {
   const result = next(action);
-  const actionsToPersist = [setSelectedChat.type, setAuth.type, setMessages.type, addMessage.type, replaceMessage.type, updateMessageStatus.type, deleteMessage.type];
+  const actionsToPersist = [
+    setSelectedChat.type,
+    setAuth.type,
+    setMessages.type,
+    addMessage.type,
+    replaceMessage.type,
+    updateMessageStatus.type,
+    deleteMessage.type,
+  ];
 
   if (actionsToPersist.includes(action.type)) {
-    // --- Updated: Throttle persistence to avoid excessive writes ---
     requestAnimationFrame(() => {
       const state = store.getState();
       try {
         const serializableState = {
           messages: {
-            selectedChat: typeof state.messages.selectedChat === 'string' ? state.messages.selectedChat : null,
+            selectedChat: isValidObjectId(state.messages.selectedChat) ? state.messages.selectedChat : null,
             chats: Object.keys(state.messages.chats).reduce((acc, recipientId) => {
-              acc[recipientId] = state.messages.chats[recipientId].map((msg) => ({
-                _id: msg._id,
-                clientMessageId: msg.clientMessageId,
-                senderId: msg.senderId,
-                recipientId: msg.recipientId,
-                content: msg.content,
-                contentType: msg.contentType,
-                plaintextContent: msg.plaintextContent,
-                status: msg.status,
-                caption: msg.caption,
-                replyTo: msg.replyTo,
-                originalFilename: msg.originalFilename,
-                senderVirtualNumber: msg.senderVirtualNumber,
-                senderUsername: msg.senderUsername,
-                senderPhoto: msg.senderPhoto,
-                createdAt: msg.createdAt,
-                updatedAt: msg.updatedAt,
-              }));
+              if (isValidObjectId(recipientId)) {
+                acc[recipientId] = state.messages.chats[recipientId].map((msg) => ({
+                  _id: msg._id,
+                  clientMessageId: msg.clientMessageId,
+                  senderId: msg.senderId,
+                  recipientId: msg.recipientId,
+                  content: msg.content,
+                  contentType: msg.contentType,
+                  plaintextContent: msg.plaintextContent,
+                  status: msg.status,
+                  caption: msg.caption,
+                  replyTo: msg.replyTo,
+                  originalFilename: msg.originalFilename,
+                  senderVirtualNumber: msg.senderVirtualNumber,
+                  senderUsername: msg.senderUsername,
+                  senderPhoto: msg.senderPhoto,
+                  createdAt: msg.createdAt.toISOString(),
+                  updatedAt: msg.updatedAt ? msg.updatedAt.toISOString() : undefined,
+                }));
+              }
               return acc;
             }, {}),
           },
@@ -220,11 +262,11 @@ const persistenceMiddleware = (store) => (next) => (action) => {
             photo: state.auth.photo,
             virtualNumber: state.auth.virtualNumber,
             username: state.auth.username,
-            privateKey: null, // Exclude privateKey for security
+            privateKey: null,
           },
         };
         localStorage.setItem('reduxState', JSON.stringify(serializableState));
-        console.log('Persisted state:', {
+        console.debug('Persisted state:', {
           selectedChat: serializableState.messages.selectedChat,
           userId: serializableState.auth.userId,
           chatCount: Object.keys(serializableState.messages.chats).length,
@@ -234,25 +276,12 @@ const persistenceMiddleware = (store) => (next) => (action) => {
       }
     });
   } else if (action.type === clearAuth.type || action.type === resetState.type) {
-    // --- Updated: Preserve messages state explicitly ---
-    const state = store.getState();
     try {
       localStorage.setItem('reduxState', JSON.stringify({
-        messages: {
-          selectedChat: null,
-          chats: state.messages.chats,
-        },
-        auth: {
-          token: null,
-          userId: null,
-          role: null,
-          photo: null,
-          virtualNumber: null,
-          username: null,
-          privateKey: null,
-        },
+        messages: { selectedChat: null, chats: {} }, // --- Updated: Clear chats ---
+        auth: authSlice.getInitialState(),
       }));
-      console.log('Cleared auth state, preserved messages');
+      console.debug('Cleared state');
     } catch (error) {
       console.error('Failed to persist state during clearAuth/resetState:', error);
     }
@@ -269,7 +298,7 @@ const loadPersistedState = () => {
       if (
         parsedState &&
         parsedState.messages &&
-        (typeof parsedState.messages.selectedChat === 'string' || parsedState.messages.selectedChat === null) &&
+        (isValidObjectId(parsedState.messages.selectedChat) || parsedState.messages.selectedChat === null) &&
         parsedState.messages.chats &&
         parsedState.auth
       ) {
@@ -277,17 +306,18 @@ const loadPersistedState = () => {
           if (isValidObjectId(recipientId)) {
             acc[recipientId] = parsedState.messages.chats[recipientId].filter(
               (msg) =>
-                msg._id &&
-                msg.clientMessageId &&
                 isValidObjectId(msg.senderId) &&
                 isValidObjectId(msg.recipientId) &&
-                ['sent', 'delivered', 'read', 'pending'].includes(msg.status) // --- Updated: Validate status ---
+                ['sent', 'delivered', 'read', 'pending', 'failed'].includes(msg.status)
             ).map((msg) => ({
-              ...msg,
+              _id: msg._id || msg.clientMessageId,
+              clientMessageId: msg.clientMessageId || msg._id || `temp-${Date.now()}-${Math.random()}`, // --- Updated: Fallback clientMessageId ---
               content: msg.content || '',
               contentType: msg.contentType || 'text',
-              plaintextContent: msg.plaintextContent || '',
+              plaintextContent: msg.plaintextContent || '[Message not decrypted]',
               status: msg.status || 'pending',
+              senderId: msg.senderId,
+              recipientId: msg.recipientId,
               caption: msg.caption || undefined,
               replyTo: msg.replyTo && isValidObjectId(msg.replyTo) ? msg.replyTo : null,
               originalFilename: msg.originalFilename || undefined,
@@ -300,7 +330,6 @@ const loadPersistedState = () => {
           }
           return acc;
         }, {});
-        // --- Updated: Validate auth fields ---
         const auth = {
           token: typeof parsedState.auth.token === 'string' ? parsedState.auth.token : null,
           userId: isValidObjectId(parsedState.auth.userId) ? parsedState.auth.userId : null,
@@ -310,7 +339,7 @@ const loadPersistedState = () => {
           username: typeof parsedState.auth.username === 'string' ? parsedState.auth.username : null,
           privateKey: null,
         };
-        console.log('Loaded persisted state:', {
+        console.debug('Loaded persisted state:', {
           selectedChat: parsedState.messages.selectedChat,
           userId: auth.userId,
           chatCount: Object.keys(chats).length,
@@ -325,7 +354,7 @@ const loadPersistedState = () => {
   } catch (error) {
     console.error('Failed to load persisted state:', error);
   }
-  // --- Updated: Clear invalid state but preserve valid messages if possible ---
+  // --- Updated: Simplified recovery logic ---
   try {
     const persistedState = localStorage.getItem('reduxState');
     if (persistedState) {
@@ -335,32 +364,44 @@ const loadPersistedState = () => {
           if (isValidObjectId(recipientId)) {
             acc[recipientId] = parsedState.messages.chats[recipientId].filter(
               (msg) =>
-                msg._id &&
-                msg.clientMessageId &&
                 isValidObjectId(msg.senderId) &&
-                isValidObjectId(msg.recipientId)
-            );
+                isValidObjectId(msg.recipientId) &&
+                ['sent', 'delivered', 'read', 'pending', 'failed'].includes(msg.status)
+            ).map((msg) => ({
+              _id: msg._id || msg.clientMessageId,
+              clientMessageId: msg.clientMessageId || msg._id || `temp-${Date.now()}-${Math.random()}`,
+              content: msg.content || '',
+              contentType: msg.contentType || 'text',
+              plaintextContent: msg.plaintextContent || '[Message not decrypted]',
+              status: msg.status || 'pending',
+              senderId: msg.senderId,
+              recipientId: msg.recipientId,
+              caption: msg.caption || undefined,
+              replyTo: msg.replyTo && isValidObjectId(msg.replyTo) ? msg.replyTo : null,
+              originalFilename: msg.originalFilename || undefined,
+              senderVirtualNumber: msg.senderVirtualNumber || undefined,
+              senderUsername: msg.senderUsername || undefined,
+              senderPhoto: msg.senderPhoto || undefined,
+              createdAt: msg.createdAt ? new Date(msg.createdAt) : new Date(),
+              updatedAt: msg.updatedAt ? new Date(msg.updatedAt) : undefined,
+            }));
           }
           return acc;
         }, {});
-        localStorage.setItem(
-          'reduxState',
-          JSON.stringify({
-            messages: { selectedChat: null, chats },
-            auth: authSlice.getInitialState(),
-          })
-        );
-        console.log('Preserved valid messages, cleared invalid state');
-        return {
+        const newState = {
           messages: { selectedChat: null, chats },
           auth: authSlice.getInitialState(),
         };
+        localStorage.setItem('reduxState', JSON.stringify(newState));
+        console.debug('Recovered messages, cleared invalid state');
+        return newState;
       }
     }
   } catch (error) {
     console.error('Failed to recover partial state:', error);
   }
   localStorage.removeItem('reduxState');
+  console.debug('Cleared invalid reduxState');
   return undefined;
 };
 

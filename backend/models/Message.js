@@ -23,24 +23,29 @@ const messageSchema = new mongoose.Schema({
         if (this.contentType === 'text') {
           return /^[A-Za-z0-9+/=]+\|[A-Za-z0-9+/=]+\|[A-Za-z0-9+/=]+$/.test(v);
         }
-        return /^(https?:\/\/[^\s/$.?#].[^\s]*)$/.test(v);
+        // --- Updated: Relaxed URL validation ---
+        return /^(https?:\/\/[^\s/$.?#][^\s]*(\?[^\s]*)?)$/.test(v);
       },
-      message: props => props.value.contentType === 'text' 
-        ? 'Text content must be in encrypted format (data|iv|key)'
-        : 'Media content must be a valid URL',
+      message: props =>
+        props.value.contentType === 'text'
+          ? 'Text content must be in encrypted format (data|iv|key)'
+          : 'Media content must be a valid URL',
     },
   },
   contentType: { type: String, enum: ['text', 'image', 'video', 'audio', 'document'], required: true },
   plaintextContent: {
     type: String,
-    required: function () { return this.contentType === 'text'; },
-    default: function () { return this.contentType === 'text' ? undefined : ''; },
+    default: '', // --- Updated: Optional with empty string default ---
   },
-  status: { type: String, enum: ['sent', 'delivered', 'read'], default: 'sent' },
+  status: {
+    type: String,
+    enum: ['pending', 'sent', 'delivered', 'read', 'failed'], // --- Updated: Added pending/failed ---
+    default: 'sent',
+  },
   caption: { type: String, default: null },
   replyTo: { type: mongoose.Schema.Types.ObjectId, ref: 'Message', default: null },
   originalFilename: { type: String, default: null },
-  clientMessageId: { type: String, required: true, unique: true },
+  clientMessageId: { type: String, required: false, unique: true, sparse: true }, // --- Updated: Optional, sparse index ---
   senderVirtualNumber: { type: String, default: null },
   senderUsername: { type: String, default: null },
   senderPhoto: { type: String, default: null },
@@ -51,7 +56,7 @@ const messageSchema = new mongoose.Schema({
 });
 
 // Consolidated indexes
-messageSchema.index({ clientMessageId: 1 }, { unique: true });
+messageSchema.index({ clientMessageId: 1 }, { unique: true, sparse: true }); // --- Updated: Sparse index ---
 messageSchema.index({ senderId: 1, recipientId: 1, createdAt: -1 });
 messageSchema.index({ recipientId: 1, status: 1 });
 
@@ -62,7 +67,7 @@ const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 // Pre-save hook
 messageSchema.pre('save', async function (next) {
   try {
-    // Check sender cache
+    // Validate sender
     const cacheKey = this.senderId.toString();
     let sender = senderCache.get(cacheKey);
     if (!sender || sender.timestamp < Date.now() - CACHE_TTL) {
@@ -74,11 +79,22 @@ messageSchema.pre('save', async function (next) {
       senderCache.set(cacheKey, { ...sender, timestamp: Date.now() });
     }
 
+    // --- Updated: Validate recipient ---
+    const recipient = await User.findById(this.recipientId).select('_id').lean();
+    if (!recipient) {
+      logger.error('Invalid recipient', { recipientId: this.recipientId });
+      return next(new Error('Recipient does not exist'));
+    }
+
     // Populate sender fields if missing
-    if (!this.senderVirtualNumber || !this.senderUsername || !this.senderPhoto) {
-      this.senderVirtualNumber = this.senderVirtualNumber || sender.virtualNumber || '';
-      this.senderUsername = this.senderUsername || sender.username || 'Unknown';
-      this.senderPhoto = this.senderPhoto || sender.photo || 'https://placehold.co/40x40';
+    this.senderVirtualNumber = this.senderVirtualNumber || sender.virtualNumber || '';
+    this.senderUsername = this.senderUsername || sender.username || 'Unknown';
+    this.senderPhoto = this.senderPhoto || sender.photo || 'https://placehold.co/40x40';
+
+    // --- Updated: Generate clientMessageId if missing ---
+    if (!this.clientMessageId && this.isNew) {
+      this.clientMessageId = `server-${this._id}-${Date.now()}`;
+      logger.debug('Generated clientMessageId', { clientMessageId: this.clientMessageId });
     }
 
     // Validate replyTo if present
@@ -90,12 +106,18 @@ messageSchema.pre('save', async function (next) {
       }
     }
 
+    // --- Updated: Ensure plaintextContent is string ---
+    if (this.plaintextContent === undefined || this.plaintextContent === null) {
+      this.plaintextContent = '';
+    }
+
     next();
   } catch (error) {
     logger.error('Message pre-save validation failed', {
       error: error.message,
       senderId: this.senderId,
       recipientId: this.recipientId,
+      stack: error.stack,
     });
     next(new Error(`Message validation failed: ${error.message}`));
   }
@@ -126,7 +148,7 @@ messageSchema.statics.cleanupOrphanedMessages = async function () {
       const users = await User.find({ _id: { $in: batch } }).select('_id').lean();
       users.forEach(user => existingUserIds.add(user._id.toString()));
       processedUsers += batch.length;
-      logger.info('Processed user batch', { processed: processedUsers, total: messageUsers.length });
+      logger.debug('Processed user batch', { processed: processedUsers, total: messageUsers.length });
     }
 
     const orphanedUserIds = messageUsers.filter(id => !existingUserIds.has(id));
@@ -145,13 +167,13 @@ messageSchema.statics.cleanupOrphanedMessages = async function () {
         ],
       });
       totalDeleted += result.deletedCount || 0;
-      logger.info('Deleted orphaned messages batch', { deleted: result.deletedCount, batchSize: batch.length });
+      logger.debug('Deleted orphaned messages batch', { deleted: result.deletedCount, batchSize: batch.length });
     }
 
     logger.info('Orphaned messages cleanup completed', { deletedCount: totalDeleted });
     return { deletedCount: totalDeleted };
   } catch (error) {
-    logger.error('Orphaned messages cleanup failed', { error: error.message });
+    logger.error('Orphaned messages cleanup failed', { error: error.message, stack: error.stack });
     throw new Error(`Cleanup failed: ${error.message}`);
   }
 };
