@@ -470,24 +470,24 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     };
   }, [socket, isForgeReady, selectedChat, userId, chats, dispatch, unreadMessages, logClientError]);
 
-  useEffect(() => {
-    if (!token || !userId) {
-      setError('Please log in to access chat');
-      setIsLoadingChatList(false);
-      return;
-    }
-    if (isForgeReady) {
-      console.log('Connecting to Socket.IO at:', BASE_URL);
-      socket.emit('join', userId);
-      fetchChatList();
-    }
-  }, [token, userId, isForgeReady, fetchChatList, socket]);
-
-  useEffect(() => {
-    if (selectedChat && !chats[selectedChat]) {
+ useEffect(() => {
+  if (!token || !userId) {
+    setError('Please log in to access chat');
+    setIsLoadingChatList(false);
+    return;
+  }
+  if (isForgeReady) {
+    console.log('Connecting to Socket.IO at:', BASE_URL);
+    socket.emit('join', userId);
+    fetchChatList();
+    // Fetch messages for persisted selectedChat on mount
+    if (selectedChat && isValidObjectId(selectedChat) && !chats[selectedChat]) {
       fetchMessages(selectedChat);
     }
-  }, [selectedChat, fetchMessages, chats]);
+  }
+}, [token, userId, isForgeReady, fetchChatList, socket, selectedChat, fetchMessages, chats]);
+
+
 
   
   useEffect(() => {

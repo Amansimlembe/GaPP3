@@ -165,9 +165,12 @@ export const {
 
 export const { setAuth, clearAuth } = authSlice.actions;
 
+
+
+
 const persistenceMiddleware = (store) => (next) => (action) => {
   const result = next(action);
-  const actionsToPersist = [setSelectedChat.type, resetState.type, setAuth.type, clearAuth.type];
+  const actionsToPersist = [setSelectedChat.type, resetState.type, setAuth.type, clearAuth.type, setMessages.type, addMessage.type, replaceMessage.type, updateMessageStatus.type, deleteMessage.type];
 
   if (actionsToPersist.includes(action.type)) {
     requestAnimationFrame(() => {
@@ -176,6 +179,27 @@ const persistenceMiddleware = (store) => (next) => (action) => {
         const serializableState = {
           messages: {
             selectedChat: typeof state.messages.selectedChat === 'string' ? state.messages.selectedChat : null,
+            chats: Object.keys(state.messages.chats).reduce((acc, recipientId) => {
+              acc[recipientId] = state.messages.chats[recipientId].map((msg) => ({
+                _id: msg._id,
+                clientMessageId: msg.clientMessageId,
+                senderId: msg.senderId,
+                recipientId: msg.recipientId,
+                content: msg.content,
+                contentType: msg.contentType,
+                plaintextContent: msg.plaintextContent,
+                status: msg.status,
+                caption: msg.caption,
+                replyTo: msg.replyTo,
+                originalFilename: msg.originalFilename,
+                senderVirtualNumber: msg.senderVirtualNumber,
+                senderUsername: msg.senderUsername,
+                senderPhoto: msg.senderPhoto,
+                createdAt: msg.createdAt,
+                updatedAt: msg.updatedAt,
+              }));
+              return acc;
+            }, {}),
           },
           auth: {
             token: state.auth.token,
@@ -191,6 +215,7 @@ const persistenceMiddleware = (store) => (next) => (action) => {
         console.log('Persisted state:', {
           selectedChat: serializableState.messages.selectedChat,
           userId: serializableState.auth.userId,
+          chatCount: Object.keys(serializableState.messages.chats).length,
         });
       } catch (error) {
         console.error('Failed to persist state:', error);
@@ -211,14 +236,29 @@ const loadPersistedState = () => {
         parsedState &&
         parsedState.messages &&
         (typeof parsedState.messages.selectedChat === 'string' || parsedState.messages.selectedChat === null) &&
+        parsedState.messages.chats &&
         parsedState.auth
       ) {
+        const chats = Object.keys(parsedState.messages.chats).reduce((acc, recipientId) => {
+          if (isValidObjectId(recipientId)) {
+            acc[recipientId] = parsedState.messages.chats[recipientId].filter(
+              (msg) => msg._id && msg.clientMessageId && isValidObjectId(msg.senderId) && isValidObjectId(msg.recipientId)
+            ).map((msg) => ({
+              ...msg,
+              createdAt: msg.createdAt ? new Date(msg.createdAt) : new Date(),
+              updatedAt: msg.updatedAt ? new Date(msg.updatedAt) : undefined,
+              replyTo: msg.replyTo && isValidObjectId(msg.replyTo) ? msg.replyTo : null,
+            }));
+          }
+          return acc;
+        }, {});
         console.log('Loaded persisted state:', {
           selectedChat: parsedState.messages.selectedChat,
           userId: parsedState.auth.userId,
+          chatCount: Object.keys(chats).length,
         });
         return {
-          messages: { selectedChat: parsedState.messages.selectedChat, chats: {} },
+          messages: { selectedChat: parsedState.messages.selectedChat, chats },
           auth: {
             token: parsedState.auth.token || null,
             userId: parsedState.auth.userId || null,
@@ -238,6 +278,7 @@ const loadPersistedState = () => {
   localStorage.removeItem('reduxState');
   return undefined;
 };
+
 
 export const store = configureStore({
   reducer: {
