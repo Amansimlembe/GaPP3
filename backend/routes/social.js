@@ -146,32 +146,6 @@ const deleteUserSchema = Joi.object({
   }, 'ObjectId validation').required(),
 });
 
-// Auth middleware
-const authMiddleware = async (req, res, next) => {
-  const token = req.header('Authorization')?.replace('Bearer ', '');
-  if (!token) {
-    logger.warn('No token provided', { method: req.method, url: req.url });
-    return res.status(401).json({ error: 'No token provided' });
-  }
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
-    const user = await User.findById(decoded.userId || decoded.id).select('contacts _id username virtualNumber photo status lastSeen');
-    if (!user) {
-      logger.warn('User not found', { userId: decoded.userId || decoded.id });
-      return res.status(401).json({ error: 'User not found' });
-    }
-    const blacklisted = await mongoose.model('TokenBlacklist').findOne({ token }).select('_id').lean();
-    if (blacklisted) {
-      logger.warn('Blacklisted token used', { userId: decoded.userId || decoded.id });
-      return res.status(401).json({ error: 'Token invalidated' });
-    }
-    req.user = user;
-    next();
-  } catch (error) {
-    logger.error('Auth middleware error', { error: error.message, stack: error.stack });
-    res.status(401).json({ error: 'Invalid token', details: error.message });
-  }
-};
 
 // Cache for chat lists
 const chatListCache = new Map();
