@@ -66,20 +66,6 @@ const userSchema = new mongoose.Schema({
   contacts: {
     type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
     default: [],
-    validate: {
-      validator: async function (value) {
-        if (!value.length) return true;
-        try {
-          const users = await mongoose.model('User').find({ _id: { $in: value } }).select('_id').lean();
-          const validIds = new Set(users.map((user) => user._id.toString()));
-          return value.every((id) => validIds.has(id.toString()));
-        } catch (err) {
-          logger.error('Contact validation failed', { error: err.message, userId: this._id?.toString() });
-          return false;
-        }
-      },
-      message: 'One or more invalid contact IDs.',
-    },
   },
   role: {
     type: Number,
@@ -108,35 +94,22 @@ const userSchema = new mongoose.Schema({
 });
 
 // Indexes for performance
-userSchema.index({ email: 1 });
-userSchema.index({ username: 1 });
-userSchema.index({ virtualNumber: 1, sparse: true }); // Explicitly define sparse index
-userSchema.index({ status: 1, lastSeen: -1 });
+userSchema.index({ email: 1 }, { unique: true });
+userSchema.index({ username: 1 }, { unique: true });
+userSchema.index({ virtualNumber: 1 }, { unique: true, sparse: true });
 
-// Pre-save hook to validate and clean contacts
+// Pre-save hook to clean contacts
 userSchema.pre('save', async function (next) {
   try {
     if (this.isModified('contacts') && this.contacts.length) {
       // Remove duplicates
-      const uniqueContacts = [...new Set(this.contacts.map((id) => id.toString()))];
-      this.contacts = uniqueContacts.map((id) => new mongoose.Types.ObjectId(id));
-
-      // Validate contacts in bulk
-      const existingUsers = await this.constructor.find({ _id: { $in: this.contacts } }).select('_id').lean();
-      const existingIds = new Set(existingUsers.map((user) => user._id.toString()));
-      const invalidContacts = uniqueContacts.filter((id) => !existingIds.has(id));
-
-      if (invalidContacts.length) {
-        logger.warn('Invalid contacts detected during save', {
-          userId: this._id?.toString(),
-          invalidContacts,
-        });
-        return next(new Error(`Invalid contact IDs: ${invalidContacts.join(', ')}`));
-      }
+      this.contacts = [...new Set(this.contacts.map((id) => id.toString()))].map(
+        (id) => new mongoose.Types.ObjectId(id)
+      );
     }
     next();
   } catch (error) {
-    logger.error('User pre-save validation failed', {
+    logger.error('User pre-save failed', {
       error: error.message,
       stack: error.stack,
       userId: this._id?.toString(),
@@ -149,32 +122,23 @@ userSchema.pre('save', async function (next) {
 userSchema.statics.cleanupInvalidContacts = async function () {
   try {
     logger.info('Starting invalid contacts cleanup');
-    const batchSize = 1000;
-    let totalUpdated = 0;
-
     const usersWithContacts = await this.find({ contacts: { $ne: [] } }).select('_id contacts').lean();
     if (!usersWithContacts.length) {
       logger.info('No users with contacts found for cleanup');
       return { updatedCount: 0 };
     }
 
-    for (let i = 0; i < usersWithContacts.length; i += batchSize) {
-      const batch = usersWithContacts.slice(i, i + batchSize);
-      const contactIds = [...new Set(batch.flatMap((user) => user.contacts.map((id) => id.toString())))];
-      
-      const existingUsers = await this.find({ _id: { $in: contactIds } }).select('_id').lean();
-      const existingIds = new Set(existingUsers.map((user) => user._id.toString()));
-
-      for (const user of batch) {
-        const validContacts = user.contacts.filter((id) => existingIds.has(id.toString()));
-        if (validContacts.length !== user.contacts.length) {
-          const result = await this.updateOne(
-            { _id: user._id },
-            { $set: { contacts: validContacts } },
-            { session: null }
-          );
-          totalUpdated += result.modifiedCount || 0;
-        }
+    let totalUpdated = 0;
+    for (const user of usersWithContacts) {
+      const validContacts = [...new Set(user.contacts.map((id) => id.toString()))].map(
+        (id) => new mongoose.Types.ObjectId(id)
+      );
+      if (validContacts.length !== user.contacts.length) {
+        const result = await this.updateOne(
+          { _id: user._id },
+          { $set: { contacts: validContacts } }
+        );
+        totalUpdated += result.modifiedCount || 0;
       }
     }
 
