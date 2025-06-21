@@ -122,7 +122,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
 
   const fetchChatList = useCallback(async (isRetry = false) => {
     if (!isForgeReady) return;
-    setIsLoadingChatList(true);
+    setIsLoadingChatList(false);
     try {
       const cacheKey = `chatList:${userId}`;
       const cached = sessionStorage.getItem(cacheKey);
@@ -682,7 +682,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
                 <span className="timestamp">{new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                 {isMine && (
                   <span className="message-status">
-                    {msg.status === 'pending' ? '⌛' : msg.status === 'sent' ? '✓' : msg.status === 'delivered' ? '✓✓' : msg.status === 'read' ? '👀' : '❌'}
+                    {msg.status === 'pending' ? 'o' : msg.status === 'sent' ? '✓' : msg.status === 'delivered' ? '✓✓' : msg.status === 'read' ? '✓✓' : '?'}
                   </span>
                 )}
               </div>
