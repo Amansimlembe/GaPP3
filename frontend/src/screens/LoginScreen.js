@@ -3,6 +3,7 @@ import axios from 'axios';
 import { motion } from 'framer-motion';
 import { getCountries } from 'libphonenumber-js';
 import { FaEye, FaEyeSlash } from 'react-icons/fa';
+import { debounce } from 'lodash';
 
 const LoginScreen = ({ setAuth }) => {
   const [email, setEmail] = useState('');
@@ -17,7 +18,9 @@ const LoginScreen = ({ setAuth }) => {
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [isCountryInputFocused, setIsCountryInputFocused] = useState(false);
+  const [photo, setPhoto] = useState(null);
   const countryInputRef = useRef(null);
+  const fileInputRef = useRef(null);
 
   let countries = [];
   try {
@@ -56,31 +59,41 @@ const LoginScreen = ({ setAuth }) => {
         setError('Passwords do not match');
         return false;
       }
+      if (photo && !['image/jpeg', 'image/png', 'image/gif'].includes(photo.type)) {
+        setError('Photo must be JPEG, PNG, or GIF');
+        return false;
+      }
+      if (photo && photo.size > 50 * 1024 * 1024) {
+        setError('Photo must be under 50MB');
+        return false;
+      }
     }
     return true;
   };
 
   const checkLocation = async (selectedCountry) => {
-    if (isLogin) return true; // Skip for login
+    if (isLogin) return true;
     try {
       const position = await new Promise((resolve, reject) => {
-        navigator.geolocation.getCurrentPosition(resolve, reject);
+        navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 10000 });
       });
       const { latitude, longitude } = position.coords;
-      const response = await axios.get(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=en`);
+      const response = await axios.get(
+        `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=en`
+      );
       const currentCountryCode = response.data.countryCode;
       if (currentCountryCode !== selectedCountry) {
-        setError('Selected country does not match your current location.');
-        return false;
+        setError('Selected country does not match your current location. Proceed anyway?');
+        return window.confirm('Selected country does not match your location. Continue?');
       }
       return true;
     } catch (err) {
-      setError('Unable to detect location. Please ensure you are in the selected country.');
-      return false;
+      console.warn('Location check failed:', err);
+      return window.confirm('Unable to detect location. Proceed with selected country?');
     }
   };
 
-  const retryRequest = async (data, config, retries = 5, delay = 1000) => {
+  const retryRequest = async (data, config, retries = 3, baseDelay = 1000) => {
     for (let i = 0; i < retries; i++) {
       try {
         const response = await axios.post(
@@ -97,13 +110,19 @@ const LoginScreen = ({ setAuth }) => {
           stack: err.stack,
           requestData: isLogin ? data : 'FormData (multipart)',
         });
-        if (isLogin && err.response?.status === 401 && 
-            (err.response?.data?.error === 'Email not registered' || 
-             err.response?.data?.error === 'Wrong password')) {
+        if (
+          isLogin &&
+          err.response?.status === 401 &&
+          (err.response?.data?.code === 'EMAIL_NOT_FOUND' || err.response?.data?.code === 'INVALID_PASSWORD')
+        ) {
           throw err;
         }
+        if (!isLogin && err.response?.status === 401) {
+          throw err; // Avoid retrying 401 for registration
+        }
         if ((err.response?.status === 429 || err.response?.status >= 500) && i < retries - 1) {
-          await new Promise((resolve) => setTimeout(resolve, delay * (i + 1)));
+          const delay = baseDelay * Math.pow(2, i); // Exponential backoff
+          await new Promise((resolve) => setTimeout(resolve, delay));
           continue;
         }
         throw err;
@@ -131,6 +150,7 @@ const LoginScreen = ({ setAuth }) => {
             formData.append('password', password);
             formData.append('username', username);
             formData.append('country', selectedCountry);
+            if (photo) formData.append('photo', photo);
             return formData;
           })();
 
@@ -140,15 +160,23 @@ const LoginScreen = ({ setAuth }) => {
 
       const response = await retryRequest(data, config);
 
-      localStorage.setItem('token', response.token);
-      localStorage.setItem('userId', response.userId);
-      localStorage.setItem('role', response.role);
-      localStorage.setItem('photo', response.photo || 'https://placehold.co/40x40');
-      localStorage.setItem('virtualNumber', response.virtualNumber || '');
-      localStorage.setItem('username', response.username);
-      localStorage.setItem('privateKey', response.privateKey || '');
+      // Store in sessionStorage for privateKey security
+      sessionStorage.setItem('token', response.token);
+      sessionStorage.setItem('userId', response.userId);
+      sessionStorage.setItem('role', response.role);
+      sessionStorage.setItem('photo', response.photo || 'https://placehold.co/40x40');
+      sessionStorage.setItem('virtualNumber', response.virtualNumber || '');
+      sessionStorage.setItem('username', response.username);
+      sessionStorage.setItem('privateKey', response.privateKey || '');
 
-      setAuth(response.token, response.userId, response.role, response.photo, response.virtualNumber, response.username);
+      setAuth(
+        response.token,
+        response.userId,
+        response.role,
+        response.photo,
+        response.virtualNumber,
+        response.username
+      );
     } catch (error) {
       console.error(`${isLogin ? 'Login' : 'Register'} error:`, {
         status: error.response?.status,
@@ -157,7 +185,15 @@ const LoginScreen = ({ setAuth }) => {
         stack: error.stack,
       });
       const errorMessage =
-        error.response?.status === 429
+        error.response?.data?.code === 'EMAIL_NOT_FOUND'
+          ? 'Email not registered'
+          : error.response?.data?.code === 'INVALID_PASSWORD'
+          ? 'Incorrect password'
+          : error.response?.data?.code === 'DUPLICATE_USER'
+          ? 'Email or username already exists'
+          : error.response?.data?.code === 'DUPLICATE_KEY'
+          ? 'Email, username, or virtual number already exists'
+          : error.response?.status === 429
           ? 'Too many requests, please try again later'
           : error.response?.data?.error ||
             error.response?.data?.details ||
@@ -177,9 +213,11 @@ const LoginScreen = ({ setAuth }) => {
     setSelectedCountry('');
     setSearch('');
     setError('');
+    setPhoto(null);
     setShowPassword(false);
     setShowConfirmPassword(false);
     setIsCountryInputFocused(false);
+    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   const handleCountrySelect = (country) => {
@@ -197,11 +235,16 @@ const LoginScreen = ({ setAuth }) => {
     }
   };
 
-  const handleCountryChange = (e) => {
-    setSearch(e.target.value);
+  const debouncedHandleCountryChange = debounce((value) => {
+    setSearch(value);
     if (selectedCountry) {
-      setSelectedCountry(''); // Reset selectedCountry when user types (e.g., backspace)
+      setSelectedCountry('');
     }
+  }, 300);
+
+  const handleCountryChange = (e) => {
+    debouncedHandleCountryChange(e.target.value);
+    setError('');
   };
 
   useEffect(() => {
@@ -219,7 +262,7 @@ const LoginScreen = ({ setAuth }) => {
   }, [filteredCountries, search]);
 
   const getCountryInputValue = () => {
-    if (search) return search; // Prioritize search text when typing
+    if (search) return search;
     if (selectedCountry) {
       const country = countries.find((c) => c.code === selectedCountry);
       return country ? country.name : '';
@@ -245,10 +288,14 @@ const LoginScreen = ({ setAuth }) => {
               <input
                 type="text"
                 value={username}
-                onChange={(e) => setUsername(e.target.value)}
+                onChange={(e) => {
+                  setUsername(e.target.value);
+                  setError('');
+                }}
                 className="w-full p-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600"
                 placeholder="Username (3-20 characters)"
                 disabled={loading}
+                aria-label="Username"
               />
               <div className="relative" ref={countryInputRef}>
                 <input
@@ -260,16 +307,19 @@ const LoginScreen = ({ setAuth }) => {
                   className="w-full p-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600"
                   placeholder="Select a country"
                   disabled={loading}
+                  aria-label="Select country"
                 />
                 {isCountryInputFocused && (
                   <div className="absolute z-10 w-full mt-1 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg shadow-lg max-h-40 overflow-y-auto">
-                    <ul>
+                    <ul role="listbox">
                       {filteredCountries.length > 0 ? (
                         filteredCountries.map((c, index) => (
                           <li
                             key={c.code}
                             onClick={() => handleCountrySelect(c)}
                             className={`p-2 cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-600 ${index === 0 ? 'bg-gray-100 dark:bg-gray-600' : ''}`}
+                            role="option"
+                            aria-selected={index === 0}
                           >
                             {c.name}
                           </li>
@@ -281,32 +331,53 @@ const LoginScreen = ({ setAuth }) => {
                   </div>
                 )}
               </div>
+              <input
+                type="file"
+                accept="image/jpeg,image/png,image/gif"
+                onChange={(e) => {
+                  setPhoto(e.target.files[0]);
+                  setError('');
+                }}
+                ref={fileInputRef}
+                className="w-full p-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600"
+                disabled={loading}
+                aria-label="Profile photo"
+              />
             </>
           )}
           <input
             type="email"
             value={email}
-            onChange={(e) => setEmail(e.target.value)}
+            onChange={(e) => {
+              setEmail(e.target.value);
+              setError('');
+            }}
             className="w-full p-2 border rounded-md dark:bg-gray-700 dark:text-white dark:border-gray-600"
             placeholder="Email"
             required
             disabled={loading}
+            aria-label="Email"
           />
           <div className="relative">
             <input
               type={showPassword ? 'text' : 'password'}
               value={password}
-              onChange={(e) => setPassword(e.target.value)}
+              onChange={(e) => {
+                setPassword(e.target.value);
+                setError('');
+              }}
               className="w-full p-2 border rounded-md dark:bg-gray-700 dark:text-white dark:border-gray-600"
               placeholder="Password (min 6 characters)"
               required
               disabled={loading}
+              aria-label="Password"
             />
             <button
               type="button"
               onClick={() => setShowPassword(!showPassword)}
               className="absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-500 dark:text-gray-300"
               disabled={loading}
+              aria-label={showPassword ? 'Hide password' : 'Show password'}
             >
               {showPassword ? <FaEyeSlash size={20} /> : <FaEye size={20} />}
             </button>
@@ -316,17 +387,22 @@ const LoginScreen = ({ setAuth }) => {
               <input
                 type={showConfirmPassword ? 'text' : 'password'}
                 value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
+                onChange={(e) => {
+                  setConfirmPassword(e.target.value);
+                  setError('');
+                }}
                 className="w-full p-2 border rounded-md dark:bg-gray-700 dark:text-white dark:border-gray-600"
                 placeholder="Confirm Password"
                 required
                 disabled={loading}
+                aria-label="Confirm Password"
               />
               <button
                 type="button"
                 onClick={() => setShowConfirmPassword(!showConfirmPassword)}
                 className="absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-500 dark:text-gray-300"
                 disabled={loading}
+                aria-label={showConfirmPassword ? 'Hide confirm password' : 'Show confirm password'}
               >
                 {showConfirmPassword ? <FaEyeSlash size={20} /> : <FaEye size={20} />}
               </button>
@@ -336,6 +412,7 @@ const LoginScreen = ({ setAuth }) => {
             type="submit"
             className={`w-full bg-primary text-white p-2 rounded-lg hover:bg-secondary ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}
             disabled={loading}
+            aria-label={isLogin ? 'Login' : 'Register'}
           >
             {loading ? 'Processing...' : isLogin ? 'Login' : 'Register'}
           </button>
@@ -350,6 +427,14 @@ const LoginScreen = ({ setAuth }) => {
               }
             }}
             className={`text-primary cursor-pointer hover:underline ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !loading) {
+                setIsLogin(!isLogin);
+                resetInputs();
+              }
+            }}
           >
             {isLogin ? 'Register' : 'Login'}
           </span>
