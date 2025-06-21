@@ -8,9 +8,9 @@ const { getCountryCallingCode, parsePhoneNumberFromString } = require('libphonen
 const Joi = require('joi');
 const winston = require('winston');
 const rateLimit = require('express-rate-limit');
-const mongoose = require('mongoose'); // Added for ObjectId validation
+const mongoose = require('mongoose');
 const User = require('../models/User');
-const TokenBlacklist = require('../models/TokenBlacklist'); // Import TokenBlacklist model
+const TokenBlacklist = require('../models/TokenBlacklist');
 
 const router = express.Router();
 
@@ -84,37 +84,55 @@ const authLimiter = rateLimit({
   },
 });
 
-// Updated authMiddleware with TokenBlacklist check
+// Updated authMiddleware
 const authMiddleware = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    logger.warn('No token provided', { method: req.method, url: req.url });
+    logger.warn('No token provided', { method: req.method, url: req.url, ip: req.ip });
     return res.status(401).json({ error: 'No token provided' });
   }
 
   const token = authHeader.split(' ')[1];
   try {
     // Check if token is blacklisted
-    const blacklisted = await TokenBlacklist.findOne({ token });
+    const blacklisted = await TokenBlacklist.findOne({ token }).lean();
     if (blacklisted) {
-      logger.warn('Blacklisted token used', { token: token.substring(0, 10) + '...', url: req.url });
+      logger.warn('Blacklisted token used', { token: token.substring(0, 10) + '...', url: req.url, ip: req.ip });
       return res.status(401).json({ error: 'Token is blacklisted' });
     }
 
+    // Verify JWT token
     const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
-    if (!mongoose.isValidObjectId(decoded.id)) {
-      logger.warn('Invalid user ID in token', { userId: decoded.id, url: req.url });
-      return res.status(401).json({ error: 'Invalid token' });
+    if (!decoded.id || !mongoose.isValidObjectId(decoded.id)) {
+      logger.warn('Invalid or missing user ID in token', { userId: decoded.id, url: req.url, ip: req.ip });
+      return res.status(401).json({ error: 'Invalid token: Invalid user ID' });
     }
 
-    req.user = decoded;
-    req.token = token; // Store token for blacklisting in routes like logout/refresh
+    // Verify user exists in database
+    const user = await User.findById(decoded.id).select('_id email virtualNumber role').lean();
+    if (!user) {
+      logger.warn('User not found for token', { userId: decoded.id, url: req.url, ip: req.ip });
+      return res.status(401).json({ error: 'Invalid token: User not found' });
+    }
+
+    // Set req.user and req.token
+    req.user = {
+      _id: user._id.toString(),
+      id: user._id.toString(),
+      email: user.email,
+      virtualNumber: user.virtualNumber,
+      role: user.role,
+    };
+    req.token = token;
+    logger.info('Authentication successful', { userId: user._id, url: req.url, ip: req.ip });
     next();
   } catch (error) {
-    logger.error('Auth middleware error:', {
+    logger.error('Auth middleware error', {
       error: error.message,
       token: token.substring(0, 10) + '...',
       url: req.url,
+      ip: req.ip,
+      stack: error.stack,
     });
     res.status(401).json({ error: 'Invalid token', details: error.message });
   }

@@ -10,7 +10,7 @@ const rateLimit = require('express-rate-limit');
 const User = require('../models/User');
 const { authMiddleware } = require('./auth');
 const Message = require('../models/Message');
-const TokenBlacklist = require('../models/TokenBlacklist'); // Import TokenBlacklist
+const TokenBlacklist = require('../models/TokenBlacklist');
 const router = express.Router();
 
 const logger = winston.createLogger({
@@ -145,7 +145,6 @@ const deleteUserSchema = Joi.object({
     return value;
   }, 'ObjectId validation').required(),
 });
-
 
 // Cache for chat lists
 const chatListCache = new Map();
@@ -513,6 +512,11 @@ module.exports = (app) => {
 
   router.post('/messages', authMiddleware, async (req, res) => {
     try {
+      // Check if req.user is defined
+      if (!req.user || !req.user._id) {
+        logger.warn('User not authenticated in messages request', { senderId: req.body.senderId });
+        return res.status(401).json({ error: 'Unauthorized: User not authenticated' });
+      }
       const { error } = messageSchema.validate(req.body);
       if (error) {
         logger.warn('Invalid message data', { error: error.details[0].message, userId: req.body.senderId });
@@ -574,6 +578,11 @@ module.exports = (app) => {
   router.get('/chat-list', authMiddleware, async (req, res) => {
     const { userId } = req.query;
     try {
+      // Check if req.user is defined
+      if (!req.user || !req.user._id) {
+        logger.warn('User not authenticated in chat-list request', { userId });
+        return res.status(401).json({ error: 'Unauthorized: User not authenticated' });
+      }
       if (!mongoose.isValidObjectId(userId) || userId !== req.user._id.toString()) {
         logger.warn('Invalid or unauthorized chat-list request', { userId, authUserId: req.user._id });
         return res.status(400).json({ error: 'Invalid or unauthorized request' });
@@ -652,6 +661,11 @@ module.exports = (app) => {
   router.get('/messages', authMiddleware, async (req, res) => {
     const { userId, recipientId, limit = 50, skip = 0 } = req.query;
     try {
+      // Check if req.user is defined
+      if (!req.user || !req.user._id) {
+        logger.warn('User not authenticated in messages fetch request', { userId, recipientId });
+        return res.status(401).json({ error: 'Unauthorized: User not authenticated' });
+      }
       if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId) || userId !== req.user._id.toString()) {
         logger.warn('Invalid or unauthorized messages request', { userId, recipientId, authUserId: req.user._id });
         return res.status(400).json({ error: 'Invalid or unauthorized request' });
@@ -685,6 +699,11 @@ module.exports = (app) => {
 
   router.post('/add_contact', authMiddleware, addContactLimiter, async (req, res) => {
     try {
+      // Check if req.user is defined
+      if (!req.user || !req.user._id) {
+        logger.warn('User not authenticated in add_contact request', { userId: req.body.userId });
+        return res.status(401).json({ error: 'Unauthorized: User not authenticated' });
+      }
       const { error } = addContactSchema.validate(req.body);
       if (error) {
         logger.warn('Invalid request body', { error: error.details[0].message, userId: req.body.userId });
@@ -766,6 +785,11 @@ module.exports = (app) => {
 
   router.post('/upload', authMiddleware, uploadLimiter, upload.single('file'), async (req, res) => {
     try {
+      // Check if req.user is defined
+      if (!req.user || !req.user._id) {
+        logger.warn('User not authenticated in upload request', { userId: req.body.userId });
+        return res.status(401).json({ error: 'Unauthorized: User not authenticated' });
+      }
       const { userId, recipientId, clientMessageId, senderVirtualNumber, senderUsername, senderPhoto, caption } = req.body;
       if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId) || !clientMessageId || !req.file || userId !== req.user._id.toString()) {
         logger.warn('Invalid upload parameters', { userId, recipientId, clientMessageId, hasFile: !!req.file });
@@ -824,6 +848,11 @@ module.exports = (app) => {
 
   router.post('/delete_user', authMiddleware, async (req, res) => {
     try {
+      // Check if req.user is defined
+      if (!req.user || !req.user._id) {
+        logger.warn('User not authenticated in delete_user request', { userId: req.body.userId });
+        return res.status(401).json({ error: 'Unauthorized: User not authenticated' });
+      }
       const { error } = deleteUserSchema.validate(req.body);
       if (error) {
         logger.warn('Invalid delete user request', { error: error.details[0].message, userId: req.body.userId });

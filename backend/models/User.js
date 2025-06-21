@@ -93,11 +93,6 @@ const userSchema = new mongoose.Schema({
   timestamps: true,
 });
 
-// Indexes
-userSchema.index({ email: 1 }, { unique: true });
-userSchema.index({ username: 1 }, { unique: true });
-userSchema.index({ virtualNumber: 1 }, { unique: true, sparse: true });
-
 // Pre-save hook
 userSchema.pre('save', async function (next) {
   try {
@@ -119,6 +114,7 @@ userSchema.pre('save', async function (next) {
       }
       this.contacts = validContacts;
     }
+    logger.info('User pre-save validation completed', { userId: this._id?.toString() });
     next();
   } catch (error) {
     logger.error('User pre-save failed', {
