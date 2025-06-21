@@ -250,7 +250,7 @@ module.exports = (app) => {
         logger.warn('User not found for Socket.IO', { userId: decoded.userId || decoded.id, socketId: socket.id });
         return next(new Error('User not found'));
       }
-      const blacklisted = await mongoose.model('TokenBlacklist').findOne({ token }).select('_id').lean();
+      const blacklisted = await TokenBlacklist.findOne({ token }).select('_id').lean();
       if (blacklisted) {
         logger.warn('Blacklisted token used for Socket.IO', { userId: decoded.userId || decoded.id, socketId: socket.id });
         return next(new Error('Token invalidated'));
@@ -274,6 +274,24 @@ module.exports = (app) => {
       socket.join(userId);
       await User.findByIdAndUpdate(userId, { status: 'online', lastSeen: new Date() }, { new: true, lean: true });
       io.to(userId).emit('userStatus', { userId, status: 'online', lastSeen: new Date() });
+      
+      // --- Updated: Emit pending messages when user joins ---
+      const pendingMessages = await Message.find({
+        recipientId: userId,
+        status: { $in: ['sent', 'delivered'] },
+      })
+        .populate('senderId', 'username virtualNumber photo')
+        .populate('recipientId', 'username virtualNumber photo')
+        .populate('replyTo', 'content contentType senderId recipientId createdAt')
+        .lean();
+      if (pendingMessages.length) {
+        pendingMessages.forEach((message) => {
+          io.to(userId).emit('message', message);
+        });
+        logger.info('Emitted pending messages', { userId, count: pendingMessages.length });
+      }
+      // --- End Update ---
+
       await emitUpdatedChatList(io, userId);
       logger.info('User joined room', { socketId: socket.id, userId });
     });
@@ -512,7 +530,6 @@ module.exports = (app) => {
 
   router.post('/messages', authMiddleware, async (req, res) => {
     try {
-      // Check if req.user is defined
       if (!req.user || !req.user._id) {
         logger.warn('User not authenticated in messages request', { senderId: req.body.senderId });
         return res.status(401).json({ error: 'Unauthorized: User not authenticated' });
@@ -578,7 +595,6 @@ module.exports = (app) => {
   router.get('/chat-list', authMiddleware, async (req, res) => {
     const { userId } = req.query;
     try {
-      // Check if req.user is defined
       if (!req.user || !req.user._id) {
         logger.warn('User not authenticated in chat-list request', { userId });
         return res.status(401).json({ error: 'Unauthorized: User not authenticated' });
@@ -661,7 +677,6 @@ module.exports = (app) => {
   router.get('/messages', authMiddleware, async (req, res) => {
     const { userId, recipientId, limit = 50, skip = 0 } = req.query;
     try {
-      // Check if req.user is defined
       if (!req.user || !req.user._id) {
         logger.warn('User not authenticated in messages fetch request', { userId, recipientId });
         return res.status(401).json({ error: 'Unauthorized: User not authenticated' });
@@ -699,7 +714,6 @@ module.exports = (app) => {
 
   router.post('/add_contact', authMiddleware, addContactLimiter, async (req, res) => {
     try {
-      // Check if req.user is defined
       if (!req.user || !req.user._id) {
         logger.warn('User not authenticated in add_contact request', { userId: req.body.userId });
         return res.status(401).json({ error: 'Unauthorized: User not authenticated' });
@@ -785,7 +799,6 @@ module.exports = (app) => {
 
   router.post('/upload', authMiddleware, uploadLimiter, upload.single('file'), async (req, res) => {
     try {
-      // Check if req.user is defined
       if (!req.user || !req.user._id) {
         logger.warn('User not authenticated in upload request', { userId: req.body.userId });
         return res.status(401).json({ error: 'Unauthorized: User not authenticated' });
@@ -848,7 +861,6 @@ module.exports = (app) => {
 
   router.post('/delete_user', authMiddleware, async (req, res) => {
     try {
-      // Check if req.user is defined
       if (!req.user || !req.user._id) {
         logger.warn('User not authenticated in delete_user request', { userId: req.body.userId });
         return res.status(401).json({ error: 'Unauthorized: User not authenticated' });
@@ -887,6 +899,34 @@ module.exports = (app) => {
       res.status(500).json({ error: 'Failed to delete user', details: err.message });
     }
   });
+
+  // --- Updated: Add /logout route to handle token blacklisting ---
+  router.post('/logout', authMiddleware, async (req, res) => {
+    try {
+      const token = req.token;
+      if (!token) {
+        logger.warn('No token provided for logout', { userId: req.user?.id });
+        return res.status(400).json({ error: 'No token provided' });
+      }
+
+      // Check if token is already blacklisted
+      const blacklisted = await TokenBlacklist.findOne({ token }).lean();
+      if (blacklisted) {
+        logger.info('Token already blacklisted', { userId: req.user.id });
+        return res.status(200).json({ message: 'Already logged out' });
+      }
+
+      // Blacklist the token
+      await TokenBlacklist.create({ token });
+      logger.info('Token blacklisted during logout', { userId: req.user.id });
+      io.to(req.user.id).emit('userStatus', { userId: req.user.id, status: 'offline', lastSeen: new Date() });
+      res.status(200).json({ message: 'Logged out successfully' });
+    } catch (error) {
+      logger.error('Logout error:', { error: error.message, userId: req.user?.id, stack: error.stack });
+      res.status(500).json({ error: 'Failed to logout', details: error.message });
+    }
+  });
+  // --- End Update ---
 
   router.post('/log-error', async (req, res) => {
     try {

@@ -8,7 +8,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import Picker from 'emoji-picker-react';
 import { VariableSizeList } from 'react-window';
 import AutoSizer from 'react-virtualized-auto-sizer';
-import { setMessages, addMessage, replaceMessage, updateMessageStatus, setSelectedChat, resetState } from '../store';
+import { setMessages, addMessage, replaceMessage, updateMessageStatus, setSelectedChat, resetState, setAuth, clearAuth } from '../store';
 import './ChatScreen.css';
 
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
@@ -43,7 +43,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   const typingTimeoutRef = useRef(null);
   const typingDebounceRef = useRef(null);
   const sentStatusesRef = useRef(new Set());
-  const retryCountRef = useRef({ chatList: 0, addContact: 0 });
+  const retryCountRef = useRef({ chatList: 0, addContact: 0, messages: 0 }); // --- Updated: Add messages retry ---
   const maxRetries = 3;
 
   useEffect(() => {
@@ -72,31 +72,6 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     }
   }, [userId]);
 
-
-
-  const handleLogout = useCallback(async () => {
-  try {
-    if (socket) {
-      socket.emit('leave', userId);
-      await axios.post(`${BASE_URL}/auth/logout`, {}, {
-        headers: { Authorization: `Bearer ${token}` },
-        timeout: 5000,
-      });
-      socket.disconnect();
-    }
-    sessionStorage.clear(); // Clear session storage
-    dispatch(clearAuth()); // Clear auth state
-    dispatch(setSelectedChat(null)); // Reset selected chat
-    setAuth('', '', '', '', '', '');
-    setChatList([]);
-    navigate('/');
-  } catch (err) {
-    console.error('handleLogout error:', err.message);
-    setError('Failed to logout');
-    logClientError('Logout failed', err);
-  }
-}, [socket, userId, setAuth, token, navigate, dispatch, logClientError]);
-
   const getPublicKey = useCallback(async (recipientId) => {
     if (!isValidObjectId(recipientId)) throw new Error('Invalid recipientId');
     const cacheKey = `publicKey:${recipientId}`;
@@ -119,7 +94,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       logClientError('Failed to fetch public key', err);
       throw new Error('Failed to fetch public key');
     }
-  }, [token, handleLogout, logClientError]);
+  }, [token, logClientError]); // --- Updated: Remove handleLogout dependency ---
 
   const encryptMessage = useCallback(async (content, recipientPublicKey, isMedia = false) => {
     if (!isForgeReady || !recipientPublicKey) {
@@ -149,16 +124,33 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     if (!isForgeReady) return;
     setIsLoadingChatList(true);
     try {
+      const cacheKey = `chatList:${userId}`;
+      const cached = sessionStorage.getItem(cacheKey);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (parsed.timestamp > Date.now() - 5 * 60 * 1000) {
+          setChatList(parsed.chatList.map((chat) => ({
+            ...chat,
+            _id: chat.id,
+            unreadCount: unreadMessages[chat.id] || chat.unreadCount || 0,
+          })));
+          setError('');
+          setIsLoadingChatList(false);
+          return;
+        }
+      }
       const { data } = await axios.get(`${BASE_URL}/social/chat-list`, {
         headers: { Authorization: `Bearer ${token}` },
         params: { userId },
         timeout: 5000,
       });
-      setChatList(data.map((chat) => ({
+      const chatListData = data.map((chat) => ({
         ...chat,
         _id: chat.id,
         unreadCount: unreadMessages[chat.id] || chat.unreadCount || 0,
-      })));
+      }));
+      setChatList(chatListData);
+      sessionStorage.setItem(cacheKey, JSON.stringify({ chatList: chatListData, timestamp: Date.now() }));
       setError('');
       retryCountRef.current.chatList = 0;
     } catch (err) {
@@ -178,22 +170,83 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     } finally {
       setIsLoadingChatList(false);
     }
-  }, [isForgeReady, token, userId, handleLogout, unreadMessages, logClientError]);
+  }, [isForgeReady, token, userId, unreadMessages, logClientError]); // --- Updated: Remove handleLogout dependency ---
 
-  const fetchMessages = useCallback(async (chatId) => {
-    if (!isForgeReady || !isValidObjectId(chatId)) return;
+  const handleLogout = useCallback(async () => {
+    try {
+      if (socket) {
+        socket.emit('leave', userId);
+        // --- Updated: Use /social/logout route ---
+        await axios.post(`${BASE_URL}/social/logout`, {}, {
+          headers: { Authorization: `Bearer ${token}` },
+          timeout: 5000,
+        });
+        socket.disconnect();
+      }
+      dispatch(clearAuth());
+      dispatch(resetState());
+      setAuth('', '', '', '', '', '');
+      // --- Updated: Do not clear chatList to preserve UI state ---
+      // setChatList([]);
+      navigate('/');
+    } catch (err) {
+      console.error('handleLogout error:', err.message);
+      // --- Updated: Handle 401 gracefully ---
+      if (err.response?.status === 401) {
+        console.log('Token already invalidated, proceeding with logout');
+        dispatch(clearAuth());
+        dispatch(resetState());
+        setAuth('', '', '', '', '', '');
+        navigate('/');
+      } else {
+        setError('Failed to logout');
+        logClientError('Logout failed', err);
+      }
+    }
+  }, [socket, userId, token, dispatch, setAuth, navigate, logClientError]);
+
+  const fetchMessages = useCallback(async (chatId, isRetry = false) => {
+    if (!isValidObjectId(chatId) || !token) return;
     try {
       const { data } = await axios.get(`${BASE_URL}/social/messages`, {
         headers: { Authorization: `Bearer ${token}` },
-        params: { userId, recipientId: chatId },
+        params: { userId, recipientId: chatId, limit: 50, skip: 0 },
         timeout: 5000,
       });
       dispatch(setMessages({ recipientId: chatId, messages: data.messages }));
+      // --- Updated: Update unread count ---
       setUnreadMessages((prev) => ({ ...prev, [chatId]: 0 }));
-      const unreadMessageIds = data.messages
+      retryCountRef.current.messages = 0;
+    } catch (err) {
+      console.error('fetchMessages error:', err.message, err.response?.data);
+      logClientError('Messages fetch failed', err);
+      if (err.response?.status === 401) {
+        setError('Session expired');
+        setTimeout(() => handleLogout(), 5000);
+      } else if (err.response?.status === 500 && !isRetry && retryCountRef.current.messages < maxRetries) {
+        retryCountRef.current.messages += 1;
+        setTimeout(() => fetchMessages(chatId, true), 1000 * retryCountRef.current.messages);
+        setError(`Retrying messages fetch (${retryCountRef.current.messages}/${maxRetries})...`);
+      } else {
+        setError(`Failed to load messages: ${err.response?.data?.error || 'Unknown error'}`);
+        retryCountRef.current.messages = 0;
+      }
+    }
+  }, [token, userId, dispatch, logClientError]); // --- Updated: Remove handleLogout dependency ---
+
+  const selectChat = useCallback((chatId) => {
+    dispatch(setSelectedChat(chatId));
+    setShowMenu(false);
+    setError('');
+    if (chatId && socket && isValidObjectId(chatId)) {
+      // --- Updated: Fetch messages only if not already loaded ---
+      if (!chats[chatId]) {
+        fetchMessages(chatId);
+      }
+      const unreadMessageIds = (chats[chatId] || [])
         .filter((m) => m.status !== 'read' && m.recipientId.toString() === userId && !sentStatusesRef.current.has(m._id))
         .map((m) => m._id);
-      if (unreadMessageIds.length && socket) {
+      if (unreadMessageIds.length) {
         socket.emit('batchMessageStatus', {
           messageIds: unreadMessageIds,
           status: 'read',
@@ -201,18 +254,10 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         });
         unreadMessageIds.forEach((id) => sentStatusesRef.current.add(id));
       }
-      listRef.current?.scrollToItem(data.messages.length, 'end');
-    } catch (err) {
-      console.error('fetchMessages error:', err.message, err.response?.data);
-      logClientError('Messages fetch failed', err);
-      if (err.response?.status === 401) {
-        setError('Session expired, please log in again');
-        setTimeout(() => handleLogout(), 5000);
-      } else {
-        setError(`Failed to load messages: ${err.response?.data?.error || 'Unknown error'}`);
-      }
+      setUnreadMessages((prev) => ({ ...prev, [chatId]: 0 }));
     }
-  }, [isForgeReady, token, userId, socket, dispatch, logClientError]);
+    inputRef.current?.focus();
+  }, [socket, chats, userId, dispatch, fetchMessages]);
 
   const sendMessage = useCallback(async () => {
     if (!isForgeReady || !message.trim() || !selectedChat || !isValidObjectId(selectedChat)) return;
@@ -410,7 +455,14 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       const senderId = typeof msg.senderId === 'object' ? msg.senderId._id.toString() : msg.senderId.toString();
       const recipientId = typeof msg.recipientId === 'object' ? msg.recipientId._id.toString() : msg.recipientId.toString();
       const targetId = senderId === userId ? recipientId : senderId;
-      dispatch(addMessage({ recipientId: targetId, message: msg }));
+      // --- Updated: Ensure plaintextContent is preserved ---
+      dispatch(addMessage({ 
+        recipientId: targetId, 
+        message: {
+          ...msg,
+          plaintextContent: msg.plaintextContent || '[Message not decrypted]',
+        }
+      }));
       if (selectedChat === targetId && document.hasFocus()) {
         if (!sentStatusesRef.current.has(msg._id)) {
           socket.emit('batchMessageStatus', {
@@ -471,26 +523,23 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     };
   }, [socket, isForgeReady, selectedChat, userId, chats, dispatch, unreadMessages, logClientError]);
 
- useEffect(() => {
-  if (!token || !userId) {
-    setError('Please log in to access chat');
-    setIsLoadingChatList(false);
-    return;
-  }
-  if (isForgeReady) {
-    console.log('Connecting to Socket.IO at:', BASE_URL);
-    socket.emit('join', userId);
-    fetchChatList();
-    // Fetch messages for persisted selectedChat on mount
-    if (selectedChat && isValidObjectId(selectedChat) && !chats[selectedChat]) {
-      fetchMessages(selectedChat);
+  useEffect(() => {
+    if (!token || !userId) {
+      setError('Please log in to access chat');
+      setIsLoadingChatList(false);
+      return;
     }
-  }
-}, [token, userId, isForgeReady, fetchChatList, socket, selectedChat, fetchMessages, chats]);
+    if (isForgeReady) {
+      console.log('Connecting to Socket.IO at:', BASE_URL);
+      socket.emit('join', userId);
+      fetchChatList();
+      // --- Updated: Fetch messages for persisted selectedChat only if not loaded ---
+      if (selectedChat && isValidObjectId(selectedChat) && !chats[selectedChat]) {
+        fetchMessages(selectedChat);
+      }
+    }
+  }, [token, userId, isForgeReady, fetchChatList, socket, selectedChat, fetchMessages, chats]);
 
-
-
-  
   useEffect(() => {
     const handleClickOutside = (e) => {
       if (menuRef.current && !menuRef.current.contains(e.target)) {
@@ -515,27 +564,6 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       }, 3000);
     }, 500);
   }, [socket, selectedChat, userId]);
-
-  const selectChat = useCallback((chatId) => {
-    dispatch(setSelectedChat(chatId));
-    setShowMenu(false);
-    setError('');
-    if (chatId && socket) {
-      const unreadMessageIds = (chats[chatId] || [])
-        .filter((m) => m.status !== 'read' && m.recipientId.toString() === userId && !sentStatusesRef.current.has(m._id))
-        .map((m) => m._id);
-      if (unreadMessageIds.length) {
-        socket.emit('batchMessageStatus', {
-          messageIds: unreadMessageIds,
-          status: 'read',
-          recipientId: userId,
-        });
-        unreadMessageIds.forEach((id) => sentStatusesRef.current.add(id));
-      }
-      setUnreadMessages((prev) => ({ ...prev, [chatId]: 0 }));
-    }
-    inputRef.current?.focus();
-  }, [socket, chats, userId, dispatch]);
 
   const getItemSize = useCallback(
     (index) => {
