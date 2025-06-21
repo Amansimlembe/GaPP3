@@ -60,6 +60,19 @@ const messageSlice = createSlice({
           clientMessageId: msg.clientMessageId || msg._id,
           content: msg.content || '',
           status: msg.status || 'pending',
+          // --- Updated: Ensure consistent message structure ---
+          senderId: msg.senderId,
+          recipientId: msg.recipientId,
+          contentType: msg.contentType || 'text',
+          plaintextContent: msg.plaintextContent || '',
+          caption: msg.caption || undefined,
+          replyTo: msg.replyTo && isValidObjectId(msg.replyTo) ? msg.replyTo : null,
+          originalFilename: msg.originalFilename || undefined,
+          senderVirtualNumber: msg.senderVirtualNumber || undefined,
+          senderUsername: msg.senderUsername || undefined,
+          senderPhoto: msg.senderPhoto || undefined,
+          createdAt: msg.createdAt ? new Date(msg.createdAt) : new Date(),
+          updatedAt: msg.updatedAt ? new Date(msg.updatedAt) : undefined,
         })),
       };
       console.log(`Set ${messages.length} messages for ${recipientId}`);
@@ -146,9 +159,10 @@ const messageSlice = createSlice({
         console.warn(`Invalid recipientId: ${recipientId}`);
       }
     },
-    resetState: () => {
-      console.log('Reset messages state');
-      return { chats: {}, selectedChat: null };
+    resetState: (state) => {
+      // --- Updated: Preserve chats state instead of clearing ---
+      console.log('Reset messages state, preserving chats');
+      state.selectedChat = null;
     },
   },
 });
@@ -165,14 +179,12 @@ export const {
 
 export const { setAuth, clearAuth } = authSlice.actions;
 
-
-
-
 const persistenceMiddleware = (store) => (next) => (action) => {
   const result = next(action);
   const actionsToPersist = [setSelectedChat.type, setAuth.type, setMessages.type, addMessage.type, replaceMessage.type, updateMessageStatus.type, deleteMessage.type];
 
   if (actionsToPersist.includes(action.type)) {
+    // --- Updated: Throttle persistence to avoid excessive writes ---
     requestAnimationFrame(() => {
       const state = store.getState();
       try {
@@ -222,27 +234,32 @@ const persistenceMiddleware = (store) => (next) => (action) => {
       }
     });
   } else if (action.type === clearAuth.type || action.type === resetState.type) {
-    // Clear only auth-related data, keep messages in localStorage
+    // --- Updated: Preserve messages state explicitly ---
     const state = store.getState();
-    localStorage.setItem('reduxState', JSON.stringify({
-      messages: state.messages,
-      auth: {
-        token: null,
-        userId: null,
-        role: null,
-        photo: null,
-        virtualNumber: null,
-        username: null,
-        privateKey: null,
-      },
-    }));
-    console.log('Cleared auth state, preserved messages');
+    try {
+      localStorage.setItem('reduxState', JSON.stringify({
+        messages: {
+          selectedChat: null,
+          chats: state.messages.chats,
+        },
+        auth: {
+          token: null,
+          userId: null,
+          role: null,
+          photo: null,
+          virtualNumber: null,
+          username: null,
+          privateKey: null,
+        },
+      }));
+      console.log('Cleared auth state, preserved messages');
+    } catch (error) {
+      console.error('Failed to persist state during clearAuth/resetState:', error);
+    }
   }
 
-  return result
+  return result;
 };
-
-
 
 const loadPersistedState = () => {
   try {
@@ -259,32 +276,48 @@ const loadPersistedState = () => {
         const chats = Object.keys(parsedState.messages.chats).reduce((acc, recipientId) => {
           if (isValidObjectId(recipientId)) {
             acc[recipientId] = parsedState.messages.chats[recipientId].filter(
-              (msg) => msg._id && msg.clientMessageId && isValidObjectId(msg.senderId) && isValidObjectId(msg.recipientId)
+              (msg) =>
+                msg._id &&
+                msg.clientMessageId &&
+                isValidObjectId(msg.senderId) &&
+                isValidObjectId(msg.recipientId) &&
+                ['sent', 'delivered', 'read', 'pending'].includes(msg.status) // --- Updated: Validate status ---
             ).map((msg) => ({
               ...msg,
+              content: msg.content || '',
+              contentType: msg.contentType || 'text',
+              plaintextContent: msg.plaintextContent || '',
+              status: msg.status || 'pending',
+              caption: msg.caption || undefined,
+              replyTo: msg.replyTo && isValidObjectId(msg.replyTo) ? msg.replyTo : null,
+              originalFilename: msg.originalFilename || undefined,
+              senderVirtualNumber: msg.senderVirtualNumber || undefined,
+              senderUsername: msg.senderUsername || undefined,
+              senderPhoto: msg.senderPhoto || undefined,
               createdAt: msg.createdAt ? new Date(msg.createdAt) : new Date(),
               updatedAt: msg.updatedAt ? new Date(msg.updatedAt) : undefined,
-              replyTo: msg.replyTo && isValidObjectId(msg.replyTo) ? msg.replyTo : null,
             }));
           }
           return acc;
         }, {});
+        // --- Updated: Validate auth fields ---
+        const auth = {
+          token: typeof parsedState.auth.token === 'string' ? parsedState.auth.token : null,
+          userId: isValidObjectId(parsedState.auth.userId) ? parsedState.auth.userId : null,
+          role: typeof parsedState.auth.role === 'string' ? parsedState.auth.role : null,
+          photo: typeof parsedState.auth.photo === 'string' ? parsedState.auth.photo : null,
+          virtualNumber: typeof parsedState.auth.virtualNumber === 'string' ? parsedState.auth.virtualNumber : null,
+          username: typeof parsedState.auth.username === 'string' ? parsedState.auth.username : null,
+          privateKey: null,
+        };
         console.log('Loaded persisted state:', {
           selectedChat: parsedState.messages.selectedChat,
-          userId: parsedState.auth.userId,
+          userId: auth.userId,
           chatCount: Object.keys(chats).length,
         });
         return {
           messages: { selectedChat: parsedState.messages.selectedChat, chats },
-          auth: {
-            token: parsedState.auth.token || null,
-            userId: parsedState.auth.userId || null,
-            role: parsedState.auth.role || null,
-            photo: parsedState.auth.photo || null,
-            virtualNumber: parsedState.auth.virtualNumber || null,
-            username: parsedState.auth.username || null,
-            privateKey: null,
-          },
+          auth,
         };
       }
       console.warn('Invalid persisted state format');
@@ -292,10 +325,44 @@ const loadPersistedState = () => {
   } catch (error) {
     console.error('Failed to load persisted state:', error);
   }
+  // --- Updated: Clear invalid state but preserve valid messages if possible ---
+  try {
+    const persistedState = localStorage.getItem('reduxState');
+    if (persistedState) {
+      const parsedState = JSON.parse(persistedState);
+      if (parsedState.messages && parsedState.messages.chats) {
+        const chats = Object.keys(parsedState.messages.chats).reduce((acc, recipientId) => {
+          if (isValidObjectId(recipientId)) {
+            acc[recipientId] = parsedState.messages.chats[recipientId].filter(
+              (msg) =>
+                msg._id &&
+                msg.clientMessageId &&
+                isValidObjectId(msg.senderId) &&
+                isValidObjectId(msg.recipientId)
+            );
+          }
+          return acc;
+        }, {});
+        localStorage.setItem(
+          'reduxState',
+          JSON.stringify({
+            messages: { selectedChat: null, chats },
+            auth: authSlice.getInitialState(),
+          })
+        );
+        console.log('Preserved valid messages, cleared invalid state');
+        return {
+          messages: { selectedChat: null, chats },
+          auth: authSlice.getInitialState(),
+        };
+      }
+    }
+  } catch (error) {
+    console.error('Failed to recover partial state:', error);
+  }
   localStorage.removeItem('reduxState');
   return undefined;
 };
-
 
 export const store = configureStore({
   reducer: {
