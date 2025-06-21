@@ -229,6 +229,12 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     }
   }, [isForgeReady, message, selectedChat, userId, virtualNumber, username, photo, socket, getPublicKey, encryptMessage, dispatch, chats]);
 
+
+
+
+
+  
+
   const handleAddContact = useCallback(async () => {
     if (!contactInput.trim()) {
       setContactError('Please enter a virtual number');
@@ -245,19 +251,24 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         { userId, virtualNumber: contactInput.trim() },
         { headers: { Authorization: `Bearer ${token}` }, timeout: 5000 }
       );
+      console.log('Add contact response:', response.data); // Debug log
+      const newChat = {
+        id: response.data.id,
+        _id: response.data.id,
+        username: response.data.username || 'Unknown',
+        virtualNumber: response.data.virtualNumber || '',
+        photo: response.data.photo || 'https://placehold.co/40x40',
+        status: response.data.status || 'offline',
+        lastSeen: response.data.lastSeen || null,
+        latestMessage: null,
+        unreadCount: unreadMessages[response.data.id] || 0,
+      };
       setChatList((prev) => {
-        if (prev.find((chat) => chat.id === response.data.id)) return prev;
-        const newChat = {
-          id: response.data.id,
-          _id: response.data.id,
-          username: response.data.username || 'Unknown',
-          virtualNumber: response.data.virtualNumber || '',
-          photo: response.data.photo || 'https://placehold.co/40x40',
-          status: response.data.status || 'offline',
-          lastSeen: response.data.lastSeen || null,
-          latestMessage: null,
-          unreadCount: unreadMessages[response.data.id] || 0,
-        };
+        if (prev.find((chat) => chat.id === newChat.id)) {
+          console.log('Contact already in chat list:', newChat.id);
+          return prev;
+        }
+        console.log('Adding new contact to chat list:', newChat);
         return [...prev, newChat];
       });
       setContactInput('');
@@ -265,7 +276,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       setShowAddContact(false);
       setError('');
     } catch (err) {
-      console.error('handleAddContact error:', err.message);
+      console.error('handleAddContact error:', err.message, err.response?.data);
       const errorMsg = err.response?.data?.error || 'Failed to add contact';
       setContactError(errorMsg);
       if (err.response?.status === 500 && retryCountRef.current < maxRetries) {
@@ -284,12 +295,16 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     if (!socket || !isForgeReady || !userId) return;
 
     const handleNewContact = ({ userId: emitterId, contactData }) => {
+      console.log('Received contactData event:', { emitterId, contactData }); // Debug log
       if (!contactData?.id || !isValidObjectId(contactData.id)) {
         console.error('Invalid contactData received:', contactData);
         return;
       }
       setChatList((prev) => {
-        if (prev.find((chat) => chat.id === contactData.id)) return prev;
+        if (prev.find((chat) => chat.id === contactData.id)) {
+          console.log('Contact already exists in chat list:', contactData.id);
+          return prev;
+        }
         const newChat = {
           id: contactData.id,
           _id: contactData.id,
@@ -301,16 +316,26 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
           latestMessage: null,
           unreadCount: unreadMessages[contactData.id] || 0,
         };
+        console.log('Adding new contact from socket:', newChat);
         return [...prev, newChat];
       });
     };
 
     const handleChatListUpdated = ({ users }) => {
+      console.log('Received chatListUpdated event:', { users }); // Debug log
       setChatList((prev) => {
         const newChatMap = new Map(users.map((chat) => [chat.id, { ...chat, _id: chat.id, unreadCount: unreadMessages[chat.id] || 0 }]));
-        return [...newChatMap.values()];
+        prev.forEach((chat) => {
+          if (newChatMap.has(chat.id)) {
+            newChatMap.set(chat.id, { ...newChatMap.get(chat.id), unreadCount: unreadMessages[chat.id] || 0 });
+          }
+        });
+        const updatedList = [...newChatMap.values()];
+        console.log('Updated chat list:', updatedList);
+        return updatedList;
       });
     };
+
 
     const handleMessage = (msg) => {
       const senderId = typeof msg.senderId === 'object' ? msg.senderId._id.toString() : msg.senderId.toString();
@@ -353,6 +378,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         });
       });
     };
+       
 
     socket.on('contactData', handleNewContact);
     socket.on('chatListUpdated', handleChatListUpdated);
@@ -370,6 +396,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       socket.off('messageStatus');
     };
   }, [socket, isForgeReady, selectedChat, userId, chats, dispatch, unreadMessages]);
+
 
   useEffect(() => {
     if (!token || !userId) {

@@ -690,106 +690,52 @@ module.exports = (io) => {
     }
   });
 
-  router.post('/add_contact', authMiddleware, async (req, res) => {
-    try {
-      const { error } = addContactSchema.validate(req.body);
-      if (error) {
-        logger.warn('Invalid request body', { error: error.details[0].message, userId: req.body.userId });
-        return res.status(400).json({ error: 'Invalid request data' });
-      }
+  // ... (other imports and configurations remain unchanged)
 
-      const { userId, virtualNumber } = req.body;
-      if (!userId || userId !== req.user.id) {
-        logger.warn('Unauthorized user', { userId, authenticatedUser: req.user.id });
-        return res.status(403).json({ error: 'Unauthorized' });
-      }
+router.post('/add_contact', authMiddleware, async (req, res) => {
+  try {
+    const { error } = addContactSchema.validate(req.body);
+    if (error) {
+      logger.warn('Invalid request body', { error: error.details[0].message, userId: req.body.userId });
+      return res.status(400).json({ error: 'Invalid request data' });
+    }
 
-      // Fetch user
-      const user = await User.findById(userId).select('_id username virtualNumber photo status lastSeen contacts');
-      if (!user) {
-        logger.warn('User not found', { userId });
-        return res.status(404).json({ error: 'User not found' });
-      }
+    const { userId, virtualNumber } = req.body;
+    if (!userId || userId !== req.user.id) {
+      logger.warn('Unauthorized user', { userId, authenticatedUser: req.user.id });
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
 
-      // Fetch contact by virtualNumber
-      const contact = await User.findOne({ virtualNumber }).select('_id username virtualNumber photo status lastSeen contacts');
-      if (!contact) {
-        logger.info('Contact not found', { userId, virtualNumber });
-        return res.status(404).json({ error: 'The contact is not registered' });
-      }
+    // Fetch user
+    const user = await User.findById(userId).select('_id username virtualNumber photo status lastSeen contacts');
+    if (!user) {
+      logger.warn('User not found', { userId });
+      return res.status(404).json({ error: 'User not found' });
+    }
 
-      // Check for self-addition
-      if (contact._id.toString() === userId) {
-        logger.warn('Attempt to add self as contact', { userId });
-        return res.status(400).json({ error: 'Cannot add self as contact' });
-      }
+    // Fetch contact by virtualNumber
+    const contact = await User.findOne({ virtualNumber }).select('_id username virtualNumber photo status lastSeen contacts');
+    if (!contact) {
+      logger.info('Contact not found', { userId, virtualNumber });
+      return res.status(404).json({ error: 'The contact is not registered' });
+    }
 
-      // Initialize contacts arrays if missing
-      user.contacts = Array.isArray(user.contacts) ? user.contacts : [];
-      contact.contacts = Array.isArray(contact.contacts) ? contact.contacts : [];
+    // Check for self-addition
+    if (contact._id.toString() === userId) {
+      logger.warn('Attempt to add self as contact', { userId });
+      return res.status(400).json({ error: 'Cannot add self as contact' });
+    }
 
-      // Check for existing contact
-      const userHasContact = user.contacts.some((id) => id.toString() === contact._id.toString());
-      const contactHasUser = contact.contacts.some((id) => id.toString() === userId);
+    // Initialize contacts arrays if missing
+    user.contacts = Array.isArray(user.contacts) ? user.contacts : [];
+    contact.contacts = Array.isArray(contact.contacts) ? contact.contacts : [];
 
-      if (userHasContact && contactHasUser) {
-        logger.info('Contact already exists', { userId, contactId: contact._id });
-        const contactData = {
-          id: contact._id.toString(),
-          username: contact.username || 'Unknown',
-          virtualNumber: contact.virtualNumber || '',
-          photo: contact.photo || 'https://placehold.co/40x40',
-          status: contact.status || 'offline',
-          lastSeen: contact.lastSeen || null,
-          latestMessage: null,
-          unreadCount: 0,
-        };
-        return res.status(200).json(contactData);
-      }
+    // Check for existing contact
+    const userHasContact = user.contacts.some((id) => id.toString() === contact._id.toString());
+    const contactHasUser = contact.contacts.some((id) => id.toString() === userId);
 
-      // Update contacts
-      if (!userHasContact) {
-        user.contacts.push(contact._id);
-        try {
-          await user.save({ validateBeforeSave: true });
-        } catch (saveError) {
-          logger.error('Failed to save user contacts', {
-            error: saveError.message,
-            stack: saveError.stack,
-            userId,
-            contactId: contact._id.toString(),
-          });
-          return res.status(500).json({ error: 'Failed to update user contacts', details: saveError.message });
-        }
-      }
-
-      if (!contactHasUser) {
-        contact.contacts.push(user._id);
-        try {
-          await contact.save({ validateBeforeSave: true });
-        } catch (saveError) {
-          logger.error('Failed to save contact contacts', {
-            error: saveError.message,
-            stack: saveError.stack,
-            userId,
-            contactId: contact._id.toString(),
-          });
-          // Rollback user update if contact save fails
-          if (!userHasContact) {
-            user.contacts = user.contacts.filter((id) => id.toString() !== contact._id.toString());
-            await user.save({ validateBeforeSave: true }).catch((rollbackError) => {
-              logger.error('Failed to rollback user contacts', {
-                error: rollbackError.message,
-                stack: rollbackError.stack,
-                userId,
-              });
-            });
-          }
-          return res.status(500).json({ error: 'Failed to update contact contacts', details: saveError.message });
-        }
-      }
-
-      // Prepare response
+    if (userHasContact && contactHasUser) {
+      logger.info('Contact already exists', { userId, contactId: contact._id });
       const contactData = {
         id: contact._id.toString(),
         username: contact.username || 'Unknown',
@@ -800,43 +746,87 @@ module.exports = (io) => {
         latestMessage: null,
         unreadCount: 0,
       };
-
-      // Emit Socket.IO events
-      io.to(userId).emit('contactData', { userId, contactData });
-      io.to(contact._id.toString()).emit('contactData', {
-        userId: contact._id.toString(),
-        contactData: {
-          id: user._id.toString(),
-          username: user.username || 'Unknown',
-          virtualNumber: user.virtualNumber || '',
-          photo: user.photo || 'https://placehold.co/40x40',
-          status: user.status || 'offline',
-          lastSeen: user.lastSeen || null,
-          latestMessage: null,
-          unreadCount: 0,
-        },
-      });
-
-      await Promise.all([emitUpdatedChatList(userId), emitUpdatedChatList(contact._id.toString())]);
-
-      logger.info('Contact added successfully', { userId, contactId: contact._id.toString() });
-      res.status(201).json(contactData);
-    } catch (error) {
-      logger.error('Add contact failed', {
-        error: error.message,
-        stack: error.stack,
-        userId: req.body.userId,
-        virtualNumber: req.body.virtualNumber,
-      });
-      if (error.code === 11000) {
-        return res.status(409).json({ error: 'Contact already exists' });
-      }
-      if (error.message.includes('Invalid contact IDs')) {
-        return res.status(400).json({ error: 'Invalid contact data' });
-      }
-      return res.status(500).json({ error: 'Failed to add contact', details: error.message });
+      return res.status(200).json(contactData);
     }
-  });
+
+    // Begin transaction for atomic updates
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        // Update user contacts
+        if (!userHasContact) {
+          user.contacts.push(contact._id);
+          await user.save({ validateBeforeSave: true, session });
+          logger.info('Updated user contacts', { userId, contactId: contact._id.toString() });
+        }
+
+        // Update contact contacts
+        if (!contactHasUser) {
+          contact.contacts.push(user._id);
+          await contact.save({ validateBeforeSave: true, session });
+          logger.info('Updated contact contacts', { userId, contactId: contact._id.toString() });
+        }
+      });
+    } catch (transactionError) {
+      logger.error('Transaction failed, rolling back', {
+        error: transactionError.message,
+        stack: transactionError.stack,
+        userId,
+        contactId: contact._id.toString(),
+      });
+      return res.status(500).json({ error: 'Failed to add contact due to transaction error', details: transactionError.message });
+    } finally {
+      session.endSession();
+    }
+
+    // Prepare response
+    const contactData = {
+      id: contact._id.toString(),
+      username: contact.username || 'Unknown',
+      virtualNumber: contact.virtualNumber || '',
+      photo: contact.photo || 'https://placehold.co/40x40',
+      status: contact.status || 'offline',
+      lastSeen: contact.lastSeen || null,
+      latestMessage: null,
+      unreadCount: 0,
+    };
+
+    // Emit Socket.IO events
+    io.to(userId).emit('contactData', { userId, contactData });
+    io.to(contact._id.toString()).emit('contactData', {
+      userId: contact._id.toString(),
+      contactData: {
+        id: user._id.toString(),
+        username: user.username || 'Unknown',
+        virtualNumber: user.virtualNumber || '',
+        photo: user.photo || 'https://placehold.co/40x40',
+        status: user.status || 'offline',
+        lastSeen: user.lastSeen || null,
+        latestMessage: null,
+        unreadCount: 0,
+      },
+    });
+
+    await Promise.all([emitUpdatedChatList(userId), emitUpdatedChatList(contact._id.toString())]);
+
+    logger.info('Contact added successfully', { userId, contactId: contact._id.toString() });
+    res.status(201).json(contactData);
+  } catch (error) {
+    logger.error('Add contact failed', {
+      error: error.message,
+      stack: error.stack,
+      userId: req.body.userId,
+      virtualNumber: req.body.virtualNumber,
+    });
+    if (error.code === 11000) {
+      return res.status(409).json({ error: 'Contact already exists' });
+    }
+    if (error.message.includes('Invalid contact IDs')) {
+      return res.status(400).json({ error: 'Invalid contact data' });
+    }
+    return res.status(500).json({ error: 'Failed to add contact', details: error.message });
+  }
+});
 
   router.post('/upload', authMiddleware, upload.single('file'), async (req, res) => {
     try {

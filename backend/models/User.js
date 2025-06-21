@@ -69,9 +69,14 @@ const userSchema = new mongoose.Schema({
     validate: {
       validator: async function (value) {
         if (!value.length) return true;
-        const users = await mongoose.model('User').find({ _id: { $in: value } }).select('_id').lean();
-        const validIds = new Set(users.map((user) => user._id.toString()));
-        return value.every((id) => validIds.has(id.toString()));
+        try {
+          const users = await mongoose.model('User').find({ _id: { $in: value } }).select('_id').lean();
+          const validIds = new Set(users.map((user) => user._id.toString()));
+          return value.every((id) => validIds.has(id.toString()));
+        } catch (err) {
+          logger.error('Contact validation failed', { error: err.message, userId: this._id?.toString() });
+          return false;
+        }
       },
       message: 'One or more invalid contact IDs.',
     },
@@ -105,8 +110,7 @@ const userSchema = new mongoose.Schema({
 // Indexes for performance
 userSchema.index({ email: 1 });
 userSchema.index({ username: 1 });
-userSchema.index({ virtualNumber: 1 });
-userSchema.index({ contacts: 1, status: 1 });
+userSchema.index({ virtualNumber: 1, sparse: true }); // Explicitly define sparse index
 userSchema.index({ status: 1, lastSeen: -1 });
 
 // Pre-save hook to validate and clean contacts
@@ -123,7 +127,7 @@ userSchema.pre('save', async function (next) {
       const invalidContacts = uniqueContacts.filter((id) => !existingIds.has(id));
 
       if (invalidContacts.length) {
-        logger.error('Invalid contacts found during save', {
+        logger.warn('Invalid contacts detected during save', {
           userId: this._id?.toString(),
           invalidContacts,
         });
