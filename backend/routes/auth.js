@@ -8,7 +8,9 @@ const { getCountryCallingCode, parsePhoneNumberFromString } = require('libphonen
 const Joi = require('joi');
 const winston = require('winston');
 const rateLimit = require('express-rate-limit');
+const mongoose = require('mongoose'); // Added for ObjectId validation
 const User = require('../models/User');
+const TokenBlacklist = require('../models/TokenBlacklist'); // Import TokenBlacklist model
 
 const router = express.Router();
 
@@ -72,10 +74,9 @@ const upload = multer({
   },
 });
 
-
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 100, // Increased to 100
+  max: 100,
   message: { error: 'Too many requests, please try again later.' },
   handler: (req, res, next, options) => {
     logger.warn('Rate limit exceeded', { ip: req.ip, method: req.method, url: req.url });
@@ -83,9 +84,7 @@ const authLimiter = rateLimit({
   },
 });
 
-
-
-// Updated authMiddleware without Redis
+// Updated authMiddleware with TokenBlacklist check
 const authMiddleware = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -95,11 +94,28 @@ const authMiddleware = async (req, res, next) => {
 
   const token = authHeader.split(' ')[1];
   try {
+    // Check if token is blacklisted
+    const blacklisted = await TokenBlacklist.findOne({ token });
+    if (blacklisted) {
+      logger.warn('Blacklisted token used', { token: token.substring(0, 10) + '...', url: req.url });
+      return res.status(401).json({ error: 'Token is blacklisted' });
+    }
+
     const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
+    if (!mongoose.isValidObjectId(decoded.id)) {
+      logger.warn('Invalid user ID in token', { userId: decoded.id, url: req.url });
+      return res.status(401).json({ error: 'Invalid token' });
+    }
+
     req.user = decoded;
+    req.token = token; // Store token for blacklisting in routes like logout/refresh
     next();
   } catch (error) {
-    logger.error('Auth middleware error:', { error: error.message, token: token.substring(0, 10) + '...', url: req.url });
+    logger.error('Auth middleware error:', {
+      error: error.message,
+      token: token.substring(0, 10) + '...',
+      url: req.url,
+    });
     res.status(401).json({ error: 'Invalid token', details: error.message });
   }
 };
@@ -117,15 +133,13 @@ const loginSchema = Joi.object({
   password: Joi.string().min(6).required(),
 });
 
-
-
 const generateVirtualNumber = async (countryCode, userId) => {
   try {
     logger.info('Generating virtual number', { countryCode, userId });
     const countryCallingCode = getCountryCallingCode(countryCode.toUpperCase());
     let virtualNumber;
     let attempts = 0;
-    const maxAttempts = 20; // Increased attempts
+    const maxAttempts = 20;
 
     do {
       let firstFive = '';
@@ -152,7 +166,6 @@ const generateVirtualNumber = async (countryCode, userId) => {
     throw new Error(`Failed to generate virtual number: ${error.message}`);
   }
 };
-
 
 router.post('/register', authLimiter, upload.single('photo'), async (req, res) => {
   try {
@@ -222,9 +235,11 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
     await user.save();
 
     logger.info('Generating JWT', { email });
-    const token = jwt.sign({ id: user._id, email, virtualNumber, role: user.role }, process.env.JWT_SECRET, {
-      expiresIn: '24h',
-    });
+    const token = jwt.sign(
+      { id: user._id, email, virtualNumber, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: '24h', algorithm: 'HS256' }
+    );
 
     logger.info('User registered successfully', { userId: user._id, email });
     res.status(201).json({
@@ -262,7 +277,10 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
 router.post('/login', authLimiter, async (req, res) => {
   try {
     const { error } = loginSchema.validate(req.body);
-    if (error) return res.status(400).json({ error: error.details[0].message });
+    if (error) {
+      logger.warn('Validation error', { error: error.details[0].message, body: req.body });
+      return res.status(400).json({ error: error.details[0].message });
+    }
 
     const { email, password } = req.body;
     const user = await User.findOne({ email }).select('+privateKey');
@@ -278,26 +296,41 @@ router.post('/login', authLimiter, async (req, res) => {
     const token = jwt.sign(
       { id: user._id, email, virtualNumber: user.virtualNumber, role: user.role },
       process.env.JWT_SECRET,
-      { expiresIn: '24h' }
+      { expiresIn: '24h', algorithm: 'HS256' }
     );
 
     logger.info('Login successful', { userId: user._id, email });
-    
-
     res.json({
-  token,
-  userId: user._id,
-  role: user.role,
-  photo: user.photo || 'https://placehold.co/40x40',
-  virtualNumber: user.virtualNumber || '',
-  username: user.username || '',
-  privateKey: user.privateKey,
+      token,
+      userId: user._id,
+      role: user.role,
+      photo: user.photo || 'https://placehold.co/40x40',
+      virtualNumber: user.virtualNumber || '',
+      username: user.username || '',
+      privateKey: user.privateKey,
+    });
+  } catch (error) {
+    logger.error('Login error', { error: error.message, stack: error.stack, body: req.body });
+    res.status(500).json({ error: 'Failed to login', details: error.message });
+  }
 });
 
+router.post('/logout', authMiddleware, async (req, res) => {
+  try {
+    const token = req.token;
+    if (!token) {
+      logger.warn('No token provided for logout', { userId: req.user.id });
+      return res.status(400).json({ error: 'No token provided' });
+    }
 
+    // Blacklist the token
+    await TokenBlacklist.create({ token });
+    logger.info('Token blacklisted during logout', { userId: req.user.id });
+
+    res.status(200).json({ message: 'Logged out successfully' });
   } catch (error) {
-    logger.error('Login error', { error: error.message, body: req.body });
-    res.status(500).json({ error: 'Failed to login', details: error.message });
+    logger.error('Logout error:', { error: error.message, userId: req.user?.id, stack: error.stack });
+    res.status(500).json({ error: 'Failed to logout', details: error.message });
   }
 });
 
@@ -305,27 +338,41 @@ router.post('/update_country', authMiddleware, async (req, res) => {
   try {
     const updateCountrySchema = Joi.object({
       userId: Joi.string().required(),
-      country: Joi.string().required(),
+      country: Joi.string().length(2).uppercase().required(),
     });
     const { error } = updateCountrySchema.validate(req.body);
-    if (error) return res.status(400).json({ error: error.details[0].message });
+    if (error) {
+      logger.warn('Validation error', { error: error.details[0].message, body: req.body });
+      return res.status(400).json({ error: error.details[0].message });
+    }
 
     const { userId, country } = req.body;
-    if (userId !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
+    if (userId !== req.user.id) {
+      logger.warn('Unauthorized country update attempt', { userId, reqUserId: req.user.id });
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+
+    if (!mongoose.isValidObjectId(userId)) {
+      logger.warn('Invalid user ID', { userId });
+      return res.status(400).json({ error: 'Invalid user ID' });
+    }
 
     const user = await User.findById(userId);
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (!user) {
+      logger.warn('User not found', { userId });
+      return res.status(404).json({ error: 'User not found' });
+    }
 
     if (user.country !== country) {
       user.country = country;
       user.virtualNumber = await generateVirtualNumber(country, user._id.toString());
       await user.save();
+      logger.info('Country updated', { userId, country, virtualNumber: user.virtualNumber });
     }
 
-    logger.info('Country updated', { userId, country });
     res.json({ virtualNumber: user.virtualNumber });
   } catch (error) {
-    logger.error('Update country error:', { error: error.message, userId: req.body.userId });
+    logger.error('Update country error:', { error: error.message, stack: error.stack, userId: req.body.userId });
     res.status(500).json({ error: 'Failed to update country', details: error.message });
   }
 });
@@ -333,11 +380,25 @@ router.post('/update_country', authMiddleware, async (req, res) => {
 router.post('/update_photo', authMiddleware, upload.single('photo'), async (req, res) => {
   try {
     const { userId } = req.body;
-    if (userId !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
-    if (!req.file) return res.status(400).json({ error: 'No photo provided' });
+    if (userId !== req.user.id) {
+      logger.warn('Unauthorized photo update attempt', { userId, reqUserId: req.user.id });
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+    if (!req.file) {
+      logger.warn('No photo provided', { userId });
+      return res.status(400).json({ error: 'No photo provided' });
+    }
+
+    if (!mongoose.isValidObjectId(userId)) {
+      logger.warn('Invalid user ID', { userId });
+      return res.status(400).json({ error: 'Invalid user ID' });
+    }
 
     const user = await User.findById(userId);
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (!user) {
+      logger.warn('User not found', { userId });
+      return res.status(404).json({ error: 'User not found' });
+    }
 
     const result = await new Promise((resolve, reject) => {
       cloudinary.uploader.upload_stream(
@@ -349,10 +410,10 @@ router.post('/update_photo', authMiddleware, upload.single('photo'), async (req,
     user.photo = result.secure_url;
     await user.save();
 
-    logger.info('Photo updated', { userId });
+    logger.info('Photo updated', { userId, photo: user.photo });
     res.json({ photo: user.photo });
   } catch (error) {
-    logger.error('Update photo error:', { error: error.message, userId: req.body.userId });
+    logger.error('Update photo error:', { error: error.message, stack: error.stack, userId: req.body.userId });
     res.status(500).json({ error: 'Failed to update photo', details: error.message });
   }
 });
@@ -364,16 +425,33 @@ router.post('/update_username', authMiddleware, async (req, res) => {
       username: Joi.string().min(3).max(20).required(),
     });
     const { error } = updateUsernameSchema.validate(req.body);
-    if (error) return res.status(400).json({ error: error.details[0].message });
+    if (error) {
+      logger.warn('Validation error', { error: error.details[0].message, body: req.body });
+      return res.status(400).json({ error: error.details[0].message });
+    }
 
     const { userId, username } = req.body;
-    if (userId !== req.user.id) return res.status(403).json({ error: 'Not authorized' });
+    if (userId !== req.user.id) {
+      logger.warn('Unauthorized username update attempt', { userId, reqUserId: req.user.id });
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+
+    if (!mongoose.isValidObjectId(userId)) {
+      logger.warn('Invalid user ID', { userId });
+      return res.status(400).json({ error: 'Invalid user ID' });
+    }
 
     const user = await User.findById(userId);
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (!user) {
+      logger.warn('User not found', { userId });
+      return res.status(404).json({ error: 'User not found' });
+    }
 
     const existingUser = await User.findOne({ username });
-    if (existingUser && existingUser._id.toString() !== userId) return res.status(400).json({ error: 'Username already taken' });
+    if (existingUser && existingUser._id.toString() !== userId) {
+      logger.warn('Username already taken', { username, userId });
+      return res.status(400).json({ error: 'Username already taken' });
+    }
 
     user.username = username.trim();
     await user.save();
@@ -381,7 +459,7 @@ router.post('/update_username', authMiddleware, async (req, res) => {
     logger.info('Username updated', { userId, username });
     res.json({ username: user.username });
   } catch (error) {
-    logger.error('Update username error:', { error: error.message, userId: req.body.userId });
+    logger.error('Update username error:', { error: error.message, stack: error.stack, userId: req.body.userId });
     res.status(500).json({ error: 'Failed to update username', details: error.message });
   }
 });
@@ -389,7 +467,10 @@ router.post('/update_username', authMiddleware, async (req, res) => {
 router.get('/contacts', authMiddleware, async (req, res) => {
   try {
     const user = await User.findById(req.user.id).populate('contacts', 'username virtualNumber photo status lastSeen');
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (!user) {
+      logger.warn('User not found', { userId: req.user.id });
+      return res.status(404).json({ error: 'User not found' });
+    }
 
     const contacts = user.contacts.map((contact) => ({
       id: contact._id,
@@ -402,19 +483,28 @@ router.get('/contacts', authMiddleware, async (req, res) => {
 
     res.json(contacts);
   } catch (error) {
-    logger.error('Fetch contacts error', { error: error.message, userId: req.user.id });
+    logger.error('Fetch contacts error', { error: error.message, stack: error.stack, userId: req.user.id });
     res.status(500).json({ error: 'Failed to fetch contacts', details: error.message });
   }
 });
 
 router.get('/public_key/:userId', authMiddleware, async (req, res) => {
   try {
-    const user = await User.findById(req.params.userId).select('publicKey');
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    const { userId } = req.params;
+    if (!mongoose.isValidObjectId(userId)) {
+      logger.warn('Invalid user ID', { userId });
+      return res.status(400).json({ error: 'Invalid user ID' });
+    }
+
+    const user = await User.findById(userId).select('publicKey');
+    if (!user) {
+      logger.warn('User not found', { userId });
+      return res.status(404).json({ error: 'User not found' });
+    }
 
     res.json({ publicKey: user.publicKey });
   } catch (error) {
-    logger.error('Fetch public key error:', { error: error.message, userId: req.params.userId });
+    logger.error('Fetch public key error:', { error: error.message, stack: error.stack, userId: req.params.userId });
     res.status(500).json({ error: 'Failed to fetch public key', details: error.message });
   }
 });
@@ -428,30 +518,42 @@ router.post('/refresh', authLimiter, authMiddleware, async (req, res) => {
       return res.status(403).json({ error: 'Not authorized' });
     }
 
+    if (!mongoose.isValidObjectId(req.user.id)) {
+      logger.warn('Invalid user ID in token', { userId: req.user.id });
+      return res.status(401).json({ error: 'Invalid token' });
+    }
+
     const user = await User.findById(req.user.id).select('+privateKey');
     if (!user) {
       logger.warn('User not found during token refresh', { userId: req.user.id });
       return res.status(401).json({ error: 'User not found' });
     }
 
+    // Blacklist the old token
+    const oldToken = req.token;
+    if (oldToken) {
+      await TokenBlacklist.create({ token: oldToken });
+      logger.info('Old token blacklisted during refresh', { userId: req.user.id });
+    }
+
     const newToken = jwt.sign(
       { id: user._id, email: user.email, virtualNumber: user.virtualNumber, role: user.role },
       process.env.JWT_SECRET,
-      { expiresIn: '24h' }
+      { expiresIn: '24h', algorithm: 'HS256' }
     );
 
     logger.info('Token refreshed successfully', { userId: user._id });
     res.json({
-  token: newToken,
-  userId: user._id,
-  role: user.role,
-  photo: user.photo || 'https://placehold.co/40x40',
-  virtualNumber: user.virtualNumber || '',
-  username: user.username || '',
-  privateKey: user.privateKey,
-});
+      token: newToken,
+      userId: user._id,
+      role: user.role,
+      photo: user.photo || 'https://placehold.co/40x40',
+      virtualNumber: user.virtualNumber || '',
+      username: user.username || '',
+      privateKey: user.privateKey,
+    });
   } catch (error) {
-    logger.error('Refresh token error:', { error: error.message, userId: req.user?.id, ip: req.ip });
+    logger.error('Refresh token error:', { error: error.message, stack: error.stack, userId: req.user?.id, ip: req.ip });
     res.status(500).json({ error: 'Failed to refresh token', details: error.message });
   }
 });

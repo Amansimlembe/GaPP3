@@ -3,6 +3,8 @@ import ReactDOM from 'react-dom';
 import App from './App';
 import { Provider } from 'react-redux';
 import { store } from './store';
+import './tailwind.config.js'; // Ensure Tailwind is imported
+
 
 ReactDOM.render(
   <Provider store={store}>

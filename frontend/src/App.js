@@ -9,10 +9,11 @@ import LoginScreen from './screens/LoginScreen';
 import JobSeekerScreen from './screens/JobSeekerScreen';
 import EmployerScreen from './screens/EmployerScreen';
 import FeedScreen from './screens/FeedScreen';
-import ChatScreen from './screens/ChatScreen';
+import ChatScreen from './screens/messages/ChatScreen';
 import ProfileScreen from './screens/ProfileScreen';
 import CountrySelector from './components/CountrySelector';
-import { setAuth, clearAuth, setSelectedChat } from './store';
+import { setAuth, clearAuthData, setSelectedChat } from './store';
+import './tailwind.config.js'; // Ensure Tailwind is imported
 
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
 
@@ -27,7 +28,9 @@ class ErrorBoundary extends React.Component {
     console.error('ErrorBoundary caught:', error, errorInfo);
     axios.post(`${BASE_URL}/social/log-error`, {
       error: error.message,
-      stack: errorInfo.componentStack,
+      stack: errorInfo.componentStack?.toString() || 'No stack trace',
+      userId: this.props.userId || 'unknown',
+      route: window.location.pathname,
       timestamp: new Date().toISOString(),
     }).catch((err) => console.warn('Failed to log error:', err.message));
   }
@@ -35,15 +38,25 @@ class ErrorBoundary extends React.Component {
   render() {
     if (this.state.hasError) {
       return (
-        <div className="error-screen p-4 text-center">
-          <h2 className="text-xl font-bold">Something went wrong</h2>
-          <p className="my-2">{this.state.error?.message || 'Unknown error'}</p>
-          <button
-            className="bg-primary text-white px-4 py-2 rounded"
-            onClick={() => window.location.reload()}
-          >
-            Reload
-          </button>
+        <div className="error-screen p-4 text-center bg-gray-100 dark:bg-gray-900 min-h-screen h-full">
+          <h2 className="text-xl font-bold text-gray-800 dark:text-gray-100">Something went wrong</h2>
+          <p className="my-2 text-gray-600 dark:text-gray-400">{this.state.error?.message || 'Unknown error'}</p>
+          <div className="flex gap-4 justify-center">
+            <button
+              className="bg-primary text-white px-4 py-2 rounded-lg hover:bg-blue-600 transition-colors"
+              onClick={() => window.location.reload(true)}
+            >
+              Refresh
+            </button>
+            {this.props.onLogout && (
+              <button
+                className="bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600 transition-colors"
+                onClick={() => this.props.onLogout()}
+              >
+                Log Out
+              </button>
+            )}
+          </div>
         </div>
       );
     }
@@ -79,55 +92,96 @@ const getTokenExpiration = (token) => {
 
 const App = () => {
   const dispatch = useDispatch();
-  const { token, userId, role, photo, virtualNumber, username } = useSelector((state) => state.auth);
+  const { token, userId, role, photo, virtualNumber, username, privateKey } = useSelector((state) => state.auth);
   const { selectedChat } = useSelector((state) => state.messages);
   const [chatNotifications, setChatNotifications] = useState(0);
-  const [isAuthenticated, setIsAuthenticated] = useState(!!token);
+  const [isAuthenticated, setIsAuthenticated] = useState(!!token && !!userId);
   const [socket, setSocket] = useState(null);
-  const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
+  const [theme, setTheme] = useState(() => {
+    const savedTheme = localStorage.getItem('theme');
+    if (savedTheme) return savedTheme;
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  });
   const [error, setError] = useState(null);
 
-  const setAuthData = (newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername, privateKey) => {
-    dispatch(setAuth({
-      token: newToken || null,
-      userId: newUserId || null,
-      role: Number(newRole) || null,
-      photo: newPhoto || 'https://placehold.co/40x40',
-      virtualNumber: newVirtualNumber || null,
-      username: newUsername || null,
-      privateKey: privateKey || null,
-    }));
+  const setAuthData = (newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername, newPrivateKey) => {
     if (newToken && newUserId) {
+      dispatch(setAuth({
+        token: newToken,
+        userId: newUserId,
+        role: Number(newRole),
+        photo: newPhoto || 'https://placehold.co/40x40',
+        virtualNumber: newVirtualNumber || '',
+        username: newUsername || '',
+        privateKey: newPrivateKey || '',
+      }));
       localStorage.setItem('token', newToken);
       localStorage.setItem('userId', newUserId);
       localStorage.setItem('role', String(newRole));
       localStorage.setItem('photo', newPhoto || 'https://placehold.co/40x40');
       localStorage.setItem('virtualNumber', newVirtualNumber || '');
       localStorage.setItem('username', newUsername || '');
-      localStorage.setItem('privateKey', privateKey || '');
+      localStorage.setItem('privateKey', newPrivateKey || '');
       setIsAuthenticated(true);
+      setError(null);
     } else {
-      localStorage.clear();
-      setIsAuthenticated(false);
-      dispatch(clearAuth());
-      setChatNotifications(0);
-      setSocket(null);
-      setError('Authentication failed, please log in again');
+      handleLogout();
     }
   };
 
+  const handleLogout = () => {
+    if (socket) {
+      socket.emit('leave', userId);
+      socket.disconnect();
+    }
+    dispatch(clearAuthData());
+    localStorage.clear();
+    sessionStorage.clear();
+    setIsAuthenticated(false);
+    setSocket(null);
+    setChatNotifications(0);
+    setError(null);
+    setAuthData(null, null, null, null, null, null, null);
+    console.log('Logged out, state cleared');
+  };
+
+  useEffect(() => {
+    // Global axios interceptor for 401 errors
+    const interceptor = axios.interceptors.response.use(
+      (response) => response,
+      async (error) => {
+        if (error.response?.status === 401) {
+          console.warn('401 Unauthorized, attempting token refresh');
+          const newToken = await refreshToken();
+          if (newToken) {
+            error.config.headers.Authorization = `Bearer ${newToken}`;
+            return axios(error.config);
+          } else {
+            handleLogout();
+            setError('Session expired, please log in again');
+          }
+        }
+        return Promise.reject(error);
+      }
+    );
+
+    return () => {
+      axios.interceptors.response.eject(interceptor);
+    };
+  }, [token, userId]);
+
   useEffect(() => {
     if (!token || !userId) {
-      console.warn('Invalid token or userId, skipping socket initialization');
-      setAuthData(null, null, null, null, null, null, null);
+      console.warn('Missing token or userId, logging out');
+      handleLogout();
       return;
     }
 
     const newSocket = io(BASE_URL, {
       auth: { token },
       transports: ['websocket', 'polling'],
-      reconnectionAttempts: 10,
-      reconnectionDelay: 3000,
+      reconnectionAttempts: 5,
+      reconnectionDelay: 2000,
       timeout: 10000,
     });
     setSocket(newSocket);
@@ -135,7 +189,7 @@ const App = () => {
     return () => {
       newSocket.emit('leave', userId);
       newSocket.disconnect();
-      console.log('Socket cleanup');
+      console.log('Socket cleaned up');
       setSocket(null);
     };
   }, [token, userId]);
@@ -147,16 +201,16 @@ const App = () => {
         { userId },
         {
           headers: { Authorization: `Bearer ${token}` },
-          timeout: 15000,
+          timeout: 10000,
         }
       );
-      const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername, privateKey } = response.data;
-      setAuthData(newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername, privateKey);
-      console.log('Token refreshed');
+      const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername, privateKey: newPrivateKey } = response.data;
+      setAuthData(newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername, newPrivateKey);
+      console.log('Token refreshed successfully');
       return newToken;
     } catch (error) {
-      console.error('Token refresh failed:', error.response?.data || error.message);
-      setAuthData(null, null, null, null, null, null, null);
+      console.error('Token refresh failed:', error.response?.data?.error || error.message);
+      handleLogout();
       setError('Session expired, please log in again');
       return null;
     }
@@ -171,11 +225,17 @@ const App = () => {
       isRefreshing = true;
       try {
         const expTime = getTokenExpiration(token);
-        if (expTime && expTime - Date.now() < 10 * 60 * 1000) {
+        if (!expTime) {
+          console.warn('Invalid token expiration, logging out');
+          handleLogout();
+          return;
+        }
+        if (expTime - Date.now() < 10 * 60 * 1000) { // 10 minutes before expiry
           await refreshToken();
         }
       } catch (err) {
         console.error('Token expiration check failed:', err.message);
+        handleLogout();
         setError('Authentication error, please log in again');
       } finally {
         isRefreshing = false;
@@ -183,7 +243,7 @@ const App = () => {
     };
 
     checkTokenExpiration();
-    const interval = setInterval(checkTokenExpiration, 5 * 60 * 1000);
+    const interval = setInterval(checkTokenExpiration, 5 * 60 * 1000); // Check every 5 minutes
     return () => clearInterval(interval);
   }, [isAuthenticated, token, userId, socket]);
 
@@ -197,14 +257,22 @@ const App = () => {
 
     socket.on('connect_error', async (error) => {
       console.error('Socket connect error:', error.message);
-      if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
+      if (error.message.includes('Invalid token') || error.message.includes('No token provided') || error.message.includes('Token invalidated')) {
         const newToken = await refreshToken();
         if (newToken) {
           socket.auth.token = newToken;
           socket.disconnect().connect();
         } else {
-          setAuthData(null, null, null, null, null, null, null);
+          handleLogout();
         }
+      }
+    });
+
+    socket.on('error', (data) => {
+      console.error('Socket error:', data.message);
+      setError(data.message || 'Socket error occurred');
+      if (data.message.includes('Invalid token') || data.message.includes('Unauthorized')) {
+        handleLogout();
       }
     });
 
@@ -216,33 +284,64 @@ const App = () => {
     });
 
     socket.on('message', (msg) => {
+      console.log('Received message:', msg);
       if (msg.recipientId === userId && (!selectedChat || selectedChat !== msg.senderId)) {
         setChatNotifications((prev) => prev + 1);
       }
     });
 
-    socket.on('newContact', (contactData) => {
-      console.log('New contact:', contactData);
+    socket.on('contactData', (data) => {
+      console.log('New contact data:', data);
+      setChatNotifications((prev) => prev + 1); // Notify for new contacts
+    });
+
+    socket.on('userStatus', (data) => {
+      console.log('User status update:', data);
+      // Optionally update UI for contact status
+    });
+
+    socket.on('userDeleted', (data) => {
+      console.log('User deleted:', data);
+      if (selectedChat === data.userId) {
+        dispatch(setSelectedChat(null));
+      }
+      setChatNotifications(0); // Reset notifications
     });
 
     return () => {
       socket.off('connect');
       socket.off('connect_error');
+      socket.off('error');
       socket.off('disconnect');
       socket.off('message');
-      socket.off('newContact');
+      socket.off('contactData');
+      socket.off('userStatus');
+      socket.off('userDeleted');
     };
-  }, [socket, userId, selectedChat]);
+  }, [socket, userId, selectedChat, dispatch]);
 
   useEffect(() => {
-    document.documentElement.className = theme === 'dark' ? 'dark' : '';
+    document.documentElement.className = theme;
     localStorage.setItem('theme', theme);
+    // Sync with system theme changes
+    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+    const handleChange = (e) => {
+      if (!localStorage.getItem('theme')) {
+        setTheme(e.matches ? 'dark' : 'light');
+      }
+    };
+    mediaQuery.addEventListener('change', handleChange);
+    return () => mediaQuery.removeEventListener('change', handleChange);
   }, [theme]);
 
-  const toggleTheme = () => setTheme(theme === 'light' ? 'dark' : 'light');
+  const toggleTheme = () => {
+    const newTheme = theme === 'light' ? 'dark' : 'light';
+    setTheme(newTheme);
+    localStorage.setItem('theme', newTheme);
+  };
 
   const handleChatNavigation = () => {
-    console.log('Navigating to ChatScreen'); // Debug log
+    console.log('Navigating to ChatScreen');
     setChatNotifications(0);
     dispatch(setSelectedChat(null));
   };
@@ -251,8 +350,14 @@ const App = () => {
     return (
       <ErrorBoundary>
         {error && (
-          <div className="fixed top-0 left-0 right-0 bg-red-500 text-white p-2 text-center">
+          <div className="fixed top-0 left-0 right-0 bg-red-500 text-white p-2 text-center z-50">
             {error}
+            <button
+              className="ml-4 bg-white text-red-500 px-2 py-1 rounded text-sm"
+              onClick={() => setError(null)}
+            >
+              Dismiss
+            </button>
           </div>
         )}
         <LoginScreen setAuth={setAuthData} />
@@ -261,10 +366,16 @@ const App = () => {
   }
 
   return (
-    <ErrorBoundary>
+    <ErrorBoundary userId={userId} onLogout={handleLogout}>
       {error && (
-        <div className="fixed top-0 left-0 right-0 bg-red-500 text-white p-2 text-center">
+        <div className="fixed top-0 left-0 right-0 bg-red-500 text-white p-2 text-center z-50">
           {error}
+          <button
+            className="ml-4 bg-white text-red-500 px-2 py-1 rounded text-sm"
+            onClick={() => setError(null)}
+          >
+            Dismiss
+          </button>
         </div>
       )}
       <Router>
@@ -275,12 +386,14 @@ const App = () => {
           photo={photo}
           virtualNumber={virtualNumber}
           username={username}
+          privateKey={privateKey}
           chatNotifications={chatNotifications}
           setAuth={setAuthData}
           socket={socket}
           toggleTheme={toggleTheme}
           handleChatNavigation={handleChatNavigation}
           theme={theme}
+          handleLogout={handleLogout}
         />
       </Router>
     </ErrorBoundary>
@@ -294,37 +407,50 @@ const AuthenticatedApp = ({
   photo,
   virtualNumber,
   username,
+  privateKey,
   chatNotifications,
   setAuth,
   socket,
   toggleTheme,
   handleChatNavigation,
   theme,
+  handleLogout,
 }) => {
   const location = useLocation();
   const dispatch = useDispatch();
   const { selectedChat } = useSelector((state) => state.messages);
   const isChatRouteWithSelectedChat = location.pathname === '/chat' && selectedChat;
 
-  // Debug log to check current route
   useEffect(() => {
-    console.log('Current route:', location.pathname);
-  }, [location.pathname]);
+    console.log('Current route:', location.pathname, 'Selected chat:', selectedChat);
+  }, [location.pathname, selectedChat]);
 
   return (
-    <div className={`min-h-screen flex flex-col ${theme === 'dark' ? 'dark' : ''} bg-gray-100 dark:bg-gray-900`}>
+    <div className={`min-h-screen flex flex-col ${theme} bg-gray-100 dark:bg-gray-900`}>
       {!virtualNumber && (
         <CountrySelector
           token={token}
           userId={userId}
           virtualNumber={virtualNumber}
-          onComplete={(newVirtualNumber) => setAuth(token, userId, role, photo, newVirtualNumber, username)}
+          onComplete={(newVirtualNumber) => setAuth(token, userId, role, photo, newVirtualNumber, username, privateKey)}
         />
       )}
       <div className="flex-1 p-0 relative">
         <Routes>
-          <Route path="/jobs" element={role === 0 ? <JobSeekerScreen token={token} userId={userId} /> : <EmployerScreen token={token} userId={userId} />} />
-          <Route path="/feed" element={<FeedScreen token={token} userId={userId} onUnauthorized={() => setAuth(null, null, null, null, null, null, null)} />} />
+          <Route
+            path="/jobs"
+            element={
+              role === 0 ? (
+                <JobSeekerScreen token={token} userId={userId} onUnauthorized={handleLogout} />
+              ) : (
+                <EmployerScreen token={token} userId={userId} onUnauthorized={handleLogout} />
+              )
+            }
+          />
+          <Route
+            path="/feed"
+            element={<FeedScreen token={token} userId={userId} onUnauthorized={handleLogout} />}
+          />
           <Route
             path="/chat"
             element={
@@ -336,12 +462,25 @@ const AuthenticatedApp = ({
                 username={username}
                 virtualNumber={virtualNumber}
                 photo={photo}
+                privateKey={privateKey}
+                onUnauthorized={handleLogout}
               />
             }
           />
           <Route
             path="/profile"
-            element={<ProfileScreen token={token} userId={userId} setAuth={setAuth} username={username} virtualNumber={virtualNumber} photo={photo} />}
+            element={
+              <ProfileScreen
+                token={token}
+                userId={userId}
+                setAuth={setAuth}
+                username={username}
+                virtualNumber={virtualNumber}
+                photo={photo}
+                privateKey={privateKey}
+                onUnauthorized={handleLogout}
+              />
+            }
           />
           <Route path="*" element={<Navigate to="/feed" replace />} />
         </Routes>
@@ -368,11 +507,7 @@ const AuthenticatedApp = ({
         </NavLink>
         <NavLink
           to="/chat"
-          onClick={() => {
-            console.log('Chat NavLink clicked'); // Debug log
-            handleChatNavigation();
-            dispatch(setSelectedChat(null)); // Ensure chat state is reset
-          }}
+          onClick={handleChatNavigation}
           className={({ isActive }) => `flex flex-col items-center p-2 rounded relative ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}
         >
           <FaComments className="text-xl" />
