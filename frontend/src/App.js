@@ -13,7 +13,7 @@ import ChatScreen from './screens/messages/ChatScreen';
 import ProfileScreen from './screens/ProfileScreen';
 import CountrySelector from './components/CountrySelector';
 import { setAuth, clearAuthData, setSelectedChat } from './store';
-import '../tailwind.config.js'; // Ensure Tailwind is imported
+import './frontend/tailwind.config.js'; // Ensure Tailwind is imported
 
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
 
