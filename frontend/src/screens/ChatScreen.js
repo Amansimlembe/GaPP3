@@ -72,29 +72,30 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     }
   }, [userId]);
 
+
+
   const handleLogout = useCallback(async () => {
-    try {
-      if (socket) {
-        socket.emit('leave', userId);
-        await axios.post(`${BASE_URL}/auth/logout`, {}, {
-          headers: { Authorization: `Bearer ${token}` },
-          timeout: 5000,
-        });
-        socket.disconnect();
-      }
-      sessionStorage.clear();
-      localStorage.clear();
-      dispatch(resetState());
-      setAuth('', '', '', '', '', '');
-      setChatList([]);
-      dispatch(setSelectedChat(null));
-      navigate('/');
-    } catch (err) {
-      console.error('handleLogout error:', err.message);
-      setError('Failed to logout');
-      logClientError('Logout failed', err);
+  try {
+    if (socket) {
+      socket.emit('leave', userId);
+      await axios.post(`${BASE_URL}/auth/logout`, {}, {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 5000,
+      });
+      socket.disconnect();
     }
-  }, [socket, userId, setAuth, token, navigate, dispatch, logClientError]);
+    sessionStorage.clear(); // Clear session storage
+    dispatch(clearAuth()); // Clear auth state
+    dispatch(setSelectedChat(null)); // Reset selected chat
+    setAuth('', '', '', '', '', '');
+    setChatList([]);
+    navigate('/');
+  } catch (err) {
+    console.error('handleLogout error:', err.message);
+    setError('Failed to logout');
+    logClientError('Logout failed', err);
+  }
+}, [socket, userId, setAuth, token, navigate, dispatch, logClientError]);
 
   const getPublicKey = useCallback(async (recipientId) => {
     if (!isValidObjectId(recipientId)) throw new Error('Invalid recipientId');
