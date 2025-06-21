@@ -9,7 +9,7 @@ import LoginScreen from './screens/LoginScreen';
 import JobSeekerScreen from './screens/JobSeekerScreen';
 import EmployerScreen from './screens/EmployerScreen';
 import FeedScreen from './screens/FeedScreen';
-import ChatScreen from './screens/messages/ChatScreen';
+import ChatScreen from './screens/ChatScreen';
 import ProfileScreen from './screens/ProfileScreen';
 import CountrySelector from './components/CountrySelector';
 import { setAuth, clearAuthData, setSelectedChat } from './store';
