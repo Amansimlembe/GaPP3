@@ -1,25 +1,28 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
-const { authMiddleware } = require('./auth');
-const Message = require('../models/Message');
-const User = require('../models/User');
+const mongoose = require('mongoose');
 const winston = require('winston');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
 const Joi = require('joi');
-const mongoose = require('mongoose');
 const validator = require('validator');
+const rateLimit = require('express-rate-limit');
+const User = require('../models/User');
+const Message = require('../models/Message');
+
+const router = express.Router();
 
 const logger = winston.createLogger({
   level: 'info',
   format: winston.format.combine(winston.format.timestamp(), winston.format.json()),
   transports: [
     new winston.transports.Console(),
-    new winston.transports.File({ filename: 'logs/error.log', level: 'error' }),
-    new winston.transports.File({ filename: 'logs/combined.log' }),
+    new winston.transports.File({ filename: 'logs/social-error.log', level: 'error' }),
+    new winston.transports.File({ filename: 'logs/social-combined.log' }),
   ],
 });
 
+// Configure Cloudinary
 const configureCloudinary = () => {
   let cloudinaryConfig = {};
   if (process.env.CLOUDINARY_URL) {
@@ -56,6 +59,7 @@ const configureCloudinary = () => {
 };
 configureCloudinary();
 
+// Multer setup
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 50 * 1024 * 1024 },
@@ -69,8 +73,21 @@ const upload = multer({
   },
 });
 
+// Rate limiters
+const addContactLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10,
+  message: 'Too many contact addition requests, please try again later',
+});
+const uploadLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5,
+  message: 'Too many upload requests, please try again later',
+});
+
 const validContentTypes = ['text', 'image', 'video', 'audio', 'document'];
 
+// Joi schemas
 const messageSchema = Joi.object({
   senderId: Joi.string().custom((value, helpers) => {
     if (!mongoose.isValidObjectId(value)) return helpers.error('any.invalid');
@@ -94,7 +111,11 @@ const messageSchema = Joi.object({
   contentType: Joi.string().valid(...validContentTypes).required().messages({
     'any.only': `contentType must be one of: ${validContentTypes.join(', ')}`,
   }),
-  plaintextContent: Joi.string().required().messages({ 'string.empty': 'plaintextContent required for text messages' }),
+  plaintextContent: Joi.string().when('contentType', {
+    is: 'text',
+    then: Joi.string().required(),
+    otherwise: Joi.string().allow('').optional(),
+  }).messages({ 'string.empty': 'plaintextContent required for text messages' }),
   caption: Joi.string().optional(),
   replyTo: Joi.string().custom((value, helpers) => {
     if (value && !mongoose.isValidObjectId(value)) return helpers.error('any.invalid');
@@ -112,7 +133,9 @@ const addContactSchema = Joi.object({
     if (!mongoose.isValidObjectId(value)) return helpers.error('any.invalid');
     return value;
   }, 'ObjectId validation').required(),
-  virtualNumber: Joi.string().required(),
+  virtualNumber: Joi.string().pattern(/^\+\d{7,15}$/).required().messages({
+    'string.pattern.base': 'Invalid virtual number format (e.g., +1234567890)',
+  }),
 });
 
 const deleteUserSchema = Joi.object({
@@ -122,10 +145,124 @@ const deleteUserSchema = Joi.object({
   }, 'ObjectId validation').required(),
 });
 
-module.exports = (io) => {
-  const router = express.Router();
+// Auth middleware
+const authMiddleware = async (req, res, next) => {
+  const token = req.header('Authorization')?.replace('Bearer ', '');
+  if (!token) {
+    logger.warn('No token provided', { method: req.method, url: req.url });
+    return res.status(401).json({ error: 'No token provided' });
+  }
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
+    const user = await User.findById(decoded.userId || decoded.id).select('contacts _id username virtualNumber photo status lastSeen');
+    if (!user) {
+      logger.warn('User not found', { userId: decoded.userId || decoded.id });
+      return res.status(401).json({ error: 'User not found' });
+    }
+    const blacklisted = await mongoose.model('TokenBlacklist').findOne({ token }).select('_id').lean();
+    if (blacklisted) {
+      logger.warn('Blacklisted token used', { userId: decoded.userId || decoded.id });
+      return res.status(401).json({ error: 'Token invalidated' });
+    }
+    req.user = user;
+    next();
+  } catch (error) {
+    logger.error('Auth middleware error', { error: error.message, stack: error.stack });
+    res.status(401).json({ error: 'Invalid token', details: error.message });
+  }
+};
 
-  // Socket.IO middleware for token validation
+// Cache for chat lists
+const chatListCache = new Map();
+const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+// Optimized emitUpdatedChatList
+const emitUpdatedChatList = async (io, userId) => {
+  try {
+    if (!mongoose.isValidObjectId(userId)) {
+      logger.warn('Invalid userId in emitUpdatedChatList', { userId });
+      return;
+    }
+    const cacheKey = `chatList:${userId}`;
+    const cached = chatListCache.get(cacheKey);
+    if (cached && cached.timestamp > Date.now() - CACHE_TTL) {
+      io.to(userId).emit('chatListUpdated', { userId, users: cached.chatList });
+      logger.info('Served cached chat list', { userId, chatCount: cached.chatList.length });
+      return;
+    }
+    const user = await User.findById(userId)
+      .populate({
+        path: 'contacts',
+        select: 'username virtualNumber photo status lastSeen',
+      })
+      .lean();
+    if (!user || !user.contacts?.length) {
+      io.to(userId).emit('chatListUpdated', { userId, users: [] });
+      chatListCache.set(cacheKey, { chatList: [], timestamp: Date.now() });
+      logger.info('No contacts found for chat list', { userId });
+      return;
+    }
+    const latestMessages = await Message.aggregate([
+      {
+        $match: {
+          $or: [
+            { senderId: new mongoose.Types.ObjectId(userId), recipientId: { $in: user.contacts.map((c) => c._id) } },
+            { recipientId: new mongoose.Types.ObjectId(userId), senderId: { $in: user.contacts.map((c) => c._id) } },
+          ],
+        },
+      },
+      { $sort: { createdAt: -1 } },
+      {
+        $group: {
+          _id: {
+            $cond: [
+              { $eq: ['$senderId', new mongoose.Types.ObjectId(userId)] },
+              '$recipientId',
+              '$senderId',
+            ],
+          },
+          latestMessage: { $first: '$$ROOT' },
+          unreadCount: {
+            $sum: {
+              $cond: [
+                { $and: [{ $eq: ['$recipientId', new mongoose.Types.ObjectId(userId)] }, { $eq: ['$status', 'delivered'] }] },
+                1,
+                0,
+              ],
+            },
+          },
+        },
+      },
+    ]);
+    const chatList = user.contacts.map((contact) => {
+      const messageData = latestMessages.find((m) => m._id.toString() === contact._id.toString());
+      return {
+        id: contact._id.toString(),
+        username: contact.username || 'Unknown',
+        virtualNumber: contact.virtualNumber || '',
+        photo: contact.photo || 'https://placehold.co/40x40',
+        status: contact.status || 'offline',
+        lastSeen: contact.lastSeen || null,
+        latestMessage: messageData?.latestMessage || null,
+        unreadCount: messageData?.unreadCount || 0,
+      };
+    });
+    chatListCache.set(cacheKey, { chatList, timestamp: Date.now() });
+    io.to(userId).emit('chatListUpdated', { userId, users: chatList });
+    logger.info('Emitted updated chat list', { userId, chatCount: chatList.length });
+  } catch (error) {
+    logger.error('Failed to emit updated chat list', { error: error.message, stack: error.stack, userId });
+  }
+};
+
+// Socket.IO setup
+module.exports = (app) => {
+  const io = app.get('io');
+  if (!io || typeof io.use !== 'function') {
+    logger.error('Invalid Socket.IO instance in social.js', { io: !!io, use: typeof io?.use });
+    throw new Error('Socket.IO initialization failed: invalid io instance');
+  }
+
   io.use(async (socket, next) => {
     const token = socket.handshake.auth.token;
     if (!token) {
@@ -134,115 +271,48 @@ module.exports = (io) => {
     }
     try {
       const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
+      const user = await User.findById(decoded.userId || decoded.id).select('_id');
+      if (!user) {
+        logger.warn('User not found for Socket.IO', { userId: decoded.userId || decoded.id, socketId: socket.id });
+        return next(new Error('User not found'));
+      }
       const blacklisted = await mongoose.model('TokenBlacklist').findOne({ token }).select('_id').lean();
       if (blacklisted) {
-        logger.warn('Blacklisted token used for Socket.IO', { socketId: socket.id });
+        logger.warn('Blacklisted token used for Socket.IO', { userId: decoded.userId || decoded.id, socketId: socket.id });
         return next(new Error('Token invalidated'));
       }
       socket.user = decoded;
       next();
     } catch (error) {
-      logger.error('Socket.IO auth error', { error: error.message, socketId: socket.id });
+      logger.error('Socket.IO auth error', { error: error.message, socketId: socket.id, stack: error.stack });
       next(new Error('Invalid token'));
     }
   });
 
-  const emitUpdatedChatList = async (userId) => {
-    try {
-      if (!mongoose.isValidObjectId(userId)) {
-        logger.warn('Invalid userId in emitUpdatedChatList', { userId });
-        return;
-      }
-
-      const user = await User.findById(userId).select('contacts').lean();
-      if (!user) {
-        logger.warn('User not found in emitUpdatedChatList', { userId });
-        io.to(userId).emit('chatListUpdated', { userId, users: [] });
-        return;
-      }
-
-      const contacts = Array.isArray(user.contacts) ? user.contacts : [];
-      if (!contacts.length) {
-        io.to(userId).emit('chatListUpdated', { userId, users: [] });
-        return;
-      }
-
-      const contactUsers = await User.find({ _id: { $in: contacts } })
-        .select('username virtualNumber photo status lastSeen')
-        .lean();
-
-      const chatList = await Promise.all(
-        contactUsers.map(async (contact) => {
-          const latestMessage = await Message.findOne({
-            $or: [
-              { senderId: userId, recipientId: contact._id },
-              { senderId: contact._id, recipientId: userId },
-            ],
-          })
-            .sort({ createdAt: -1 })
-            .select('content contentType senderId recipientId createdAt plaintextContent senderVirtualNumber senderUsername senderPhoto')
-            .lean();
-
-          const unreadCount = await Message.countDocuments({
-            senderId: contact._id,
-            recipientId: userId,
-            status: { $ne: 'read' },
-          });
-
-          return {
-            id: contact._id.toString(),
-            username: contact.username || 'Unknown',
-            virtualNumber: contact.virtualNumber || '',
-            photo: contact.photo || 'https://placehold.co/40x40',
-            status: contact.status || 'offline',
-            lastSeen: contact.lastSeen || null,
-            latestMessage: latestMessage || null,
-            unreadCount: unreadCount || 0,
-          };
-        })
-      );
-
-      io.to(userId).emit('chatListUpdated', { userId, users: chatList });
-      logger.info('Emitted updated chat list', { userId, chatCount: chatList.length });
-    } catch (error) {
-      logger.error('Failed to emit updated chat list', { error: error.message, stack: error.stack, userId });
-    }
-  };
-
   io.on('connection', (socket) => {
     logger.info('New Socket.IO connection', { socketId: socket.id, userId: socket.user?.id });
 
-    socket.on('join', (userId) => {
+    socket.on('join', async (userId) => {
       if (!mongoose.isValidObjectId(userId) || userId !== socket.user.id) {
         logger.warn('Invalid or unauthorized join attempt', { socketId: socket.id, userId });
         return;
       }
       socket.join(userId);
-      User.findByIdAndUpdate(userId, { status: 'online', lastSeen: new Date() }, { new: true, lean: true })
-        .then((user) => {
-          if (user) {
-            io.to(userId).emit('userStatus', { userId, status: 'online', lastSeen: user.lastSeen });
-            emitUpdatedChatList(userId);
-            logger.info('User joined room', { socketId: socket.id, userId });
-          }
-        })
-        .catch((err) => logger.error('User join failed', { error: err.message, stack: err.stack, userId }));
+      await User.findByIdAndUpdate(userId, { status: 'online', lastSeen: new Date() }, { new: true, lean: true });
+      io.to(userId).emit('userStatus', { userId, status: 'online', lastSeen: new Date() });
+      await emitUpdatedChatList(io, userId);
+      logger.info('User joined room', { socketId: socket.id, userId });
     });
 
-    socket.on('leave', (userId) => {
+    socket.on('leave', async (userId) => {
       if (!mongoose.isValidObjectId(userId) || userId !== socket.user.id) {
         logger.warn('Invalid or unauthorized leave attempt', { socketId: socket.id, userId });
         return;
       }
-      User.findByIdAndUpdate(userId, { status: 'offline', lastSeen: new Date() }, { new: true, lean: true })
-        .then((user) => {
-          if (user) {
-            io.to(userId).emit('userStatus', { userId, status: 'offline', lastSeen: user.lastSeen });
-            logger.info('User left room', { socketId: socket.id, userId });
-          }
-        })
-        .catch((err) => logger.error('User leave failed', { error: err.message, stack: err.stack, userId }));
       socket.leave(userId);
+      await User.findByIdAndUpdate(userId, { status: 'offline', lastSeen: new Date() }, { new: true, lean: true });
+      io.to(userId).emit('userStatus', { userId, status: 'offline', lastSeen: new Date() });
+      logger.info('User left room', { socketId: socket.id, userId });
     });
 
     socket.on('typing', ({ userId, recipientId }) => {
@@ -278,20 +348,21 @@ module.exports = (io) => {
             unreadCount: 0,
           };
           io.to(userId).emit('contactData', { userId, contactData: contactObj });
+          const user = await User.findById(userId).select('username virtualNumber photo status lastSeen').lean();
           io.to(contactData.id).emit('contactData', {
             userId: contactData.id,
             contactData: {
               id: userId,
-              username: (await User.findById(userId).select('username')).username || 'Unknown',
-              virtualNumber: (await User.findById(userId).select('virtualNumber')).virtualNumber || '',
-              photo: (await User.findById(userId).select('photo')).photo || 'https://placehold.co/40x40',
-              status: (await User.findById(userId).select('status')).status || 'offline',
-              lastSeen: (await User.findById(userId).select('lastSeen')).lastSeen || null,
+              username: user.username || 'Unknown',
+              virtualNumber: user.virtualNumber || '',
+              photo: user.photo || 'https://placehold.co/40x40',
+              status: user.status || 'offline',
+              lastSeen: user.lastSeen || null,
               latestMessage: null,
               unreadCount: 0,
             },
           });
-          await Promise.all([emitUpdatedChatList(userId), emitUpdatedChatList(contactData.id)]);
+          await Promise.all([emitUpdatedChatList(io, userId), emitUpdatedChatList(io, contactData.id)]);
         }
       } catch (err) {
         logger.error('Contact data emission failed', { error: err.message, stack: err.stack, userId });
@@ -304,7 +375,6 @@ module.exports = (io) => {
         if (error) {
           return callback({ error: error.details[0].message });
         }
-
         const {
           senderId,
           recipientId,
@@ -318,20 +388,13 @@ module.exports = (io) => {
           senderUsername,
           senderPhoto,
         } = messageData;
-
         if (senderId !== socket.user.id) {
           return callback({ error: 'Unauthorized sender' });
         }
-
-        if (contentType === 'text' && !plaintextContent) {
-          return callback({ error: 'plaintextContent required for text messages' });
-        }
-
         const existingMessage = await Message.findOne({ clientMessageId }).lean();
         if (existingMessage) {
           return callback({ message: existingMessage });
         }
-
         const sender = await User.findById(senderId).select('virtualNumber username photo').lean();
         const message = new Message({
           senderId,
@@ -348,20 +411,15 @@ module.exports = (io) => {
           senderUsername: senderUsername || sender.username,
           senderPhoto: senderPhoto || sender.photo,
         });
-
         await message.save();
-
         const populatedMessage = await Message.findById(message._id)
           .populate('senderId', 'username virtualNumber photo')
           .populate('recipientId', 'username virtualNumber photo')
           .populate('replyTo', 'content contentType senderId recipientId createdAt')
           .lean();
-
         io.to(recipientId).emit('message', populatedMessage);
         io.to(senderId).emit('message', populatedMessage);
-
-        await Promise.all([emitUpdatedChatList(senderId), emitUpdatedChatList(recipientId)]);
-
+        await Promise.all([emitUpdatedChatList(io, senderId), emitUpdatedChatList(io, recipientId)]);
         callback({ message: populatedMessage });
       } catch (err) {
         logger.error('Message send failed', { error: err.message, stack: err.stack, senderId: messageData.senderId });
@@ -374,34 +432,31 @@ module.exports = (io) => {
         if (!mongoose.isValidObjectId(messageId)) {
           return callback({ error: 'Invalid messageId' });
         }
-
         const message = await Message.findById(messageId);
         if (!message) {
           return callback({ error: 'Message not found' });
         }
-
         if (message.senderId.toString() !== socket.user.id) {
           return callback({ error: 'Unauthorized to edit message' });
         }
-
+        if (message.contentType !== 'text') {
+          return callback({ error: 'Only text messages can be edited' });
+        }
         message.content = newContent;
         message.plaintextContent = plaintextContent || '';
         message.updatedAt = new Date();
         await message.save();
-
         const populatedMessage = await Message.findById(message._id)
           .populate('senderId', 'username virtualNumber photo')
           .populate('recipientId', 'username virtualNumber photo')
           .populate('replyTo', 'content contentType senderId recipientId createdAt')
           .lean();
-
         io.to(message.recipientId.toString()).emit('editMessage', populatedMessage);
         io.to(message.senderId.toString()).emit('editMessage', populatedMessage);
-
         callback({ message: populatedMessage });
       } catch (err) {
         logger.error('Edit message failed', { error: err.message, stack: err.stack, messageId });
-        callback({ error: 'Failed to edit message' });
+        callback({ error: 'Failed to edit message', details: err.message });
       }
     });
 
@@ -410,27 +465,21 @@ module.exports = (io) => {
         if (!mongoose.isValidObjectId(messageId) || !mongoose.isValidObjectId(recipientId)) {
           return callback({ error: 'Invalid messageId or recipientId' });
         }
-
         const message = await Message.findById(messageId);
         if (!message) {
           return callback({ error: 'Message not found' });
         }
-
         if (message.senderId.toString() !== socket.user.id) {
           return callback({ error: 'Unauthorized to delete message' });
         }
-
         await Message.findByIdAndDelete(messageId);
-
         io.to(recipientId).emit('deleteMessage', { messageId, recipientId });
         io.to(message.senderId.toString()).emit('deleteMessage', { messageId, recipientId: message.senderId.toString() });
-
-        await Promise.all([emitUpdatedChatList(message.senderId.toString()), emitUpdatedChatList(recipientId)]);
-
+        await Promise.all([emitUpdatedChatList(io, message.senderId.toString()), emitUpdatedChatList(io, recipientId)]);
         callback({ status: 'success' });
       } catch (err) {
         logger.error('Delete message failed', { error: err.message, stack: err.stack, messageId });
-        callback({ error: 'Failed to delete message' });
+        callback({ error: 'Failed to delete message', details: err.message });
       }
     });
 
@@ -439,20 +488,13 @@ module.exports = (io) => {
         if (!mongoose.isValidObjectId(messageId) || !['sent', 'delivered', 'read'].includes(status)) {
           return;
         }
-
         const message = await Message.findById(messageId);
-        if (!message) {
+        if (!message || message.recipientId.toString() !== socket.user.id) {
           return;
         }
-
-        if (message.recipientId.toString() !== socket.user.id) {
-          return;
-        }
-
         message.status = status;
         await message.save();
-
-        io.to(message.senderId.toString()).emit('messageStatus', { messageId, status });
+        io.to(message.senderId.toString()).emit('messageStatus', { messageIds: [messageId], status });
       } catch (err) {
         logger.error('Message status update failed', { error: err.message, stack: err.stack, messageId });
       }
@@ -460,24 +502,17 @@ module.exports = (io) => {
 
     socket.on('batchMessageStatus', async ({ messageIds, status, recipientId }) => {
       try {
-        if (!messageIds.every((id) => mongoose.isValidObjectId(id)) || !mongoose.isValidObjectId(recipientId)) {
+        if (!messageIds.every((id) => mongoose.isValidObjectId(id)) || !mongoose.isValidObjectId(recipientId) || recipientId !== socket.user.id) {
           return;
         }
-
-        if (recipientId !== socket.user.id) {
-          return;
-        }
-
         const messages = await Message.find({ _id: { $in: messageIds }, recipientId });
         if (!messages.length) {
           return;
         }
-
         await Message.updateMany(
           { _id: { $in: messageIds }, recipientId },
           { status, updatedAt: new Date() }
         );
-
         const senderIds = [...new Set(messages.map((msg) => msg.senderId.toString()))];
         senderIds.forEach((senderId) => {
           io.to(senderId).emit('messageStatus', { messageIds, status });
@@ -487,20 +522,16 @@ module.exports = (io) => {
       }
     });
 
-    socket.on('disconnect', () => {
+    socket.on('disconnect', async () => {
       if (socket.user?.id) {
-        User.findByIdAndUpdate(socket.user.id, { status: 'offline', lastSeen: new Date() }, { new: true, lean: true })
-          .then((user) => {
-            if (user) {
-              io.to(socket.user.id).emit('userStatus', { userId: socket.user.id, status: 'offline', lastSeen: user.lastSeen });
-            }
-          })
-          .catch((err) => logger.error('User disconnect status update failed', { error: err.message, stack: err.stack, userId: socket.user.id }));
+        await User.findByIdAndUpdate(socket.user.id, { status: 'offline', lastSeen: new Date() }, { new: true, lean: true });
+        io.to(socket.user.id).emit('userStatus', { userId: socket.user.id, status: 'offline', lastSeen: new Date() });
       }
       logger.info('Socket.IO disconnected', { socketId: socket.id, userId: socket.user?.id });
     });
   });
 
+  // Routes
   router.get('/health', async (req, res) => {
     res.json({ status: 'healthy' });
   });
@@ -509,9 +540,9 @@ module.exports = (io) => {
     try {
       const { error } = messageSchema.validate(req.body);
       if (error) {
+        logger.warn('Invalid message data', { error: error.details[0].message, userId: req.body.senderId });
         return res.status(400).json({ error: error.details[0].message });
       }
-
       const {
         senderId,
         recipientId,
@@ -525,20 +556,14 @@ module.exports = (io) => {
         senderUsername,
         senderPhoto,
       } = req.body;
-
-      if (senderId !== req.user.id) {
+      if (senderId !== req.user._id.toString()) {
+        logger.warn('Unauthorized message sender', { senderId, authUserId: req.user._id });
         return res.status(403).json({ error: 'Unauthorized sender' });
       }
-
-      if (contentType === 'text' && !plaintextContent) {
-        return res.status(400).json({ error: 'plaintextContent required for text messages' });
-      }
-
       const existingMessage = await Message.findOne({ clientMessageId }).lean();
       if (existingMessage) {
         return res.status(200).json({ message: existingMessage });
       }
-
       const sender = await User.findById(senderId).select('virtualNumber username photo').lean();
       const message = new Message({
         senderId,
@@ -555,23 +580,18 @@ module.exports = (io) => {
         senderUsername: senderUsername || sender.username,
         senderPhoto: senderPhoto || sender.photo,
       });
-
       await message.save();
-
       const populatedMessage = await Message.findById(message._id)
         .populate('senderId', 'username virtualNumber photo')
         .populate('recipientId', 'username virtualNumber photo')
         .populate('replyTo', 'content contentType senderId recipientId createdAt')
         .lean();
-
       io.to(recipientId).emit('message', populatedMessage);
       io.to(senderId).emit('message', populatedMessage);
-
-      await Promise.all([emitUpdatedChatList(senderId), emitUpdatedChatList(recipientId)]);
-
+      await Promise.all([emitUpdatedChatList(io, senderId), emitUpdatedChatList(io, recipientId)]);
       res.status(201).json({ message: populatedMessage });
     } catch (error) {
-      logger.error('Save message error:', { error: error.message, stack: error.stack });
+      logger.error('Save message error', { error: error.message, stack: error.stack, senderId: req.body.senderId });
       res.status(500).json({ error: 'Failed to save message', details: error.message });
     }
   });
@@ -579,73 +599,88 @@ module.exports = (io) => {
   router.get('/chat-list', authMiddleware, async (req, res) => {
     const { userId } = req.query;
     try {
-      if (!mongoose.isValidObjectId(userId) || userId !== req.user.id) {
-        logger.warn('Invalid or unauthorized userId', { userId, authenticatedUser: req.user.id });
-        return res.status(400).json({ error: 'Invalid or unauthorized userId' });
+      if (!mongoose.isValidObjectId(userId) || userId !== req.user._id.toString()) {
+        logger.warn('Invalid or unauthorized chat-list request', { userId, authUserId: req.user._id });
+        return res.status(400).json({ error: 'Invalid or unauthorized request' });
       }
-
-      const user = await User.findById(userId).select('contacts').lean();
-      if (!user) {
-        logger.warn('User not found', { userId });
-        return res.status(404).json({ error: 'User not found' });
+      const cacheKey = `chatList:${userId}`;
+      const cached = chatListCache.get(cacheKey);
+      if (cached && cached.timestamp > Date.now() - CACHE_TTL) {
+        logger.info('Served cached chat list', { userId, chatCount: cached.chatList.length });
+        return res.status(200).json(cached.chatList);
       }
-
-      const contacts = Array.isArray(user.contacts) ? user.contacts : [];
-      if (!contacts.length) {
-        logger.info('No valid contacts found for user', { userId });
-        return res.json([]);
-      }
-
-      const contactUsers = await User.find({ _id: { $in: contacts } })
-        .select('username virtualNumber photo status lastSeen')
-        .lean();
-
-      const chatList = await Promise.all(
-        contactUsers.map(async (contact) => {
-          const latestMessage = await Message.findOne({
-            $or: [
-              { senderId: userId, recipientId: contact._id },
-              { senderId: contact._id, recipientId: userId },
-            ],
-          })
-            .sort({ createdAt: -1 })
-            .select('content contentType senderId recipientId createdAt plaintextContent senderVirtualNumber senderUsername senderPhoto')
-            .lean();
-
-          const unreadCount = await Message.countDocuments({
-            senderId: contact._id,
-            recipientId: userId,
-            status: { $ne: 'read' },
-          });
-
-          return {
-            id: contact._id.toString(),
-            username: contact.username || 'Unknown',
-            virtualNumber: contact.virtualNumber || '',
-            photo: contact.photo || 'https://placehold.co/40x40',
-            status: contact.status || 'offline',
-            lastSeen: contact.lastSeen || null,
-            latestMessage: latestMessage || null,
-            unreadCount: unreadCount || 0,
-          };
+      const user = await User.findById(userId)
+        .populate({
+          path: 'contacts',
+          select: 'username virtualNumber photo status lastSeen',
         })
-      );
-
+        .lean();
+      if (!user || !user.contacts?.length) {
+        logger.info('No contacts found for chat list', { userId });
+        chatListCache.set(cacheKey, { chatList: [], timestamp: Date.now() });
+        return res.status(200).json([]);
+      }
+      const latestMessages = await Message.aggregate([
+        {
+          $match: {
+            $or: [
+              { senderId: new mongoose.Types.ObjectId(userId), recipientId: { $in: user.contacts.map((c) => c._id) } },
+              { recipientId: new mongoose.Types.ObjectId(userId), senderId: { $in: user.contacts.map((c) => c._id) } },
+            ],
+          },
+        },
+        { $sort: { createdAt: -1 } },
+        {
+          $group: {
+            _id: {
+              $cond: [
+                { $eq: ['$senderId', new mongoose.Types.ObjectId(userId)] },
+                '$recipientId',
+                '$senderId',
+              ],
+            },
+            latestMessage: { $first: '$$ROOT' },
+            unreadCount: {
+              $sum: {
+                $cond: [
+                  { $and: [{ $eq: ['$recipientId', new mongoose.Types.ObjectId(userId)] }, { $eq: ['$status', 'delivered'] }] },
+                  1,
+                  0,
+                ],
+              },
+            },
+          },
+        },
+      ]);
+      const chatList = user.contacts.map((contact) => {
+        const messageData = latestMessages.find((m) => m._id.toString() === contact._id.toString());
+        return {
+          id: contact._id.toString(),
+          username: contact.username || 'Unknown',
+          virtualNumber: contact.virtualNumber || '',
+          photo: contact.photo || 'https://placehold.co/40x40',
+          status: contact.status || 'offline',
+          lastSeen: contact.lastSeen || null,
+          latestMessage: messageData?.latestMessage || null,
+          unreadCount: messageData?.unreadCount || 0,
+        };
+      });
+      chatListCache.set(cacheKey, { chatList, timestamp: Date.now() });
       logger.info('Chat list fetched successfully', { userId, chatCount: chatList.length });
-      res.json(chatList);
-    } catch (err) {
-      logger.error('Chat list failed', { error: err.message, stack: err.stack, userId });
-      res.status(500).json({ error: 'Failed to fetch chat list', details: err.message });
+      res.status(200).json(chatList);
+    } catch (error) {
+      logger.error('Chat list fetch failed', { userId, error: error.message, stack: error.stack });
+      res.status(500).json({ error: 'Failed to fetch chat list', details: error.message });
     }
   });
 
   router.get('/messages', authMiddleware, async (req, res) => {
     const { userId, recipientId, limit = 50, skip = 0 } = req.query;
     try {
-      if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId) || userId !== req.user.id) {
-        return res.status(400).json({ error: 'Invalid or unauthorized userId or recipientId' });
+      if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId) || userId !== req.user._id.toString()) {
+        logger.warn('Invalid or unauthorized messages request', { userId, recipientId, authUserId: req.user._id });
+        return res.status(400).json({ error: 'Invalid or unauthorized request' });
       }
-
       const messages = await Message.find({
         $or: [
           { senderId: userId, recipientId },
@@ -659,58 +694,44 @@ module.exports = (io) => {
         .populate('recipientId', 'username virtualNumber photo')
         .populate('replyTo', 'content contentType senderId recipientId createdAt')
         .lean();
-
       const total = await Message.countDocuments({
         $or: [
           { senderId: userId, recipientId },
           { senderId: recipientId, recipientId: userId },
         ],
       });
-
-      res.json({ messages, total });
-    } catch (err) {
-      logger.error('Messages fetch failed', { error: err.message, stack: err.stack });
-      res.status(500).json({ error: 'Failed to fetch messages', details: err.message });
+      logger.info('Messages fetched successfully', { userId, recipientId, messageCount: messages.length });
+      res.status(200).json({ messages, total });
+    } catch (error) {
+      logger.error('Messages fetch failed', { userId, recipientId, error: error.message, stack: error.stack });
+      res.status(500).json({ error: 'Failed to fetch messages', details: error.message });
     }
   });
 
-  router.post('/add_contact', authMiddleware, async (req, res) => {
+  router.post('/add_contact', authMiddleware, addContactLimiter, async (req, res) => {
     try {
       const { error } = addContactSchema.validate(req.body);
       if (error) {
         logger.warn('Invalid request body', { error: error.details[0].message, userId: req.body.userId });
-        return res.status(400).json({ error: 'Invalid request data' });
+        return res.status(400).json({ error: error.details[0].message });
       }
-
       const { userId, virtualNumber } = req.body;
-      if (!userId || userId !== req.user.id) {
-        logger.warn('Unauthorized user', { userId, authenticatedUser: req.user.id });
+      if (userId !== req.user._id.toString()) {
+        logger.warn('Unauthorized add_contact attempt', { userId, authUserId: req.user._id });
         return res.status(403).json({ error: 'Unauthorized' });
       }
-
-      const user = await User.findById(userId).select('_id username virtualNumber photo status lastSeen contacts');
-      if (!user) {
-        logger.warn('User not found', { userId });
-        return res.status(404).json({ error: 'User not found' });
-      }
-
       const contact = await User.findOne({ virtualNumber }).select('_id username virtualNumber photo status lastSeen contacts');
       if (!contact) {
         logger.info('Contact not found', { userId, virtualNumber });
         return res.status(404).json({ error: 'The contact is not registered' });
       }
-
       if (contact._id.toString() === userId) {
         logger.warn('Attempt to add self as contact', { userId });
         return res.status(400).json({ error: 'Cannot add self as contact' });
       }
-
-      user.contacts = Array.isArray(user.contacts) ? user.contacts : [];
-      contact.contacts = Array.isArray(contact.contacts) ? contact.contacts : [];
-
+      const user = await User.findById(userId).select('contacts');
       const userHasContact = user.contacts.some((id) => id.toString() === contact._id.toString());
       const contactHasUser = contact.contacts.some((id) => id.toString() === userId);
-
       if (userHasContact && contactHasUser) {
         logger.info('Contact already exists', { userId, contactId: contact._id });
         const contactData = {
@@ -725,40 +746,14 @@ module.exports = (io) => {
         };
         return res.status(200).json(contactData);
       }
-
-      const session = await mongoose.startSession();
-      try {
-        await session.withTransaction(async () => {
-          if (!userHasContact) {
-            await User.updateOne(
-              { _id: userId },
-              { $addToSet: { contacts: contact._id } },
-              { session }
-            );
-            logger.info('Updated user contacts', { userId, contactId: contact._id.toString() });
-          }
-
-          if (!contactHasUser) {
-            await User.updateOne(
-              { _id: contact._id },
-              { $addToSet: { contacts: user._id } },
-              { session }
-            );
-            logger.info('Updated contact contacts', { userId, contactId: contact._id.toString() });
-          }
-        });
-      } catch (transactionError) {
-        logger.error('Transaction failed', {
-          error: transactionError.message,
-          stack: transactionError.stack,
-          userId,
-          contactId: contact._id.toString(),
-        });
-        return res.status(500).json({ error: 'Failed to add contact', details: transactionError.message });
-      } finally {
-        session.endSession();
+      if (!userHasContact) {
+        await User.updateOne({ _id: userId }, { $addToSet: { contacts: contact._id } });
+        logger.info('Updated user contacts', { userId, contactId: contact._id.toString() });
       }
-
+      if (!contactHasUser) {
+        await User.updateOne({ _id: contact._id }, { $addToSet: { contacts: user._id } });
+        logger.info('Updated contact contacts', { userId, contactId: contact._id.toString() });
+      }
       const contactData = {
         id: contact._id.toString(),
         username: contact.username || 'Unknown',
@@ -769,57 +764,45 @@ module.exports = (io) => {
         latestMessage: null,
         unreadCount: 0,
       };
-
+      chatListCache.delete(`chatList:${userId}`);
+      chatListCache.delete(`chatList:${contact._id.toString()}`);
       io.to(userId).emit('contactData', { userId, contactData });
       io.to(contact._id.toString()).emit('contactData', {
         userId: contact._id.toString(),
         contactData: {
           id: user._id.toString(),
-          username: user.username || 'Unknown',
-          virtualNumber: user.virtualNumber || '',
-          photo: user.photo || 'https://placehold.co/40x40',
-          status: user.status || 'offline',
-          lastSeen: user.lastSeen || null,
+          username: req.user.username || 'Unknown',
+          virtualNumber: req.user.virtualNumber || '',
+          photo: req.user.photo || 'https://placehold.co/40x40',
+          status: req.user.status || 'offline',
+          lastSeen: req.user.lastSeen || null,
           latestMessage: null,
           unreadCount: 0,
         },
       });
-
-      await Promise.all([emitUpdatedChatList(userId), emitUpdatedChatList(contact._id.toString())]);
-
+      await Promise.all([emitUpdatedChatList(io, userId), emitUpdatedChatList(io, contact._id.toString())]);
       logger.info('Contact added successfully', { userId, contactId: contact._id.toString() });
       res.status(201).json(contactData);
     } catch (error) {
-      logger.error('Add contact failed', {
-        error: error.message,
-        stack: error.stack,
-        userId: req.body.userId,
-        virtualNumber: req.body.virtualNumber,
-      });
-      return res.status(500).json({ error: 'Internal Server Error', details: error.message });
+      logger.error('Add contact failed', { userId: req.body.userId, virtualNumber: req.body.virtualNumber, error: error.message, stack: error.stack });
+      res.status(500).json({ error: 'Failed to add contact', details: error.message });
     }
   });
 
-  router.post('/upload', authMiddleware, upload.single('file'), async (req, res) => {
+  router.post('/upload', authMiddleware, uploadLimiter, upload.single('file'), async (req, res) => {
     try {
       const { userId, recipientId, clientMessageId, senderVirtualNumber, senderUsername, senderPhoto, caption } = req.body;
-      if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId) || !clientMessageId || !req.file || userId !== req.user.id) {
+      if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId) || !clientMessageId || !req.file || userId !== req.user._id.toString()) {
+        logger.warn('Invalid upload parameters', { userId, recipientId, clientMessageId, hasFile: !!req.file });
         return res.status(400).json({ error: 'Invalid or unauthorized parameters' });
       }
-
       const existingMessage = await Message.findOne({ clientMessageId }).lean();
       if (existingMessage) {
         return res.json({ message: existingMessage });
       }
-
-      const contentType = req.file.mimetype.startsWith('image/')
-        ? 'image'
-        : req.file.mimetype.startsWith('video/')
-        ? 'video'
-        : req.file.mimetype.startsWith('audio/')
-        ? 'audio'
-        : 'document';
-
+      const contentType = req.file.mimetype.startsWith('image/') ? 'image' :
+                          req.file.mimetype.startsWith('video/') ? 'video' :
+                          req.file.mimetype.startsWith('audio/') ? 'audio' : 'document';
       const uploadResult = await new Promise((resolve, reject) => {
         const uploadStream = cloudinary.uploader.upload_stream(
           { resource_type: contentType === 'document' ? 'raw' : contentType },
@@ -830,7 +813,6 @@ module.exports = (io) => {
         );
         require('stream').Readable.from(req.file.buffer).pipe(uploadStream);
       });
-
       const sender = await User.findById(userId).select('virtualNumber username photo').lean();
       const message = new Message({
         senderId: userId,
@@ -846,23 +828,21 @@ module.exports = (io) => {
         senderUsername: senderUsername || sender.username,
         senderPhoto: senderPhoto || sender.photo,
       });
-
       await message.save();
-
       const populatedMessage = await Message.findById(message._id)
         .populate('senderId', 'username virtualNumber photo')
         .populate('recipientId', 'username virtualNumber photo')
         .populate('replyTo', 'content contentType senderId recipientId createdAt')
         .lean();
-
+      chatListCache.delete(`chatList:${userId}`);
+      chatListCache.delete(`chatList:${recipientId}`);
       io.to(recipientId).emit('message', populatedMessage);
       io.to(userId).emit('message', populatedMessage);
-
-      await Promise.all([emitUpdatedChatList(userId), emitUpdatedChatList(recipientId)]);
-
+      await Promise.all([emitUpdatedChatList(io, userId), emitUpdatedChatList(io, recipientId)]);
+      logger.info('Media uploaded successfully', { userId, recipientId, messageId: message._id });
       res.json({ message: populatedMessage });
     } catch (err) {
-      logger.error('Media upload failed', { error: err.message, stack: err.stack });
+      logger.error('Media upload failed', { error: err.message, stack: err.stack, userId: req.body.userId });
       res.status(500).json({ error: 'Failed to upload media', details: err.message });
     }
   });
@@ -871,38 +851,35 @@ module.exports = (io) => {
     try {
       const { error } = deleteUserSchema.validate(req.body);
       if (error) {
+        logger.warn('Invalid delete user request', { error: error.details[0].message, userId: req.body.userId });
         return res.status(400).json({ error: error.details[0].message });
       }
-
       const { userId } = req.body;
-      if (userId !== req.user.id) {
+      if (userId !== req.user._id.toString()) {
+        logger.warn('Unauthorized delete user attempt', { userId, authUserId: req.user._id });
         return res.status(403).json({ error: 'Unauthorized' });
       }
-
       const user = await User.findById(userId);
       if (!user) {
+        logger.info('User not found for deletion', { userId });
         return res.status(404).json({ error: 'User not found' });
       }
-
       const contacts = await User.find({ contacts: userId }).select('_id').lean();
       const contactIds = contacts.map((contact) => contact._id.toString());
-
       await Message.deleteMany({ $or: [{ senderId: userId }, { recipientId: userId }] });
-
       await User.updateMany({ contacts: userId }, { $pull: { contacts: userId } });
-
       await User.findByIdAndDelete(userId);
-
+      chatListCache.delete(`chatList:${userId}`);
+      contactIds.forEach((contactId) => chatListCache.delete(`chatList:${contactId}`));
       io.to(userId).emit('userStatus', { userId, status: 'offline', lastSeen: new Date() });
       contactIds.forEach((contactId) => {
         io.to(contactId).emit('userDeleted', { userId });
       });
-
-      await Promise.all(contactIds.map((contactId) => emitUpdatedChatList(contactId)));
-
+      await Promise.all(contactIds.map((contactId) => emitUpdatedChatList(io, contactId)));
+      logger.info('User deleted successfully', { userId });
       res.json({ message: 'User deleted successfully' });
     } catch (err) {
-      logger.error('User deletion failed', { error: err.message, stack: err.stack });
+      logger.error('User deletion failed', { error: err.message, stack: err.stack, userId: req.body.userId });
       res.status(500).json({ error: 'Failed to delete user', details: err.message });
     }
   });
@@ -910,13 +887,7 @@ module.exports = (io) => {
   router.post('/log-error', async (req, res) => {
     try {
       const { error, stack, userId, route, timestamp } = req.body;
-      logger.error('Client-side error reported', {
-        error,
-        stack,
-        userId,
-        route,
-        timestamp,
-      });
+      logger.error('Client-side error reported', { error, stack, userId, route, timestamp });
       res.status(200).json({ message: 'Error logged successfully' });
     } catch (err) {
       logger.error('Failed to log client error', { error: err.message, stack: err.stack });

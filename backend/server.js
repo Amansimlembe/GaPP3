@@ -112,7 +112,7 @@ connectDB();
 const routes = [
   { path: '/auth', handler: authRoutes, name: 'authRoutes' },
   { path: '/feed', handler: feedRoutes, name: 'feedRoutes' },
-  { path: '/social', handler: socialRoutes, name: 'socialRoutes' }, // Simplified registration
+  { path: '/social', handler: socialRoutes(app), name: 'socialRoutes' },
   { path: '/jobseeker', handler: jobseekerRoutes, name: 'jobseekerRoutes' },
   { path: '/employer', handler: employerRoutes, name: 'employerRoutes' },
 ];

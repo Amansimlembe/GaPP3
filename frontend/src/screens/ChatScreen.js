@@ -35,10 +35,14 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   const [isForgeReady, setIsForgeReady] = useState(false);
   const [isLoadingChatList, setIsLoadingChatList] = useState(true);
   const [isLoadingAddContact, setIsLoadingAddContact] = useState(false);
+  const [file, setFile] = useState(null);
   const inputRef = useRef(null);
+  const fileInputRef = useRef(null);
   const listRef = useRef(null);
   const menuRef = useRef(null);
   const typingTimeoutRef = useRef(null);
+  const typingDebounceRef = useRef(null);
+  const sentStatusesRef = useRef(new Set());
   const retryCountRef = useRef({ chatList: 0, addContact: 0 });
   const maxRetries = 3;
 
@@ -49,9 +53,24 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     } else {
       setError('Encryption library failed to load');
       console.error('node-forge initialization failed:', forge);
+      logClientError('node-forge initialization failed', new Error('Forge not loaded'));
       setIsLoadingChatList(false);
     }
   }, []);
+
+  const logClientError = useCallback(async (message, error) => {
+    try {
+      await axios.post(`${BASE_URL}/social/log-error`, {
+        error: message,
+        stack: error?.stack || '',
+        userId,
+        route: window.location.pathname,
+        timestamp: new Date().toISOString(),
+      }, { timeout: 5000 });
+    } catch (err) {
+      console.error('Failed to log client error:', err.message);
+    }
+  }, [userId]);
 
   const handleLogout = useCallback(async () => {
     try {
@@ -73,8 +92,9 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     } catch (err) {
       console.error('handleLogout error:', err.message);
       setError('Failed to logout');
+      logClientError('Logout failed', err);
     }
-  }, [socket, userId, setAuth, token, navigate, dispatch]);
+  }, [socket, userId, setAuth, token, navigate, dispatch, logClientError]);
 
   const getPublicKey = useCallback(async (recipientId) => {
     if (!isValidObjectId(recipientId)) throw new Error('Invalid recipientId');
@@ -95,14 +115,16 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         setError('Session expired, please log in again');
         setTimeout(() => handleLogout(), 5000);
       }
-      throw new Error('Failed to fetch public key: ' + err.message);
+      logClientError('Failed to fetch public key', err);
+      throw new Error('Failed to fetch public key');
     }
-  }, [token, handleLogout]);
+  }, [token, handleLogout, logClientError]);
 
   const encryptMessage = useCallback(async (content, recipientPublicKey, isMedia = false) => {
     if (!isForgeReady || !recipientPublicKey) {
-      console.error('encryptMessage: Dependencies missing', { isForgeReady, recipientPublicKey });
-      throw new Error('Encryption dependencies missing');
+      const err = new Error('Encryption dependencies missing');
+      logClientError('Encryption dependencies missing', err);
+      throw err;
     }
     try {
       const aesKey = forge.random.getBytesSync(32);
@@ -117,9 +139,10 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       return encrypted;
     } catch (err) {
       console.error('encryptMessage error:', err.message);
-      throw new Error('Failed to encrypt message: ' + err.message);
+      logClientError('Encryption failed', err);
+      throw new Error('Failed to encrypt message');
     }
-  }, [isForgeReady]);
+  }, [isForgeReady, logClientError]);
 
   const fetchChatList = useCallback(async (isRetry = false) => {
     if (!isForgeReady) return;
@@ -139,6 +162,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       retryCountRef.current.chatList = 0;
     } catch (err) {
       console.error('ChatList fetch error:', err.message, err.response?.data);
+      logClientError('Chat list fetch failed', err);
       if (err.response?.status === 401) {
         setError('Session expired');
         setTimeout(() => handleLogout(), 5000);
@@ -153,7 +177,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     } finally {
       setIsLoadingChatList(false);
     }
-  }, [isForgeReady, token, userId, handleLogout, unreadMessages]);
+  }, [isForgeReady, token, userId, handleLogout, unreadMessages, logClientError]);
 
   const fetchMessages = useCallback(async (chatId) => {
     if (!isForgeReady || !isValidObjectId(chatId)) return;
@@ -165,18 +189,21 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       });
       dispatch(setMessages({ recipientId: chatId, messages: data.messages }));
       setUnreadMessages((prev) => ({ ...prev, [chatId]: 0 }));
-      if (data.messages.length && socket) {
+      const unreadMessageIds = data.messages
+        .filter((m) => m.status !== 'read' && m.recipientId.toString() === userId && !sentStatusesRef.current.has(m._id))
+        .map((m) => m._id);
+      if (unreadMessageIds.length && socket) {
         socket.emit('batchMessageStatus', {
-          messageIds: data.messages
-            .filter((m) => m.status !== 'read' && m.recipientId.toString() === userId)
-            .map((m) => m._id),
+          messageIds: unreadMessageIds,
           status: 'read',
           recipientId: userId,
         });
+        unreadMessageIds.forEach((id) => sentStatusesRef.current.add(id));
       }
       listRef.current?.scrollToItem(data.messages.length, 'end');
     } catch (err) {
       console.error('fetchMessages error:', err.message, err.response?.data);
+      logClientError('Messages fetch failed', err);
       if (err.response?.status === 401) {
         setError('Session expired, please log in again');
         setTimeout(() => handleLogout(), 5000);
@@ -184,7 +211,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         setError(`Failed to load messages: ${err.response?.data?.error || 'Unknown error'}`);
       }
     }
-  }, [isForgeReady, token, userId, socket, dispatch]);
+  }, [isForgeReady, token, userId, socket, dispatch, logClientError]);
 
   const sendMessage = useCallback(async () => {
     if (!isForgeReady || !message.trim() || !selectedChat || !isValidObjectId(selectedChat)) return;
@@ -213,6 +240,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
           console.error('Socket message error:', ack.error);
           setError(`Failed to send message: ${ack.error}`);
           dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: clientMessageId, status: 'failed' }));
+          logClientError('Socket message failed', new Error(ack.error));
           return;
         }
         dispatch(replaceMessage({ recipientId: selectedChat, message: { ...ack.message, plaintextContent }, replaceId: clientMessageId }));
@@ -223,10 +251,59 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       listRef.current?.scrollToItem((chats[selectedChat]?.length || 0) + 1, 'end');
     } catch (err) {
       console.error('sendMessage error:', err.message);
-      setError('Failed to send message: ' + err.message);
+      setError('Failed to send message');
       dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: clientMessageId, status: 'failed' }));
+      logClientError('Send message failed', err);
     }
-  }, [isForgeReady, message, selectedChat, userId, virtualNumber, username, photo, socket, getPublicKey, encryptMessage, dispatch, chats]);
+  }, [isForgeReady, message, selectedChat, userId, virtualNumber, username, photo, socket, getPublicKey, encryptMessage, dispatch, chats, logClientError]);
+
+  const handleAttachment = useCallback(async (e) => {
+    const selectedFile = e.target.files[0];
+    if (!selectedFile || !selectedChat || !isValidObjectId(selectedChat)) return;
+    if (selectedFile.size > 50 * 1024 * 1024) {
+      setError('File size exceeds 50MB limit');
+      return;
+    }
+    setFile(selectedFile);
+    setShowAttachmentPicker(false);
+    const clientMessageId = generateClientMessageId();
+    try {
+      const formData = new FormData();
+      formData.append('file', selectedFile);
+      formData.append('userId', userId);
+      formData.append('recipientId', selectedChat);
+      formData.append('clientMessageId', clientMessageId);
+      formData.append('senderVirtualNumber', virtualNumber);
+      formData.append('senderUsername', username);
+      formData.append('senderPhoto', photo);
+      const tempMessage = {
+        senderId: userId,
+        recipientId: selectedChat,
+        content: URL.createObjectURL(selectedFile),
+        contentType: selectedFile.type.startsWith('image/') ? 'image' :
+                     selectedFile.type.startsWith('video/') ? 'video' :
+                     selectedFile.type.startsWith('audio/') ? 'audio' : 'document',
+        originalFilename: selectedFile.name,
+        clientMessageId,
+        status: 'pending',
+        createdAt: new Date(),
+      };
+      dispatch(addMessage({ recipientId: selectedChat, message: tempMessage }));
+      const { data } = await axios.post(`${BASE_URL}/social/upload`, formData, {
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'multipart/form-data' },
+        timeout: 30000,
+      });
+      dispatch(replaceMessage({ recipientId: selectedChat, message: data.message, replaceId: clientMessageId }));
+      dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: data.message._id, status: 'sent' }));
+      setFile(null);
+      listRef.current?.scrollToItem((chats[selectedChat]?.length || 0) + 1, 'end');
+    } catch (err) {
+      console.error('handleAttachment error:', err.message, err.response?.data);
+      setError(`Failed to upload file: ${err.response?.data?.error || 'Unknown error'}`);
+      dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: clientMessageId, status: 'failed' }));
+      logClientError('File upload failed', err);
+    }
+  }, [selectedChat, userId, virtualNumber, username, photo, token, dispatch, chats, logClientError]);
 
   const handleAddContact = useCallback(async () => {
     if (!contactInput.trim()) {
@@ -271,6 +348,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       retryCountRef.current.addContact = 0;
     } catch (err) {
       console.error('handleAddContact error:', err.message, err.response?.data);
+      logClientError('Add contact failed', err);
       const errorMsg = err.response?.data?.error || 'Failed to add contact';
       if (err.response?.status === 500 && retryCountRef.current.addContact < maxRetries) {
         retryCountRef.current.addContact += 1;
@@ -283,7 +361,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     } finally {
       setIsLoadingAddContact(false);
     }
-  }, [contactInput, token, userId]);
+  }, [contactInput, token, userId, logClientError]);
 
   useEffect(() => {
     if (!socket || !isForgeReady || !userId) return;
@@ -292,6 +370,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       console.log('Received contactData event:', { emitterId, contactData });
       if (!contactData?.id || !isValidObjectId(contactData.id)) {
         console.error('Invalid contactData received:', contactData);
+        logClientError('Invalid contactData received', new Error('Invalid contact id'));
         return;
       }
       setChatList((prev) => {
@@ -332,11 +411,14 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       const targetId = senderId === userId ? recipientId : senderId;
       dispatch(addMessage({ recipientId: targetId, message: msg }));
       if (selectedChat === targetId && document.hasFocus()) {
-        socket.emit('batchMessageStatus', {
-          messageIds: [msg._id],
-          status: 'read',
-          recipientId: userId,
-        });
+        if (!sentStatusesRef.current.has(msg._id)) {
+          socket.emit('batchMessageStatus', {
+            messageIds: [msg._id],
+            status: 'read',
+            recipientId: userId,
+          });
+          sentStatusesRef.current.add(msg._id);
+        }
         setUnreadMessages((prev) => ({ ...prev, [targetId]: 0 }));
         listRef.current?.scrollToItem((chats[targetId]?.length || 0) + 1, 'end');
       } else {
@@ -386,7 +468,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       socket.off('stopTyping');
       socket.off('messageStatus');
     };
-  }, [socket, isForgeReady, selectedChat, userId, chats, dispatch, unreadMessages]);
+  }, [socket, isForgeReady, selectedChat, userId, chats, dispatch, unreadMessages, logClientError]);
 
   useEffect(() => {
     if (!token || !userId) {
@@ -395,6 +477,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       return;
     }
     if (isForgeReady) {
+      console.log('Connecting to Socket.IO at:', BASE_URL);
       socket.emit('join', userId);
       fetchChatList();
     }
@@ -411,6 +494,8 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       if (menuRef.current && !menuRef.current.contains(e.target)) {
         setShowMenu(false);
         setShowAddContact(false);
+        setShowAttachmentPicker(false);
+        setShowEmojiPicker(false);
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
@@ -419,11 +504,14 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
 
   const handleTyping = useCallback(() => {
     if (!socket || !selectedChat) return;
-    clearTimeout(typingTimeoutRef.current);
-    socket.emit('typing', { userId, recipientId: selectedChat });
-    typingTimeoutRef.current = setTimeout(() => {
-      socket.emit('stopTyping', { userId, recipientId: selectedChat });
-    }, 3000);
+    clearTimeout(typingDebounceRef.current);
+    typingDebounceRef.current = setTimeout(() => {
+      socket.emit('typing', { userId, recipientId: selectedChat });
+      clearTimeout(typingTimeoutRef.current);
+      typingTimeoutRef.current = setTimeout(() => {
+        socket.emit('stopTyping', { userId, recipientId: selectedChat });
+      }, 3000);
+    }, 500);
   }, [socket, selectedChat, userId]);
 
   const selectChat = useCallback((chatId) => {
@@ -431,13 +519,17 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     setShowMenu(false);
     setError('');
     if (chatId && socket) {
-      socket.emit('batchMessageStatus', {
-        messageIds: (chats[chatId] || [])
-          .filter((m) => m.status !== 'read' && m.recipientId.toString() === userId)
-          .map((m) => m._id),
-        status: 'read',
-        recipientId: userId,
-      });
+      const unreadMessageIds = (chats[chatId] || [])
+        .filter((m) => m.status !== 'read' && m.recipientId.toString() === userId && !sentStatusesRef.current.has(m._id))
+        .map((m) => m._id);
+      if (unreadMessageIds.length) {
+        socket.emit('batchMessageStatus', {
+          messageIds: unreadMessageIds,
+          status: 'read',
+          recipientId: userId,
+        });
+        unreadMessageIds.forEach((id) => sentStatusesRef.current.add(id));
+      }
       setUnreadMessages((prev) => ({ ...prev, [chatId]: 0 }));
     }
     inputRef.current?.focus();
@@ -688,10 +780,47 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
                 />
                 {showAttachmentPicker && (
                   <div className="attachment-picker">
-                    <FaImage className="picker-item" />
-                    <FaVideo className="picker-item" />
-                    <FaFile className="picker-item" />
-                    <FaMusic className="picker-item" />
+                    <label htmlFor="attach-image" className="picker-item">
+                      <FaImage />
+                      <input
+                        id="attach-image"
+                        type="file"
+                        accept="image/*"
+                        onChange={handleAttachment}
+                        ref={fileInputRef}
+                        style={{ display: 'none' }}
+                      />
+                    </label>
+                    <label htmlFor="attach-video" className="picker-item">
+                      <FaVideo />
+                      <input
+                        id="attach-video"
+                        type="file"
+                        accept="video/*"
+                        onChange={handleAttachment}
+                        style={{ display: 'none' }}
+                      />
+                    </label>
+                    <label htmlFor="attach-audio" className="picker-item">
+                      <FaMusic />
+                      <input
+                        id="attach-audio"
+                        type="file"
+                        accept="audio/*"
+                        onChange={handleAttachment}
+                        style={{ display: 'none' }}
+                      />
+                    </label>
+                    <label htmlFor="attach-document" className="picker-item">
+                      <FaFile />
+                      <input
+                        id="attach-document"
+                        type="file"
+                        accept=".pdf,.doc,.docx,.txt"
+                        onChange={handleAttachment}
+                        style={{ display: 'none' }}
+                      />
+                    </label>
                   </div>
                 )}
                 <input
