@@ -11,7 +11,6 @@ const User = require('../models/User');
 const { authMiddleware } = require('./auth');
 const Message = require('../models/Message');
 const TokenBlacklist = require('../models/TokenBlacklist'); // Import TokenBlacklist
-
 const router = express.Router();
 
 const logger = winston.createLogger({
@@ -36,7 +35,7 @@ const configureCloudinary = () => {
         api_secret: url.password,
       };
     } catch (err) {
-      logger.error('Invalid CLOUDINARY_URL format', { error: err.message, stack: err.stack });
+      logger.error('Invalid CLOUDINARY_URL format', { error: err.message });
       throw new Error(`Invalid CLOUDINARY_URL format: ${err.message}`);
     }
   } else if (
@@ -70,7 +69,6 @@ const upload = multer({
     if (allowedTypes.some((type) => file.mimetype.startsWith(type))) {
       cb(null, true);
     } else {
-      logger.warn('Invalid file type', { mimetype: file.mimetype });
       cb(new Error('Invalid file type'), false);
     }
   },
@@ -79,12 +77,12 @@ const upload = multer({
 // Rate limiters
 const addContactLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 20, // Increased for better UX
+  max: 10,
   message: 'Too many contact addition requests, please try again later',
 });
 const uploadLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 10, // Increased for better UX
+  max: 5,
   message: 'Too many upload requests, please try again later',
 });
 
@@ -92,55 +90,38 @@ const validContentTypes = ['text', 'image', 'video', 'audio', 'document'];
 
 // Joi schemas
 const messageSchema = Joi.object({
-  senderId: Joi.string()
-    .custom((value, helpers) => {
-      if (!mongoose.isValidObjectId(value)) return helpers.error('any.invalid');
+  senderId: Joi.string().custom((value, helpers) => {
+    if (!mongoose.isValidObjectId(value)) return helpers.error('any.invalid');
+    return value;
+  }, 'ObjectId validation').required().messages({ 'any.invalid': 'Invalid senderId' }),
+  recipientId: Joi.string().custom((value, helpers) => {
+    if (!mongoose.isValidObjectId(value)) return helpers.error('any.invalid');
+    return value;
+  }, 'ObjectId validation').required().messages({ 'any.invalid': 'Invalid recipientId' }),
+  content: Joi.string().required().when('contentType', {
+    is: 'text',
+    then: Joi.string().pattern(/^[A-Za-z0-9+/=]+\|[A-Za-z0-9+/=]+\|[A-Za-z0-9+/=]+$/, 'encrypted format'),
+    otherwise: Joi.string().custom((value, helpers) => {
+      if (!validator.isURL(value)) return helpers.error('any.invalid');
       return value;
-    }, 'ObjectId validation')
-    .required()
-    .messages({ 'any.invalid': 'Invalid senderId' }),
-  recipientId: Joi.string()
-    .custom((value, helpers) => {
-      if (!mongoose.isValidObjectId(value)) return helpers.error('any.invalid');
-      return value;
-    }, 'ObjectId validation')
-    .required()
-    .messages({ 'any.invalid': 'Invalid recipientId' }),
-  content: Joi.string()
-    .required()
-    .when('contentType', {
-      is: 'text',
-      then: Joi.string().pattern(/^[A-Za-z0-9+/=]+\|[A-Za-z0-9+/=]+\|[A-Za-z0-9+/=]+$/, 'encrypted format'),
-      otherwise: Joi.string().custom((value, helpers) => {
-        if (!validator.isURL(value)) return helpers.error('any.invalid');
-        return value;
-      }, 'URL validation'),
-    })
-    .messages({
-      'string.pattern.name': 'Text content must be in encrypted format (data|iv|key)',
-      'any.invalid': 'Media content must be a valid URL',
-    }),
-  contentType: Joi.string()
-    .valid(...validContentTypes)
-    .required()
-    .messages({
-      'any.only': `contentType must be one of: ${validContentTypes.join(', ')}`,
-    }),
-  plaintextContent: Joi.string()
-    .when('contentType', {
-      is: 'text',
-      then: Joi.string().required(),
-      otherwise: Joi.string().allow('').optional(),
-    })
-    .messages({ 'string.empty': 'plaintextContent required for text messages' }),
+    }, 'URL validation'),
+  }).messages({
+    'string.pattern.name': 'Text content must be in encrypted format (data|iv|key)',
+    'any.invalid': 'Media content must be a valid URL',
+  }),
+  contentType: Joi.string().valid(...validContentTypes).required().messages({
+    'any.only': `contentType must be one of: ${validContentTypes.join(', ')}`,
+  }),
+  plaintextContent: Joi.string().when('contentType', {
+    is: 'text',
+    then: Joi.string().required(),
+    otherwise: Joi.string().allow('').optional(),
+  }).messages({ 'string.empty': 'plaintextContent required for text messages' }),
   caption: Joi.string().optional(),
-  replyTo: Joi.string()
-    .custom((value, helpers) => {
-      if (value && !mongoose.isValidObjectId(value)) return helpers.error('any.invalid');
-      return value;
-    }, 'ObjectId validation')
-    .optional()
-    .messages({ 'any.invalid': 'Invalid replyTo ID' }),
+  replyTo: Joi.string().custom((value, helpers) => {
+    if (value && !mongoose.isValidObjectId(value)) return helpers.error('any.invalid');
+    return value;
+  }, 'ObjectId validation').optional().messages({ 'any.invalid': 'Invalid replyTo ID' }),
   originalFilename: Joi.string().optional(),
   clientMessageId: Joi.string().required().messages({ 'string.empty': 'clientMessageId required' }),
   senderVirtualNumber: Joi.string().optional(),
@@ -149,28 +130,48 @@ const messageSchema = Joi.object({
 });
 
 const addContactSchema = Joi.object({
-  userId: Joi.string()
-    .custom((value, helpers) => {
-      if (!mongoose.isValidObjectId(value)) return helpers.error('any.invalid');
-      return value;
-    }, 'ObjectId validation')
-    .required(),
-  virtualNumber: Joi.string()
-    .pattern(/^\+\d{7,15}$/)
-    .required()
-    .messages({
-      'string.pattern.base': 'Invalid virtual number format (e.g., +1234567890)',
-    }),
+  userId: Joi.string().custom((value, helpers) => {
+    if (!mongoose.isValidObjectId(value)) return helpers.error('any.invalid');
+    return value;
+  }, 'ObjectId validation').required(),
+  virtualNumber: Joi.string().pattern(/^\+\d{7,15}$/).required().messages({
+    'string.pattern.base': 'Invalid virtual number format (e.g., +1234567890)',
+  }),
 });
 
 const deleteUserSchema = Joi.object({
-  userId: Joi.string()
-    .custom((value, helpers) => {
-      if (!mongoose.isValidObjectId(value)) return helpers.error('any.invalid');
-      return value;
-    }, 'ObjectId validation')
-    .required(),
+  userId: Joi.string().custom((value, helpers) => {
+    if (!mongoose.isValidObjectId(value)) return helpers.error('any.invalid');
+    return value;
+  }, 'ObjectId validation').required(),
 });
+
+// Auth middleware
+const authMiddleware = async (req, res, next) => {
+  const token = req.header('Authorization')?.replace('Bearer ', '');
+  if (!token) {
+    logger.warn('No token provided', { method: req.method, url: req.url });
+    return res.status(401).json({ error: 'No token provided' });
+  }
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
+    const user = await User.findById(decoded.userId || decoded.id).select('contacts _id username virtualNumber photo status lastSeen');
+    if (!user) {
+      logger.warn('User not found', { userId: decoded.userId || decoded.id });
+      return res.status(401).json({ error: 'User not found' });
+    }
+    const blacklisted = await mongoose.model('TokenBlacklist').findOne({ token }).select('_id').lean();
+    if (blacklisted) {
+      logger.warn('Blacklisted token used', { userId: decoded.userId || decoded.id });
+      return res.status(401).json({ error: 'Token invalidated' });
+    }
+    req.user = user;
+    next();
+  } catch (error) {
+    logger.error('Auth middleware error', { error: error.message, stack: error.stack });
+    res.status(401).json({ error: 'Invalid token', details: error.message });
+  }
+};
 
 // Cache for chat lists
 const chatListCache = new Map();
@@ -258,120 +259,114 @@ const emitUpdatedChatList = async (io, userId) => {
 // Socket.IO setup
 module.exports = (app) => {
   const io = app.get('io');
-  if (!io || typeof io.on !== 'function') {
-    logger.error('Invalid Socket.IO instance in social.js', { io: !!io, on: typeof io?.on });
+  if (!io || typeof io.use !== 'function') {
+    logger.error('Invalid Socket.IO instance in social.js', { io: !!io, use: typeof io?.use });
     throw new Error('Socket.IO initialization failed: invalid io instance');
   }
+
+  io.use(async (socket, next) => {
+    const token = socket.handshake.auth.token;
+    if (!token) {
+      logger.warn('No token provided for Socket.IO', { socketId: socket.id });
+      return next(new Error('No token provided'));
+    }
+    try {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
+      const user = await User.findById(decoded.userId || decoded.id).select('_id');
+      if (!user) {
+        logger.warn('User not found for Socket.IO', { userId: decoded.userId || decoded.id, socketId: socket.id });
+        return next(new Error('User not found'));
+      }
+      const blacklisted = await mongoose.model('TokenBlacklist').findOne({ token }).select('_id').lean();
+      if (blacklisted) {
+        logger.warn('Blacklisted token used for Socket.IO', { userId: decoded.userId || decoded.id, socketId: socket.id });
+        return next(new Error('Token invalidated'));
+      }
+      socket.user = decoded;
+      next();
+    } catch (error) {
+      logger.error('Socket.IO auth error', { error: error.message, socketId: socket.id, stack: error.stack });
+      next(new Error('Invalid token'));
+    }
+  });
 
   io.on('connection', (socket) => {
     logger.info('New Socket.IO connection', { socketId: socket.id, userId: socket.user?.id });
 
     socket.on('join', async (userId) => {
-      try {
-        if (!mongoose.isValidObjectId(userId) || userId !== socket.user.id) {
-          logger.warn('Invalid or unauthorized join attempt', { socketId: socket.id, userId });
-          socket.emit('error', { message: 'Invalid or unauthorized join attempt' });
-          return;
-        }
-        socket.join(userId);
-        await User.findByIdAndUpdate(userId, { status: 'online', lastSeen: new Date() }, { new: true, lean: true });
-        io.to(userId).emit('userStatus', { userId, status: 'online', lastSeen: new Date() });
-        await emitUpdatedChatList(io, userId);
-        logger.info('User joined room', { socketId: socket.id, userId });
-      } catch (err) {
-        logger.error('Join event error', { error: err.message, stack: err.stack, userId });
-        socket.emit('error', { message: 'Failed to join room' });
+      if (!mongoose.isValidObjectId(userId) || userId !== socket.user.id) {
+        logger.warn('Invalid or unauthorized join attempt', { socketId: socket.id, userId });
+        return;
       }
+      socket.join(userId);
+      await User.findByIdAndUpdate(userId, { status: 'online', lastSeen: new Date() }, { new: true, lean: true });
+      io.to(userId).emit('userStatus', { userId, status: 'online', lastSeen: new Date() });
+      await emitUpdatedChatList(io, userId);
+      logger.info('User joined room', { socketId: socket.id, userId });
     });
 
     socket.on('leave', async (userId) => {
-      try {
-        if (!mongoose.isValidObjectId(userId) || userId !== socket.user.id) {
-          logger.warn('Invalid or unauthorized leave attempt', { socketId: socket.id, userId });
-          socket.emit('error', { message: 'Invalid or unauthorized leave attempt' });
-          return;
-        }
-        socket.leave(userId);
-        await User.findByIdAndUpdate(userId, { status: 'offline', lastSeen: new Date() }, { new: true, lean: true });
-        io.to(userId).emit('userStatus', { userId, status: 'offline', lastSeen: new Date() });
-        logger.info('User left room', { socketId: socket.id, userId });
-      } catch (err) {
-        logger.error('Leave event error', { error: err.message, stack: err.stack, userId });
-        socket.emit('error', { message: 'Failed to leave room' });
+      if (!mongoose.isValidObjectId(userId) || userId !== socket.user.id) {
+        logger.warn('Invalid or unauthorized leave attempt', { socketId: socket.id, userId });
+        return;
       }
+      socket.leave(userId);
+      await User.findByIdAndUpdate(userId, { status: 'offline', lastSeen: new Date() }, { new: true, lean: true });
+      io.to(userId).emit('userStatus', { userId, status: 'offline', lastSeen: new Date() });
+      logger.info('User left room', { socketId: socket.id, userId });
     });
 
     socket.on('typing', ({ userId, recipientId }) => {
-      try {
-        if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId) || userId !== socket.user.id) {
-          logger.warn('Invalid typing event', { userId, recipientId, socketId: socket.id });
-          socket.emit('error', { message: 'Invalid typing event' });
-          return;
-        }
-        io.to(recipientId).emit('typing', { userId });
-      } catch (err) {
-        logger.error('Typing event error', { error: err.message, stack: err.stack, userId, recipientId });
-        socket.emit('error', { message: 'Failed to process typing event' });
+      if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId) || userId !== socket.user.id) {
+        return;
       }
+      io.to(recipientId).emit('typing', { userId });
     });
 
     socket.on('stopTyping', ({ userId, recipientId }) => {
-      try {
-        if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId) || userId !== socket.user.id) {
-          logger.warn('Invalid stopTyping event', { userId, recipientId, socketId: socket.id });
-          socket.emit('error', { message: 'Invalid stopTyping event' });
-          return;
-        }
-        io.to(recipientId).emit('stopTyping', { userId });
-      } catch (err) {
-        logger.error('StopTyping event error', { error: err.message, stack: err.stack, userId, recipientId });
-        socket.emit('error', { message: 'Failed to process stopTyping event' });
+      if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId) || userId !== socket.user.id) {
+        return;
       }
+      io.to(recipientId).emit('stopTyping', { userId });
     });
 
     socket.on('contactData', async ({ userId, contactData }) => {
+      if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(contactData.id) || userId !== socket.user.id) {
+        logger.warn('Invalid contactData event', { userId, socketId: socket.id });
+        return;
+      }
       try {
-        if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(contactData.id) || userId !== socket.user.id) {
-          logger.warn('Invalid contactData event', { userId, contactId: contactData.id, socketId: socket.id });
-          socket.emit('error', { message: 'Invalid contactData event' });
-          return;
-        }
         const contact = await User.findById(contactData.id).select('username virtualNumber photo status lastSeen').lean();
-        if (!contact) {
-          logger.warn('Contact not found', { userId, contactId: contactData.id });
-          socket.emit('error', { message: 'Contact not found' });
-          return;
-        }
-        const contactObj = {
-          id: contact._id.toString(),
-          username: contact.username || 'Unknown',
-          virtualNumber: contact.virtualNumber || '',
-          photo: contact.photo || 'https://placehold.co/40x40',
-          status: contact.status || 'offline',
-          lastSeen: contact.lastSeen || null,
-          latestMessage: null,
-          unreadCount: 0,
-        };
-        io.to(userId).emit('contactData', { userId, contactData: contactObj });
-        const user = await User.findById(userId).select('username virtualNumber photo status lastSeen').lean();
-        io.to(contactData.id).emit('contactData', {
-          userId: contactData.id,
-          contactData: {
-            id: userId,
-            username: user.username || 'Unknown',
-            virtualNumber: user.virtualNumber || '',
-            photo: user.photo || 'https://placehold.co/40x40',
-            status: user.status || 'offline',
-            lastSeen: user.lastSeen || null,
+        if (contact) {
+          const contactObj = {
+            id: contact._id.toString(),
+            username: contact.username || 'Unknown',
+            virtualNumber: contact.virtualNumber || '',
+            photo: contact.photo || 'https://placehold.co/40x40',
+            status: contact.status || 'offline',
+            lastSeen: contact.lastSeen || null,
             latestMessage: null,
             unreadCount: 0,
-          },
-        });
-        await Promise.all([emitUpdatedChatList(io, userId), emitUpdatedChatList(io, contactData.id)]);
-        logger.info('Contact data emitted', { userId, contactId: contactData.id });
+          };
+          io.to(userId).emit('contactData', { userId, contactData: contactObj });
+          const user = await User.findById(userId).select('username virtualNumber photo status lastSeen').lean();
+          io.to(contactData.id).emit('contactData', {
+            userId: contactData.id,
+            contactData: {
+              id: userId,
+              username: user.username || 'Unknown',
+              virtualNumber: user.virtualNumber || '',
+              photo: user.photo || 'https://placehold.co/40x40',
+              status: user.status || 'offline',
+              lastSeen: user.lastSeen || null,
+              latestMessage: null,
+              unreadCount: 0,
+            },
+          });
+          await Promise.all([emitUpdatedChatList(io, userId), emitUpdatedChatList(io, contactData.id)]);
+        }
       } catch (err) {
         logger.error('Contact data emission failed', { error: err.message, stack: err.stack, userId });
-        socket.emit('error', { message: 'Failed to emit contact data' });
       }
     });
 
@@ -379,7 +374,6 @@ module.exports = (app) => {
       try {
         const { error } = messageSchema.validate(messageData);
         if (error) {
-          logger.warn('Invalid message data', { error: error.details[0].message, senderId: messageData.senderId });
           return callback({ error: error.details[0].message });
         }
         const {
@@ -396,7 +390,6 @@ module.exports = (app) => {
           senderPhoto,
         } = messageData;
         if (senderId !== socket.user.id) {
-          logger.warn('Unauthorized message sender', { senderId, socketUserId: socket.user.id });
           return callback({ error: 'Unauthorized sender' });
         }
         const existingMessage = await Message.findOne({ clientMessageId }).lean();
@@ -427,34 +420,27 @@ module.exports = (app) => {
           .lean();
         io.to(recipientId).emit('message', populatedMessage);
         io.to(senderId).emit('message', populatedMessage);
-        chatListCache.delete(`chatList:${senderId}`);
-        chatListCache.delete(`chatList:${recipientId}`);
         await Promise.all([emitUpdatedChatList(io, senderId), emitUpdatedChatList(io, recipientId)]);
         callback({ message: populatedMessage });
-        logger.info('Message sent', { senderId, recipientId, messageId: message._id });
       } catch (err) {
         logger.error('Message send failed', { error: err.message, stack: err.stack, senderId: messageData.senderId });
-        callback({ error: 'Failed to send message', details: err.message });
+        callback({ error: err.message });
       }
     });
 
     socket.on('editMessage', async ({ messageId, newContent, plaintextContent }, callback) => {
       try {
         if (!mongoose.isValidObjectId(messageId)) {
-          logger.warn('Invalid messageId', { messageId, socketId: socket.id });
           return callback({ error: 'Invalid messageId' });
         }
         const message = await Message.findById(messageId);
         if (!message) {
-          logger.warn('Message not found', { messageId, socketId: socket.id });
           return callback({ error: 'Message not found' });
         }
         if (message.senderId.toString() !== socket.user.id) {
-          logger.warn('Unauthorized edit attempt', { messageId, socketUserId: socket.user.id });
           return callback({ error: 'Unauthorized to edit message' });
         }
         if (message.contentType !== 'text') {
-          logger.warn('Non-text message edit attempt', { messageId, contentType: message.contentType });
           return callback({ error: 'Only text messages can be edited' });
         }
         message.content = newContent;
@@ -469,7 +455,6 @@ module.exports = (app) => {
         io.to(message.recipientId.toString()).emit('editMessage', populatedMessage);
         io.to(message.senderId.toString()).emit('editMessage', populatedMessage);
         callback({ message: populatedMessage });
-        logger.info('Message edited', { messageId, senderId: socket.user.id });
       } catch (err) {
         logger.error('Edit message failed', { error: err.message, stack: err.stack, messageId });
         callback({ error: 'Failed to edit message', details: err.message });
@@ -479,26 +464,20 @@ module.exports = (app) => {
     socket.on('deleteMessage', async ({ messageId, recipientId }, callback) => {
       try {
         if (!mongoose.isValidObjectId(messageId) || !mongoose.isValidObjectId(recipientId)) {
-          logger.warn('Invalid delete message parameters', { messageId, recipientId, socketId: socket.id });
           return callback({ error: 'Invalid messageId or recipientId' });
         }
         const message = await Message.findById(messageId);
         if (!message) {
-          logger.warn('Message not found', { messageId, socketId: socket.id });
           return callback({ error: 'Message not found' });
         }
         if (message.senderId.toString() !== socket.user.id) {
-          logger.warn('Unauthorized delete attempt', { messageId, socketUserId: socket.user.id });
           return callback({ error: 'Unauthorized to delete message' });
         }
         await Message.findByIdAndDelete(messageId);
         io.to(recipientId).emit('deleteMessage', { messageId, recipientId });
         io.to(message.senderId.toString()).emit('deleteMessage', { messageId, recipientId: message.senderId.toString() });
-        chatListCache.delete(`chatList:${message.senderId.toString()}`);
-        chatListCache.delete(`chatList:${recipientId}`);
         await Promise.all([emitUpdatedChatList(io, message.senderId.toString()), emitUpdatedChatList(io, recipientId)]);
         callback({ status: 'success' });
-        logger.info('Message deleted', { messageId, senderId: socket.user.id });
       } catch (err) {
         logger.error('Delete message failed', { error: err.message, stack: err.stack, messageId });
         callback({ error: 'Failed to delete message', details: err.message });
@@ -508,18 +487,15 @@ module.exports = (app) => {
     socket.on('messageStatus', async ({ messageId, status }) => {
       try {
         if (!mongoose.isValidObjectId(messageId) || !['sent', 'delivered', 'read'].includes(status)) {
-          logger.warn('Invalid messageStatus parameters', { messageId, status, socketId: socket.id });
           return;
         }
         const message = await Message.findById(messageId);
         if (!message || message.recipientId.toString() !== socket.user.id) {
-          logger.warn('Unauthorized or invalid message status update', { messageId, socketUserId: socket.user.id });
           return;
         }
         message.status = status;
         await message.save();
         io.to(message.senderId.toString()).emit('messageStatus', { messageIds: [messageId], status });
-        logger.info('Message status updated', { messageId, status, recipientId: socket.user.id });
       } catch (err) {
         logger.error('Message status update failed', { error: err.message, stack: err.stack, messageId });
       }
@@ -527,17 +503,11 @@ module.exports = (app) => {
 
     socket.on('batchMessageStatus', async ({ messageIds, status, recipientId }) => {
       try {
-        if (
-          !messageIds.every((id) => mongoose.isValidObjectId(id)) ||
-          !mongoose.isValidObjectId(recipientId) ||
-          recipientId !== socket.user.id
-        ) {
-          logger.warn('Invalid batchMessageStatus parameters', { recipientId, socketId: socket.id });
+        if (!messageIds.every((id) => mongoose.isValidObjectId(id)) || !mongoose.isValidObjectId(recipientId) || recipientId !== socket.user.id) {
           return;
         }
         const messages = await Message.find({ _id: { $in: messageIds }, recipientId });
         if (!messages.length) {
-          logger.warn('No messages found for batch status update', { recipientId, messageIds });
           return;
         }
         await Message.updateMany(
@@ -548,32 +518,23 @@ module.exports = (app) => {
         senderIds.forEach((senderId) => {
           io.to(senderId).emit('messageStatus', { messageIds, status });
         });
-        logger.info('Batch message status updated', { recipientId, status, messageCount: messages.length });
       } catch (err) {
         logger.error('Batch message status update failed', { error: err.message, stack: err.stack, recipientId });
       }
     });
 
     socket.on('disconnect', async () => {
-      try {
-        if (socket.user?.id) {
-          await User.findByIdAndUpdate(socket.user.id, { status: 'offline', lastSeen: new Date() }, { new: true, lean: true });
-          io.to(socket.user.id).emit('userStatus', { userId: socket.user.id, status: 'offline', lastSeen: new Date() });
-        }
-        logger.info('Socket.IO disconnected', { socketId: socket.id, userId: socket.user?.id });
-      } catch (err) {
-        logger.error('Disconnect event error', { error: err.message, stack: err.stack, socketId: socket.id });
+      if (socket.user?.id) {
+        await User.findByIdAndUpdate(socket.user.id, { status: 'offline', lastSeen: new Date() }, { new: true, lean: true });
+        io.to(socket.user.id).emit('userStatus', { userId: socket.user.id, status: 'offline', lastSeen: new Date() });
       }
-    });
-
-    socket.on('error', (err) => {
-      logger.error('Socket error', { error: err.message, stack: err.stack, socketId: socket.id, userId: socket.user?.id });
+      logger.info('Socket.IO disconnected', { socketId: socket.id, userId: socket.user?.id });
     });
   });
 
   // Routes
   router.get('/health', async (req, res) => {
-    res.json({ status: 'healthy', mongodb: mongoose.connection.readyState });
+    res.json({ status: 'healthy' });
   });
 
   router.post('/messages', authMiddleware, async (req, res) => {
@@ -626,13 +587,9 @@ module.exports = (app) => {
         .populate('recipientId', 'username virtualNumber photo')
         .populate('replyTo', 'content contentType senderId recipientId createdAt')
         .lean();
-      const io = app.get('io');
       io.to(recipientId).emit('message', populatedMessage);
       io.to(senderId).emit('message', populatedMessage);
-      chatListCache.delete(`chatList:${senderId}`);
-      chatListCache.delete(`chatList:${recipientId}`);
       await Promise.all([emitUpdatedChatList(io, senderId), emitUpdatedChatList(io, recipientId)]);
-      logger.info('Message saved', { senderId, recipientId, messageId: message._id });
       res.status(201).json({ message: populatedMessage });
     } catch (error) {
       logger.error('Save message error', { error: error.message, stack: error.stack, senderId: req.body.senderId });
@@ -756,7 +713,7 @@ module.exports = (app) => {
     try {
       const { error } = addContactSchema.validate(req.body);
       if (error) {
-        logger.warn('Invalid add_contact request', { error: error.details[0].message, userId: req.body.userId });
+        logger.warn('Invalid request body', { error: error.details[0].message, userId: req.body.userId });
         return res.status(400).json({ error: error.details[0].message });
       }
       const { userId, virtualNumber } = req.body;
@@ -808,7 +765,6 @@ module.exports = (app) => {
         latestMessage: null,
         unreadCount: 0,
       };
-      const io = app.get('io');
       chatListCache.delete(`chatList:${userId}`);
       chatListCache.delete(`chatList:${contact._id.toString()}`);
       io.to(userId).emit('contactData', { userId, contactData });
@@ -879,7 +835,6 @@ module.exports = (app) => {
         .populate('recipientId', 'username virtualNumber photo')
         .populate('replyTo', 'content contentType senderId recipientId createdAt')
         .lean();
-      const io = app.get('io');
       chatListCache.delete(`chatList:${userId}`);
       chatListCache.delete(`chatList:${recipientId}`);
       io.to(recipientId).emit('message', populatedMessage);
@@ -915,7 +870,6 @@ module.exports = (app) => {
       await Message.deleteMany({ $or: [{ senderId: userId }, { recipientId: userId }] });
       await User.updateMany({ contacts: userId }, { $pull: { contacts: userId } });
       await User.findByIdAndDelete(userId);
-      const io = app.get('io');
       chatListCache.delete(`chatList:${userId}`);
       contactIds.forEach((contactId) => chatListCache.delete(`chatList:${contactId}`));
       io.to(userId).emit('userStatus', { userId, status: 'offline', lastSeen: new Date() });
