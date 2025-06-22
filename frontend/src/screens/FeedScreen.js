@@ -27,23 +27,25 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
   const feedRef = useRef(null);
   const mediaRefs = useRef({});
 
-  // Changed: Add retry logic for API calls
+  // Changed: Retry logic with improved error handling
   const retryOperation = async (operation, maxRetries = 3, baseDelay = 1000) => {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         if (!navigator.onLine) throw new Error('Offline');
         return await operation();
       } catch (err) {
-        if (attempt === maxRetries || err.response?.status === 401) {
-          throw err;
+        if (err.response?.status === 401) {
+          onUnauthorized?.();
+          throw new Error('Unauthorized');
         }
+        if (attempt === maxRetries) throw err;
         const delay = Math.pow(2, attempt) * baseDelay;
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
     }
   };
 
-  // Changed: Optimize IntersectionObserver
+  // Changed: Optimized IntersectionObserver with cleanup
   const setupIntersectionObserver = useCallback(
     debounce(() => {
       const observer = new IntersectionObserver(
@@ -54,7 +56,7 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
             if (entry.isIntersecting && !showComments) {
               setPlayingPostId(postId);
               if (media.tagName === 'VIDEO') {
-                media.play().catch((err) => console.warn('Video play error:', err));
+                media.play().catch((err) => console.warn('Video play error:', err.message));
               }
             } else if (media.tagName === 'VIDEO') {
               media.pause();
@@ -62,7 +64,7 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
             }
           });
         },
-        { threshold: 0.6 } // Changed: Lower threshold for smoother transitions
+        { threshold: 0.6 }
       );
 
       Object.values(mediaRefs.current).forEach((media) => media && observer.observe(media));
@@ -74,12 +76,13 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
             media.src = '';
           }
         });
+        mediaRefs.current = {};
       };
     }, 300),
     [showComments]
   );
 
-  // Changed: Optimize fetchFeed with retry and deduplication
+  // Changed: Optimized fetchFeed with deduplication and error handling
   const fetchFeed = useCallback(
     async (pageNum = 1, isRefresh = false) => {
       if (!token || !userId || (loading && !isRefresh) || (!hasMore && !isRefresh)) return;
@@ -97,54 +100,49 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
           : [];
         setPosts((prev) => {
           const newPosts = pageNum === 1 || isRefresh ? filteredPosts : [...prev, ...filteredPosts];
-          // Deduplicate posts
           const uniquePosts = Array.from(
             new Map(newPosts.map((post) => [post._id.toString(), post])).values()
           );
           return uniquePosts;
         });
-        setHasMore(data.hasMore || false);
+        setHasMore(data.hasMore ?? false);
+        setPage(pageNum); // Changed: Sync page state
         setError('');
         if (filteredPosts.length > 0 && (pageNum === 1 || isRefresh)) {
           setPlayingPostId(filteredPosts[0]._id.toString());
         }
       } catch (error) {
-        console.error('Failed to fetch feed:', error);
-        if (error.response?.status === 401 || error.message === 'Offline') {
-          setError(error.message === 'Offline' ? 'You are offline' : 'Unauthorized. Please log in again.');
-          if (error.response?.status === 401) onUnauthorized?.();
-        } else {
-          setError(error.response?.data?.error || 'Failed to load feed');
-        }
+        console.error('Fetch feed error:', error.message);
+        setError(error.message === 'Offline' ? 'You are offline' : error.message === 'Unauthorized' ? 'Unauthorized. Please log in again.' : 'Failed to load feed');
       } finally {
         setLoading(false);
-        if (isRefresh) setRefreshing(false);
+        setRefreshing(false);
       }
     },
     [token, userId, loading, hasMore, onUnauthorized]
   );
 
-  // Changed: Optimize socket setup and cleanup
+  // Changed: Enhanced socket setup with error handling
   useEffect(() => {
     if (!token || !userId || !socket) return;
 
-    fetchFeed();
-    socket.emit('join', userId);
+    fetchFeed(1);
+    socket.emit('join', { userId }); // Changed: Emit object to match server.js
 
     const handleNewPost = (post) => {
       if (!post.isStory && post._id) {
         setPosts((prev) => {
           const newPosts = [post, ...prev];
-          // Deduplicate
           return Array.from(new Map(newPosts.map((p) => [p._id.toString(), p])).values());
         });
+        setCurrentIndex(0); // Changed: Scroll to new post
       }
     };
 
     const handlePostUpdate = (updatedPost) => {
       if (updatedPost._id) {
         setPosts((prev) =>
-          prev.map((p) => (p._id.toString() === updatedPost._id.toString() ? updatedPost : p))
+          prev.map((p) => (p._id.toString() === updatedPost._id.toString() ? { ...p, ...updatedPost } : p))
         );
       }
     };
@@ -152,28 +150,43 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
     const handlePostDeleted = (postId) => {
       if (postId) {
         setPosts((prev) => prev.filter((p) => p._id.toString() !== postId.toString()));
+        if (playingPostId === postId.toString()) {
+          setPlayingPostId(null);
+        }
+      }
+    };
+
+    const handleConnectError = (error) => {
+      console.error('Socket connect error:', error.message);
+      if (error.message.includes('invalid token')) {
+        setError('Session expired. Please log in again.');
+        onUnauthorized?.();
       }
     };
 
     socket.on('newPost', handleNewPost);
     socket.on('postUpdate', handlePostUpdate);
     socket.on('postDeleted', handlePostDeleted);
+    socket.on('connect_error', handleConnectError);
 
     return () => {
       socket.off('newPost', handleNewPost);
       socket.off('postUpdate', handlePostUpdate);
       socket.off('postDeleted', handlePostDeleted);
+      socket.off('connect_error', handleConnectError);
+      socket.emit('leave', userId); // Changed: Emit leave on cleanup
     };
-  }, [token, userId, socket, fetchFeed]);
+  }, [token, userId, socket, fetchFeed, playingPostId, onUnauthorized]);
 
-  // Changed: Optimize scroll handling with debounce
+  // Changed: Optimized scroll handling
   const handleScroll = useCallback(
     debounce(() => {
       if (!feedRef.current || loading || !hasMore) return;
       const { scrollTop, scrollHeight, clientHeight } = feedRef.current;
-      if (scrollTop + clientHeight >= scrollHeight - 100) { // Changed: Increase threshold
-        setPage((prev) => prev + 1);
-        fetchFeed(page + 1);
+      if (scrollTop + clientHeight >= scrollHeight - 100) {
+        const nextPage = page + 1;
+        setPage(nextPage);
+        fetchFeed(nextPage);
       }
     }, 200),
     [loading, hasMore, page, fetchFeed]
@@ -184,7 +197,7 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
     const feedElement = feedRef.current;
     if (feedElement) {
       feedElement.addEventListener('scroll', handleScroll);
-      if (posts.length > 0) {
+      if (posts.length > 0 && currentIndex < posts.length) {
         feedElement.scrollTo({ top: currentIndex * window.innerHeight, behavior: 'smooth' });
       }
     }
@@ -194,7 +207,7 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
     };
   }, [posts, currentIndex, setupIntersectionObserver, handleScroll]);
 
-  // Changed: Optimize postContent with retry
+  // Changed: Optimized postContent with validation
   const postContent = async () => {
     if (!userId || (!caption.trim() && !file && contentType !== 'text')) {
       setError('Please provide content');
@@ -217,14 +230,10 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
           },
           onUploadProgress: (progressEvent) =>
             setUploadProgress(Math.round((progressEvent.loaded * 100) / progressEvent.total)),
-          timeout: 15000, // Changed: Increase timeout for uploads
+          timeout: 15000,
         })
       );
       socket.emit('newPost', data);
-      setPosts((prev) => {
-        const newPosts = [data, ...prev];
-        return Array.from(new Map(newPosts.map((p) => [p._id.toString(), p])).values());
-      });
       setCaption('');
       setFile(null);
       setShowPostModal(false);
@@ -232,22 +241,18 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
       setError('');
       setCurrentIndex(0);
     } catch (error) {
-      console.error('Post error:', error);
-      if (error.response?.status === 401 || error.message === 'Offline') {
-        setError(error.message === 'Offline' ? 'You are offline' : 'Unauthorized. Please log in again.');
-        if (error.response?.status === 401) onUnauthorized?.();
-      } else {
-        setError(error.response?.data?.error || 'Failed to post');
-      }
+      console.error('Post error:', error.message);
+      setError(error.message === 'Offline' ? 'You are offline' : error.message === 'Unauthorized' ? 'Unauthorized. Please log in again.' : error.response?.data?.error || 'Failed to post');
       setUploadProgress(null);
     }
   };
 
-  // Changed: Optimize likePost with retry
+  // Changed: Optimized likePost with validation
   const likePost = async (postId) => {
     if (!playingPostId || postId !== playingPostId) return;
     try {
       const post = posts.find((p) => p._id.toString() === postId);
+      if (!post) return;
       const action = post.likedBy?.map((id) => id.toString()).includes(userId) ? '/unlike' : '/like';
       const { data } = await retryOperation(() =>
         axios.post(
@@ -261,15 +266,12 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
       );
       socket.emit('postUpdate', data);
     } catch (error) {
-      console.error('Like error:', error);
-      if (error.response?.status === 401 || error.message === 'Offline') {
-        setError(error.message === 'Offline' ? 'You are offline' : 'Unauthorized. Please log in again.');
-        if (error.response?.status === 401) onUnauthorized?.();
-      }
+      console.error('Like error:', error.message);
+      setError(error.message === 'Offline' ? 'You are offline' : error.message === 'Unauthorized' ? 'Unauthorized. Please log in again.' : 'Failed to like post');
     }
   };
 
-  // Changed: Optimize commentPost with retry
+  // Changed: Optimized commentPost with validation
   const commentPost = async (postId) => {
     if (!playingPostId || postId !== playingPostId || !comment.trim()) return;
     try {
@@ -283,19 +285,15 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
           }
         )
       );
-      const updatedPost = {
+      socket.emit('postUpdate', {
         ...posts.find((p) => p._id.toString() === postId),
         comments: [...(posts.find((p) => p._id.toString() === postId)?.comments || []), data],
-      };
-      socket.emit('postUpdate', updatedPost);
+      });
       setComment('');
       setShowComments(null);
     } catch (error) {
-      console.error('Comment error:', error);
-      if (error.response?.status === 401 || error.message === 'Offline') {
-        setError(error.message === 'Offline' ? 'You are offline' : 'Unauthorized. Please log in again.');
-        if (error.response?.status === 401) onUnauthorized?.();
-      }
+      console.error('Comment error:', error.message);
+      setError(error.message === 'Offline' ? 'You are offline' : error.message === 'Unauthorized' ? 'Unauthorized. Please log in again.' : 'Failed to comment');
     }
   };
 
@@ -313,10 +311,11 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
   const handleRefresh = useCallback(() => {
     setPage(1);
     setCurrentIndex(0);
+    setHasMore(true); // Changed: Reset hasMore on refresh
     fetchFeed(1, true);
   }, [fetchFeed]);
 
-  // Changed: Optimize swipe handlers
+  // Changed: Optimized swipe handlers
   const swipeHandlers = useSwipeable({
     onSwipedUp: () => {
       if (showComments) return;
@@ -338,12 +337,15 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
     },
     trackMouse: false,
     delta: 50,
-    preventDefaultTouchmoveEvent: true, // Changed: Prevent browser scrolling
+    preventScrollOnSwipe: true, // Changed: Prevent browser scrolling
   });
 
-  const handleDoubleTap = useCallback((postId) => {
-    likePost(postId);
-  }, [likePost]);
+  const handleDoubleTap = useCallback(
+    (postId) => {
+      likePost(postId);
+    },
+    [likePost]
+  );
 
   const LoadingSkeleton = () => (
     <div className="h-screen w-full bg-gray-200 animate-pulse relative snap-start md:max-w-[600px] md:h-[800px] md:rounded-lg">
@@ -441,7 +443,7 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
                 {contentType === 'text' ? (
                   <textarea
                     value={caption}
-                    onChange={(e) => setCaption(e.target.value.slice(0, 500))} // Changed: Limit caption length
+                    onChange={(e) => setCaption(e.target.value.slice(0, 500))}
                     className="flex-1 p-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:ring-2 focus:ring-blue-500 focus:outline-none transition duration-200 resize-none"
                     placeholder="What's on your mind? (max 500 chars)"
                     rows="4"
@@ -478,7 +480,7 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
                 <input
                   type="text"
                   value={caption}
-                  onChange={(e) => setCaption(e.target.value.slice(0, 500))} // Changed: Limit caption length
+                  onChange={(e) => setCaption(e.target.value.slice(0, 500))}
                   className="w-full p-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:ring-2 focus:ring-blue-500 focus:outline-none transition duration-200"
                   placeholder="Add a caption... (max 500 chars)"
                   aria-label="Post caption"
@@ -539,207 +541,205 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
         </div>
       )}
 
-      {/* TikTok-like Feed */}
+      {/* Feed Content */}
       {posts.length === 0 && !loading && !refreshing ? (
         <div className="h-screen flex items-center justify-center text-white" role="status">
           <p>No posts available</p>
         </div>
+      ) : posts.length === 0 && loading ? (
+        [...Array(3)].map((_, i) => <LoadingSkeleton key={i} />)
       ) : (
-        posts.length === 0 && loading ? (
-          [...Array(3)].map((_, i) => <LoadingSkeleton key={i} />)
-        ) : (
-          posts.map((post, index) => (
-            <motion.div
-              key={post._id.toString()}
-              initial={{ opacity: 0 }}
-              animate={{ opacity: index === currentIndex ? 1 : 0.5 }}
-              transition={{ duration: 0.3 }}
-              className="h-screen w-full flex flex-col items-center justify-center text-white relative snap-start md:max-w-[600px] md:mx-auto md:h-[800px] md:rounded-lg md:shadow-lg md:bg-gray-900"
-              onDoubleClick={() => handleDoubleTap(post._id.toString())}
-              role="article"
-              aria-labelledby={`post-${post._id}`}
-            >
-              {/* User Info */}
-              <div className="absolute top-4 left-4 z-10 flex items-center">
-                <img
-                  src={post.photo || 'https://placehold.co/40x40'}
-                  alt={`${post.username || 'Unknown'}'s profile`}
-                  className="w-10 h-10 rounded-full mr-2 border-2 border-blue-500"
-                />
-                <div>
-                  <span id={`post-${post._id}`} className="font-bold text-white">{post.username || 'Unknown'}</span>
-                  <span className="text-xs ml-2 text-gray-400">{timeAgo(post.createdAt)}</span>
-                </div>
+        posts.map((post, index) => (
+          <motion.div
+            key={post._id.toString()}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: index === currentIndex ? 1 : 0.5 }}
+            transition={{ duration: 0.3 }}
+            className="h-screen w-full flex flex-col items-center justify-center text-white relative snap-start md:max-w-[600px] md:mx-auto md:h-[800px] md:rounded-lg md:shadow-lg md:bg-gray-900"
+            onDoubleClick={() => handleDoubleTap(post._id.toString())}
+            role="article"
+            aria-labelledby={`post-${post._id}`}
+          >
+            {/* User Info */}
+            <div className="absolute top-4 left-4 z-10 flex items-center">
+              <img
+                src={post.photo || 'https://placehold.co/40x40'}
+                alt={`${post.username || 'Unknown'}'s profile`}
+                className="w-10 h-10 rounded-full mr-2 border-2 border-blue-500"
+              />
+              <div>
+                <span id={`post-${post._id}`} className="font-bold text-white">{post.username || 'Unknown'}</span>
+                <span className="text-xs ml-2 text-gray-400">{timeAgo(post.createdAt)}</span>
               </div>
+            </div>
 
-              {/* Post Content */}
-              {post.contentType === 'text' && (
-                <p className="text-lg p-4 bg-black bg-opacity-50 rounded-lg max-w-[80%] mx-auto text-center">
-                  {post.content}
-                </p>
-              )}
-              {post.contentType === 'image' && (
-                <img
-                  src={post.content}
-                  alt="Post image"
-                  className="w-full h-full object-cover md:rounded-lg"
-                  data-post-id={post._id.toString()}
-                  ref={(el) => (mediaRefs.current[post._id.toString()] = el)}
-                />
-              )}
+            {/* Post Content */}
+            {post.contentType === 'text' && (
+              <p className="text-lg p-4 bg-black bg-opacity-50 rounded-lg max-w-[80%] mx-auto text-center">
+                {post.content}
+              </p>
+            )}
+            {post.contentType === 'image' && (
+              <img
+                src={post.content}
+                alt="Post image"
+                className="w-full h-full object-cover md:rounded-lg"
+                data-post-id={post._id.toString()}
+                ref={(el) => (mediaRefs.current[post._id.toString()] = el)}
+              />
+            )}
+            {post.contentType === 'video' && (
+              <video
+                ref={(el) => (mediaRefs.current[post._id.toString()] = el)}
+                data-post-id={post._id.toString()}
+                playsInline
+                muted={muted}
+                loop
+                src={post.content}
+                className="w-full h-full object-cover md:rounded-lg"
+                preload="metadata"
+              />
+            )}
+            {post.contentType === 'audio' && (
+              <audio
+                ref={(el) => (mediaRefs.current[post._id.toString()] = el)}
+                data-post-id={post._id.toString()}
+                controls
+                src={post.content}
+                className="w-full mt-4"
+                preload="metadata"
+              />
+            )}
+            {post.contentType === 'raw' && (
+              <a
+                href={post.content}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-blue-500 p-4 bg-black bg-opacity-50 rounded-lg"
+                aria-label="Open document"
+              >
+                Open Document
+              </a>
+            )}
+
+            {/* Interactions */}
+            <div className="absolute right-4 bottom-20 flex flex-col items-center space-y-6 z-10">
+              <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
+                <button
+                  onClick={() => likePost(post._id.toString())}
+                  className="focus:outline-none focus:ring-2 focus:ring-red-500"
+                  aria-label={post.likedBy?.map((id) => id.toString()).includes(userId) ? 'Unlike post' : 'Like post'}
+                >
+                  <FaHeart
+                    className={`text-3xl ${post.likedBy?.map((id) => id.toString()).includes(userId) ? 'text-red-500' : 'text-white'}`}
+                  />
+                  <span className="text-sm text-white">{post.likes || 0}</span>
+                </button>
+              </motion.div>
+              <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
+                <button
+                  onClick={() => setShowComments(post._id.toString())}
+                  className="focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  aria-label="View comments"
+                >
+                  <FaComment className="text-3xl text-white hover:text-blue-500" />
+                  <span className="text-sm text-white">{post.comments?.length || 0}</span>
+                </button>
+              </motion.div>
+              <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
+                <button
+                  onClick={() =>
+                    navigator.clipboard
+                      .writeText(`${window.location.origin}/post/${post._id.toString()}`)
+                      .then(() => alert('Link copied!'))
+                  }
+                  className="focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  aria-label="Share post"
+                >
+                  <FaShare className="text-3xl text-white hover:text-blue-500" />
+                </button>
+              </motion.div>
               {post.contentType === 'video' && (
-                <video
-                  ref={(el) => (mediaRefs.current[post._id.toString()] = el)}
-                  data-post-id={post._id.toString()}
-                  playsInline
-                  muted={muted}
-                  loop
-                  src={post.content}
-                  className="w-full h-full object-cover md:rounded-lg"
-                  preload="metadata" // Changed: Optimize video loading
-                />
-              )}
-              {post.contentType === 'audio' && (
-                <audio
-                  ref={(el) => (mediaRefs.current[post._id.toString()] = el)}
-                  data-post-id={post._id.toString()}
-                  controls
-                  src={post.content}
-                  className="w-full mt-4"
-                  preload="metadata" // Changed: Optimize audio loading
-                />
-              )}
-              {post.contentType === 'raw' && (
-                <a
-                  href={post.content}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-blue-500 p-4 bg-black bg-opacity-50 rounded-lg"
-                  aria-label="Open document"
-                >
-                  Open Document
-                </a>
-              )}
-
-              {/* Interactions */}
-              <div className="absolute right-4 bottom-20 flex flex-col items-center space-y-6 z-10">
                 <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
                   <button
-                    onClick={() => likePost(post._id.toString())}
-                    className="focus:outline-none focus:ring-2 focus:ring-red-500"
-                    aria-label={post.likedBy?.map((id) => id.toString()).includes(userId) ? 'Unlike post' : 'Like post'}
-                  >
-                    <FaHeart
-                      className={`text-3xl ${post.likedBy?.map((id) => id.toString()).includes(userId) ? 'text-red-500' : 'text-white'}`}
-                    />
-                    <span className="text-sm text-white">{post.likes || 0}</span>
-                  </button>
-                </motion.div>
-                <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
-                  <button
-                    onClick={() => setShowComments(post._id.toString())}
+                    onClick={() => setMuted((prev) => !prev)}
                     className="focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    aria-label="View comments"
+                    aria-label={muted ? 'Unmute video' : 'Mute video'}
                   >
-                    <FaComment className="text-3xl text-white hover:text-blue-500" />
-                    <span className="text-sm text-white">{post.comments?.length || 0}</span>
-                  </button>
-                </motion.div>
-                <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
-                  <button
-                    onClick={() =>
-                      navigator.clipboard
-                        .writeText(`${window.location.origin}/post/${post._id.toString()}`)
-                        .then(() => alert('Link copied!'))
-                    }
-                    className="focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    aria-label="Share post"
-                  >
-                    <FaShare className="text-3xl text-white hover:text-blue-500" />
-                  </button>
-                </motion.div>
-                {post.contentType === 'video' && (
-                  <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
-                    <button
-                      onClick={() => setMuted((prev) => !prev)}
-                      className="focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      aria-label={muted ? 'Unmute video' : 'Mute video'}
-                    >
-                      {muted ? (
-                        <FaVolumeMute className="text-3xl text-white hover:text-blue-500" />
-                      ) : (
-                        <FaVolumeUp className="text-3xl text-white hover:text-blue-500" />
-                      )}
-                    </button>
-                  </motion.div>
-                )}
-              </div>
-
-              {/* Caption */}
-              {post.caption && (
-                <motion.div
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="absolute bottom-4 left-4 right-4 text-sm bg-black bg-opacity-50 p-3 rounded-lg max-w-[70%] md:max-w-[80%]"
-                >
-                  <span className="font-bold text-white">{post.username || 'Unknown'}</span>
-                  <span className="ml-2 text-white">{post.caption}</span>
-                </motion.div>
-              )}
-
-              {/* Comments Modal */}
-              <AnimatePresence>
-                {showComments === post._id.toString() && (
-                  <motion.div
-                    initial={{ opacity: 0, y: 100 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: 100 }}
-                    className="fixed bottom-0 left-0 right-0 bg-gray-900 text-white p-4 rounded-t-lg shadow-lg h-1/2 overflow-y-auto z-50 md:max-w-[600px] md:mx-auto"
-                    role="dialog"
-                    aria-modal="true"
-                    aria-labelledby={`comments-${post._id}`}
-                  >
-                    <h3 id={`comments-${post._id}`} className="text-lg font-bold text-blue-500 mb-2">Comments</h3>
-                    {post.comments?.length === 0 ? (
-                      <p className="text-gray-400">No comments yet</p>
+                    {muted ? (
+                      <FaVolumeMute className="text-3xl text-white hover:text-blue-500" />
                     ) : (
-                      post.comments.map((c, i) => (
-                        <div key={`${c.createdAt}-${i}`} className="flex items-center mb-3">
-                          <img
-                            src={c.photo || 'https://placehold.co/30x30'}
-                            alt={`${c.username || 'Unknown'}'s profile`}
-                            className="w-8 h-8 rounded-full mr-2 border border-gray-700"
-                          />
-                          <p className="text-sm text-white">
-                            <span className="font-semibold">{c.username || 'Unknown'}</span> {c.comment}
-                          </p>
-                        </div>
-                      ))
+                      <FaVolumeUp className="text-3xl text-white hover:text-blue-500" />
                     )}
-                    <div className="flex items-center mt-3">
-                      <input
-                        value={comment}
-                        onChange={(e) => setComment(e.target.value.slice(0, 500))} // Changed: Limit comment length
-                        className="flex-1 p-3 bg-gray-800 border border-gray-700 rounded-full text-white focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                        placeholder="Add a comment... (max 500 chars)"
-                        aria-label="Add comment"
-                      />
-                      <motion.button
-                        whileHover={{ scale: 1.1 }}
-                        whileTap={{ scale: 0.9 }}
-                        onClick={() => commentPost(post._id.toString())}
-                        className="ml-3 p-3 bg-blue-500 rounded-full focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        aria-label="Submit comment"
-                      >
-                        <FaPaperPlane className="text-xl text-white" />
-                      </motion.button>
-                    </div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </motion.div>
-          ))
-        )
+                  </button>
+                </motion.div>
+              )}
+            </div>
+
+            {/* Caption */}
+            {post.caption && (
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="absolute bottom-4 left-4 right-4 text-sm bg-black bg-opacity-50 p-3 rounded-lg max-w-[70%] md:max-w-[80%]"
+              >
+                <span className="font-bold text-white">{post.username || 'Unknown'}</span>
+                <span className="ml-2 text-white">{post.caption}</span>
+              </motion.div>
+            )}
+
+            {/* Comments Modal */}
+            <AnimatePresence>
+              {showComments === post._id.toString() && (
+                <motion.div
+                  initial={{ opacity: 0, y: 100 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 100 }}
+                  className="fixed bottom-0 left-0 right-0 bg-gray-900 text-white p-4 rounded-t-lg shadow-lg h-1/2 overflow-y-auto z-50 md:max-w-[600px] md:mx-auto"
+                  role="dialog"
+                  aria-modal="true"
+                  aria-labelledby={`comments-${post._id}`}
+                >
+                  <h3 id={`comments-${post._id}`} className="text-lg font-bold text-blue-500 mb-2">Comments</h3>
+                  {post.comments?.length === 0 ? (
+                    <p className="text-gray-400">No comments yet</p>
+                  ) : (
+                    post.comments.map((c, i) => (
+                      <div key={`${c.createdAt}-${i}`} className="flex items-center mb-3">
+                        <img
+                          src={c.photo || 'https://placehold.co/30x30'}
+                          alt={`${c.username || 'Unknown'}'s profile`}
+                          className="w-8 h-8 rounded-full mr-2 border border-gray-700"
+                        />
+                        <p className="text-sm text-white">
+                          <span className="font-semibold">{c.username || 'Unknown'}</span> {c.comment}
+                        </p>
+                      </div>
+                    ))
+                  )}
+                  <div className="flex items-center mt-3">
+                    <input
+                      value={comment}
+                      onChange={(e) => setComment(e.target.value.slice(0, 500))}
+                      className="flex-1 p-3 bg-gray-800 border border-gray-700 rounded-full text-white focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                      placeholder="Add a comment... (max 500 chars)"
+                      aria-label="Add comment"
+                    />
+                    <motion.button
+                      whileHover={{ scale: 1.1 }}
+                      whileTap={{ scale: 0.9 }}
+                      onClick={() => commentPost(post._id.toString())}
+                      className="ml-3 p-3 bg-blue-500 rounded-full focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      aria-label="Submit comment"
+                    >
+                      <FaPaperPlane className="text-xl text-white" />
+                    </motion.button>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </motion.div>
+        ))
       )}
 
       {/* Comments Overlay */}
