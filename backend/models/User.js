@@ -12,6 +12,20 @@ const logger = winston.createLogger({
   ],
 });
 
+// Changed: Retry with exponential backoff
+const retryOperation = async (operation, maxRetries = 3) => {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await operation();
+    } catch (err) {
+      if (attempt === maxRetries) throw err;
+      const delay = Math.pow(2, attempt) * 1000;
+      logger.warn('Retrying operation', { attempt, error: err.message });
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+};
+
 const userSchema = new mongoose.Schema({
   email: {
     type: String,
@@ -54,7 +68,7 @@ const userSchema = new mongoose.Schema({
     type: String,
     unique: true,
     sparse: true,
-    default: null, // Changed: Explicit default to null
+    default: null,
     validate: {
       validator: function (value) {
         if (!value) return true;
@@ -67,6 +81,13 @@ const userSchema = new mongoose.Schema({
   contacts: {
     type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
     default: [],
+    // Changed: Add max length for contacts
+    validate: {
+      validator: function (value) {
+        return value.length <= 1000; // Max 1000 contacts
+      },
+      message: 'Contacts list cannot exceed 1000 entries.',
+    },
   },
   role: {
     type: Number,
@@ -94,27 +115,33 @@ const userSchema = new mongoose.Schema({
   timestamps: true,
 });
 
+// Changed: Optimized indexes
+userSchema.index({ email: 1 }, { unique: true });
+userSchema.index({ username: 1 }, { unique: true });
+userSchema.index({ virtualNumber: 1 }, { unique: true, sparse: true });
+userSchema.index({ contacts: 1 });
+userSchema.index({ status: 1, lastSeen: 1 }); // Changed: Support status cleanup
+
 // Pre-save hook
 userSchema.pre('save', async function (next) {
   try {
-    if (this.isModified('contacts') && this.contacts.length) {
-      // Remove duplicates and validate ObjectIds
-      const uniqueContacts = [...new Set(this.contacts.map((id) => id.toString()))];
-      const validContacts = [];
-      for (const id of uniqueContacts) {
-        if (!mongoose.isValidObjectId(id)) {
-          logger.warn('Invalid contact ID', { userId: this._id?.toString(), contactId: id });
-          continue;
+    await retryOperation(async () => {
+      if (this.isModified('contacts') && this.contacts.length) {
+        // Changed: Use Set for deduplication and bulk validation
+        const uniqueContacts = [...new Set(this.contacts.map((id) => id.toString()))].filter(
+          (id) => mongoose.isValidObjectId(id)
+        );
+        if (uniqueContacts.length > 1000) {
+          throw new Error('Contacts list cannot exceed 1000 entries.');
         }
-        const contact = await this.constructor.findById(id).select('_id').lean();
-        if (contact) {
-          validContacts.push(new mongoose.Types.ObjectId(id));
-        } else {
-          logger.warn('Contact does not exist', { userId: this._id?.toString(), contactId: id });
-        }
+        const existingContacts = await this.constructor.find(
+          { _id: { $in: uniqueContacts } },
+          '_id'
+        ).lean();
+        const validContacts = existingContacts.map((contact) => contact._id);
+        this.contacts = validContacts;
       }
-      this.contacts = validContacts;
-    }
+    });
     logger.info('User pre-save validation completed', { userId: this._id?.toString() });
     next();
   } catch (error) {
@@ -134,18 +161,18 @@ userSchema.statics.cleanupInvalidContacts = async function () {
     const batchSize = 1000;
     let totalUpdated = 0;
 
-    const usersWithContacts = await this.find({ contacts: { $ne: [] } }).select('_id contacts').lean();
-    if (!usersWithContacts.length) {
-      logger.info('No users with contacts found for cleanup');
-      return { updatedCount: 0 };
-    }
+    // Changed: Stream users to reduce memory usage
+    const userStream = this.find({ contacts: { $ne: [] } })
+      .select('_id contacts')
+      .lean()
+      .cursor();
 
     const existingUserIds = new Set(
       (await this.find({}).select('_id').lean()).map((user) => user._id.toString())
     );
 
     const updates = [];
-    for (const user of usersWithContacts) {
+    for await (const user of userStream) {
       const validContacts = user.contacts
         .filter((id) => existingUserIds.has(id.toString()))
         .map((id) => new mongoose.Types.ObjectId(id));
@@ -159,12 +186,24 @@ userSchema.statics.cleanupInvalidContacts = async function () {
           },
         });
       }
+      // Changed: Process batches incrementally
+      if (updates.length >= batchSize) {
+        await retryOperation(async () => {
+          const result = await this.bulkWrite(updates);
+          totalUpdated += result.modifiedCount || 0;
+          logger.debug('Invalid contacts cleanup batch', { updated: result.modifiedCount, batchSize });
+        });
+        updates.length = 0; // Clear array
+      }
     }
 
+    // Process remaining updates
     if (updates.length) {
-      const result = await this.bulkWrite(updates);
-      totalUpdated = result.modifiedCount || 0;
-      logger.info('Invalid contacts cleanup batch completed', { updatedCount: totalUpdated, batchSize: updates.length });
+      await retryOperation(async () => {
+        const result = await this.bulkWrite(updates);
+        totalUpdated += result.modifiedCount || 0;
+        logger.debug('Invalid contacts cleanup final batch', { updated: result.modifiedCount, batchSize: updates.length });
+      });
     }
 
     logger.info('Invalid contacts cleanup completed', { updatedCount: totalUpdated });
@@ -175,15 +214,17 @@ userSchema.statics.cleanupInvalidContacts = async function () {
   }
 };
 
-// Changed: Method to reset stale online statuses
+// Static method to reset stale online statuses
 userSchema.statics.resetStaleStatuses = async function (thresholdMinutes = 30) {
   try {
     logger.info('Starting stale status cleanup');
     const threshold = new Date(Date.now() - thresholdMinutes * 60 * 1000);
-    const result = await this.updateMany(
-      { status: 'online', lastSeen: { $lt: threshold } },
-      { $set: { status: 'offline', lastSeen: new Date() } }
-    );
+    const result = await retryOperation(async () => {
+      return await this.updateMany(
+        { status: 'online', lastSeen: { $lt: threshold } },
+        { $set: { status: 'offline', lastSeen: new Date() } }
+      );
+    });
     logger.info('Stale status cleanup completed', { updatedCount: result.modifiedCount });
     return { updatedCount: result.modifiedCount };
   } catch (error) {

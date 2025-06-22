@@ -54,7 +54,6 @@ const logger = winston.createLogger({
   ],
 });
 
-// Log Cloudinary configuration (omit api_secret for security)
 logger.info('Cloudinary configuration loaded', {
   cloud_name: cloudinaryConfig.cloud_name,
   api_key: cloudinaryConfig.api_key,
@@ -64,7 +63,7 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    if (!file) return cb(null, true); // Allow no file
+    if (!file) return cb(null, true);
     const allowedTypes = ['image/jpeg', 'image/png', 'image/gif'];
     if (!allowedTypes.includes(file.mimetype)) {
       logger.warn('Invalid file type', { mimetype: file.mimetype });
@@ -84,7 +83,20 @@ const authLimiter = rateLimit({
   },
 });
 
-// Updated authMiddleware
+// Changed: Retry with exponential backoff
+const retryOperation = async (operation, maxRetries = 3, baseDelay = 1000) => {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await operation();
+    } catch (err) {
+      if (attempt === maxRetries) throw err;
+      const delay = Math.pow(2, attempt) * baseDelay;
+      logger.warn('Retrying operation', { attempt, error: err.message });
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+};
+
 const authMiddleware = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -94,28 +106,30 @@ const authMiddleware = async (req, res, next) => {
 
   const token = authHeader.split(' ')[1];
   try {
-    // Check if token is blacklisted
-    const blacklisted = await TokenBlacklist.findOne({ token }).lean();
+    // Changed: Retry blacklist check
+    const blacklisted = await retryOperation(async () => {
+      return await TokenBlacklist.findOne({ token }).lean();
+    });
     if (blacklisted) {
       logger.warn('Blacklisted token used', { token: token.substring(0, 10) + '...', url: req.url, ip: req.ip });
       return res.status(401).json({ error: 'Token is blacklisted' });
     }
 
-    // Verify JWT token
     const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
     if (!decoded.id || !mongoose.isValidObjectId(decoded.id)) {
       logger.warn('Invalid or missing user ID in token', { userId: decoded.id, url: req.url, ip: req.ip });
       return res.status(401).json({ error: 'Invalid token: Invalid user ID' });
     }
 
-    // Verify user exists in database
-    const user = await User.findById(decoded.id).select('_id email virtualNumber role').lean();
+    // Changed: Retry user lookup
+    const user = await retryOperation(async () => {
+      return await User.findById(decoded.id).select('_id email virtualNumber role').lean();
+    });
     if (!user) {
       logger.warn('User not found for token', { userId: decoded.id, url: req.url, ip: req.ip });
       return res.status(401).json({ error: 'Invalid token: User not found' });
     }
 
-    // Set req.user and req.token
     req.user = {
       _id: user._id.toString(),
       id: user._id.toString(),
@@ -140,7 +154,7 @@ const authMiddleware = async (req, res, next) => {
 
 const registerSchema = Joi.object({
   email: Joi.string().email().required(),
-  password: Joi.string().min(6).required(),
+  password: Joi.string().min(8).required(), // Changed: Enforce 8 chars
   username: Joi.string().min(3).max(20).required(),
   country: Joi.string().length(2).uppercase().required(),
   role: Joi.number().integer().min(0).max(1).optional().default(0),
@@ -148,7 +162,7 @@ const registerSchema = Joi.object({
 
 const loginSchema = Joi.object({
   email: Joi.string().email().required(),
-  password: Joi.string().min(6).required(),
+  password: Joi.string().min(8).required(), // Changed: Enforce 8 chars
 });
 
 const generateVirtualNumber = async (countryCode, userId) => {
@@ -160,13 +174,10 @@ const generateVirtualNumber = async (countryCode, userId) => {
     const maxAttempts = 20;
 
     do {
-      let firstFive = '';
-      for (let i = 0; i < 5; i++) {
-        firstFive += Math.floor(Math.random() * 9) + 1;
-      }
-      const remainingFour = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
-      virtualNumber = `+${countryCallingCode}${firstFive}${remainingFour}`;
-      const existingUser = await User.findOne({ virtualNumber });
+      // Changed: Use more efficient number generation
+      const randomDigits = Math.floor(100000000 + Math.random() * 900000000).toString();
+      virtualNumber = `+${countryCallingCode}${randomDigits}`;
+      const existingUser = await User.findOne({ virtualNumber }).lean();
       if (!existingUser) break;
       attempts++;
       logger.warn('Virtual number collision', { attempt: attempts, virtualNumber });
@@ -187,8 +198,6 @@ const generateVirtualNumber = async (countryCode, userId) => {
 
 router.post('/register', authLimiter, upload.single('photo'), async (req, res) => {
   try {
-    logger.info('Register request received', { email: req.body.email, username: req.body.username });
-
     const { error } = registerSchema.validate(req.body);
     if (error) {
       logger.warn('Validation error', { error: error.details[0].message, body: req.body });
@@ -197,24 +206,23 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
 
     const { email, password, username, country, role = 0 } = req.body;
 
-    logger.info('Checking for existing user', { email, username });
-    const existingUser = await User.findOne({ $or: [{ email }, { username }] });
+    // Changed: Retry user check
+    const existingUser = await retryOperation(async () => {
+      return await User.findOne({ $or: [{ email }, { username }] }).lean();
+    });
     if (existingUser) {
       logger.warn('Duplicate user', { email, username });
       return res.status(400).json({ error: 'Email or username already exists' });
     }
 
-    logger.info('Generating RSA key pair', { email });
     const { publicKey, privateKey } = forge.pki.rsa.generateKeyPair({ bits: 2048 });
     const publicKeyPem = forge.pki.publicKeyToPem(publicKey);
     const privateKeyPem = forge.pki.privateKeyToPem(privateKey);
 
-    logger.info('Hashing password', { email });
     const hashedPassword = await bcrypt.hash(password, 10);
 
     let virtualNumber;
     try {
-      logger.info('Generating virtual number', { email, country });
       virtualNumber = await generateVirtualNumber(country, forge.util.bytesToHex(forge.random.getBytesSync(16)));
     } catch (err) {
       return res.status(400).json({ error: 'Failed to generate virtual number', details: err.message });
@@ -233,26 +241,23 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
     });
 
     if (req.file) {
-      logger.info('Uploading photo to Cloudinary', { email, mimetype: req.file.mimetype, size: req.file.size });
-      try {
-        const result = await new Promise((resolve, reject) => {
+      // Changed: Retry Cloudinary upload
+      const result = await retryOperation(async () => {
+        return await new Promise((resolve, reject) => {
           cloudinary.uploader.upload_stream(
             { resource_type: 'image', folder: 'gapp_profile_photos' },
             (error, result) => (error ? reject(error) : resolve(result))
           ).end(req.file.buffer);
         });
-        user.photo = result.secure_url;
-        logger.info('Photo uploaded successfully', { email, url: result.secure_url });
-      } catch (err) {
-        logger.error('Cloudinary upload failed', { error: err.message, email });
-        return res.status(400).json({ error: 'Failed to upload photo', details: err.message });
-      }
+      });
+      user.photo = result.secure_url;
     }
 
-    logger.info('Saving user to MongoDB', { email });
-    await user.save();
+    // Changed: Retry user save
+    await retryOperation(async () => {
+      await user.save();
+    });
 
-    logger.info('Generating JWT', { email });
     const token = jwt.sign(
       { id: user._id, email, virtualNumber, role: user.role },
       process.env.JWT_SECRET,
@@ -270,7 +275,7 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
       privateKey: privateKeyPem,
     });
   } catch (error) {
-    logger.error('Register error:', {
+    logger.error('Register error', {
       error: error.message,
       stack: error.stack,
       body: {
@@ -301,7 +306,10 @@ router.post('/login', authLimiter, async (req, res) => {
     }
 
     const { email, password } = req.body;
-    const user = await User.findOne({ email }).select('+privateKey');
+    // Changed: Retry user lookup
+    const user = await retryOperation(async () => {
+      return await User.findOne({ email }).select('+privateKey').lean();
+    });
     if (!user) {
       logger.warn('Login attempt with unregistered email', { email });
       return res.status(401).json({ error: 'Email not registered' });
@@ -316,6 +324,14 @@ router.post('/login', authLimiter, async (req, res) => {
       process.env.JWT_SECRET,
       { expiresIn: '24h', algorithm: 'HS256' }
     );
+
+    // Changed: Update status and lastSeen
+    await retryOperation(async () => {
+      await User.updateOne(
+        { _id: user._id },
+        { $set: { status: 'online', lastSeen: new Date() } }
+      );
+    });
 
     logger.info('Login successful', { userId: user._id, email });
     res.json({
@@ -341,13 +357,23 @@ router.post('/logout', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'No token provided' });
     }
 
-    // Blacklist the token
-    await TokenBlacklist.create({ token });
-    logger.info('Token blacklisted during logout', { userId: req.user.id });
+    // Changed: Retry blacklist operation
+    await retryOperation(async () => {
+      await TokenBlacklist.create({ token });
+    });
 
+    // Changed: Update status to offline
+    await retryOperation(async () => {
+      await User.updateOne(
+        { _id: req.user.id },
+        { $set: { status: 'offline', lastSeen: new Date() } }
+      );
+    });
+
+    logger.info('Logout successful', { userId: req.user.id });
     res.status(200).json({ message: 'Logged out successfully' });
   } catch (error) {
-    logger.error('Logout error:', { error: error.message, userId: req.user?.id, stack: error.stack });
+    logger.error('Logout error', { error: error.message, userId: req.user?.id, stack: error.stack });
     res.status(500).json({ error: 'Failed to logout', details: error.message });
   }
 });
@@ -375,7 +401,10 @@ router.post('/update_country', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Invalid user ID' });
     }
 
-    const user = await User.findById(userId);
+    // Changed: Retry user update
+    const user = await retryOperation(async () => {
+      return await User.findById(userId);
+    });
     if (!user) {
       logger.warn('User not found', { userId });
       return res.status(404).json({ error: 'User not found' });
@@ -384,13 +413,15 @@ router.post('/update_country', authMiddleware, async (req, res) => {
     if (user.country !== country) {
       user.country = country;
       user.virtualNumber = await generateVirtualNumber(country, user._id.toString());
-      await user.save();
-      logger.info('Country updated', { userId, country, virtualNumber: user.virtualNumber });
+      await retryOperation(async () => {
+        await user.save();
+      });
     }
 
+    logger.info('Country updated', { userId, country, virtualNumber: user.virtualNumber });
     res.json({ virtualNumber: user.virtualNumber });
   } catch (error) {
-    logger.error('Update country error:', { error: error.message, stack: error.stack, userId: req.body.userId });
+    logger.error('Update country error', { error: error.message, stack: error.stack, userId: req.body.userId });
     res.status(500).json({ error: 'Failed to update country', details: error.message });
   }
 });
@@ -412,26 +443,33 @@ router.post('/update_photo', authMiddleware, upload.single('photo'), async (req,
       return res.status(400).json({ error: 'Invalid user ID' });
     }
 
-    const user = await User.findById(userId);
+    // Changed: Retry user lookup and update
+    const user = await retryOperation(async () => {
+      return await User.findById(userId);
+    });
     if (!user) {
       logger.warn('User not found', { userId });
       return res.status(404).json({ error: 'User not found' });
     }
 
-    const result = await new Promise((resolve, reject) => {
-      cloudinary.uploader.upload_stream(
-        { resource_type: 'image', folder: 'gapp_profile_photos' },
-        (error, result) => (error ? reject(error) : resolve(result))
-      ).end(req.file.buffer);
+    const result = await retryOperation(async () => {
+      return await new Promise((resolve, reject) => {
+        cloudinary.uploader.upload_stream(
+          { resource_type: 'image', folder: 'gapp_profile_photos' },
+          (error, result) => (error ? reject(error) : resolve(result))
+        ).end(req.file.buffer);
+      });
     });
 
     user.photo = result.secure_url;
-    await user.save();
+    await retryOperation(async () => {
+      await user.save();
+    });
 
     logger.info('Photo updated', { userId, photo: user.photo });
     res.json({ photo: user.photo });
   } catch (error) {
-    logger.error('Update photo error:', { error: error.message, stack: error.stack, userId: req.body.userId });
+    logger.error('Update photo error', { error: error.message, stack: error.stack, userId: req.body.userId });
     res.status(500).json({ error: 'Failed to update photo', details: error.message });
   }
 });
@@ -459,32 +497,50 @@ router.post('/update_username', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Invalid user ID' });
     }
 
-    const user = await User.findById(userId);
+    // Changed: Retry user operations
+    const user = await retryOperation(async () => {
+      return await User.findById(userId);
+    });
     if (!user) {
       logger.warn('User not found', { userId });
       return res.status(404).json({ error: 'User not found' });
     }
 
-    const existingUser = await User.findOne({ username });
+    const existingUser = await retryOperation(async () => {
+      return await User.findOne({ username }).lean();
+    });
     if (existingUser && existingUser._id.toString() !== userId) {
       logger.warn('Username already taken', { username, userId });
       return res.status(400).json({ error: 'Username already taken' });
     }
 
     user.username = username.trim();
-    await user.save();
+    await retryOperation(async () => {
+      await user.save();
+    });
 
     logger.info('Username updated', { userId, username });
     res.json({ username: user.username });
   } catch (error) {
-    logger.error('Update username error:', { error: error.message, stack: error.stack, userId: req.body.userId });
+    logger.error('Update username error', { error: error.message, stack: error.stack, userId: req.body.userId });
     res.status(500).json({ error: 'Failed to update username', details: error.message });
   }
 });
 
 router.get('/contacts', authMiddleware, async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).populate('contacts', 'username virtualNumber photo status lastSeen');
+    // Changed: Add pagination
+    const { page = 1, limit = 50 } = req.query;
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const user = await retryOperation(async () => {
+      return await User.findById(req.user.id)
+        .populate({
+          path: 'contacts',
+          select: 'username virtualNumber photo status lastSeen',
+          options: { skip, limit: parseInt(limit) },
+        })
+        .lean();
+    });
     if (!user) {
       logger.warn('User not found', { userId: req.user.id });
       return res.status(404).json({ error: 'User not found' });
@@ -499,7 +555,17 @@ router.get('/contacts', authMiddleware, async (req, res) => {
       lastSeen: contact.lastSeen,
     }));
 
-    res.json(contacts);
+    // Changed: Include pagination metadata
+    const totalContacts = user.contacts.length;
+    res.json({
+      contacts,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total: totalContacts,
+        pages: Math.ceil(totalContacts / parseInt(limit)),
+      },
+    });
   } catch (error) {
     logger.error('Fetch contacts error', { error: error.message, stack: error.stack, userId: req.user.id });
     res.status(500).json({ error: 'Failed to fetch contacts', details: error.message });
@@ -514,7 +580,10 @@ router.get('/public_key/:userId', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Invalid user ID' });
     }
 
-    const user = await User.findById(userId).select('publicKey');
+    // Changed: Retry user lookup
+    const user = await retryOperation(async () => {
+      return await User.findById(userId).select('publicKey').lean();
+    });
     if (!user) {
       logger.warn('User not found', { userId });
       return res.status(404).json({ error: 'User not found' });
@@ -522,7 +591,7 @@ router.get('/public_key/:userId', authMiddleware, async (req, res) => {
 
     res.json({ publicKey: user.publicKey });
   } catch (error) {
-    logger.error('Fetch public key error:', { error: error.message, stack: error.stack, userId: req.params.userId });
+    logger.error('Fetch public key error', { error: error.message, stack: error.stack, userId: req.params.userId });
     res.status(500).json({ error: 'Failed to fetch public key', details: error.message });
   }
 });
@@ -541,7 +610,10 @@ router.post('/refresh', authLimiter, authMiddleware, async (req, res) => {
       return res.status(401).json({ error: 'Invalid token' });
     }
 
-    const user = await User.findById(req.user.id).select('+privateKey');
+    // Changed: Retry user lookup
+    const user = await retryOperation(async () => {
+      return await User.findById(req.user.id).select('+privateKey').lean();
+    });
     if (!user) {
       logger.warn('User not found during token refresh', { userId: req.user.id });
       return res.status(401).json({ error: 'User not found' });
@@ -550,7 +622,9 @@ router.post('/refresh', authLimiter, authMiddleware, async (req, res) => {
     // Blacklist the old token
     const oldToken = req.token;
     if (oldToken) {
-      await TokenBlacklist.create({ token: oldToken });
+      await retryOperation(async () => {
+        await TokenBlacklist.create({ token: oldToken });
+      });
       logger.info('Old token blacklisted during refresh', { userId: req.user.id });
     }
 
@@ -571,7 +645,7 @@ router.post('/refresh', authLimiter, authMiddleware, async (req, res) => {
       privateKey: user.privateKey,
     });
   } catch (error) {
-    logger.error('Refresh token error:', { error: error.message, stack: error.stack, userId: req.user?.id, ip: req.ip });
+    logger.error('Refresh token error', { error: error.message, stack: error.stack, userId: req.user?.id, ip: req.ip });
     res.status(500).json({ error: 'Failed to refresh token', details: error.message });
   }
 });

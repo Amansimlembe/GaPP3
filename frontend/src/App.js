@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { BrowserRouter as Router, Route, Routes, Navigate, NavLink, useLocation } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { FaHome, FaBriefcase, FaComments, FaUser } from 'react-icons/fa';
@@ -25,11 +25,26 @@ class ErrorBoundary extends React.Component {
 
   componentDidCatch(error, errorInfo) {
     console.error('ErrorBoundary caught:', error, errorInfo);
-    axios.post(`${BASE_URL}/social/log-error`, {
-      error: error.message,
-      stack: errorInfo.componentStack,
-      timestamp: new Date().toISOString(),
-    }).catch((err) => console.warn('Failed to log error:', err.message));
+    // Changed: Retry error logging
+    const retryLog = async (retries = 3, baseDelay = 1000) => {
+      for (let i = 0; i < retries; i++) {
+        try {
+          await axios.post(`${BASE_URL}/social/log-error`, {
+            error: error.message,
+            stack: errorInfo.componentStack,
+            timestamp: new Date().toISOString(),
+          }, { timeout: 5000 });
+          return;
+        } catch (err) {
+          if (i < retries - 1) {
+            await new Promise((resolve) => setTimeout(resolve, Math.pow(2, i) * baseDelay));
+            continue;
+          }
+          console.warn('Failed to log error:', err.message);
+        }
+      }
+    };
+    retryLog();
   }
 
   render() {
@@ -39,8 +54,9 @@ class ErrorBoundary extends React.Component {
           <h2 className="text-xl font-bold">Something went wrong</h2>
           <p className="my-2">{this.state.error?.message || 'Unknown error'}</p>
           <button
-            className="bg-primary text-white px-4 py-2 rounded"
+            className="bg-primary text-white px-4 py-2 rounded focus:outline-none focus:ring-2 focus:ring-primary"
             onClick={() => window.location.reload()}
+            aria-label="Reload page"
           >
             Reload
           </button>
@@ -87,7 +103,8 @@ const App = () => {
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
   const [error, setError] = useState(null);
 
-  const setAuthData = (newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername, privateKey) => {
+  // Changed: Optimize auth data setting
+  const setAuthData = useCallback((newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername, privateKey) => {
     dispatch(setAuth({
       token: newToken || null,
       userId: newUserId || null,
@@ -98,24 +115,18 @@ const App = () => {
       privateKey: privateKey || null,
     }));
     if (newToken && newUserId) {
-      localStorage.setItem('token', newToken);
-      localStorage.setItem('userId', newUserId);
-      localStorage.setItem('role', String(newRole));
-      localStorage.setItem('photo', newPhoto || 'https://placehold.co/40x40');
-      localStorage.setItem('virtualNumber', newVirtualNumber || '');
-      localStorage.setItem('username', newUsername || '');
-      localStorage.setItem('privateKey', privateKey || '');
       setIsAuthenticated(true);
     } else {
-      localStorage.clear();
-      setIsAuthenticated(false);
+      localStorage.removeItem('theme'); // Preserve theme
       dispatch(clearAuth());
+      setIsAuthenticated(false);
       setChatNotifications(0);
       setSocket(null);
       setError('Authentication failed, please log in again');
     }
-  };
+  }, [dispatch]);
 
+  // Changed: Add offline detection and retry for socket
   useEffect(() => {
     if (!token || !userId) {
       console.warn('Invalid token or userId, skipping socket initialization');
@@ -126,44 +137,63 @@ const App = () => {
     const newSocket = io(BASE_URL, {
       auth: { token },
       transports: ['websocket', 'polling'],
-      reconnectionAttempts: 10,
-      reconnectionDelay: 3000,
+      reconnectionAttempts: 5, // Changed: Reduce attempts
+      reconnectionDelay: 1000, // Changed: Exponential backoff starts at 1s
+      reconnectionDelayMax: 5000,
       timeout: 10000,
     });
     setSocket(newSocket);
 
+    // Changed: Handle offline reconnection
+    const handleOnline = () => newSocket.connect();
+    const handleOffline = () => console.warn('Offline: Socket disconnected');
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
     return () => {
       newSocket.emit('leave', userId);
       newSocket.disconnect();
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
       console.log('Socket cleanup');
       setSocket(null);
     };
-  }, [token, userId]);
+  }, [token, userId, setAuthData]);
 
-  const refreshToken = async () => {
-    try {
-      const response = await axios.post(
-        `${BASE_URL}/auth/refresh`,
-        { userId },
-        {
-          headers: { Authorization: `Bearer ${token}` },
-          timeout: 15000,
+  // Changed: Add retry logic for token refresh
+  const refreshToken = useCallback(async () => {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        if (!navigator.onLine) {
+          throw new Error('Offline: Cannot refresh token');
         }
-      );
-      const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername, privateKey } = response.data;
-      setAuthData(newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername, privateKey);
-      console.log('Token refreshed');
-      return newToken;
-    } catch (error) {
-      console.error('Token refresh failed:', error.response?.data || error.message);
-      setAuthData(null, null, null, null, null, null, null);
-      setError('Session expired, please log in again');
-      return null;
+        const response = await axios.post(
+          `${BASE_URL}/auth/refresh`,
+          { userId },
+          {
+            headers: { Authorization: `Bearer ${token}` },
+            timeout: 10000, // Changed: Reduce timeout
+          }
+        );
+        const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername, privateKey } = response.data;
+        setAuthData(newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername, privateKey);
+        console.log('Token refreshed');
+        return newToken;
+      } catch (error) {
+        console.error(`Token refresh attempt ${attempt} failed:`, error.response?.data || error.message);
+        if (attempt < 3 && (error.response?.status === 429 || error.response?.status >= 500 || error.code === 'ECONNABORTED' || !navigator.onLine)) {
+          await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * 1000));
+          continue;
+        }
+        setAuthData(null, null, null, null, null, null, null);
+        setError('Session expired, please log in again');
+        return null;
+      }
     }
-  };
+  }, [token, userId, setAuthData]);
 
   useEffect(() => {
-    if (!isAuthenticated || !token || !userId || !socket) return;
+    if (!isAuthenticated || !token || !userId) return;
 
     let isRefreshing = false;
     const checkTokenExpiration = async () => {
@@ -171,7 +201,7 @@ const App = () => {
       isRefreshing = true;
       try {
         const expTime = getTokenExpiration(token);
-        if (expTime && expTime - Date.now() < 10 * 60 * 1000) {
+        if (expTime && expTime - Date.now() < 10 * 60 * 1000) { // 10 minutes
           await refreshToken();
         }
       } catch (err) {
@@ -185,8 +215,9 @@ const App = () => {
     checkTokenExpiration();
     const interval = setInterval(checkTokenExpiration, 5 * 60 * 1000);
     return () => clearInterval(interval);
-  }, [isAuthenticated, token, userId, socket]);
+  }, [isAuthenticated, token, userId, refreshToken]);
 
+  // Changed: Optimize socket event handlers
   useEffect(() => {
     if (!socket) return;
 
@@ -210,7 +241,7 @@ const App = () => {
 
     socket.on('disconnect', (reason) => {
       console.warn('Socket disconnected:', reason);
-      if (reason === 'io server disconnect') {
+      if (reason === 'io server disconnect' && navigator.onLine) {
         socket.connect();
       }
     });
@@ -232,26 +263,26 @@ const App = () => {
       socket.off('message');
       socket.off('newContact');
     };
-  }, [socket, userId, selectedChat]);
+  }, [socket, userId, selectedChat, refreshToken, setAuthData]);
 
   useEffect(() => {
     document.documentElement.className = theme === 'dark' ? 'dark' : '';
     localStorage.setItem('theme', theme);
   }, [theme]);
 
-  const toggleTheme = () => setTheme(theme === 'light' ? 'dark' : 'light');
+  const toggleTheme = useCallback(() => setTheme((prev) => prev === 'light' ? 'dark' : 'light'), []);
 
-  const handleChatNavigation = () => {
-    console.log('Navigating to ChatScreen'); // Debug log
+  const handleChatNavigation = useCallback(() => {
+    console.log('Navigating to ChatScreen');
     setChatNotifications(0);
     dispatch(setSelectedChat(null));
-  };
+  }, [dispatch]);
 
   if (!isAuthenticated) {
     return (
       <ErrorBoundary>
         {error && (
-          <div className="fixed top-0 left-0 right-0 bg-red-500 text-white p-2 text-center">
+          <div className="fixed top-0 left-0 right-0 bg-red-500 text-white p-2 text-center z-50">
             {error}
           </div>
         )}
@@ -263,7 +294,7 @@ const App = () => {
   return (
     <ErrorBoundary>
       {error && (
-        <div className="fixed top-0 left-0 right-0 bg-red-500 text-white p-2 text-center">
+        <div className="fixed top-0 left-0 right-0 bg-red-500 text-white p-2 text-center z-50">
           {error}
         </div>
       )}
@@ -306,7 +337,6 @@ const AuthenticatedApp = ({
   const { selectedChat } = useSelector((state) => state.messages);
   const isChatRouteWithSelectedChat = location.pathname === '/chat' && selectedChat;
 
-  // Debug log to check current route
   useEffect(() => {
     console.log('Current route:', location.pathname);
   }, [location.pathname]);
@@ -354,26 +384,25 @@ const AuthenticatedApp = ({
       >
         <NavLink
           to="/feed"
-          className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}
+          className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'} focus:outline-none focus:ring-2 focus:ring-white`}
+          aria-label="Feed"
         >
           <FaHome className="text-xl" />
           <span className="text-xs">Feed</span>
         </NavLink>
         <NavLink
           to="/jobs"
-          className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}
+          className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'} focus:outline-none focus:ring-2 focus:ring-white`}
+          aria-label="Jobs"
         >
           <FaBriefcase className="text-xl" />
           <span className="text-xs">Jobs</span>
         </NavLink>
         <NavLink
           to="/chat"
-          onClick={() => {
-            console.log('Chat NavLink clicked'); // Debug log
-            handleChatNavigation();
-            dispatch(setSelectedChat(null)); // Ensure chat state is reset
-          }}
-          className={({ isActive }) => `flex flex-col items-center p-2 rounded relative ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}
+          onClick={handleChatNavigation}
+          className={({ isActive }) => `flex flex-col items-center p-2 rounded relative ${isActive ? 'bg-secondary' : 'hover:bg-secondary'} focus:outline-none focus:ring-2 focus:ring-white`}
+          aria-label={`Chat ${chatNotifications > 0 ? `with ${chatNotifications} notifications` : ''}`}
         >
           <FaComments className="text-xl" />
           {chatNotifications > 0 && (
@@ -385,7 +414,8 @@ const AuthenticatedApp = ({
         </NavLink>
         <NavLink
           to="/profile"
-          className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}
+          className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'} focus:outline-none focus:ring-2 focus:ring-white`}
+          aria-label="Profile"
         >
           <FaUser className="text-xl" />
           <span className="text-xs">Profile</span>

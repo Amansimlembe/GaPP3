@@ -12,6 +12,9 @@ const logger = winston.createLogger({
   ],
 });
 
+// Changed: Add TTL index for 30 days
+const MESSAGE_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 days
+
 const messageSchema = new mongoose.Schema({
   senderId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   recipientId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
@@ -21,9 +24,8 @@ const messageSchema = new mongoose.Schema({
     validate: {
       validator: function (v) {
         if (this.contentType === 'text') {
-          return v === '' || /^[A-Za-z0-9+/=]+\|[A-Za-z0-9+/=]+\|[A-Za-z0-9+/=]+$/.test(v); // Changed: Allow empty string for text
+          return v === '' || /^[A-Za-z0-9+/=]+\|[A-Za-z0-9+/=]+\|[A-Za-z0-9+/=]+$/.test(v);
         }
-        // Changed: More permissive URL validation
         return v === '' || /^(https?:\/\/[^\s/$.?#][^\s]*)$/.test(v);
       },
       message: props =>
@@ -33,83 +35,111 @@ const messageSchema = new mongoose.Schema({
     },
   },
   contentType: { type: String, enum: ['text', 'image', 'video', 'audio', 'document'], required: true },
-  plaintextContent: {
-    type: String,
-    default: '', // Already good: Ensures empty string for media
-  },
+  plaintextContent: { type: String, default: '' },
   status: {
     type: String,
     enum: ['pending', 'sent', 'delivered', 'read', 'failed'],
-    default: 'pending', // Changed: Default to pending for optimistic updates
+    default: 'pending',
   },
-  caption: { type: String, default: null },
+  caption: { type: String, default: null, maxLength: 500 }, // Changed: Add maxLength
   replyTo: { type: mongoose.Schema.Types.ObjectId, ref: 'Message', default: null },
-  originalFilename: { type: String, default: null },
-  clientMessageId: { type: String, required: true, unique: true, sparse: true }, // Changed: Required to ensure uniqueness
+  originalFilename: { type: String, default: null, maxLength: 255 }, // Changed: Add maxLength
+  clientMessageId: { type: String, required: true, unique: true, sparse: true },
   senderVirtualNumber: { type: String, default: null },
-  senderUsername: { type: String, default: null },
+  senderUsername: { type: String, default: null, maxLength: 50 }, // Changed: Add maxLength
   senderPhoto: { type: String, default: null },
-  createdAt: { type: Date, default: Date.now },
+  createdAt: { type: Date, default: Date.now, expires: MESSAGE_TTL_SECONDS }, // Changed: Add TTL
   updatedAt: { type: Date },
 }, {
   timestamps: { updatedAt: 'updatedAt' },
 });
 
-// Consolidated indexes
+// Changed: Optimized indexes
 messageSchema.index({ clientMessageId: 1 }, { unique: true, sparse: true });
 messageSchema.index({ senderId: 1, recipientId: 1, createdAt: -1 });
 messageSchema.index({ recipientId: 1, status: 1 });
+messageSchema.index({ createdAt: 1 }); // Changed: Support TTL
 
-// Sender cache
-const senderCache = new Map();
-const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+// Changed: Bounded LRU cache
+class LRUCache {
+  constructor(maxSize, ttl) {
+    this.maxSize = maxSize;
+    this.ttl = ttl;
+    this.cache = new Map();
+  }
+  get(key) {
+    const item = this.cache.get(key);
+    if (item && item.timestamp > Date.now() - this.ttl) {
+      this.cache.delete(key);
+      this.cache.set(key, item);
+      return item.data;
+    }
+    this.cache.delete(key);
+    return null;
+  }
+  set(key, data) {
+    if (this.cache.size >= this.maxSize) {
+      const firstKey = this.cache.keys().next().value;
+      this.cache.delete(firstKey);
+    }
+    this.cache.set(key, { data, timestamp: Date.now() });
+  }
+}
+
+const senderCache = new LRUCache(1000, 5 * 60 * 1000); // Changed: 1000 users, 5 min TTL
+
+// Changed: Retry with exponential backoff
+const retryOperation = async (operation, maxRetries = 3) => {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await operation();
+    } catch (err) {
+      if (attempt === maxRetries) throw err;
+      const delay = Math.pow(2, attempt) * 1000;
+      logger.warn('Retrying operation', { attempt, error: err.message });
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+};
 
 // Pre-save hook
 messageSchema.pre('save', async function (next) {
   try {
-    // Validate sender
-    const cacheKey = this.senderId.toString();
-    let sender = senderCache.get(cacheKey);
-    if (!sender || sender.timestamp < Date.now() - CACHE_TTL) {
-      sender = await User.findById(this.senderId).select('virtualNumber username photo').lean();
+    await retryOperation(async () => {
+      const cacheKey = this.senderId.toString();
+      let sender = senderCache.get(cacheKey);
       if (!sender) {
-        logger.error('Invalid sender', { senderId: this.senderId });
-        return next(new Error('Sender does not exist'));
+        sender = await User.findById(this.senderId).select('virtualNumber username photo').lean();
+        if (!sender) {
+          throw new Error('Sender does not exist');
+        }
+        senderCache.set(cacheKey, sender);
       }
-      senderCache.set(cacheKey, { ...sender, timestamp: Date.now() });
-    }
 
-    // Validate recipient
-    const recipient = await User.findById(this.recipientId).select('_id status').lean(); // Changed: Fetch status for dynamic default
-    if (!recipient) {
-      logger.error('Invalid recipient', { recipientId: this.recipientId });
-      return next(new Error('Recipient does not exist'));
-    }
-
-    // Populate sender fields if missing
-    this.senderVirtualNumber = this.senderVirtualNumber || sender.virtualNumber || '';
-    this.senderUsername = this.senderUsername || sender.username || 'Unknown';
-    this.senderPhoto = this.senderPhoto || sender.photo || 'https://placehold.co/40x40';
-
-    // Changed: Set default status based on recipient availability
-    if (this.isNew && !this.status) {
-      this.status = recipient.status === 'online' ? 'delivered' : 'pending';
-    }
-
-    // Validate replyTo if present
-    if (this.replyTo) {
-      const replyMessage = await this.constructor.findById(this.replyTo).select('_id').lean();
-      if (!replyMessage) {
-        logger.error('Invalid replyTo ID', { replyTo: this.replyTo });
-        return next(new Error('ReplyTo message does not exist'));
+      const recipient = await User.findById(this.recipientId).select('_id status').lean();
+      if (!recipient) {
+        throw new Error('Recipient does not exist');
       }
-    }
 
-    // Ensure plaintextContent is string
-    if (this.plaintextContent === undefined || this.plaintextContent === null) {
-      this.plaintextContent = '';
-    }
+      this.senderVirtualNumber = this.senderVirtualNumber || sender.virtualNumber || '';
+      this.senderUsername = this.senderUsername || sender.username || 'Unknown';
+      this.senderPhoto = this.senderPhoto || sender.photo || 'https://placehold.co/40x40';
 
+      if (this.isNew && !this.status) {
+        this.status = recipient.status === 'online' ? 'delivered' : 'pending';
+      }
+
+      if (this.replyTo) {
+        const replyMessage = await this.constructor.findById(this.replyTo).select('_id').lean();
+        if (!replyMessage) {
+          throw new Error('ReplyTo message does not exist');
+        }
+      }
+
+      if (this.plaintextContent === undefined || this.plaintextContent === null) {
+        this.plaintextContent = '';
+      }
+    });
     next();
   } catch (error) {
     logger.error('Message pre-save validation failed', {
@@ -145,23 +175,25 @@ messageSchema.statics.cleanupOrphanedMessages = async function () {
       const batch = messageUsers.slice(i, i + batchSize);
       const users = await User.find({ _id: { $in: batch } }).select('_id').lean();
       users.forEach(user => existingUserIds.add(user._id.toString()));
-      logger.debug('Processed user batch', { processed: batch.length, total: messageUsers.length });
     }
 
     const orphanedUserIds = messageUsers.filter(id => !existingUserIds.has(id));
-
     if (!orphanedUserIds.length) {
       logger.info('No orphaned messages found');
       return { deletedCount: 0 };
     }
 
+    // Changed: Use retry for deletion
     for (let i = 0; i < orphanedUserIds.length; i += batchSize) {
       const batch = orphanedUserIds.slice(i, i + batchSize);
-      const result = await this.deleteMany({
-        $or: [
-          { senderId: { $in: batch } },
-          { recipientId: { $in: batch } },
-        ],
+      const result = await retryOperation(async () => {
+        const deleteResult = await this.deleteMany({
+          $or: [
+            { senderId: { $in: batch } },
+            { recipientId: { $in: batch } },
+          ],
+        });
+        return deleteResult;
       });
       totalDeleted += result.deletedCount || 0;
       logger.debug('Deleted orphaned messages batch', { deleted: result.deletedCount, batchSize: batch.length });
