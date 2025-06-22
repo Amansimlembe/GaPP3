@@ -1,12 +1,22 @@
+
+
+
+
 import React from 'react';
 import ReactDOM from 'react-dom';
 import App from './App';
 import { Provider } from 'react-redux';
-import { store } from './store';
+import { store, initializeStore } from './store';
 
-ReactDOM.render(
-  <Provider store={store}>
-    <App />
-  </Provider>,
-  document.getElementById('root')
-);
+// Bootstrap app after store initialization
+const bootstrap = async () => {
+  await initializeStore();
+  ReactDOM.render(
+    <Provider store={store}>
+      <App />
+    </Provider>,
+    document.getElementById('root')
+  );
+};
+
+bootstrap();
