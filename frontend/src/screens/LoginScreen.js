@@ -4,7 +4,7 @@ import { motion } from 'framer-motion';
 import { getCountries } from 'libphonenumber-js';
 import { FaEye, FaEyeSlash } from 'react-icons/fa';
 import { useDispatch } from 'react-redux'; // Changed: Add Redux integration
-import { setAuth } from '../slices/authSlice'; // Changed: Import Redux action
+import { setAuth } from '../store'; // Changed: Import Redux action
 
 const LoginScreen = () => {
   const [email, setEmail] = useState('');
