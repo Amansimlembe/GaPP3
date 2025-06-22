@@ -21,31 +21,31 @@ const messageSchema = new mongoose.Schema({
     validate: {
       validator: function (v) {
         if (this.contentType === 'text') {
-          return /^[A-Za-z0-9+/=]+\|[A-Za-z0-9+/=]+\|[A-Za-z0-9+/=]+$/.test(v);
+          return v === '' || /^[A-Za-z0-9+/=]+\|[A-Za-z0-9+/=]+\|[A-Za-z0-9+/=]+$/.test(v); // Changed: Allow empty string for text
         }
-        // --- Updated: Relaxed URL validation ---
-        return /^(https?:\/\/[^\s/$.?#][^\s]*(\?[^\s]*)?)$/.test(v);
+        // Changed: More permissive URL validation
+        return v === '' || /^(https?:\/\/[^\s/$.?#][^\s]*)$/.test(v);
       },
       message: props =>
         props.value.contentType === 'text'
-          ? 'Text content must be in encrypted format (data|iv|key)'
-          : 'Media content must be a valid URL',
+          ? 'Text content must be empty or in encrypted format (data|iv|key)'
+          : 'Media content must be empty or a valid URL',
     },
   },
   contentType: { type: String, enum: ['text', 'image', 'video', 'audio', 'document'], required: true },
   plaintextContent: {
     type: String,
-    default: '', // --- Updated: Optional with empty string default ---
+    default: '', // Already good: Ensures empty string for media
   },
   status: {
     type: String,
-    enum: ['pending', 'sent', 'delivered', 'read', 'failed'], // --- Updated: Added pending/failed ---
-    default: 'sent',
+    enum: ['pending', 'sent', 'delivered', 'read', 'failed'],
+    default: 'pending', // Changed: Default to pending for optimistic updates
   },
   caption: { type: String, default: null },
   replyTo: { type: mongoose.Schema.Types.ObjectId, ref: 'Message', default: null },
   originalFilename: { type: String, default: null },
-  clientMessageId: { type: String, required: false, unique: true, sparse: true }, // --- Updated: Optional, sparse index ---
+  clientMessageId: { type: String, required: true, unique: true, sparse: true }, // Changed: Required to ensure uniqueness
   senderVirtualNumber: { type: String, default: null },
   senderUsername: { type: String, default: null },
   senderPhoto: { type: String, default: null },
@@ -56,7 +56,7 @@ const messageSchema = new mongoose.Schema({
 });
 
 // Consolidated indexes
-messageSchema.index({ clientMessageId: 1 }, { unique: true, sparse: true }); // --- Updated: Sparse index ---
+messageSchema.index({ clientMessageId: 1 }, { unique: true, sparse: true });
 messageSchema.index({ senderId: 1, recipientId: 1, createdAt: -1 });
 messageSchema.index({ recipientId: 1, status: 1 });
 
@@ -79,8 +79,8 @@ messageSchema.pre('save', async function (next) {
       senderCache.set(cacheKey, { ...sender, timestamp: Date.now() });
     }
 
-    // --- Updated: Validate recipient ---
-    const recipient = await User.findById(this.recipientId).select('_id').lean();
+    // Validate recipient
+    const recipient = await User.findById(this.recipientId).select('_id status').lean(); // Changed: Fetch status for dynamic default
     if (!recipient) {
       logger.error('Invalid recipient', { recipientId: this.recipientId });
       return next(new Error('Recipient does not exist'));
@@ -91,10 +91,9 @@ messageSchema.pre('save', async function (next) {
     this.senderUsername = this.senderUsername || sender.username || 'Unknown';
     this.senderPhoto = this.senderPhoto || sender.photo || 'https://placehold.co/40x40';
 
-    // --- Updated: Generate clientMessageId if missing ---
-    if (!this.clientMessageId && this.isNew) {
-      this.clientMessageId = `server-${this._id}-${Date.now()}`;
-      logger.debug('Generated clientMessageId', { clientMessageId: this.clientMessageId });
+    // Changed: Set default status based on recipient availability
+    if (this.isNew && !this.status) {
+      this.status = recipient.status === 'online' ? 'delivered' : 'pending';
     }
 
     // Validate replyTo if present
@@ -106,7 +105,7 @@ messageSchema.pre('save', async function (next) {
       }
     }
 
-    // --- Updated: Ensure plaintextContent is string ---
+    // Ensure plaintextContent is string
     if (this.plaintextContent === undefined || this.plaintextContent === null) {
       this.plaintextContent = '';
     }
@@ -129,7 +128,6 @@ messageSchema.statics.cleanupOrphanedMessages = async function () {
     logger.info('Starting orphaned messages cleanup');
     const batchSize = 1000;
     let totalDeleted = 0;
-    let processedUsers = 0;
 
     const [senderIds, recipientIds] = await Promise.all([
       this.distinct('senderId'),
@@ -147,8 +145,7 @@ messageSchema.statics.cleanupOrphanedMessages = async function () {
       const batch = messageUsers.slice(i, i + batchSize);
       const users = await User.find({ _id: { $in: batch } }).select('_id').lean();
       users.forEach(user => existingUserIds.add(user._id.toString()));
-      processedUsers += batch.length;
-      logger.debug('Processed user batch', { processed: processedUsers, total: messageUsers.length });
+      logger.debug('Processed user batch', { processed: batch.length, total: messageUsers.length });
     }
 
     const orphanedUserIds = messageUsers.filter(id => !existingUserIds.has(id));

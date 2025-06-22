@@ -98,11 +98,11 @@ const messageSchema = Joi.object({
     if (!mongoose.isValidObjectId(value)) return helpers.error('any.invalid');
     return value;
   }, 'ObjectId validation').required().messages({ 'any.invalid': 'Invalid recipientId' }),
-  content: Joi.string().required().when('contentType', {
+  content: Joi.string().allow('').required().when('contentType', { // Changed: Allow empty string for content
     is: 'text',
-    then: Joi.string().pattern(/^[A-Za-z0-9+/=]+\|[A-Za-z0-9+/=]+\|[A-Za-z0-9+/=]+$/, 'encrypted format'),
+    then: Joi.string().pattern(/^[A-Za-z0-9+/=]+\|[A-Za-z0-9+/=]+\|[A-Za-z0-9+/=]+$/, 'encrypted format').allow(''),
     otherwise: Joi.string().custom((value, helpers) => {
-      if (!validator.isURL(value)) return helpers.error('any.invalid');
+      if (!validator.isURL(value) && value !== '') return helpers.error('any.invalid');
       return value;
     }, 'URL validation'),
   }).messages({
@@ -279,7 +279,7 @@ module.exports = (app) => {
       await User.findByIdAndUpdate(userId, { status: 'online', lastSeen: new Date() }, { new: true, lean: true });
       io.to(userId).emit('userStatus', { userId, status: 'online', lastSeen: new Date() });
 
-      // --- Updated: Fetch messages and update statuses ---
+      // Changed: Fetch messages and update statuses correctly
       const messages = await Message.find({
         $or: [
           { senderId: userId },
@@ -292,24 +292,23 @@ module.exports = (app) => {
         .populate('replyTo', 'content contentType senderId recipientId createdAt')
         .lean();
       if (messages.length) {
-        // Mark sent messages as delivered
+        // Mark sent messages as delivered or read based on recipient state
         const sentMessageIds = messages
-          .filter((msg) => msg.recipientId.toString() === userId && msg.status === 'sent')
+          .filter((msg) => msg.recipientId.toString() === userId && ['sent', 'delivered'].includes(msg.status))
           .map((msg) => msg._id);
         if (sentMessageIds.length) {
           await Message.updateMany(
             { _id: { $in: sentMessageIds }, recipientId: userId },
-            { status: 'delivered', updatedAt: new Date() }
+            { status: 'read', updatedAt: new Date() }
           );
           const senderIds = [...new Set(messages
             .filter((msg) => sentMessageIds.includes(msg._id))
             .map((msg) => msg.senderId.toString())
           )];
           senderIds.forEach((senderId) => {
-            io.to(senderId).emit('messageStatus', { messageIds: sentMessageIds, status: 'delivered' });
+            io.to(senderId).emit('messageStatus', { messageIds: sentMessageIds, status: 'read' });
           });
         }
-        // Emit all messages
         messages.forEach((message) => {
           io.to(userId).emit('message', {
             ...message,
@@ -328,6 +327,64 @@ module.exports = (app) => {
       }
       await emitUpdatedChatList(io, userId);
       logger.info('User joined room', { socketId: socket.id, userId });
+    });
+
+    // Added: Handle reconnection
+    socket.on('reconnect', async (userId) => {
+      if (!mongoose.isValidObjectId(userId) || userId !== socket.user.id) {
+        logger.warn('Invalid or unauthorized reconnect attempt', { socketId: socket.id, userId });
+        socket.emit('error', { message: 'Invalid or unauthorized reconnect attempt' });
+        return;
+      }
+      socket.join(userId);
+      await User.findByIdAndUpdate(userId, { status: 'online', lastSeen: new Date() }, { new: true, lean: true });
+      io.to(userId).emit('userStatus', { userId, status: 'online', lastSeen: new Date() });
+      const messages = await Message.find({
+        $or: [
+          { senderId: userId },
+          { recipientId: userId },
+        ],
+      })
+        .sort({ createdAt: 1 })
+        .populate('senderId', 'username virtualNumber photo')
+        .populate('recipientId', 'username virtualNumber photo')
+        .populate('replyTo', 'content contentType senderId recipientId createdAt')
+        .lean();
+      if (messages.length) {
+        const sentMessageIds = messages
+          .filter((msg) => msg.recipientId.toString() === userId && ['sent', 'delivered'].includes(msg.status))
+          .map((msg) => msg._id);
+        if (sentMessageIds.length) {
+          await Message.updateMany(
+            { _id: { $in: sentMessageIds }, recipientId: userId },
+            { status: 'read', updatedAt: new Date() }
+          );
+          const senderIds = [...new Set(messages
+            .filter((msg) => sentMessageIds.includes(msg._id))
+            .map((msg) => msg.senderId.toString())
+          )];
+          senderIds.forEach((senderId) => {
+            io.to(senderId).emit('messageStatus', { messageIds: sentMessageIds, status: 'read' });
+          });
+        }
+        messages.forEach((message) => {
+          io.to(userId).emit('message', {
+            ...message,
+            senderId: message.senderId._id.toString(),
+            recipientId: message.recipientId._id.toString(),
+            replyTo: message.replyTo
+              ? {
+                  ...message.replyTo,
+                  senderId: message.replyTo.senderId.toString(),
+                  recipientId: message.replyTo.recipientId.toString(),
+                }
+              : null,
+          });
+        });
+        logger.info('Emitted messages on reconnect', { userId, count: messages.length });
+      }
+      await emitUpdatedChatList(io, userId);
+      logger.info('User reconnected', { socketId: socket.id, userId });
     });
 
     socket.on('leave', async (userId) => {
@@ -438,10 +495,10 @@ module.exports = (app) => {
         const message = new Message({
           senderId,
           recipientId,
-          content,
+          content: content || '', // Changed: Ensure content is a string
           contentType,
           plaintextContent: plaintextContent || '',
-          status: recipient?.status === 'online' ? 'delivered' : 'sent', // Set status based on recipient's online state
+          status: recipient?.status === 'online' ? 'delivered' : 'sent',
           caption: caption || undefined,
           replyTo: replyTo && mongoose.isValidObjectId(replyTo) ? replyTo : undefined,
           originalFilename: messageData.originalFilename || undefined,
@@ -479,10 +536,10 @@ module.exports = (app) => {
                 recipientId: populatedMessage.replyTo.recipientId.toString(),
               }
             : null,
+            
         });
-        if (recipient?.status === 'online') {
-          io.to(senderId).emit('messageStatus', { messageIds: [message._id], status: 'delivered' });
-        }
+        // Changed: Emit correct status based on recipient state
+        io.to(senderId).emit('messageStatus', { messageIds: [message._id], status: recipient?.status === 'online' ? 'delivered' : 'sent' });
         await Promise.all([emitUpdatedChatList(io, senderId), emitUpdatedChatList(io, recipientId)]);
         logger.info('Message sent via socket', { messageId: message._id, senderId, recipientId });
         callback({ message: populatedMessage });
@@ -658,7 +715,7 @@ module.exports = (app) => {
       const message = new Message({
         senderId,
         recipientId,
-        content,
+        content: content || '', // Changed: Ensure content is a string
         contentType,
         plaintextContent: plaintextContent || '',
         status: recipient?.status === 'online' ? 'delivered' : 'sent',
@@ -684,7 +741,7 @@ module.exports = (app) => {
           ? {
               ...populatedMessage.replyTo,
               senderId: populatedMessage.replyTo.senderId.toString(),
-              recipientId: populatedMessage.replyTo.recipientId.toString(),
+              recipientId: populatedMessage.recipientId._id.toString(),
             }
           : null,
       });
@@ -696,13 +753,11 @@ module.exports = (app) => {
           ? {
               ...populatedMessage.replyTo,
               senderId: populatedMessage.replyTo.senderId.toString(),
-              recipientId: populatedMessage.replyTo.recipientId.toString(),
+              recipientId: populatedMessage.recipientId._id.toString(),
             }
           : null,
       });
-      if (recipient?.status === 'online') {
-        io.to(senderId).emit('messageStatus', { messageIds: [message._id], status: 'delivered' });
-      }
+      io.to(senderId).emit('messageStatus', { messageIds: [message._id], status: recipient?.status === 'online' ? 'delivered' : 'sent' });
       await Promise.all([emitUpdatedChatList(io, senderId), emitUpdatedChatList(io, recipientId)]);
       logger.info('Message saved via /messages', { messageId: message._id, senderId, recipientId });
       res.status(201).json({ message: populatedMessage });
@@ -713,7 +768,7 @@ module.exports = (app) => {
   });
 
   router.get('/messages', authMiddleware, async (req, res) => {
-    const { userId, recipientId, limit = 100, skip = 0, since } = req.query; // --- Updated: Added 'since' parameter ---
+    const { userId, recipientId, limit = 100, skip = 0, since } = req.query;
     try {
       if (!req.user || !req.user._id) {
         logger.warn('User not authenticated in messages fetch request', { userId, recipientId });
@@ -730,7 +785,7 @@ module.exports = (app) => {
         ],
       };
       if (since && !isNaN(Date.parse(since))) {
-        query.createdAt = { $gt: new Date(since) }; // Fetch messages after 'since' timestamp
+        query.createdAt = { $gt: new Date(since) };
       }
       const messages = await Message.find(query)
         .sort({ createdAt: 1 })
@@ -740,6 +795,7 @@ module.exports = (app) => {
         .populate('recipientId', 'username virtualNumber photo')
         .populate('replyTo', 'content contentType senderId recipientId createdAt')
         .lean();
+      // Changed: Update delivered messages to read
       const deliveredMessageIds = messages
         .filter((msg) => msg.recipientId.toString() === userId && msg.status === 'delivered')
         .map((msg) => msg._id);
@@ -920,7 +976,7 @@ module.exports = (app) => {
           ? {
               ...populatedMessage.replyTo,
               senderId: populatedMessage.replyTo.senderId.toString(),
-              recipientId: populatedMessage.replyTo.recipientId.toString(),
+              recipientId: populatedMessage.recipientId._id.toString(),
             }
           : null,
       });
@@ -932,13 +988,11 @@ module.exports = (app) => {
           ? {
               ...populatedMessage.replyTo,
               senderId: populatedMessage.replyTo.senderId.toString(),
-              recipientId: populatedMessage.replyTo.recipientId.toString(),
+              recipientId: populatedMessage.recipientId._id.toString(),
             }
           : null,
       });
-      if (recipient?.status === 'online') {
-        io.to(userId).emit('messageStatus', { messageIds: [message._id], status: 'delivered' });
-      }
+      io.to(userId).emit('messageStatus', { messageIds: [message._id], status: recipient?.status === 'online' ? 'delivered' : 'sent' });
       await Promise.all([emitUpdatedChatList(io, userId), emitUpdatedChatList(io, recipientId)]);
       logger.info('Media uploaded successfully', { userId, recipientId, messageId: message._id });
       res.json({ message: populatedMessage });
@@ -996,12 +1050,10 @@ module.exports = (app) => {
         logger.warn('No token provided for logout', { userId: req.user?.id });
         return res.status(400).json({ error: 'No token provided' });
       }
-      const blacklisted = await TokenBlacklist.findOne({ token }).lean();
-      if (blacklisted) {
-        logger.info('Token already blacklisted', { userId: req.user.id });
-        return res.status(200).json({ message: 'Already logged out' });
-      }
-      await TokenBlacklist.create({ token });
+      // Changed: Simplified logout with robust error handling
+      await TokenBlacklist.create({ token }).catch((err) => {
+        logger.warn('Token blacklisting failed, continuing logout', { userId: req.user.id, error: err.message });
+      });
       const sockets = await io.in(req.user.id).fetchSockets();
       sockets.forEach((socket) => {
         socket.disconnect(true);
@@ -1009,7 +1061,7 @@ module.exports = (app) => {
       });
       await User.findByIdAndUpdate(req.user.id, { status: 'offline', lastSeen: new Date() }, { new: true, lean: true });
       io.to(req.user.id).emit('userStatus', { userId: req.user.id, status: 'offline', lastSeen: new Date() });
-      logger.info('Token blacklisted during logout', { userId: req.user.id });
+      logger.info('Logout successful', { userId: req.user.id });
       res.status(200).json({ message: 'Logged out successfully' });
     } catch (error) {
       logger.error('Logout error', { error: error.message, userId: req.user?.id, stack: error.stack });

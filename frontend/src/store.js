@@ -44,9 +44,9 @@ const messageSlice = createSlice({
   initialState: {
     chats: {},
     selectedChat: null,
-    chatListTimestamp: 0, // Added: Timestamp for chat list freshness
-    messagesTimestamp: {}, // Added: Per-chat message freshness
-    chatList: [], // Added: Store chat list in Redux
+    chatListTimestamp: 0,
+    messagesTimestamp: {},
+    chatList: [],
   },
   reducers: {
     setMessages: (state, action) => {
@@ -69,7 +69,7 @@ const messageSlice = createSlice({
           content: msg.content || '',
           status: ['sent', 'delivered', 'read', 'pending', 'failed'].includes(msg.status)
             ? msg.status
-            : messageMap.get(key)?.status || 'sent',
+            : 'sent', // Changed: Prefer incoming status
           senderId: msg.senderId?._id || msg.senderId,
           recipientId: msg.recipientId?._id || msg.recipientId,
           contentType: msg.contentType || 'text',
@@ -83,13 +83,13 @@ const messageSlice = createSlice({
           createdAt: msg.createdAt ? new Date(msg.createdAt) : new Date(),
           updatedAt: msg.updatedAt ? new Date(msg.updatedAt) : undefined,
         };
-        messageMap.set(key, { ...messageMap.get(key), ...normalizedMsg });
+        messageMap.set(key, normalizedMsg); // Changed: Overwrite with new data
       });
       state.chats = {
         ...state.chats,
         [recipientId]: Array.from(messageMap.values()).sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt)),
       };
-      state.messagesTimestamp[recipientId] = Date.now(); // Update timestamp
+      state.messagesTimestamp[recipientId] = Date.now();
       console.debug(`Set ${messages.length} messages for ${recipientId}, total: ${state.chats[recipientId].length}`);
     },
     addMessage: (state, action) => {
@@ -131,7 +131,7 @@ const messageSlice = createSlice({
         state.chats[recipientId] = [];
       }
       const index = state.chats[recipientId].findIndex(
-        (msg) => msg._id === replaceId || msg.clientMessageId === replaceId
+        (msg) => msg.clientMessageId === replaceId || msg._id === replaceId // Changed: Prioritize clientMessageId
       );
       const normalizedMsg = {
         ...message,
@@ -149,8 +149,8 @@ const messageSlice = createSlice({
         state.chats[recipientId][index] = normalizedMsg;
         console.debug(`Replaced message ${replaceId} with ${message._id} in ${recipientId}`);
       } else {
+        console.warn(`Message ${replaceId} not found in ${recipientId}, adding new message`);
         state.chats[recipientId].push(normalizedMsg);
-        console.debug(`Message ${replaceId} not found, added ${message._id} to ${recipientId}`);
       }
     },
     updateMessageStatus: (state, action) => {
@@ -292,6 +292,9 @@ const persistenceMiddleware = (store) => (next) => (action) => {
         });
       } catch (error) {
         console.error('Failed to persist state:', error);
+        // Changed: Clear corrupted state on error
+        localStorage.removeItem('reduxState');
+        console.debug('Cleared corrupted reduxState due to persistence error');
       }
     });
   } else if (action.type === clearAuth.type || action.type === resetState.type) {
@@ -309,6 +312,9 @@ const persistenceMiddleware = (store) => (next) => (action) => {
       console.debug('Cleared state');
     } catch (error) {
       console.error('Failed to persist state during clearAuth/resetState:', error);
+      // Changed: Clear corrupted state on error
+      localStorage.removeItem('reduxState');
+      console.debug('Cleared corrupted reduxState due to clear error');
     }
   }
 

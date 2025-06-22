@@ -54,9 +54,10 @@ const userSchema = new mongoose.Schema({
     type: String,
     unique: true,
     sparse: true,
+    default: null, // Changed: Explicit default to null
     validate: {
       validator: function (value) {
-        if (!value) return true; // Allow null/undefined
+        if (!value) return true;
         const phoneNumber = parsePhoneNumberFromString(value, this.country);
         return phoneNumber ? phoneNumber.isValid() : false;
       },
@@ -171,6 +172,23 @@ userSchema.statics.cleanupInvalidContacts = async function () {
   } catch (error) {
     logger.error('Invalid contacts cleanup failed', { error: error.message, stack: error.stack });
     throw new Error(`Cleanup failed: ${error.message}`);
+  }
+};
+
+// Changed: Method to reset stale online statuses
+userSchema.statics.resetStaleStatuses = async function (thresholdMinutes = 30) {
+  try {
+    logger.info('Starting stale status cleanup');
+    const threshold = new Date(Date.now() - thresholdMinutes * 60 * 1000);
+    const result = await this.updateMany(
+      { status: 'online', lastSeen: { $lt: threshold } },
+      { $set: { status: 'offline', lastSeen: new Date() } }
+    );
+    logger.info('Stale status cleanup completed', { updatedCount: result.modifiedCount });
+    return { updatedCount: result.modifiedCount };
+  } catch (error) {
+    logger.error('Stale status cleanup failed', { error: error.message, stack: error.stack });
+    throw new Error(`Stale status cleanup failed: ${error.message}`);
   }
 };
 
