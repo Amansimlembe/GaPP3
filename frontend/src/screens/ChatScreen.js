@@ -165,7 +165,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         setTimeout(() => fetchChatList(true), 1000 * retryCountRef.current.chatList);
         setErrors((prev) => [...prev, `Retrying chat list fetch (${retryCountRef.current.chatList}/${maxRetries})...`]);
       } else {
-        setErrors((prev) => [...prev, `Failed to load chat list: ${err.response?.data?.error || 'Unknown error'}`]);
+        //setErrors((prev) => [...prev, `Failed to load chat list: ${err.response?.data?.error || 'Unknown error'}`]);
         retryCountRef.current.chatList = 0;
       }
     } finally {
@@ -247,7 +247,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         setTimeout(() => fetchMessages(chatId, true), 1000 * retryCountRef.current.messages);
         setErrors((prev) => [...prev, `Retrying messages fetch (${retryCountRef.current.messages}/${maxRetries})...`]);
       } else {
-        setErrors((prev) => [...prev, `Failed to load messages: ${err.response?.data?.error || 'Unknown error'}`]);
+        //setErrors((prev) => [...prev, `Failed to load messages: ${err.response?.data?.error || 'Unknown error'}`]);
         retryCountRef.current.messages = 0;
       }
     }
