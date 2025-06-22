@@ -1,3 +1,4 @@
+
 const mongoose = require('mongoose');
 const User = require('./User');
 const winston = require('winston');
@@ -12,7 +13,7 @@ const logger = winston.createLogger({
   ],
 });
 
-// Changed: Add TTL index for 30 days
+// TTL index for 30 days
 const MESSAGE_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 days
 
 const messageSchema = new mongoose.Schema({
@@ -41,26 +42,26 @@ const messageSchema = new mongoose.Schema({
     enum: ['pending', 'sent', 'delivered', 'read', 'failed'],
     default: 'pending',
   },
-  caption: { type: String, default: null, maxLength: 500 }, // Changed: Add maxLength
+  caption: { type: String, default: null, maxLength: 500 },
   replyTo: { type: mongoose.Schema.Types.ObjectId, ref: 'Message', default: null },
-  originalFilename: { type: String, default: null, maxLength: 255 }, // Changed: Add maxLength
+  originalFilename: { type: String, default: null, maxLength: 255 },
   clientMessageId: { type: String, required: true, unique: true, sparse: true },
   senderVirtualNumber: { type: String, default: null },
-  senderUsername: { type: String, default: null, maxLength: 50 }, // Changed: Add maxLength
+  senderUsername: { type: String, default: null, maxLength: 50 },
   senderPhoto: { type: String, default: null },
-  createdAt: { type: Date, default: Date.now, expires: MESSAGE_TTL_SECONDS }, // Changed: Add TTL
+  createdAt: { type: Date, default: Date.now, expires: MESSAGE_TTL_SECONDS },
   updatedAt: { type: Date },
 }, {
   timestamps: { updatedAt: 'updatedAt' },
 });
 
-// Changed: Optimized indexes
+// Optimized indexes
 messageSchema.index({ clientMessageId: 1 }, { unique: true, sparse: true });
 messageSchema.index({ senderId: 1, recipientId: 1, createdAt: -1 });
 messageSchema.index({ recipientId: 1, status: 1 });
-messageSchema.index({ createdAt: 1 }); // Changed: Support TTL
+messageSchema.index({ createdAt: 1 });
 
-// Changed: Bounded LRU cache
+// Bounded LRU cache
 class LRUCache {
   constructor(maxSize, ttl) {
     this.maxSize = maxSize;
@@ -86,9 +87,9 @@ class LRUCache {
   }
 }
 
-const senderCache = new LRUCache(1000, 5 * 60 * 1000); // Changed: 1000 users, 5 min TTL
+const senderCache = new LRUCache(1000, 5 * 60 * 1000);
 
-// Changed: Retry with exponential backoff
+// Retry with exponential backoff
 const retryOperation = async (operation, maxRetries = 3) => {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
@@ -125,8 +126,10 @@ messageSchema.pre('save', async function (next) {
       this.senderUsername = this.senderUsername || sender.username || 'Unknown';
       this.senderPhoto = this.senderPhoto || sender.photo || 'https://placehold.co/40x40';
 
-      if (this.isNew && !this.status) {
+      if (this.isNew) {
         this.status = recipient.status === 'online' ? 'delivered' : 'pending';
+      } else if (this.isModified('content') || this.isModified('plaintextContent')) {
+        this.updatedAt = new Date();
       }
 
       if (this.replyTo) {
@@ -160,8 +163,8 @@ messageSchema.statics.cleanupOrphanedMessages = async function () {
     let totalDeleted = 0;
 
     const [senderIds, recipientIds] = await Promise.all([
-      this.distinct('senderId'),
-      this.distinct('recipientId'),
+      this.distinct('senderId').lean(),
+      this.distinct('recipientId').lean(),
     ]);
     const messageUsers = [...new Set([...senderIds, ...recipientIds].map(id => id.toString()))];
 
@@ -183,7 +186,6 @@ messageSchema.statics.cleanupOrphanedMessages = async function () {
       return { deletedCount: 0 };
     }
 
-    // Changed: Use retry for deletion
     for (let i = 0; i < orphanedUserIds.length; i += batchSize) {
       const batch = orphanedUserIds.slice(i, i + batchSize);
       const result = await retryOperation(async () => {
@@ -192,7 +194,7 @@ messageSchema.statics.cleanupOrphanedMessages = async function () {
             { senderId: { $in: batch } },
             { recipientId: { $in: batch } },
           ],
-        });
+        }).lean();
         return deleteResult;
       });
       totalDeleted += result.deletedCount || 0;

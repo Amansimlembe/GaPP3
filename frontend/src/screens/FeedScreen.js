@@ -26,17 +26,22 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
   const [refreshing, setRefreshing] = useState(false);
   const feedRef = useRef(null);
   const mediaRefs = useRef({});
+  const isFetchingFeedRef = useRef(false);
+  const fetchFeedDebounceRef = useRef(null);
 
-  // Changed: Retry logic with improved error handling
   const retryOperation = async (operation, maxRetries = 3, baseDelay = 1000) => {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         if (!navigator.onLine) throw new Error('Offline');
         return await operation();
       } catch (err) {
-        if (err.response?.status === 401) {
+        if (err.response?.status === 401 || err.message === 'Unauthorized') {
           onUnauthorized?.();
           throw new Error('Unauthorized');
+        }
+        if (err.response?.status === 429) {
+          setError(err.response.data.message || 'Too many requests, please try again later');
+          return null;
         }
         if (attempt === maxRetries) throw err;
         const delay = Math.pow(2, attempt) * baseDelay;
@@ -45,7 +50,6 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
     }
   };
 
-  // Changed: Optimized IntersectionObserver with cleanup
   const setupIntersectionObserver = useCallback(
     debounce(() => {
       const observer = new IntersectionObserver(
@@ -82,52 +86,55 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
     [showComments]
   );
 
-  // Changed: Optimized fetchFeed with deduplication and error handling
   const fetchFeed = useCallback(
     async (pageNum = 1, isRefresh = false) => {
-      if (!token || !userId || (loading && !isRefresh) || (!hasMore && !isRefresh)) return;
+      if (!token || !userId || isFetchingFeedRef.current || (!hasMore && !isRefresh)) return;
+      isFetchingFeedRef.current = true;
       setLoading(true);
       if (isRefresh) setRefreshing(true);
-      try {
-        const { data } = await retryOperation(() =>
-          axios.get(`${BASE_URL}/feed?page=${pageNum}&limit=10`, {
-            headers: { Authorization: `Bearer ${token}` },
-            timeout: 5000,
-          })
-        );
-        const filteredPosts = Array.isArray(data.posts)
-          ? data.posts.filter((post) => !post.isStory && post._id)
-          : [];
-        setPosts((prev) => {
-          const newPosts = pageNum === 1 || isRefresh ? filteredPosts : [...prev, ...filteredPosts];
-          const uniquePosts = Array.from(
-            new Map(newPosts.map((post) => [post._id.toString(), post])).values()
+      clearTimeout(fetchFeedDebounceRef.current);
+      fetchFeedDebounceRef.current = setTimeout(async () => {
+        try {
+          const { data } = await retryOperation(() =>
+            axios.get(`${BASE_URL}/feed?page=${pageNum}&limit=10`, {
+              headers: { Authorization: `Bearer ${token}` },
+              timeout: 5000,
+            })
           );
-          return uniquePosts;
-        });
-        setHasMore(data.hasMore ?? false);
-        setPage(pageNum); // Changed: Sync page state
-        setError('');
-        if (filteredPosts.length > 0 && (pageNum === 1 || isRefresh)) {
-          setPlayingPostId(filteredPosts[0]._id.toString());
+          const filteredPosts = Array.isArray(data.posts)
+            ? data.posts.filter((post) => !post.isStory && post._id)
+            : [];
+          setPosts((prev) => {
+            const newPosts = pageNum === 1 || isRefresh ? filteredPosts : [...prev, ...filteredPosts];
+            const uniquePosts = Array.from(
+              new Map(newPosts.map((post) => [post._id.toString(), post])).values()
+            );
+            return uniquePosts;
+          });
+          setHasMore(data.hasMore ?? false);
+          setPage(pageNum);
+          setError('');
+          if (filteredPosts.length > 0 && (pageNum === 1 || isRefresh)) {
+            setPlayingPostId(filteredPosts[0]._id.toString());
+          }
+        } catch (error) {
+          console.error('Fetch feed error:', error.message);
+          setError(error.message === 'Offline' ? 'You are offline' : error.message === 'Unauthorized' ? 'Unauthorized. Please log in again.' : 'Failed to load feed');
+        } finally {
+          isFetchingFeedRef.current = false;
+          setLoading(false);
+          setRefreshing(false);
         }
-      } catch (error) {
-        console.error('Fetch feed error:', error.message);
-        setError(error.message === 'Offline' ? 'You are offline' : error.message === 'Unauthorized' ? 'Unauthorized. Please log in again.' : 'Failed to load feed');
-      } finally {
-        setLoading(false);
-        setRefreshing(false);
-      }
+      }, 300); // Debounce for 300ms
     },
-    [token, userId, loading, hasMore, onUnauthorized]
+    [token, userId, hasMore, onUnauthorized]
   );
 
-  // Changed: Enhanced socket setup with error handling
   useEffect(() => {
     if (!token || !userId || !socket) return;
 
-    fetchFeed(1);
-    socket.emit('join', { userId }); // Changed: Emit object to match server.js
+    if (!isFetchingFeedRef.current) fetchFeed(1);
+    socket.emit('join', { userId });
 
     const handleNewPost = (post) => {
       if (!post.isStory && post._id) {
@@ -135,7 +142,7 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
           const newPosts = [post, ...prev];
           return Array.from(new Map(newPosts.map((p) => [p._id.toString(), p])).values());
         });
-        setCurrentIndex(0); // Changed: Scroll to new post
+        setCurrentIndex(0);
       }
     };
 
@@ -174,14 +181,14 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
       socket.off('postUpdate', handlePostUpdate);
       socket.off('postDeleted', handlePostDeleted);
       socket.off('connect_error', handleConnectError);
-      socket.emit('leave', userId); // Changed: Emit leave on cleanup
+      socket.emit('leave', userId);
+      clearTimeout(fetchFeedDebounceRef.current);
     };
-  }, [token, userId, socket, fetchFeed, playingPostId, onUnauthorized]);
+  }, [token, userId, socket, playingPostId, onUnauthorized, fetchFeed]);
 
-  // Changed: Optimized scroll handling
   const handleScroll = useCallback(
     debounce(() => {
-      if (!feedRef.current || loading || !hasMore) return;
+      if (!feedRef.current || isFetchingFeedRef.current || !hasMore) return;
       const { scrollTop, scrollHeight, clientHeight } = feedRef.current;
       if (scrollTop + clientHeight >= scrollHeight - 100) {
         const nextPage = page + 1;
@@ -189,7 +196,7 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
         fetchFeed(nextPage);
       }
     }, 200),
-    [loading, hasMore, page, fetchFeed]
+    [hasMore, page, fetchFeed]
   );
 
   useEffect(() => {
@@ -204,10 +211,10 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
     return () => {
       if (feedElement) feedElement.removeEventListener('scroll', handleScroll);
       cleanup();
+      clearTimeout(fetchFeedDebounceRef.current);
     };
   }, [posts, currentIndex, setupIntersectionObserver, handleScroll]);
 
-  // Changed: Optimized postContent with validation
   const postContent = async () => {
     if (!userId || (!caption.trim() && !file && contentType !== 'text')) {
       setError('Please provide content');
@@ -247,7 +254,6 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
     }
   };
 
-  // Changed: Optimized likePost with validation
   const likePost = async (postId) => {
     if (!playingPostId || postId !== playingPostId) return;
     try {
@@ -271,7 +277,6 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
     }
   };
 
-  // Changed: Optimized commentPost with validation
   const commentPost = async (postId) => {
     if (!playingPostId || postId !== playingPostId || !comment.trim()) return;
     try {
@@ -311,11 +316,10 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
   const handleRefresh = useCallback(() => {
     setPage(1);
     setCurrentIndex(0);
-    setHasMore(true); // Changed: Reset hasMore on refresh
+    setHasMore(true);
     fetchFeed(1, true);
   }, [fetchFeed]);
 
-  // Changed: Optimized swipe handlers
   const swipeHandlers = useSwipeable({
     onSwipedUp: () => {
       if (showComments) return;
@@ -337,7 +341,7 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
     },
     trackMouse: false,
     delta: 50,
-    preventScrollOnSwipe: true, // Changed: Prevent browser scrolling
+    preventScrollOnSwipe: true,
   });
 
   const handleDoubleTap = useCallback(
@@ -374,7 +378,6 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
       transition={{ duration: 0.5 }}
       className="h-screen overflow-y-auto bg-black snap-y snap-mandatory md:max-w-[600px] md:mx-auto md:rounded-lg md:shadow-lg"
     >
-      {/* Floating Post Button */}
       <div className="fixed bottom-20 right-4 z-20">
         <motion.button
           whileHover={{ scale: 1.1, rotate: 90 }}
@@ -387,7 +390,6 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
         </motion.button>
       </div>
 
-      {/* Post Modal */}
       <AnimatePresence>
         {showPostModal && (
           <motion.div
@@ -505,7 +507,6 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
         )}
       </AnimatePresence>
 
-      {/* Error Display */}
       {error && (
         <motion.div
           initial={{ opacity: 0, y: -20 }}
@@ -527,21 +528,18 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
         </motion.div>
       )}
 
-      {/* Refresh Indicator */}
       {refreshing && (
         <div className="fixed top-4 left-0 right-0 text-center text-white z-10">
           <FaSyncAlt className="inline-block w-6 h-6 animate-spin" aria-label="Refreshing feed" />
         </div>
       )}
 
-      {/* Loading Indicator */}
       {loading && !refreshing && (
         <div className="fixed bottom-4 left-0 right-0 text-center text-white">
           <div className="inline-block w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" aria-label="Loading more posts"></div>
         </div>
       )}
 
-      {/* Feed Content */}
       {posts.length === 0 && !loading && !refreshing ? (
         <div className="h-screen flex items-center justify-center text-white" role="status">
           <p>No posts available</p>
@@ -560,7 +558,6 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
             role="article"
             aria-labelledby={`post-${post._id}`}
           >
-            {/* User Info */}
             <div className="absolute top-4 left-4 z-10 flex items-center">
               <img
                 src={post.photo || 'https://placehold.co/40x40'}
@@ -573,7 +570,6 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
               </div>
             </div>
 
-            {/* Post Content */}
             {post.contentType === 'text' && (
               <p className="text-lg p-4 bg-black bg-opacity-50 rounded-lg max-w-[80%] mx-auto text-center">
                 {post.content}
@@ -622,7 +618,6 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
               </a>
             )}
 
-            {/* Interactions */}
             <div className="absolute right-4 bottom-20 flex flex-col items-center space-y-6 z-10">
               <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
                 <button
@@ -676,7 +671,6 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
               )}
             </div>
 
-            {/* Caption */}
             {post.caption && (
               <motion.div
                 initial={{ opacity: 0, y: 20 }}
@@ -688,7 +682,6 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
               </motion.div>
             )}
 
-            {/* Comments Modal */}
             <AnimatePresence>
               {showComments === post._id.toString() && (
                 <motion.div
@@ -742,7 +735,6 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
         ))
       )}
 
-      {/* Comments Overlay */}
       {showComments && (
         <div
           className="fixed inset-0 bg-black bg-opacity-50 z-40"
