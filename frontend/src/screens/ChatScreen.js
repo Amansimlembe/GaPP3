@@ -1,9 +1,8 @@
-
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
 import axios from 'axios';
-import { FaArrowLeft, FaEllipsisV, FaPaperclip, FaSmile, FaPaperPlane, FaTimes, FaSignOutAlt, FaPlus, FaImage, FaVideo, FaFile } from 'react-icons/fa';
+import { FaArrowLeft, FaEllipsisV, FaPaperclip, FaSmile, FaPaperPlane, FaTimes, FaSignOutAlt, FaPlus, FaImage, FaVideo, FaFile, FaMusic } from 'react-icons/fa';
 import { motion, AnimatePresence } from 'framer-motion';
 import Picker from 'emoji-picker-react';
 import { VariableSizeList } from 'react-window';
@@ -47,10 +46,10 @@ class LRUMap {
   }
 }
 
-const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtualNumber, photo, privateKey, ...rest }) => {
+const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtualNumber, photo, privateKey }) => {
   const navigate = useNavigate();
   const dispatch = useDispatch();
-  const { selectedChat, chats, chatList, chatListTimestamp } = useSelector((state) => state.messages || {});
+  const { selectedChat, chats, chatList, chatListTimestamp } = useSelector((state) => state.messages);
   const [message, setMessage] = useState('');
   const [errors, setErrors] = useState([]);
   const [showMenu, setShowMenu] = useState(false);
@@ -82,55 +81,25 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   const isFetchingMessagesRef = useRef(new Map());
   const fetchChatListDebounceRef = useRef(null);
 
-  // Validate props and log unexpected ones
-  useEffect(() => {
-    if (!token || !userId || !socket || !setAuth) {
-      setErrors((prev) => [...prev, 'Missing required authentication props. Please log in again.']);
-      setTimeout(() => navigate('/login'), 2000);
-    }
-    if (rest.me) {
-      console.warn('Unexpected prop "me" passed to ChatScreen:', rest.me);
-      setErrors((prev) => [...prev, 'Unexpected prop "me" detected. Check parent component.']);
-      logClientError('Unexpected prop "me" passed to ChatScreen', new Error(JSON.stringify(rest.me)));
-    }
-  }, [token, userId, socket, setAuth, navigate, rest.me, logClientError]);
-
   const initDB = async () => {
-    try {
-      return await openDB('chat-app', 2, {
-        upgrade(db, oldVersion) {
-          if (oldVersion < 1) {
-            db.createObjectStore('offlineMessages', { keyPath: 'clientMessageId' });
-          }
-          if (oldVersion < 2) {
-            db.createObjectStore('messages', { keyPath: '_id' });
-          }
-        },
-      });
-    } catch (err) {
-      logClientError('Failed to initialize IndexedDB', err);
-      setErrors((prev) => [...prev, 'Failed to initialize local storage']);
-      throw err;
-    }
+    return openDB('chat-app', 1, {
+      upgrade(db) {
+        db.createObjectStore('offlineMessages', { keyPath: 'clientMessageId' });
+      },
+    });
   };
 
   useEffect(() => {
     let isMounted = true;
     const restoreQueue = async () => {
-      try {
-        const db = await initDB();
-        const messages = await db.getAll('offlineMessages');
-        if (isMounted) {
-          const uniqueMessages = Array.from(
-            new Map(messages.map((msg) => [msg.clientMessageId, msg])).values()
-          ).slice(-MAX_OFFLINE_QUEUE_SIZE);
-          offlineQueueRef.current = uniqueMessages;
-          uniqueMessages.forEach((msg) => retrySendMessage(msg));
-          console.debug('Restored offline queue:', uniqueMessages.length);
-        }
-      } catch (err) {
-        console.error('Failed to restore offline queue:', err);
-        logClientError('Offline queue restoration failed', err);
+      const db = await initDB();
+      const messages = await db.getAll('offlineMessages');
+      if (isMounted) {
+        const uniqueMessages = Array.from(
+          new Map(messages.map((msg) => [msg.clientMessageId, msg])).values()
+        ).slice(-MAX_OFFLINE_QUEUE_SIZE);
+        offlineQueueRef.current = uniqueMessages;
+        console.debug('Restored offline queue:', uniqueMessages.length);
       }
     };
     restoreQueue();
@@ -165,7 +134,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       await axios.post(`${BASE_URL}/social/log-error`, {
         error: message,
         stack: error?.stack || '',
-        userId: userId || 'unknown',
+        userId,
         route: window.location.pathname,
         timestamp: new Date().toISOString(),
       }, { timeout: 5000 });
@@ -196,7 +165,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       logClientError('Failed to fetch public key', err);
       throw err;
     }
-  }, [token]);
+  }, [token, logClientError]);
 
   const encryptMessage = useCallback(async (content, recipientPublicKey, isMedia = false) => {
     if (!forge || !recipientPublicKey) throw new Error('Encryption dependencies missing');
@@ -215,7 +184,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       logClientError('Encryption failed', err);
       throw new Error('Failed to encrypt message');
     }
-  }, [forge]);
+  }, [forge, logClientError]);
 
   const decryptMessage = useCallback(async (encryptedContent) => {
     if (!forge || !privateKey) throw new Error('Decryption dependencies missing');
@@ -231,7 +200,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       logClientError('Decryption failed', err);
       return '[Message not decrypted]';
     }
-  }, [forge, privateKey]);
+  }, [forge, privateKey, logClientError]);
 
   const retryWithBackoff = useCallback(async (fn, maxRetries, attempt = 1) => {
     try {
@@ -257,36 +226,40 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       logClientError('Retry failed', err);
       return false;
     }
-  }, []);
+  }, [logClientError]);
 
   const fetchChatList = useCallback(async () => {
     if (!isForgeReady || !token || !userId || isFetchingChatListRef.current) return;
-    isFetchingChatListRef.current = true;
-    setIsLoadingChatList(true);
-    try {
-      const success = await retryWithBackoff(async () => {
-        const { data } = await axios.get(`${BASE_URL}/social/chat-list`, {
-          headers: { Authorization: `Bearer ${token}` },
-          params: { userId, limit: 1000 },
-          timeout: 10000,
-          signal: abortControllerRef.current.signal,
-        });
-        const normalizedChats = data.map((chat) => ({
-          ...chat,
-          _id: chat.id.toString(),
-          id: chat.id.toString(),
-          unreadCount: unreadMessages[chat.id] || chat.unreadCount || 0,
-        }));
-        dispatch(setChatList(normalizedChats));
-        setErrors((prev) => prev.filter((e) => !e.includes('chat list')));
-      }, MAX_RETRIES);
-    } catch (err) {
-      setErrors((prev) => [...prev, `Failed to fetch chat list: ${err.message}`]);
-    } finally {
-      isFetchingChatListRef.current = false;
+    if (chatListTimestamp > Date.now() - CACHE_DURATION && chatList.length) {
       setIsLoadingChatList(false);
+      return;
     }
-  }, [isForgeReady, token, userId, dispatch, unreadMessages]);
+    clearTimeout(fetchChatListDebounceRef.current);
+    fetchChatListDebounceRef.current = setTimeout(async () => {
+      isFetchingChatListRef.current = true;
+      setIsLoadingChatList(true);
+      try {
+        const success = await retryWithBackoff(async () => {
+          const { data } = await axios.get(`${BASE_URL}/social/chat-list`, {
+            headers: { Authorization: `Bearer ${token}` },
+            params: { userId },
+            timeout: 5000,
+            signal: abortControllerRef.current.signal,
+          });
+          dispatch(setChatList(data.map((chat) => ({
+            ...chat,
+            _id: chat.id.toString(),
+            id: chat.id.toString(),
+            unreadCount: unreadMessages[chat.id] || chat.unreadCount || 0,
+          }))));
+          setErrors((prev) => prev.filter((e) => !e.includes('chat list')));
+        }, MAX_RETRIES);
+      } finally {
+        isFetchingChatListRef.current = false;
+        setIsLoadingChatList(false);
+      }
+    }, 500); // Debounce for 500ms
+  }, [isForgeReady, token, userId, chatListTimestamp, chatList.length, dispatch, unreadMessages, retryWithBackoff]);
 
   const handleLogout = useCallback(async () => {
     try {
@@ -301,7 +274,6 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       setAuth('', '', '', '', '', '');
       const db = await initDB();
       await db.clear('offlineMessages');
-      await db.clear('messages');
       navigate('/');
     } catch (err) {
       dispatch(clearAuth());
@@ -309,11 +281,10 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       setAuth('', '', '', '', '', '');
       const db = await initDB();
       await db.clear('offlineMessages');
-      await db.clear('messages');
       navigate('/');
       logClientError('Logout failed', err);
     }
-  }, [socket, userId, token, dispatch, setAuth, navigate]);
+  }, [socket, userId, token, dispatch, setAuth, navigate, logClientError]);
 
   const fetchMessages = useCallback(async (chatId) => {
     if (!isValidObjectId(chatId) || !token || !hasMore || isFetchingMessagesRef.current.get(chatId)) return;
@@ -322,8 +293,8 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       const success = await retryWithBackoff(async () => {
         const { data } = await axios.get(`${BASE_URL}/social/messages`, {
           headers: { Authorization: `Bearer ${token}` },
-          params: { userId, recipientId: chatId, limit: 50, skip: page * 50 },
-          timeout: 10000,
+          params: { userId, recipientId: chatId, limit: 20, skip: page * 20 },
+          timeout: 5000,
           signal: abortControllerRef.current.signal,
         });
         const existingMessages = chats[chatId] || [];
@@ -349,18 +320,16 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
             .slice(-MAX_MESSAGES),
         }));
         setTotalMessages(data.total);
-        setHasMore(page * 50 + data.messages.length < data.total);
+        setHasMore(page * 20 + data.messages.length < data.total);
         setPage((prev) => prev + 1);
         setUnreadMessages((prev) => ({ ...prev, [chatId]: 0 }));
         const failedMessages = (chats[chatId] || []).filter((m) => m.status === 'failed');
         failedMessages.forEach((msg) => retrySendMessage(msg));
       }, MAX_RETRIES);
-    } catch (err) {
-      setErrors((prev) => [...prev, `Failed to fetch messages: ${err.message}`]);
     } finally {
       isFetchingMessagesRef.current.delete(chatId);
     }
-  }, [token, userId, chats, page, hasMore, dispatch, decryptMessage]);
+  }, [token, userId, chats, page, hasMore, dispatch, decryptMessage, retryWithBackoff]);
 
   const selectChat = useCallback((chatId) => {
     dispatch(setSelectedChat(chatId));
@@ -410,51 +379,56 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     dispatch(addMessage({ recipientId: selectedChat, message: messageData }));
     setMessage('');
     const db = await initDB();
-    await db.put('offlineMessages', messageData);
     try {
+      if (!socket.connected || !navigator.onLine) {
+        if (offlineQueueRef.current.length >= MAX_OFFLINE_QUEUE_SIZE) {
+          const oldest = offlineQueueRef.current.shift();
+          await db.delete('offlineMessages', oldest.clientMessageId);
+        }
+        offlineQueueRef.current.push(messageData);
+        await db.put('offlineMessages', messageData);
+        setErrors((prev) => [...prev, 'Offline. Message queued for retry.']);
+        return;
+      }
       const recipientPublicKey = await getPublicKey(selectedChat);
       messageData.content = await encryptMessage(plaintextContent, recipientPublicKey);
-      const success = await retryWithBackoff(async () => {
-        const { data } = await axios.post(`${BASE_URL}/social/messages`, messageData, {
-          headers: { Authorization: `Bearer ${token}` },
-          timeout: 10000,
-          signal: abortControllerRef.current.signal,
-        });
+      socket.emit('message', messageData, (ack) => {
+        if (ack?.error) {
+          dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: clientMessageId, status: 'failed' }));
+          offlineQueueRef.current.push(messageData);
+          db.put('offlineMessages', messageData);
+          logClientError('Socket message failed', new Error(ack.error));
+          return;
+        }
         dispatch(replaceMessage({
           recipientId: selectedChat,
           message: {
-            ...data.message,
-            _id: data.message._id.toString(),
-            senderId: data.message.senderId.toString(),
-            recipientId: data.message.recipientId.toString(),
+            ...ack.message,
+            _id: ack.message._id.toString(),
+            senderId: ack.message.senderId.toString(),
+            recipientId: ack.message.recipientId.toString(),
             plaintextContent,
-            status: data.message.status || 'sent',
+            status: ack.message.status || 'sent',
           },
           replaceId: clientMessageId,
         }));
         dispatch(updateMessageStatus({
           recipientId: selectedChat,
-          messageId: data.message._id.toString(),
-          status: data.message.status || 'sent',
+          messageId: ack.message._id.toString(),
+          status: ack.message.status || 'sent',
         }));
-        await db.delete('offlineMessages', clientMessageId);
-        offlineQueueRef.current = offlineQueueRef.current.filter((m) => m.clientMessageId !== clientMessageId);
-        socket.emit('message', data.message, (ack) => {
-          if (ack?.error) {
-            logClientError('Socket message failed', new Error(ack.error));
-          }
-        });
-      }, MAX_RETRIES);
+      });
       listRef.current?.scrollToItem((chats[selectedChat]?.length || 0) + 1, 'end');
     } catch (err) {
       dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: clientMessageId, status: 'failed' }));
       offlineQueueRef.current.push(messageData);
+      await db.put('offlineMessages', messageData);
       logClientError('Send message failed', err);
     }
-  }, [isForgeReady, message, selectedChat, userId, virtualNumber, username, photo, socket, token, getPublicKey, encryptMessage, dispatch, chats]);
+  }, [isForgeReady, message, selectedChat, userId, virtualNumber, username, photo, socket, getPublicKey, encryptMessage, dispatch, chats, logClientError]);
 
   const retrySendMessage = useCallback(async (message) => {
-    if (!socket || !isValidObjectId(message.recipientId) || !navigator.onLine) return;
+    if (!socket || !isValidObjectId(message.recipientId) || !socket.connected || !navigator.onLine) return;
     const db = await initDB();
     try {
       dispatch(updateMessageStatus({
@@ -491,12 +465,11 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
           messageId: data.message._id.toString(),
           status: data.message.status || 'sent',
         }));
-        socket.emit('message', data.message);
       } else {
         const messageData = {
           senderId: message.senderId,
           recipientId: message.recipientId,
-          content: message.content || await encryptMessage(message.plaintextContent, await getPublicKey(message.recipientId)),
+          content: message.content,
           contentType: message.contentType,
           plaintextContent: message.plaintextContent,
           clientMessageId: message.clientMessageId,
@@ -506,29 +479,34 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
           status: 'pending',
           createdAt: message.createdAt,
         };
-        const { data } = await axios.post(`${BASE_URL}/social/messages`, messageData, {
-          headers: { Authorization: `Bearer ${token}` },
-          timeout: 10000,
-          signal: abortControllerRef.current.signal,
+        socket.emit('message', messageData, (ack) => {
+          if (ack?.error) {
+            dispatch(updateMessageStatus({
+              recipientId: message.recipientId,
+              messageId: message.clientMessageId,
+              status: 'failed',
+            }));
+            logClientError('Retry socket message failed', new Error(ack.error));
+            return;
+          }
+          dispatch(replaceMessage({
+            recipientId: message.recipientId,
+            message: {
+              ...ack.message,
+              _id: ack.message._id.toString(),
+              senderId: ack.message.senderId.toString(),
+              recipientId: ack.message.recipientId.toString(),
+              plaintextContent: message.plaintextContent,
+              status: ack.message.status || 'sent',
+            },
+            replaceId: message.clientMessageId,
+          }));
+          dispatch(updateMessageStatus({
+            recipientId: message.recipientId,
+            messageId: ack.message._id.toString(),
+            status: ack.message.status || 'sent',
+          }));
         });
-        dispatch(replaceMessage({
-          recipientId: message.recipientId,
-          message: {
-            ...data.message,
-            _id: data.message._id.toString(),
-            senderId: data.message.senderId.toString(),
-            recipientId: data.message.recipientId.toString(),
-            plaintextContent: message.plaintextContent,
-            status: data.message.status || 'sent',
-          },
-          replaceId: message.clientMessageId,
-        }));
-        dispatch(updateMessageStatus({
-          recipientId: message.recipientId,
-          messageId: data.message._id.toString(),
-          status: data.message.status || 'sent',
-        }));
-        socket.emit('message', data.message);
       }
       offlineQueueRef.current = offlineQueueRef.current.filter((m) => m.clientMessageId !== message.clientMessageId);
       await db.delete('offlineMessages', message.clientMessageId);
@@ -540,7 +518,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       }));
       logClientError('Retry send message failed', err);
     }
-  }, [socket, dispatch, token, getPublicKey, encryptMessage]);
+  }, [socket, dispatch, token, logClientError]);
 
   const handleAttachment = useCallback(async (e) => {
     const selectedFile = e.target.files[0];
@@ -556,9 +534,9 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       senderId: userId,
       recipientId: selectedChat,
       content: '',
-      contentType: selectedFile.type.includes('image') ? 'image' :
-                   selectedFile.type.includes('video') ? 'video' :
-                   selectedFile.type.includes('audio') ? 'audio' : 'document',
+      contentType: selectedFile.type.startsWith('image/') ? 'image' :
+                   selectedFile.type.startsWith('video/') ? 'video' :
+                   selectedFile.type.startsWith('audio/') ? 'audio' : 'document',
       originalFilename: selectedFile.name,
       clientMessageId,
       status: 'pending',
@@ -566,49 +544,55 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     };
     dispatch(addMessage({ recipientId: selectedChat, message: tempMessage }));
     const db = await initDB();
-    await db.put('offlineMessages', { ...tempMessage, file: await selectedFile.arrayBuffer() });
     try {
-      const success = await retryWithBackoff(async () => {
-        const formData = new FormData();
-        formData.append('file', selectedFile);
-        formData.append('userId', userId);
-        formData.append('recipientId', selectedChat);
-        formData.append('clientMessageId', clientMessageId);
-        formData.append('senderVirtualNumber', virtualNumber); // Fixed: Changed userId to virtualNumber
-        formData.append('senderUsername', username);
-        formData.append('senderPhoto', photo);
-        const { data } = await axios.post(`${BASE_URL}/social/upload`, formData, {
-          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'multipart/form-data' },
-          timeout: 30000,
-          signal: abortControllerRef.current.signal,
-        });
-        dispatch(replaceMessage({
-          recipientId: selectedChat,
-          message: {
-            ...data.message,
-            _id: data.message._id.toString(),
-            senderId: data.message.senderId.toString(),
-            recipientId: data.message.recipientId.toString(),
-          },
-          replaceId: clientMessageId,
-        }));
-        dispatch(updateMessageStatus({
-          recipientId: selectedChat,
-          messageId: data.message._id.toString(),
-          status: data.message.status || 'sent',
-        }));
-        socket.emit('message', data.message);
-        setFile(null);
-        await db.delete('offlineMessages', clientMessageId);
-        offlineQueueRef.current = offlineQueueRef.current.filter((m) => m.clientMessageId !== clientMessageId);
-      }, MAX_RETRIES);
+      if (!socket.connected || !navigator.onLine) {
+        if (offlineQueueRef.current.length >= MAX_OFFLINE_QUEUE_SIZE) {
+          const oldest = offlineQueueRef.current.shift();
+          await db.delete('offlineMessages', oldest.clientMessageId);
+        }
+        offlineQueueRef.current.push({ ...tempMessage, file: await selectedFile.arrayBuffer() });
+        await db.put('offlineMessages', { ...tempMessage, file: await selectedFile.arrayBuffer() });
+        setErrors((prev) => [...prev, 'Offline. File queued for retry.']);
+        return;
+      }
+      const formData = new FormData();
+      formData.append('file', selectedFile);
+      formData.append('userId', userId);
+      formData.append('recipientId', selectedChat);
+      formData.append('clientMessageId', clientMessageId);
+      formData.append('senderVirtualNumber', virtualNumber);
+      formData.append('senderUsername', username);
+      formData.append('senderPhoto', photo);
+      const { data } = await axios.post(`${BASE_URL}/social/upload`, formData, {
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'multipart/form-data' },
+        timeout: 30000,
+        signal: abortControllerRef.current.signal,
+      });
+      dispatch(replaceMessage({
+        recipientId: selectedChat,
+        message: {
+          ...data.message,
+          _id: data.message._id.toString(),
+          senderId: data.message.senderId.toString(),
+          recipientId: data.message.recipientId.toString(),
+        },
+        replaceId: clientMessageId,
+      }));
+      dispatch(updateMessageStatus({
+        recipientId: selectedChat,
+        messageId: data.message._id.toString(),
+        status: data.message.status || 'sent',
+      }));
+      setFile(null);
       listRef.current?.scrollToItem((chats[selectedChat]?.length || 0) + 1, 'end');
     } catch (err) {
-      setErrors((prev) => [...prev, `Failed to upload file: ${err.response?.data?.error || 'Failed to upload file'}`]);
+      setErrors((prev) => [...prev, `Failed to upload file: ${err.response?.data?.error || 'Unknown error'}`]);
       dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: clientMessageId, status: 'failed' }));
+      offlineQueueRef.current.push({ ...tempMessage, file: await selectedFile.arrayBuffer() });
+      await db.put('offlineMessages', { ...tempMessage, file: await selectedFile.arrayBuffer() });
       logClientError('File upload failed', err);
     }
-  }, [selectedChat, userId, virtualNumber, username, photo, token, dispatch, socket]);
+  }, [selectedChat, userId, virtualNumber, username, photo, token, dispatch, socket, logClientError]);
 
   const handleAddContact = useCallback(async () => {
     if (!contactInput.trim() || !isValidVirtualNumber(contactInput)) {
@@ -626,7 +610,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         id: data.id.toString(),
         _id: data.id.toString(),
         username: data.username || 'Unknown',
-        virtualNumber: data.virtualNumber || undefined,
+        virtualNumber: data.virtualNumber || '',
         photo: data.photo || 'https://placehold.co/40x40',
         status: data.status || 'offline',
         lastSeen: data.lastSeen || null,
@@ -640,22 +624,18 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       setErrors([]);
     }, MAX_RETRIES);
     setIsLoadingAddContact(false);
-  }, [contactInput, token, userId, chatList, dispatch]);
+  }, [contactInput, token, userId, chatList, dispatch, retryWithBackoff]);
 
   useEffect(() => {
     if (!socket || !isForgeReady || !userId) return;
 
     const handleConnect = () => {
-      try {
-        socket.emit('join', userId);
-        if (!isFetchingChatListRef.current) fetchChatList();
-        if (selectedChat && isValidObjectId(selectedChat) && !isFetchingMessagesRef.current.get(selectedChat)) {
-          fetchMessages(selectedChat);
-        }
-        offlineQueueRef.current.forEach((message) => retrySendMessage(message));
-      } catch (err) {
-        logClientError('Socket connect handler failed', err);
+      socket.emit('join', userId);
+      if (!isFetchingChatListRef.current) fetchChatList();
+      if (selectedChat && isValidObjectId(selectedChat) && !isFetchingMessagesRef.current.get(selectedChat)) {
+        fetchMessages(selectedChat);
       }
+      offlineQueueRef.current.forEach((message) => retrySendMessage(message));
     };
 
     const handleConnectError = (err) => {
@@ -696,39 +676,33 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     };
 
     const handleMessage = async (msg) => {
-      try {
-        const senderId = typeof msg.senderId === 'object' ? msg.senderId._id.toString() : msg.senderId.toString();
-        const recipientId = typeof msg.recipientId === 'object' ? msg.recipientId._id.toString() : msg.recipientId.toString();
-        const targetId = senderId === userId ? recipientId : senderId;
-        const plaintextContent = msg.contentType === 'text' && msg.content ? await decryptMessage(msg.content) : msg.content;
-        const messageData = {
-          ...msg,
-          _id: msg._id.toString(),
-          senderId,
-          recipientId,
-          plaintextContent,
-          status: msg.status || 'sent',
-          createdAt: new Date(msg.createdAt),
-          updatedAt: msg.updatedAt ? new Date(msg.updatedAt) : undefined,
-        };
-        dispatch(addMessage({ recipientId: targetId, message: messageData }));
-        const db = await initDB();
-        await db.put('messages', messageData);
-        if (selectedChat === targetId && document.hasFocus()) {
-          if (!sentStatusesRef.current.has(msg.clientMessageId)) {
-            socket.emit('messageStatus', {
-              messageId: msg._id,
-              status: 'read',
-            });
-            sentStatusesRef.current.set(msg.clientMessageId, 'read');
-          }
-          setUnreadMessages((prev) => ({ ...prev, [targetId]: 0 }));
-          listRef.current?.scrollToItem((chats[targetId]?.length || 0) + 1, 'end');
-        } else {
-          setUnreadMessages((prev) => ({ ...prev, [targetId]: (prev[targetId] || 0) + 1 }));
+      const senderId = typeof msg.senderId === 'object' ? msg.senderId._id.toString() : msg.senderId.toString();
+      const recipientId = typeof msg.recipientId === 'object' ? msg.recipientId._id.toString() : msg.recipientId.toString();
+      const targetId = senderId === userId ? recipientId : senderId;
+      const plaintextContent = msg.contentType === 'text' && msg.content ? await decryptMessage(msg.content) : msg.content;
+      const messageData = {
+        ...msg,
+        _id: msg._id.toString(),
+        senderId,
+        recipientId,
+        plaintextContent,
+        status: msg.status || 'sent',
+        createdAt: new Date(msg.createdAt),
+        updatedAt: msg.updatedAt ? new Date(msg.updatedAt) : undefined,
+      };
+      dispatch(addMessage({ recipientId: targetId, message: messageData }));
+      if (selectedChat === targetId && document.hasFocus()) {
+        if (!sentStatusesRef.current.has(msg.clientMessageId)) {
+          socket.emit('messageStatus', {
+            messageId: msg._id,
+            status: 'read',
+          });
+          sentStatusesRef.current.set(msg.clientMessageId, 'read');
         }
-      } catch (err) {
-        logClientError('Message handling failed', err);
+        setUnreadMessages((prev) => ({ ...prev, [targetId]: 0 }));
+        listRef.current?.scrollToItem((chats[targetId]?.length || 0) + 1, 'end');
+      } else {
+        setUnreadMessages((prev) => ({ ...prev, [targetId]: (prev[targetId] || 0) + 1 }));
       }
     };
 
@@ -749,23 +723,19 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     };
 
     const handleMessageStatus = ({ messageIds, status }) => {
-      try {
-        messageIds.forEach((messageId) => {
-          Object.keys(chats).forEach((chatId) => {
-            const message = chats[chatId]?.find((msg) => msg._id === messageId && msg.senderId.toString() === userId);
-            if (message) {
-              dispatch(updateMessageStatus({
-                recipientId: chatId,
-                messageId: message._id,
-                status,
-              }));
-              sentStatusesRef.current.set(message.clientMessageId, status);
-            }
-          });
+      messageIds.forEach((messageId) => {
+        Object.keys(chats).forEach((chatId) => {
+          const message = chats[chatId].find((msg) => msg._id === messageId && msg.senderId.toString() === userId);
+          if (message) {
+            dispatch(updateMessageStatus({
+              recipientId: chatId,
+              messageId: message._id,
+              status,
+            }));
+            sentStatusesRef.current.set(message.clientMessageId, status);
+          }
         });
-      } catch (err) {
-        logClientError('Message status handling failed', err);
-      }
+      });
     };
 
     socket.on('connect', handleConnect);
@@ -778,34 +748,31 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     socket.on('messageStatus', handleMessageStatus);
 
     return () => {
-      try {
-        socket.off('connect', handleConnect);
-        socket.off('connect_error', handleConnectError);
-        socket.off('contactData', handleNewContact);
-        socket.off('chatListUpdated', handleChatListUpdated);
-        socket.off('message', handleMessage);
-        socket.off('typing', handleTyping);
-        socket.off('stopTyping', handleStopTyping);
-        socket.off('messageStatus', handleMessageStatus);
-        socket.emit('leave', userId);
-        clearTimeout(fetchChatListDebounceRef.current);
-      } catch (err) {
-        logClientError('Socket cleanup failed', err);
-      }
+      socket.off('connect', handleConnect);
+      socket.off('connect_error', handleConnectError);
+      socket.off('contactData', handleNewContact);
+      socket.off('chatListUpdated', handleChatListUpdated);
+      socket.off('message', handleMessage);
+      socket.off('typing', handleTyping);
+      socket.off('stopTyping', handleStopTyping);
+      socket.off('messageStatus', handleMessageStatus);
+      socket.emit('leave', userId);
+      clearTimeout(fetchChatListDebounceRef.current);
     };
-  }, [socket, isForgeReady, selectedChat, userId, chats, chatList, unreadMessages, dispatch, fetchChatList, fetchMessages, retrySendMessage, decryptMessage]);
+  }, [socket, isForgeReady, selectedChat, userId, chats, chatList, unreadMessages, dispatch, fetchChatList, fetchMessages, retrySendMessage, logClientError]);
 
   useEffect(() => {
     if (!token || !userId) {
       setErrors((prev) => [...prev, 'Please log in to access chat']);
       setIsLoadingChatList(false);
       navigate('/login');
-      return undefined;
+      return;
     }
     if (isForgeReady && !isFetchingChatListRef.current) {
       fetchChatList();
     }
     return () => {
+      abortControllerRef.current.abort();
       abortControllerRef.current = new AbortController();
       clearTimeout(fetchChatListDebounceRef.current);
     };
@@ -829,7 +796,8 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     clearTimeout(typingDebounceRef.current);
     typingDebounceRef.current = setTimeout(() => {
       socket.emit('typing', { userId, recipientId: selectedChat });
-      setTimeout(() => {
+      clearTimeout(typingTimeoutRef.current);
+      typingTimeoutRef.current = setTimeout(() => {
         socket.emit('stopTyping', { userId, recipientId: selectedChat });
       }, 3000);
     }, 500);
@@ -842,14 +810,14 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       const isMedia = ['image', 'video', 'audio', 'document'].includes(msg.contentType);
       return 60 + (isMedia ? 150 : 0) + (msg.caption ? 20 : 0);
     },
-    [selectedChat, chats]
+    [chats, selectedChat]
   );
 
   const Row = useCallback(
     ({ index, style }) => {
       const msg = chats[selectedChat]?.[index];
       if (!msg) return null;
-      const prevMsg = index > 0 ? chats[selectedChat]?.[index - 1] : null;
+      const prevMsg = index > 0 ? chats[selectedChat][index - 1] : null;
       const showDate = !prevMsg || new Date(msg.createdAt).toDateString() !== new Date(prevMsg.createdAt).toDateString();
       const isMine = msg.senderId.toString() === userId;
 
@@ -867,10 +835,10 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
               ) : (
                 <>
                   {msg.contentType === 'image' && <img src={msg.content} alt="media" className="message-media" />}
-                  {msg.contentType === 'video' && <video src={msg.content} controls className="message-media-video" />}
+                  {msg.contentType === 'video' && <video src={msg.content} controls className="message-media" />}
                   {msg.contentType === 'audio' && <audio src={msg.content} controls className="message-audio" />}
                   {msg.contentType === 'document' && (
-                    <a href={msg.content} target="_blank" rel="noopener noreferrer">
+                    <a href={msg.content} className="message-document" target="_blank" rel="noopener noreferrer">
                       {msg.originalFilename || 'Document'}
                     </a>
                   )}
@@ -881,10 +849,10 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
                 <span className="timestamp">{new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                 {isMine && (
                   <span className="message-status">
-                    {msg.status === 'pending' && <span className="status-pending">⏳</span>}
+                    {msg.status === 'pending' && <span className="status-pending">o</span>}
                     {msg.status === 'sent' && <span className="status-sent">✓</span>}
                     {msg.status === 'delivered' && <span className="status-delivered">✓✓</span>}
-                    {msg.status === 'read' && <span className="status-read">✓✓✓</span>}
+                    {msg.status === 'read' && <span className="status-read">✓✓</span>}
                     {msg.status === 'failed' && <span className="status-failed">!</span>}
                   </span>
                 )}
@@ -894,7 +862,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         </>
       );
     },
-    [userId, selectedChat, chats]
+    [chats, selectedChat, userId]
   );
 
   return (
@@ -907,7 +875,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
               <div className="error-actions">
                 {error.includes('retry') && (
                   <button
-                    className="retry-btn bg-primary text-white px-4 py-2 rounded"
+                    className="retry-button bg-primary text-white px-4 py-2 rounded"
                     onClick={() => fetchChatList()}
                   >
                     Retry
@@ -1103,7 +1071,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
                       />
                     </label>
                     <label htmlFor="attach-audio" className="picker-item">
-                      <FaFile />
+                      <FaMusic />
                       <input
                         id="attach-audio"
                         type="file"
