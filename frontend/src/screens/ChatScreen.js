@@ -47,10 +47,10 @@ class LRUMap {
   }
 }
 
-const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtualNumber, photo, privateKey }) => {
+const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtualNumber, photo, privateKey, ...rest }) => {
   const navigate = useNavigate();
   const dispatch = useDispatch();
-  const { selectedChat, chats, chatList, chatListTimestamp } = useSelector((state) => state.messages);
+  const { selectedChat, chats, chatList, chatListTimestamp } = useSelector((state) => state.messages || {});
   const [message, setMessage] = useState('');
   const [errors, setErrors] = useState([]);
   const [showMenu, setShowMenu] = useState(false);
@@ -82,17 +82,36 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   const isFetchingMessagesRef = useRef(new Map());
   const fetchChatListDebounceRef = useRef(null);
 
+  // Validate props and log unexpected ones
+  useEffect(() => {
+    if (!token || !userId || !socket || !setAuth) {
+      setErrors((prev) => [...prev, 'Missing required authentication props. Please log in again.']);
+      setTimeout(() => navigate('/login'), 2000);
+    }
+    if (rest.me) {
+      console.warn('Unexpected prop "me" passed to ChatScreen:', rest.me);
+      setErrors((prev) => [...prev, 'Unexpected prop "me" detected. Check parent component.']);
+      logClientError('Unexpected prop "me" passed to ChatScreen', new Error(JSON.stringify(rest.me)));
+    }
+  }, [token, userId, socket, setAuth, navigate, rest.me, logClientError]);
+
   const initDB = async () => {
-    return openDB('chat-app', 2, {
-      upgrade(db, oldVersion) {
-        if (oldVersion < 1) {
-          db.createObjectStore('offlineMessages', { keyPath: 'clientMessageId' });
-        }
-        if (oldVersion < 2) {
-          db.createObjectStore('messages', { keyPath: '_id' });
-        }
-      },
-    });
+    try {
+      return await openDB('chat-app', 2, {
+        upgrade(db, oldVersion) {
+          if (oldVersion < 1) {
+            db.createObjectStore('offlineMessages', { keyPath: 'clientMessageId' });
+          }
+          if (oldVersion < 2) {
+            db.createObjectStore('messages', { keyPath: '_id' });
+          }
+        },
+      });
+    } catch (err) {
+      logClientError('Failed to initialize IndexedDB', err);
+      setErrors((prev) => [...prev, 'Failed to initialize local storage']);
+      throw err;
+    }
   };
 
   useEffect(() => {
@@ -116,7 +135,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     };
     restoreQueue();
     return () => { isMounted = false; };
-  }, [logClientError]);
+  }, []);
 
   useEffect(() => {
     let isMounted = true;
@@ -139,14 +158,14 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     };
     loadForge();
     return () => { isMounted = false; };
-  }, [logClientError]);
+  }, []);
 
   const logClientError = useCallback(async (message, error) => {
     try {
       await axios.post(`${BASE_URL}/social/log-error`, {
         error: message,
         stack: error?.stack || '',
-        userId,
+        userId: userId || 'unknown',
         route: window.location.pathname,
         timestamp: new Date().toISOString(),
       }, { timeout: 5000 });
@@ -177,7 +196,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       logClientError('Failed to fetch public key', err);
       throw err;
     }
-  }, [token, logClientError]);
+  }, [token]);
 
   const encryptMessage = useCallback(async (content, recipientPublicKey, isMedia = false) => {
     if (!forge || !recipientPublicKey) throw new Error('Encryption dependencies missing');
@@ -196,7 +215,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       logClientError('Encryption failed', err);
       throw new Error('Failed to encrypt message');
     }
-  }, [forge, logClientError]);
+  }, [forge]);
 
   const decryptMessage = useCallback(async (encryptedContent) => {
     if (!forge || !privateKey) throw new Error('Decryption dependencies missing');
@@ -212,7 +231,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       logClientError('Decryption failed', err);
       return '[Message not decrypted]';
     }
-  }, [forge, privateKey, logClientError]);
+  }, [forge, privateKey]);
 
   const retryWithBackoff = useCallback(async (fn, maxRetries, attempt = 1) => {
     try {
@@ -238,7 +257,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       logClientError('Retry failed', err);
       return false;
     }
-  }, [logClientError]);
+  }, []);
 
   const fetchChatList = useCallback(async () => {
     if (!isForgeReady || !token || !userId || isFetchingChatListRef.current) return;
@@ -267,7 +286,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       isFetchingChatListRef.current = false;
       setIsLoadingChatList(false);
     }
-  }, [isForgeReady, token, userId, dispatch, unreadMessages, retryWithBackoff]);
+  }, [isForgeReady, token, userId, dispatch, unreadMessages]);
 
   const handleLogout = useCallback(async () => {
     try {
@@ -294,7 +313,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       navigate('/');
       logClientError('Logout failed', err);
     }
-  }, [socket, userId, token, dispatch, setAuth, navigate, logClientError]);
+  }, [socket, userId, token, dispatch, setAuth, navigate]);
 
   const fetchMessages = useCallback(async (chatId) => {
     if (!isValidObjectId(chatId) || !token || !hasMore || isFetchingMessagesRef.current.get(chatId)) return;
@@ -341,7 +360,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     } finally {
       isFetchingMessagesRef.current.delete(chatId);
     }
-  }, [token, userId, chats, page, hasMore, dispatch, decryptMessage, retryWithBackoff]);
+  }, [token, userId, chats, page, hasMore, dispatch, decryptMessage]);
 
   const selectChat = useCallback((chatId) => {
     dispatch(setSelectedChat(chatId));
@@ -432,7 +451,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       offlineQueueRef.current.push(messageData);
       logClientError('Send message failed', err);
     }
-  }, [isForgeReady, message, selectedChat, userId, virtualNumber, username, photo, socket, token, getPublicKey, encryptMessage, dispatch, chats, logClientError, retryWithBackoff]);
+  }, [isForgeReady, message, selectedChat, userId, virtualNumber, username, photo, socket, token, getPublicKey, encryptMessage, dispatch, chats]);
 
   const retrySendMessage = useCallback(async (message) => {
     if (!socket || !isValidObjectId(message.recipientId) || !navigator.onLine) return;
@@ -521,7 +540,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       }));
       logClientError('Retry send message failed', err);
     }
-  }, [socket, dispatch, token, getPublicKey, encryptMessage, logClientError]);
+  }, [socket, dispatch, token, getPublicKey, encryptMessage]);
 
   const handleAttachment = useCallback(async (e) => {
     const selectedFile = e.target.files[0];
@@ -555,7 +574,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         formData.append('userId', userId);
         formData.append('recipientId', selectedChat);
         formData.append('clientMessageId', clientMessageId);
-        formData.append('senderVirtualNumber', userId);
+        formData.append('senderVirtualNumber', virtualNumber); // Fixed: Changed userId to virtualNumber
         formData.append('senderUsername', username);
         formData.append('senderPhoto', photo);
         const { data } = await axios.post(`${BASE_URL}/social/upload`, formData, {
@@ -589,7 +608,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: clientMessageId, status: 'failed' }));
       logClientError('File upload failed', err);
     }
-  }, [selectedChat, userId, virtualNumber, username, photo, token, dispatch, socket, logClientError, retryWithBackoff]);
+  }, [selectedChat, userId, virtualNumber, username, photo, token, dispatch, socket]);
 
   const handleAddContact = useCallback(async () => {
     if (!contactInput.trim() || !isValidVirtualNumber(contactInput)) {
@@ -621,7 +640,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       setErrors([]);
     }, MAX_RETRIES);
     setIsLoadingAddContact(false);
-  }, [contactInput, token, userId, chatList, dispatch, retryWithBackoff]);
+  }, [contactInput, token, userId, chatList, dispatch]);
 
   useEffect(() => {
     if (!socket || !isForgeReady || !userId) return;
@@ -768,13 +787,13 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         socket.off('typing', handleTyping);
         socket.off('stopTyping', handleStopTyping);
         socket.off('messageStatus', handleMessageStatus);
-        socket.emit('leave', userId); // Fixed: Replaced emitMultiple with emit
+        socket.emit('leave', userId);
         clearTimeout(fetchChatListDebounceRef.current);
       } catch (err) {
         logClientError('Socket cleanup failed', err);
       }
     };
-  }, [socket, isForgeReady, selectedChat, userId, chats, chatList, unreadMessages, dispatch, fetchChatList, fetchMessages, retrySendMessage, logClientError, decryptMessage]);
+  }, [socket, isForgeReady, selectedChat, userId, chats, chatList, unreadMessages, dispatch, fetchChatList, fetchMessages, retrySendMessage, decryptMessage]);
 
   useEffect(() => {
     if (!token || !userId) {
@@ -959,7 +978,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         </div>
       </div>
       <div className="chat-content">
-        <div className="chat-list ${selectedChat ? 'hidden md:block' : 'block'}">
+        <div className={`chat-list ${selectedChat ? 'hidden md:block' : 'block'}`}>
           {isLoadingChatList ? (
             <span className="loading-screen">Loading contacts...</span>
           ) : chatList.length === 0 ? (

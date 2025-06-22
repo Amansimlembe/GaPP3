@@ -1,3 +1,4 @@
+
 import { configureStore, createSlice } from '@reduxjs/toolkit';
 import { openDB } from 'idb';
 
@@ -35,13 +36,13 @@ const authSlice = createSlice({
   reducers: {
     setAuth: (state, action) => {
       const { token, userId, role, photo, virtualNumber, username, privateKey } = action.payload;
-      state.token = token;
+      state.token = typeof token === 'string' ? token : null;
       state.userId = isValidObjectId(userId) ? userId : null;
-      state.role = role;
-      state.photo = photo;
-      state.virtualNumber = virtualNumber;
-      state.username = username;
-      state.privateKey = privateKey;
+      state.role = typeof role === 'string' ? role : null;
+      state.photo = typeof photo === 'string' ? photo : null;
+      state.virtualNumber = typeof virtualNumber === 'string' ? virtualNumber : null;
+      state.username = typeof username === 'string' ? username : null;
+      state.privateKey = typeof privateKey === 'string' ? privateKey : null;
     },
     clearAuth: (state) => {
       Object.assign(state, authSlice.getInitialState());
@@ -67,27 +68,29 @@ const messageSlice = createSlice({
       const messageMap = new Map(existingMessages.map((msg) => [msg._id || msg.clientMessageId, msg]));
       const now = Date.now();
       messages.forEach((msg) => {
+        if (!msg || (!msg._id && !msg.clientMessageId) || (msg.createdAt && now - new Date(msg.createdAt).getTime() > MESSAGE_TTL)) return;
         const key = msg._id || msg.clientMessageId;
-        if (!key || (msg.createdAt && now - new Date(msg.createdAt).getTime() > MESSAGE_TTL)) return;
         const normalizedMsg = {
           _id: msg._id || msg.clientMessageId,
           clientMessageId: msg.clientMessageId || msg._id,
-          content: msg.content || '',
+          content: typeof msg.content === 'string' ? msg.content : '',
           status: ['sent', 'delivered', 'read', 'pending', 'failed'].includes(msg.status) ? msg.status : 'sent',
           senderId: msg.senderId?._id || msg.senderId,
           recipientId: msg.recipientId?._id || msg.recipientId,
-          contentType: msg.contentType || 'text',
-          plaintextContent: msg.plaintextContent || '[Message not decrypted]',
-          caption: msg.caption || undefined,
+          contentType: ['text', 'image', 'video', 'audio', 'document'].includes(msg.contentType) ? msg.contentType : 'text',
+          plaintextContent: typeof msg.plaintextContent === 'string' ? msg.plaintextContent : '[Message not decrypted]',
+          caption: typeof msg.caption === 'string' ? msg.caption : undefined,
           replyTo: msg.replyTo && isValidObjectId(msg.replyTo) ? msg.replyTo : null,
-          originalFilename: msg.originalFilename || undefined,
-          senderVirtualNumber: msg.senderVirtualNumber || msg.senderId?.virtualNumber || undefined,
-          senderUsername: msg.senderUsername || msg.senderId?.username || undefined,
-          senderPhoto: msg.senderPhoto || msg.senderId?.photo || undefined,
+          originalFilename: typeof msg.originalFilename === 'string' ? msg.originalFilename : undefined,
+          senderVirtualNumber: typeof msg.senderVirtualNumber === 'string' ? msg.senderVirtualNumber : undefined,
+          senderUsername: typeof msg.senderUsername === 'string' ? msg.senderUsername : undefined,
+          senderPhoto: typeof msg.senderPhoto === 'string' ? msg.senderPhoto : undefined,
           createdAt: msg.createdAt ? new Date(msg.createdAt) : new Date(),
           updatedAt: msg.updatedAt ? new Date(msg.updatedAt) : undefined,
         };
-        messageMap.set(key, normalizedMsg);
+        if (isValidObjectId(normalizedMsg.senderId) && isValidObjectId(normalizedMsg.recipientId)) {
+          messageMap.set(key, normalizedMsg);
+        }
       });
       state.chats[recipientId] = Array.from(messageMap.values())
         .filter((msg) => now - new Date(msg.createdAt).getTime() <= MESSAGE_TTL)
@@ -98,7 +101,7 @@ const messageSlice = createSlice({
     },
     addMessage: (state, action) => {
       const { recipientId, message } = action.payload;
-      if (!recipientId || !isValidObjectId(recipientId) || !message || !message.clientMessageId) return;
+      if (!recipientId || !isValidObjectId(recipientId) || !message || !message.clientMessageId || !isValidObjectId(message.senderId) || !isValidObjectId(message.recipientId)) return;
       state.chats[recipientId] = state.chats[recipientId] || [];
       if (state.chats[recipientId].some((msg) => msg._id === message._id || msg.clientMessageId === message.clientMessageId)) return;
       const normalizedMsg = {
@@ -107,15 +110,15 @@ const messageSlice = createSlice({
         status: ['pending', 'sent', 'delivered', 'read', 'failed'].includes(message.status) ? message.status : 'pending',
         senderId: message.senderId?._id || message.senderId,
         recipientId: message.recipientId?._id || message.recipientId,
-        content: message.content || '',
-        contentType: message.contentType || 'text',
-        plaintextContent: message.plaintextContent || '',
-        caption: message.caption || undefined,
+        content: typeof message.content === 'string' ? message.content : '',
+        contentType: ['text', 'image', 'video', 'audio', 'document'].includes(message.contentType) ? message.contentType : 'text',
+        plaintextContent: typeof message.plaintextContent === 'string' ? message.plaintextContent : '',
+        caption: typeof message.caption === 'string' ? message.caption : undefined,
         replyTo: message.replyTo && isValidObjectId(message.replyTo) ? message.replyTo : null,
-        originalFilename: message.originalFilename || undefined,
-        senderVirtualNumber: message.senderVirtualNumber || undefined,
-        senderUsername: message.senderUsername || undefined,
-        senderPhoto: message.senderPhoto || undefined,
+        originalFilename: typeof message.originalFilename === 'string' ? message.originalFilename : undefined,
+        senderVirtualNumber: typeof message.senderVirtualNumber === 'string' ? message.senderVirtualNumber : undefined,
+        senderUsername: typeof message.senderUsername === 'string' ? message.senderUsername : undefined,
+        senderPhoto: typeof message.senderPhoto === 'string' ? message.senderPhoto : undefined,
         createdAt: message.createdAt ? new Date(message.createdAt) : new Date(),
         updatedAt: message.updatedAt ? new Date(message.updatedAt) : undefined,
       };
@@ -126,7 +129,7 @@ const messageSlice = createSlice({
     },
     replaceMessage: (state, action) => {
       const { recipientId, message, replaceId } = action.payload;
-      if (!recipientId || !isValidObjectId(recipientId) || !message || !replaceId || !message.clientMessageId) return;
+      if (!recipientId || !isValidObjectId(recipientId) || !message || !replaceId || !message.clientMessageId || !isValidObjectId(message.senderId) || !isValidObjectId(message.recipientId)) return;
       state.chats[recipientId] = state.chats[recipientId] || [];
       const index = state.chats[recipientId].findIndex(
         (msg) => msg.clientMessageId === replaceId || msg._id === replaceId
@@ -137,15 +140,15 @@ const messageSlice = createSlice({
         status: ['sent', 'delivered', 'read'].includes(message.status) ? message.status : 'sent',
         senderId: message.senderId?._id || message.senderId,
         recipientId: message.recipientId?._id || message.recipientId,
-        content: message.content || '',
-        contentType: message.contentType || 'text',
-        plaintextContent: message.plaintextContent || '',
-        caption: message.caption || undefined,
+        content: typeof message.content === 'string' ? message.content : '',
+        contentType: ['text', 'image', 'video', 'audio', 'document'].includes(message.contentType) ? message.contentType : 'text',
+        plaintextContent: typeof message.plaintextContent === 'string' ? message.plaintextContent : '',
+        caption: typeof message.caption === 'string' ? message.caption : undefined,
         replyTo: message.replyTo && isValidObjectId(message.replyTo) ? message.replyTo : null,
-        originalFilename: message.originalFilename || undefined,
-        senderVirtualNumber: message.senderVirtualNumber || undefined,
-        senderUsername: message.senderUsername || undefined,
-        senderPhoto: message.senderPhoto || undefined,
+        originalFilename: typeof message.originalFilename === 'string' ? message.originalFilename : undefined,
+        senderVirtualNumber: typeof message.senderVirtualNumber === 'string' ? message.senderVirtualNumber : undefined,
+        senderUsername: typeof message.senderUsername === 'string' ? message.senderUsername : undefined,
+        senderPhoto: typeof message.senderPhoto === 'string' ? message.senderPhoto : undefined,
         createdAt: message.createdAt ? new Date(message.createdAt) : new Date(),
         updatedAt: message.updatedAt ? new Date(message.updatedAt) : undefined,
       };
@@ -167,6 +170,21 @@ const messageSlice = createSlice({
           : msg
       );
     },
+    editMessage: (state, action) => {
+      const { recipientId, messageId, newContent, plaintextContent } = action.payload;
+      if (!recipientId || !isValidObjectId(recipientId) || !messageId || !state.chats[recipientId]) return;
+      state.chats[recipientId] = state.chats[recipientId].map((msg) =>
+        (msg._id === messageId || msg.clientMessageId === messageId)
+          ? {
+              ...msg,
+              content: typeof newContent === 'string' ? newContent : msg.content,
+              plaintextContent: typeof plaintextContent === 'string' ? plaintextContent : msg.plaintextContent,
+              updatedAt: new Date(),
+            }
+          : msg
+      );
+      state.messagesTimestamp[recipientId] = Date.now();
+    },
     deleteMessage: (state, action) => {
       const { recipientId, messageId } = action.payload;
       if (!recipientId || !isValidObjectId(recipientId) || !messageId || !state.chats[recipientId]) return;
@@ -186,7 +204,25 @@ const messageSlice = createSlice({
       }
     },
     setChatList: (state, action) => {
-      state.chatList = action.payload.filter((contact) => isValidObjectId(contact.id));
+      const contacts = action.payload.filter((contact) => isValidObjectId(contact.id) && typeof contact.username === 'string');
+      state.chatList = contacts.map((contact) => ({
+        id: contact.id,
+        username: contact.username || 'Unknown',
+        virtualNumber: typeof contact.virtualNumber === 'string' ? contact.virtualNumber : '',
+        photo: typeof contact.photo === 'string' ? contact.photo : 'https://placehold.co/40x40',
+        status: ['online', 'offline'].includes(contact.status) ? contact.status : 'offline',
+        lastSeen: contact.lastSeen ? new Date(contact.lastSeen) : null,
+        latestMessage: contact.latestMessage
+          ? {
+              ...contact.latestMessage,
+              senderId: contact.latestMessage.senderId?._id || contact.latestMessage.senderId,
+              recipientId: contact.latestMessage.recipientId?._id || contact.latestMessage.recipientId,
+              createdAt: contact.latestMessage.createdAt ? new Date(contact.latestMessage.createdAt) : new Date(),
+              updatedAt: contact.latestMessage.updatedAt ? new Date(contact.latestMessage.updatedAt) : undefined,
+            }
+          : null,
+        unreadCount: Number.isInteger(contact.unreadCount) ? contact.unreadCount : 0,
+      }));
       state.chatListTimestamp = Date.now();
     },
     resetState: (state) => {
@@ -202,7 +238,7 @@ const messageSlice = createSlice({
           return;
         }
         state.chats[recipientId] = state.chats[recipientId].filter(
-          (msg) => now - new Date(msg.createdAt).getTime() <= MESSAGE_TTL
+          (msg) => now - new Date(msg.createdAt).getTime() <= MESSAGE_TTL && isValidObjectId(msg.senderId) && isValidObjectId(msg.recipientId)
         );
         state.chatMessageCount[recipientId] = state.chats[recipientId].length;
         if (!state.chats[recipientId].length) {
@@ -220,6 +256,7 @@ export const {
   addMessage,
   replaceMessage,
   updateMessageStatus,
+  editMessage,
   deleteMessage,
   setSelectedChat,
   setChatList,
@@ -239,6 +276,7 @@ const persistenceMiddleware = (store) => (next) => (action) => {
     addMessage.type,
     replaceMessage.type,
     updateMessageStatus.type,
+    editMessage.type,
     deleteMessage.type,
     setChatList.type,
     cleanupMessages.type,
@@ -275,7 +313,22 @@ const persistenceMiddleware = (store) => (next) => (action) => {
               }
               return acc;
             }, {}),
-            chatList: state.messages.chatList,
+            chatList: state.messages.chatList.map((contact) => ({
+              id: contact.id,
+              username: contact.username,
+              virtualNumber: contact.virtualNumber,
+              photo: contact.photo,
+              status: contact.status,
+              lastSeen: contact.lastSeen ? contact.lastSeen.toISOString() : null,
+              latestMessage: contact.latestMessage
+                ? {
+                    ...contact.latestMessage,
+                    createdAt: contact.latestMessage.createdAt.toISOString(),
+                    updatedAt: contact.latestMessage.updatedAt ? contact.latestMessage.updatedAt.toISOString() : undefined,
+                  }
+                : null,
+              unreadCount: contact.unreadCount,
+            })),
             chatListTimestamp: state.messages.chatListTimestamp,
             messagesTimestamp: state.messages.messagesTimestamp,
             chatMessageCount: state.messages.chatMessageCount,
@@ -339,18 +392,18 @@ const loadPersistedState = async () => {
           .map((msg) => ({
             _id: msg._id || msg.clientMessageId,
             clientMessageId: msg.clientMessageId || msg._id || `temp-${now}-${Math.random()}`,
-            content: msg.content || '',
-            contentType: msg.contentType || 'text',
-            plaintextContent: msg.plaintextContent || '[Message not decrypted]',
+            content: typeof msg.content === 'string' ? msg.content : '',
+            contentType: ['text', 'image', 'video', 'audio', 'document'].includes(msg.contentType) ? msg.contentType : 'text',
+            plaintextContent: typeof msg.plaintextContent === 'string' ? msg.plaintextContent : '[Message not decrypted]',
             status: msg.status || 'pending',
             senderId: msg.senderId,
             recipientId: msg.recipientId,
-            caption: msg.caption || undefined,
+            caption: typeof msg.caption === 'string' ? msg.caption : undefined,
             replyTo: msg.replyTo && isValidObjectId(msg.replyTo) ? msg.replyTo : null,
-            originalFilename: msg.originalFilename || undefined,
-            senderVirtualNumber: msg.senderVirtualNumber || undefined,
-            senderUsername: msg.senderUsername || undefined,
-            senderPhoto: msg.senderPhoto || undefined,
+            originalFilename: typeof msg.originalFilename === 'string' ? msg.originalFilename : undefined,
+            senderVirtualNumber: typeof msg.senderVirtualNumber === 'string' ? msg.senderVirtualNumber : undefined,
+            senderUsername: typeof msg.senderUsername === 'string' ? msg.senderUsername : undefined,
+            senderPhoto: typeof msg.senderPhoto === 'string' ? msg.senderPhoto : undefined,
             createdAt: msg.createdAt ? new Date(msg.createdAt) : new Date(),
             updatedAt: msg.updatedAt ? new Date(msg.updatedAt) : undefined,
           }))
@@ -364,13 +417,34 @@ const loadPersistedState = async () => {
       return acc;
     }, {});
 
+    const chatList = Array.isArray(messages.chatList)
+      ? messages.chatList
+          .filter((contact) => isValidObjectId(contact.id))
+          .map((contact) => ({
+            id: contact.id,
+            username: typeof contact.username === 'string' ? contact.username : 'Unknown',
+            virtualNumber: typeof contact.virtualNumber === 'string' ? contact.virtualNumber : '',
+            photo: typeof contact.photo === 'string' ? contact.photo : 'https://placehold.co/40x40',
+            status: ['online', 'offline'].includes(contact.status) ? contact.status : 'offline',
+            lastSeen: contact.lastSeen ? new Date(contact.lastSeen) : null,
+            latestMessage: contact.latestMessage
+              ? {
+                  ...contact.latestMessage,
+                  senderId: contact.latestMessage.senderId,
+                  recipientId: contact.latestMessage.recipientId,
+                  createdAt: contact.latestMessage.createdAt ? new Date(contact.latestMessage.createdAt) : new Date(),
+                  updatedAt: contact.latestMessage.updatedAt ? new Date(contact.latestMessage.updatedAt) : undefined,
+                }
+              : null,
+            unreadCount: Number.isInteger(contact.unreadCount) ? contact.unreadCount : 0,
+          }))
+      : [];
+
     return {
       messages: {
         selectedChat: isValidObjectId(messages.selectedChat) ? messages.selectedChat : null,
         chats,
-        chatList: Array.isArray(messages.chatList)
-          ? messages.chatList.filter((contact) => isValidObjectId(contact.id))
-          : [],
+        chatList,
         chatListTimestamp: messages.chatListTimestamp || 0,
         messagesTimestamp: messages.messagesTimestamp || {},
         chatMessageCount,
@@ -393,11 +467,20 @@ const loadPersistedState = async () => {
 
 // Hydrate store after initialization
 export const initializeStore = async () => {
-  const persistedState = await loadPersistedState();
-  if (persistedState) {
-    store.dispatch(setAuth(persistedState.auth));
-    store.dispatch(setMessages({ recipientId: 'global', messages: Object.values(persistedState.messages.chats).flat() }));
-    store.dispatch(setChatList(persistedState.messages.chatList));
+  try {
+    const persistedState = await loadPersistedState();
+    if (persistedState) {
+      store.dispatch(setAuth(persistedState.auth));
+      Object.keys(persistedState.messages.chats).forEach((recipientId) => {
+        if (isValidObjectId(recipientId)) {
+          store.dispatch(setMessages({ recipientId, messages: persistedState.messages.chats[recipientId] }));
+        }
+      });
+      store.dispatch(setChatList(persistedState.messages.chatList));
+      store.dispatch(cleanupMessages());
+    }
+  } catch (error) {
+    console.error('Failed to initialize store:', error);
   }
 };
 
@@ -418,6 +501,7 @@ export const store = configureStore({
           addMessage.type,
           replaceMessage.type,
           updateMessageStatus.type,
+          editMessage.type,
           deleteMessage.type,
           setMessages.type,
           setAuth.type,
