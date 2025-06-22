@@ -44,6 +44,9 @@ const messageSlice = createSlice({
   initialState: {
     chats: {},
     selectedChat: null,
+    chatListTimestamp: 0, // Added: Timestamp for chat list freshness
+    messagesTimestamp: {}, // Added: Per-chat message freshness
+    chatList: [], // Added: Store chat list in Redux
   },
   reducers: {
     setMessages: (state, action) => {
@@ -52,7 +55,6 @@ const messageSlice = createSlice({
         console.warn('Invalid setMessages payload:', action.payload);
         return;
       }
-      // --- Updated: Normalize and merge messages ---
       const existingMessages = state.chats[recipientId] || [];
       const messageMap = new Map(existingMessages.map((msg) => [msg._id || msg.clientMessageId, msg]));
       messages.forEach((msg) => {
@@ -65,9 +67,11 @@ const messageSlice = createSlice({
           _id: msg._id || msg.clientMessageId,
           clientMessageId: msg.clientMessageId || msg._id,
           content: msg.content || '',
-          status: ['sent', 'delivered', 'read'].includes(msg.status) ? msg.status : messageMap.get(key)?.status || 'sent',
-          senderId: msg.senderId?._id || msg.senderId, // --- Updated: Handle populated senderId ---
-          recipientId: msg.recipientId?._id || msg.recipientId, // --- Updated: Handle populated recipientId ---
+          status: ['sent', 'delivered', 'read', 'pending', 'failed'].includes(msg.status)
+            ? msg.status
+            : messageMap.get(key)?.status || 'sent',
+          senderId: msg.senderId?._id || msg.senderId,
+          recipientId: msg.recipientId?._id || msg.recipientId,
           contentType: msg.contentType || 'text',
           plaintextContent: msg.plaintextContent || '[Message not decrypted]',
           caption: msg.caption || undefined,
@@ -85,6 +89,7 @@ const messageSlice = createSlice({
         ...state.chats,
         [recipientId]: Array.from(messageMap.values()).sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt)),
       };
+      state.messagesTimestamp[recipientId] = Date.now(); // Update timestamp
       console.debug(`Set ${messages.length} messages for ${recipientId}, total: ${state.chats[recipientId].length}`);
     },
     addMessage: (state, action) => {
@@ -192,9 +197,17 @@ const messageSlice = createSlice({
         console.warn(`Invalid recipientId: ${recipientId}`);
       }
     },
+    setChatList: (state, action) => {
+      state.chatList = action.payload;
+      state.chatListTimestamp = Date.now();
+      console.debug(`Set chat list with ${action.payload.length} contacts`);
+    },
     resetState: (state) => {
       state.selectedChat = null;
-      state.chats = {}; // --- Updated: Clear chats on reset ---
+      state.chats = {};
+      state.chatList = [];
+      state.chatListTimestamp = 0;
+      state.messagesTimestamp = {};
       console.debug('Reset messages state');
     },
   },
@@ -207,6 +220,7 @@ export const {
   updateMessageStatus,
   deleteMessage,
   setSelectedChat,
+  setChatList,
   resetState,
 } = messageSlice.actions;
 
@@ -222,6 +236,7 @@ const persistenceMiddleware = (store) => (next) => (action) => {
     replaceMessage.type,
     updateMessageStatus.type,
     deleteMessage.type,
+    setChatList.type,
   ];
 
   if (actionsToPersist.includes(action.type)) {
@@ -254,6 +269,9 @@ const persistenceMiddleware = (store) => (next) => (action) => {
               }
               return acc;
             }, {}),
+            chatList: state.messages.chatList,
+            chatListTimestamp: state.messages.chatListTimestamp,
+            messagesTimestamp: state.messages.messagesTimestamp,
           },
           auth: {
             token: state.auth.token,
@@ -270,6 +288,7 @@ const persistenceMiddleware = (store) => (next) => (action) => {
           selectedChat: serializableState.messages.selectedChat,
           userId: serializableState.auth.userId,
           chatCount: Object.keys(serializableState.messages.chats).length,
+          chatListCount: serializableState.messages.chatList.length,
         });
       } catch (error) {
         console.error('Failed to persist state:', error);
@@ -278,7 +297,13 @@ const persistenceMiddleware = (store) => (next) => (action) => {
   } else if (action.type === clearAuth.type || action.type === resetState.type) {
     try {
       localStorage.setItem('reduxState', JSON.stringify({
-        messages: { selectedChat: null, chats: {} }, // --- Updated: Clear chats ---
+        messages: {
+          selectedChat: null,
+          chats: {},
+          chatList: [],
+          chatListTimestamp: 0,
+          messagesTimestamp: {},
+        },
         auth: authSlice.getInitialState(),
       }));
       console.debug('Cleared state');
@@ -311,7 +336,7 @@ const loadPersistedState = () => {
                 ['sent', 'delivered', 'read', 'pending', 'failed'].includes(msg.status)
             ).map((msg) => ({
               _id: msg._id || msg.clientMessageId,
-              clientMessageId: msg.clientMessageId || msg._id || `temp-${Date.now()}-${Math.random()}`, // --- Updated: Fallback clientMessageId ---
+              clientMessageId: msg.clientMessageId || msg._id || `temp-${Date.now()}-${Math.random()}`,
               content: msg.content || '',
               contentType: msg.contentType || 'text',
               plaintextContent: msg.plaintextContent || '[Message not decrypted]',
@@ -343,9 +368,16 @@ const loadPersistedState = () => {
           selectedChat: parsedState.messages.selectedChat,
           userId: auth.userId,
           chatCount: Object.keys(chats).length,
+          chatListCount: parsedState.messages.chatList?.length || 0,
         });
         return {
-          messages: { selectedChat: parsedState.messages.selectedChat, chats },
+          messages: {
+            selectedChat: parsedState.messages.selectedChat,
+            chats,
+            chatList: parsedState.messages.chatList || [],
+            chatListTimestamp: parsedState.messages.chatListTimestamp || 0,
+            messagesTimestamp: parsedState.messages.messagesTimestamp || {},
+          },
           auth,
         };
       }
@@ -354,7 +386,6 @@ const loadPersistedState = () => {
   } catch (error) {
     console.error('Failed to load persisted state:', error);
   }
-  // --- Updated: Simplified recovery logic ---
   try {
     const persistedState = localStorage.getItem('reduxState');
     if (persistedState) {
@@ -389,7 +420,13 @@ const loadPersistedState = () => {
           return acc;
         }, {});
         const newState = {
-          messages: { selectedChat: null, chats },
+          messages: {
+            selectedChat: null,
+            chats,
+            chatList: parsedState.messages.chatList || [],
+            chatListTimestamp: parsedState.messages.chatListTimestamp || 0,
+            messagesTimestamp: parsedState.messages.messagesTimestamp || {},
+          },
           auth: authSlice.getInitialState(),
         };
         localStorage.setItem('reduxState', JSON.stringify(newState));
@@ -417,8 +454,8 @@ export const store = configureStore({
   middleware: (getDefaultMiddleware) =>
     getDefaultMiddleware({
       serializableCheck: {
-        ignoredActions: [addMessage.type, replaceMessage.type, updateMessageStatus.type, deleteMessage.type, setMessages.type, setAuth.type],
-        ignoredPaths: ['messages.chats', 'auth'],
+        ignoredActions: [addMessage.type, replaceMessage.type, updateMessageStatus.type, deleteMessage.type, setMessages.type, setAuth.type, setChatList.type],
+        ignoredPaths: ['messages.chats', 'messages.chatList', 'auth'],
       },
     }).concat(persistenceMiddleware),
 });

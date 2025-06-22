@@ -76,12 +76,12 @@ const upload = multer({
 
 // Rate limiters
 const addContactLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
+  windowMs: 15 * 60 * 1000,
   max: 10,
   message: 'Too many contact addition requests, please try again later',
 });
 const uploadLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
+  windowMs: 15 * 60 * 1000,
   max: 5,
   message: 'Too many upload requests, please try again later',
 });
@@ -112,7 +112,7 @@ const messageSchema = Joi.object({
   contentType: Joi.string().valid(...validContentTypes).required().messages({
     'any.only': `contentType must be one of: ${validContentTypes.join(', ')}`,
   }),
-  plaintextContent: Joi.string().allow('').optional(), // --- Updated: Optional for all contentTypes ---
+  plaintextContent: Joi.string().allow('').optional(),
   caption: Joi.string().optional(),
   replyTo: Joi.string().custom((value, helpers) => {
     if (value && !mongoose.isValidObjectId(value)) return helpers.error('any.invalid');
@@ -123,8 +123,8 @@ const messageSchema = Joi.object({
   senderVirtualNumber: Joi.string().optional(),
   senderUsername: Joi.string().optional(),
   senderPhoto: Joi.string().optional(),
-  _id: Joi.any().strip(), // --- Updated: Explicitly strip _id ---
-}).unknown(false); // --- Updated: Disallow unknown fields to prevent errors ---
+  _id: Joi.any().strip(),
+}).unknown(false);
 
 const addContactSchema = Joi.object({
   userId: Joi.string().custom((value, helpers) => {
@@ -214,7 +214,13 @@ const emitUpdatedChatList = async (io, userId) => {
         photo: contact.photo || 'https://placehold.co/40x40',
         status: contact.status || 'offline',
         lastSeen: contact.lastSeen || null,
-        latestMessage: messageData?.latestMessage || null,
+        latestMessage: messageData?.latestMessage
+          ? {
+              ...messageData.latestMessage,
+              senderId: messageData.latestMessage.senderId.toString(),
+              recipientId: messageData.latestMessage.recipientId.toString(),
+            }
+          : null,
         unreadCount: messageData?.unreadCount || 0,
       };
     });
@@ -266,13 +272,14 @@ module.exports = (app) => {
     socket.on('join', async (userId) => {
       if (!mongoose.isValidObjectId(userId) || userId !== socket.user.id) {
         logger.warn('Invalid or unauthorized join attempt', { socketId: socket.id, userId });
+        socket.emit('error', { message: 'Invalid or unauthorized join attempt' });
         return;
       }
       socket.join(userId);
       await User.findByIdAndUpdate(userId, { status: 'online', lastSeen: new Date() }, { new: true, lean: true });
       io.to(userId).emit('userStatus', { userId, status: 'online', lastSeen: new Date() });
 
-      // --- Updated: Fetch and emit all relevant messages ---
+      // --- Updated: Fetch messages and update statuses ---
       const messages = await Message.find({
         $or: [
           { senderId: userId },
@@ -285,30 +292,40 @@ module.exports = (app) => {
         .populate('replyTo', 'content contentType senderId recipientId createdAt')
         .lean();
       if (messages.length) {
-        // --- Updated: Mark delivered messages as read if user is viewing ---
-        const deliveredMessageIds = messages
-          .filter((msg) => msg.recipientId.toString() === userId && msg.status === 'delivered')
+        // Mark sent messages as delivered
+        const sentMessageIds = messages
+          .filter((msg) => msg.recipientId.toString() === userId && msg.status === 'sent')
           .map((msg) => msg._id);
-        if (deliveredMessageIds.length) {
+        if (sentMessageIds.length) {
           await Message.updateMany(
-            { _id: { $in: deliveredMessageIds }, recipientId: userId },
-            { status: 'read', updatedAt: new Date() }
+            { _id: { $in: sentMessageIds }, recipientId: userId },
+            { status: 'delivered', updatedAt: new Date() }
           );
           const senderIds = [...new Set(messages
-            .filter((msg) => deliveredMessageIds.includes(msg._id))
+            .filter((msg) => sentMessageIds.includes(msg._id))
             .map((msg) => msg.senderId.toString())
           )];
           senderIds.forEach((senderId) => {
-            io.to(senderId).emit('messageStatus', { messageIds: deliveredMessageIds, status: 'read' });
+            io.to(senderId).emit('messageStatus', { messageIds: sentMessageIds, status: 'delivered' });
           });
         }
+        // Emit all messages
         messages.forEach((message) => {
-          io.to(userId).emit('message', message);
+          io.to(userId).emit('message', {
+            ...message,
+            senderId: message.senderId._id.toString(),
+            recipientId: message.recipientId._id.toString(),
+            replyTo: message.replyTo
+              ? {
+                  ...message.replyTo,
+                  senderId: message.replyTo.senderId.toString(),
+                  recipientId: message.replyTo.recipientId.toString(),
+                }
+              : null,
+          });
         });
         logger.info('Emitted messages on join', { userId, count: messages.length });
       }
-      // --- End Update ---
-
       await emitUpdatedChatList(io, userId);
       logger.info('User joined room', { socketId: socket.id, userId });
     });
@@ -316,6 +333,7 @@ module.exports = (app) => {
     socket.on('leave', async (userId) => {
       if (!mongoose.isValidObjectId(userId) || userId !== socket.user.id) {
         logger.warn('Invalid or unauthorized leave attempt', { socketId: socket.id, userId });
+        socket.emit('error', { message: 'Invalid or unauthorized leave attempt' });
         return;
       }
       socket.leave(userId);
@@ -326,6 +344,7 @@ module.exports = (app) => {
 
     socket.on('typing', ({ userId, recipientId }) => {
       if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId) || userId !== socket.user.id) {
+        socket.emit('error', { message: 'Invalid typing event' });
         return;
       }
       io.to(recipientId).emit('typing', { userId });
@@ -333,6 +352,7 @@ module.exports = (app) => {
 
     socket.on('stopTyping', ({ userId, recipientId }) => {
       if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId) || userId !== socket.user.id) {
+        socket.emit('error', { message: 'Invalid stopTyping event' });
         return;
       }
       io.to(recipientId).emit('stopTyping', { userId });
@@ -341,6 +361,7 @@ module.exports = (app) => {
     socket.on('contactData', async ({ userId, contactData }) => {
       if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(contactData.id) || userId !== socket.user.id) {
         logger.warn('Invalid contactData event', { userId, socketId: socket.id });
+        socket.emit('error', { message: 'Invalid contactData event' });
         return;
       }
       try {
@@ -375,6 +396,7 @@ module.exports = (app) => {
         }
       } catch (err) {
         logger.error('Contact data emission failed', { error: err.message, stack: err.stack, userId });
+        socket.emit('error', { message: 'Failed to emit contact data' });
       }
     });
 
@@ -402,6 +424,7 @@ module.exports = (app) => {
           logger.warn('Unauthorized message sender in socket', { senderId, socketUserId: socket.user.id });
           return callback({ error: 'Unauthorized sender' });
         }
+        const recipient = await User.findById(recipientId).select('status').lean();
         const existingMessage = await Message.findOne({ clientMessageId })
           .populate('senderId', 'username virtualNumber photo')
           .populate('recipientId', 'username virtualNumber photo')
@@ -418,7 +441,7 @@ module.exports = (app) => {
           content,
           contentType,
           plaintextContent: plaintextContent || '',
-          status: 'sent',
+          status: recipient?.status === 'online' ? 'delivered' : 'sent', // Set status based on recipient's online state
           caption: caption || undefined,
           replyTo: replyTo && mongoose.isValidObjectId(replyTo) ? replyTo : undefined,
           originalFilename: messageData.originalFilename || undefined,
@@ -433,14 +456,39 @@ module.exports = (app) => {
           .populate('recipientId', 'username virtualNumber photo')
           .populate('replyTo', 'content contentType senderId recipientId createdAt')
           .lean();
-        io.to(recipientId).emit('message', populatedMessage);
-        io.to(senderId).emit('message', populatedMessage);
+        io.to(recipientId).emit('message', {
+          ...populatedMessage,
+          senderId: populatedMessage.senderId._id.toString(),
+          recipientId: populatedMessage.recipientId._id.toString(),
+          replyTo: populatedMessage.replyTo
+            ? {
+                ...populatedMessage.replyTo,
+                senderId: populatedMessage.replyTo.senderId.toString(),
+                recipientId: populatedMessage.replyTo.recipientId.toString(),
+              }
+            : null,
+        });
+        io.to(senderId).emit('message', {
+          ...populatedMessage,
+          senderId: populatedMessage.senderId._id.toString(),
+          recipientId: populatedMessage.recipientId._id.toString(),
+          replyTo: populatedMessage.replyTo
+            ? {
+                ...populatedMessage.replyTo,
+                senderId: populatedMessage.replyTo.senderId.toString(),
+                recipientId: populatedMessage.replyTo.recipientId.toString(),
+              }
+            : null,
+        });
+        if (recipient?.status === 'online') {
+          io.to(senderId).emit('messageStatus', { messageIds: [message._id], status: 'delivered' });
+        }
         await Promise.all([emitUpdatedChatList(io, senderId), emitUpdatedChatList(io, recipientId)]);
         logger.info('Message sent via socket', { messageId: message._id, senderId, recipientId });
         callback({ message: populatedMessage });
       } catch (err) {
         logger.error('Message send failed in socket', { error: err.message, stack: err.stack, senderId: messageData.senderId });
-        callback({ error: err.message });
+        callback({ error: 'Failed to send message' });
       }
     });
 
@@ -468,8 +516,16 @@ module.exports = (app) => {
           .populate('recipientId', 'username virtualNumber photo')
           .populate('replyTo', 'content contentType senderId recipientId createdAt')
           .lean();
-        io.to(message.recipientId.toString()).emit('editMessage', populatedMessage);
-        io.to(message.senderId.toString()).emit('editMessage', populatedMessage);
+        io.to(message.recipientId.toString()).emit('editMessage', {
+          ...populatedMessage,
+          senderId: populatedMessage.senderId._id.toString(),
+          recipientId: populatedMessage.recipientId._id.toString(),
+        });
+        io.to(message.senderId.toString()).emit('editMessage', {
+          ...populatedMessage,
+          senderId: populatedMessage.senderId._id.toString(),
+          recipientId: populatedMessage.recipientId._id.toString(),
+        });
         callback({ message: populatedMessage });
       } catch (err) {
         logger.error('Edit message failed', { error: err.message, stack: err.stack, messageId });
@@ -503,27 +559,33 @@ module.exports = (app) => {
     socket.on('messageStatus', async ({ messageId, status }) => {
       try {
         if (!mongoose.isValidObjectId(messageId) || !['sent', 'delivered', 'read'].includes(status)) {
+          socket.emit('error', { message: 'Invalid messageId or status' });
           return;
         }
         const message = await Message.findById(messageId);
         if (!message || message.recipientId.toString() !== socket.user.id) {
+          socket.emit('error', { message: 'Unauthorized status update' });
           return;
         }
         message.status = status;
+        message.updatedAt = new Date();
         await message.save();
         io.to(message.senderId.toString()).emit('messageStatus', { messageIds: [messageId], status });
       } catch (err) {
         logger.error('Message status update failed', { error: err.message, stack: err.stack, messageId });
+        socket.emit('error', { message: 'Failed to update message status' });
       }
     });
 
     socket.on('batchMessageStatus', async ({ messageIds, status, recipientId }) => {
       try {
         if (!messageIds.every((id) => mongoose.isValidObjectId(id)) || !mongoose.isValidObjectId(recipientId) || recipientId !== socket.user.id) {
+          socket.emit('error', { message: 'Invalid messageIds or recipientId' });
           return;
         }
         const messages = await Message.find({ _id: { $in: messageIds }, recipientId });
         if (!messages.length) {
+          socket.emit('error', { message: 'No valid messages found' });
           return;
         }
         await Message.updateMany(
@@ -536,6 +598,7 @@ module.exports = (app) => {
         });
       } catch (err) {
         logger.error('Batch message status update failed', { error: err.message, stack: err.stack, recipientId });
+        socket.emit('error', { message: 'Failed to update batch message status' });
       }
     });
 
@@ -581,6 +644,7 @@ module.exports = (app) => {
         logger.warn('Unauthorized message sender', { senderId, authUserId: req.user._id });
         return res.status(403).json({ error: 'Unauthorized sender' });
       }
+      const recipient = await User.findById(recipientId).select('status').lean();
       const existingMessage = await Message.findOne({ clientMessageId })
         .populate('senderId', 'username virtualNumber photo')
         .populate('recipientId', 'username virtualNumber photo')
@@ -597,7 +661,7 @@ module.exports = (app) => {
         content,
         contentType,
         plaintextContent: plaintextContent || '',
-        status: 'sent',
+        status: recipient?.status === 'online' ? 'delivered' : 'sent',
         caption: caption || undefined,
         replyTo: replyTo && mongoose.isValidObjectId(replyTo) ? replyTo : undefined,
         originalFilename: req.body.originalFilename || undefined,
@@ -612,8 +676,33 @@ module.exports = (app) => {
         .populate('recipientId', 'username virtualNumber photo')
         .populate('replyTo', 'content contentType senderId recipientId createdAt')
         .lean();
-      io.to(recipientId).emit('message', populatedMessage);
-      io.to(senderId).emit('message', populatedMessage);
+      io.to(recipientId).emit('message', {
+        ...populatedMessage,
+        senderId: populatedMessage.senderId._id.toString(),
+        recipientId: populatedMessage.recipientId._id.toString(),
+        replyTo: populatedMessage.replyTo
+          ? {
+              ...populatedMessage.replyTo,
+              senderId: populatedMessage.replyTo.senderId.toString(),
+              recipientId: populatedMessage.replyTo.recipientId.toString(),
+            }
+          : null,
+      });
+      io.to(senderId).emit('message', {
+        ...populatedMessage,
+        senderId: populatedMessage.senderId._id.toString(),
+        recipientId: populatedMessage.recipientId._id.toString(),
+        replyTo: populatedMessage.replyTo
+          ? {
+              ...populatedMessage.replyTo,
+              senderId: populatedMessage.replyTo.senderId.toString(),
+              recipientId: populatedMessage.replyTo.recipientId.toString(),
+            }
+          : null,
+      });
+      if (recipient?.status === 'online') {
+        io.to(senderId).emit('messageStatus', { messageIds: [message._id], status: 'delivered' });
+      }
       await Promise.all([emitUpdatedChatList(io, senderId), emitUpdatedChatList(io, recipientId)]);
       logger.info('Message saved via /messages', { messageId: message._id, senderId, recipientId });
       res.status(201).json({ message: populatedMessage });
@@ -624,7 +713,7 @@ module.exports = (app) => {
   });
 
   router.get('/messages', authMiddleware, async (req, res) => {
-    const { userId, recipientId, limit = 100, skip = 0 } = req.query; // --- Updated: Increased default limit ---
+    const { userId, recipientId, limit = 100, skip = 0, since } = req.query; // --- Updated: Added 'since' parameter ---
     try {
       if (!req.user || !req.user._id) {
         logger.warn('User not authenticated in messages fetch request', { userId, recipientId });
@@ -634,12 +723,16 @@ module.exports = (app) => {
         logger.warn('Invalid or unauthorized messages request', { userId, recipientId, authUserId: req.user._id });
         return res.status(400).json({ error: 'Invalid or unauthorized request' });
       }
-      const messages = await Message.find({
+      let query = {
         $or: [
           { senderId: userId, recipientId },
           { senderId: recipientId, recipientId: userId },
         ],
-      })
+      };
+      if (since && !isNaN(Date.parse(since))) {
+        query.createdAt = { $gt: new Date(since) }; // Fetch messages after 'since' timestamp
+      }
+      const messages = await Message.find(query)
         .sort({ createdAt: 1 })
         .skip(parseInt(skip))
         .limit(parseInt(limit))
@@ -647,7 +740,6 @@ module.exports = (app) => {
         .populate('recipientId', 'username virtualNumber photo')
         .populate('replyTo', 'content contentType senderId recipientId createdAt')
         .lean();
-      // --- Updated: Mark delivered messages as read ---
       const deliveredMessageIds = messages
         .filter((msg) => msg.recipientId.toString() === userId && msg.status === 'delivered')
         .map((msg) => msg._id);
@@ -774,6 +866,7 @@ module.exports = (app) => {
         logger.warn('Invalid upload parameters', { userId, recipientId, clientMessageId, hasFile: !!req.file });
         return res.status(400).json({ error: 'Invalid or unauthorized parameters' });
       }
+      const recipient = await User.findById(recipientId).select('status').lean();
       const existingMessage = await Message.findOne({ clientMessageId })
         .populate('senderId', 'username virtualNumber photo')
         .populate('recipientId', 'username virtualNumber photo')
@@ -803,7 +896,7 @@ module.exports = (app) => {
         content: uploadResult.secure_url,
         contentType,
         plaintextContent: '',
-        status: 'sent',
+        status: recipient?.status === 'online' ? 'delivered' : 'sent',
         caption: caption || undefined,
         originalFilename: req.file.originalname,
         clientMessageId,
@@ -819,8 +912,33 @@ module.exports = (app) => {
         .lean();
       chatListCache.delete(`chatList:${userId}`);
       chatListCache.delete(`chatList:${recipientId}`);
-      io.to(recipientId).emit('message', populatedMessage);
-      io.to(userId).emit('message', populatedMessage);
+      io.to(recipientId).emit('message', {
+        ...populatedMessage,
+        senderId: populatedMessage.senderId._id.toString(),
+        recipientId: populatedMessage.recipientId._id.toString(),
+        replyTo: populatedMessage.replyTo
+          ? {
+              ...populatedMessage.replyTo,
+              senderId: populatedMessage.replyTo.senderId.toString(),
+              recipientId: populatedMessage.replyTo.recipientId.toString(),
+            }
+          : null,
+      });
+      io.to(userId).emit('message', {
+        ...populatedMessage,
+        senderId: populatedMessage.senderId._id.toString(),
+        recipientId: populatedMessage.recipientId._id.toString(),
+        replyTo: populatedMessage.replyTo
+          ? {
+              ...populatedMessage.replyTo,
+              senderId: populatedMessage.replyTo.senderId.toString(),
+              recipientId: populatedMessage.replyTo.recipientId.toString(),
+            }
+          : null,
+      });
+      if (recipient?.status === 'online') {
+        io.to(userId).emit('messageStatus', { messageIds: [message._id], status: 'delivered' });
+      }
       await Promise.all([emitUpdatedChatList(io, userId), emitUpdatedChatList(io, recipientId)]);
       logger.info('Media uploaded successfully', { userId, recipientId, messageId: message._id });
       res.json({ message: populatedMessage });
@@ -884,7 +1002,6 @@ module.exports = (app) => {
         return res.status(200).json({ message: 'Already logged out' });
       }
       await TokenBlacklist.create({ token });
-      // --- Updated: Disconnect Socket.IO sessions for the user ---
       const sockets = await io.in(req.user.id).fetchSockets();
       sockets.forEach((socket) => {
         socket.disconnect(true);
