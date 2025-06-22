@@ -83,7 +83,6 @@ const authLimiter = rateLimit({
   },
 });
 
-// Changed: Retry with exponential backoff
 const retryOperation = async (operation, maxRetries = 3, baseDelay = 1000) => {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
@@ -106,7 +105,6 @@ const authMiddleware = async (req, res, next) => {
 
   const token = authHeader.split(' ')[1];
   try {
-    // Changed: Retry blacklist check
     const blacklisted = await retryOperation(async () => {
       return await TokenBlacklist.findOne({ token }).lean();
     });
@@ -121,7 +119,6 @@ const authMiddleware = async (req, res, next) => {
       return res.status(401).json({ error: 'Invalid token: Invalid user ID' });
     }
 
-    // Changed: Retry user lookup
     const user = await retryOperation(async () => {
       return await User.findById(decoded.id).select('_id email virtualNumber role').lean();
     });
@@ -154,15 +151,15 @@ const authMiddleware = async (req, res, next) => {
 
 const registerSchema = Joi.object({
   email: Joi.string().email().required(),
-  password: Joi.string().min(8).required(), // Changed: Enforce 8 chars
+  password: Joi.string().min(8).required(),
   username: Joi.string().min(3).max(20).required(),
   country: Joi.string().length(2).uppercase().required(),
-  role: Joi.number().integer().min(0).max(1).optional().default(0),
+  role: Joi.number().integer().min(0).max(1).optional().default(0), // Changed: Ensured optional with default
 });
 
 const loginSchema = Joi.object({
   email: Joi.string().email().required(),
-  password: Joi.string().min(8).required(), // Changed: Enforce 8 chars
+  password: Joi.string().min(8).required(),
 });
 
 const generateVirtualNumber = async (countryCode, userId) => {
@@ -174,7 +171,6 @@ const generateVirtualNumber = async (countryCode, userId) => {
     const maxAttempts = 20;
 
     do {
-      // Changed: Use more efficient number generation
       const randomDigits = Math.floor(100000000 + Math.random() * 900000000).toString();
       virtualNumber = `+${countryCallingCode}${randomDigits}`;
       const existingUser = await User.findOne({ virtualNumber }).lean();
@@ -206,13 +202,14 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
 
     const { email, password, username, country, role = 0 } = req.body;
 
-    // Changed: Retry user check
     const existingUser = await retryOperation(async () => {
       return await User.findOne({ $or: [{ email }, { username }] }).lean();
     });
     if (existingUser) {
       logger.warn('Duplicate user', { email, username });
-      return res.status(400).json({ error: 'Email or username already exists' });
+      return res.status(400).json({
+        error: existingUser.email === email ? 'Email already exists' : 'Username already exists', // Changed: Specific error
+      });
     }
 
     const { publicKey, privateKey } = forge.pki.rsa.generateKeyPair({ bits: 2048 });
@@ -241,7 +238,6 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
     });
 
     if (req.file) {
-      // Changed: Retry Cloudinary upload
       const result = await retryOperation(async () => {
         return await new Promise((resolve, reject) => {
           cloudinary.uploader.upload_stream(
@@ -253,13 +249,12 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
       user.photo = result.secure_url;
     }
 
-    // Changed: Retry user save
     await retryOperation(async () => {
       await user.save();
     });
 
     const token = jwt.sign(
-      { id: user._id, email, virtualNumber, role: user.role },
+      { id: user._id.toString(), email, virtualNumber, role: user.role }, // Changed: Stringify _id
       process.env.JWT_SECRET,
       { expiresIn: '24h', algorithm: 'HS256' }
     );
@@ -267,7 +262,7 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
     logger.info('User registered successfully', { userId: user._id, email });
     res.status(201).json({
       token,
-      userId: user._id,
+      userId: user._id.toString(), // Changed: Stringify _id
       role: user.role,
       photo: user.photo,
       virtualNumber: user.virtualNumber,
@@ -288,7 +283,10 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
       file: req.file ? { mimetype: req.file.mimetype, size: req.file.size } : null,
     });
     if (error.code === 11000) {
-      return res.status(400).json({ error: 'Duplicate email, username, or virtual number' });
+      const field = Object.keys(error.keyPattern)[0];
+      return res.status(400).json({
+        error: `Duplicate ${field}: ${req.body[field] || 'value'} already exists`, // Changed: Specific error
+      });
     }
     if (error.name === 'ValidationError') {
       return res.status(400).json({ error: 'Invalid user data', details: error.message });
@@ -306,7 +304,6 @@ router.post('/login', authLimiter, async (req, res) => {
     }
 
     const { email, password } = req.body;
-    // Changed: Retry user lookup
     const user = await retryOperation(async () => {
       return await User.findOne({ email }).select('+privateKey').lean();
     });
@@ -320,12 +317,11 @@ router.post('/login', authLimiter, async (req, res) => {
     }
 
     const token = jwt.sign(
-      { id: user._id, email, virtualNumber: user.virtualNumber, role: user.role },
+      { id: user._id.toString(), email, virtualNumber: user.virtualNumber, role: user.role }, // Changed: Stringify _id
       process.env.JWT_SECRET,
       { expiresIn: '24h', algorithm: 'HS256' }
     );
 
-    // Changed: Update status and lastSeen
     await retryOperation(async () => {
       await User.updateOne(
         { _id: user._id },
@@ -336,7 +332,7 @@ router.post('/login', authLimiter, async (req, res) => {
     logger.info('Login successful', { userId: user._id, email });
     res.json({
       token,
-      userId: user._id,
+      userId: user._id.toString(), // Changed: Stringify _id
       role: user.role,
       photo: user.photo || 'https://placehold.co/40x40',
       virtualNumber: user.virtualNumber || '',
@@ -357,12 +353,10 @@ router.post('/logout', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'No token provided' });
     }
 
-    // Changed: Retry blacklist operation
     await retryOperation(async () => {
       await TokenBlacklist.create({ token });
     });
 
-    // Changed: Update status to offline
     await retryOperation(async () => {
       await User.updateOne(
         { _id: req.user.id },
@@ -401,7 +395,6 @@ router.post('/update_country', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Invalid user ID' });
     }
 
-    // Changed: Retry user update
     const user = await retryOperation(async () => {
       return await User.findById(userId);
     });
@@ -443,7 +436,6 @@ router.post('/update_photo', authMiddleware, upload.single('photo'), async (req,
       return res.status(400).json({ error: 'Invalid user ID' });
     }
 
-    // Changed: Retry user lookup and update
     const user = await retryOperation(async () => {
       return await User.findById(userId);
     });
@@ -497,7 +489,6 @@ router.post('/update_username', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Invalid user ID' });
     }
 
-    // Changed: Retry user operations
     const user = await retryOperation(async () => {
       return await User.findById(userId);
     });
@@ -529,7 +520,6 @@ router.post('/update_username', authMiddleware, async (req, res) => {
 
 router.get('/contacts', authMiddleware, async (req, res) => {
   try {
-    // Changed: Add pagination
     const { page = 1, limit = 50 } = req.query;
     const skip = (parseInt(page) - 1) * parseInt(limit);
     const user = await retryOperation(async () => {
@@ -547,7 +537,7 @@ router.get('/contacts', authMiddleware, async (req, res) => {
     }
 
     const contacts = user.contacts.map((contact) => ({
-      id: contact._id,
+      id: contact._id.toString(), // Changed: Stringify _id
       username: contact.username,
       virtualNumber: contact.virtualNumber,
       photo: contact.photo || 'https://placehold.co/40x40',
@@ -555,7 +545,6 @@ router.get('/contacts', authMiddleware, async (req, res) => {
       lastSeen: contact.lastSeen,
     }));
 
-    // Changed: Include pagination metadata
     const totalContacts = user.contacts.length;
     res.json({
       contacts,
@@ -580,7 +569,6 @@ router.get('/public_key/:userId', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Invalid user ID' });
     }
 
-    // Changed: Retry user lookup
     const user = await retryOperation(async () => {
       return await User.findById(userId).select('publicKey').lean();
     });
@@ -610,7 +598,6 @@ router.post('/refresh', authLimiter, authMiddleware, async (req, res) => {
       return res.status(401).json({ error: 'Invalid token' });
     }
 
-    // Changed: Retry user lookup
     const user = await retryOperation(async () => {
       return await User.findById(req.user.id).select('+privateKey').lean();
     });
@@ -619,7 +606,6 @@ router.post('/refresh', authLimiter, authMiddleware, async (req, res) => {
       return res.status(401).json({ error: 'User not found' });
     }
 
-    // Blacklist the old token
     const oldToken = req.token;
     if (oldToken) {
       await retryOperation(async () => {
@@ -629,7 +615,7 @@ router.post('/refresh', authLimiter, authMiddleware, async (req, res) => {
     }
 
     const newToken = jwt.sign(
-      { id: user._id, email: user.email, virtualNumber: user.virtualNumber, role: user.role },
+      { id: user._id.toString(), email: user.email, virtualNumber: user.virtualNumber, role: user.role }, // Changed: Stringify _id
       process.env.JWT_SECRET,
       { expiresIn: '24h', algorithm: 'HS256' }
     );
@@ -637,7 +623,7 @@ router.post('/refresh', authLimiter, authMiddleware, async (req, res) => {
     logger.info('Token refreshed successfully', { userId: user._id });
     res.json({
       token: newToken,
-      userId: user._id,
+      userId: user._id.toString(), // Changed: Stringify _id
       role: user.role,
       photo: user.photo || 'https://placehold.co/40x40',
       virtualNumber: user.virtualNumber || '',

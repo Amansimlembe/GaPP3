@@ -3,8 +3,9 @@ import axios from 'axios';
 import { motion } from 'framer-motion';
 import { getCountries } from 'libphonenumber-js';
 import { FaEye, FaEyeSlash } from 'react-icons/fa';
-import { useDispatch } from 'react-redux'; // Changed: Add Redux integration
-import { setAuth } from '../store'; // Changed: Import Redux action
+import { useDispatch } from 'react-redux';
+import { setAuth } from '../store';
+import { useNavigate } from 'react-router-dom'; // Changed: Add navigation
 
 const LoginScreen = () => {
   const [email, setEmail] = useState('');
@@ -20,9 +21,9 @@ const LoginScreen = () => {
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [isCountryInputFocused, setIsCountryInputFocused] = useState(false);
   const countryInputRef = useRef(null);
-  const dispatch = useDispatch(); // Changed: Redux dispatch
+  const dispatch = useDispatch();
+  const navigate = useNavigate(); // Changed: Initialize navigation
 
-  // Changed: Memoize countries
   const countries = useMemo(() => {
     try {
       return getCountries().map((code) => ({
@@ -36,22 +37,22 @@ const LoginScreen = () => {
     }
   }, []);
 
-  // Changed: Memoize filtered countries
-  const filteredCountries = useMemo(() =>
-    countries.filter((c) =>
-      c.name.toLowerCase().includes(search.toLowerCase()) ||
-      c.code.toLowerCase().includes(search.toLowerCase())
-    ),
+  const filteredCountries = useMemo(
+    () =>
+      countries.filter(
+        (c) =>
+          c.name.toLowerCase().includes(search.toLowerCase()) ||
+          c.code.toLowerCase().includes(search.toLowerCase())
+      ),
     [countries, search]
   );
 
-  // Changed: Optimize form validation
   const validateForm = useCallback(() => {
     if (!email || !/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(email)) {
       setError('Please enter a valid email');
       return false;
     }
-    if (!password || password.length < 8) { // Changed: Enforce 8 chars
+    if (!password || password.length < 8) {
       setError('Password must be at least 8 characters');
       return false;
     }
@@ -72,7 +73,6 @@ const LoginScreen = () => {
     return true;
   }, [email, password, username, selectedCountry, confirmPassword, isLogin]);
 
-  // Changed: Optimize geolocation check
   const checkLocation = useCallback(async (selectedCountry) => {
     if (isLogin) return true;
     try {
@@ -80,7 +80,6 @@ const LoginScreen = () => {
         navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 10000 })
       );
       const { latitude, longitude } = position.coords;
-      // Changed: Use retry for geolocation API
       const response = await axios.get(
         `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=en`,
         { timeout: 5000 }
@@ -98,18 +97,16 @@ const LoginScreen = () => {
     }
   }, [isLogin]);
 
-  // Changed: Enhanced retry logic with offline detection
   const retryRequest = async (data, config, retries = 3, baseDelay = 1000) => {
     for (let i = 0; i < retries; i++) {
       try {
-        // Changed: Check online status
         if (!navigator.onLine) {
           throw new Error('You are offline. Please check your internet connection.');
         }
         const response = await axios.post(
           `https://gapp-6yc3.onrender.com/auth/${isLogin ? 'login' : 'register'}`,
           data,
-          { ...config, timeout: 10000 } // Changed: Add timeout
+          { ...config, timeout: 10000 }
         );
         return response.data;
       } catch (err) {
@@ -120,12 +117,21 @@ const LoginScreen = () => {
           stack: err.stack,
           requestData: isLogin ? data : 'FormData (multipart)',
         });
-        if (isLogin && err.response?.status === 401 && 
-            (err.response?.data?.error === 'Email not registered' || 
-             err.response?.data?.error === 'Wrong password')) {
+        if (
+          isLogin &&
+          err.response?.status === 401 &&
+          (err.response?.data?.error === 'Email not registered' ||
+            err.response?.data?.error === 'Wrong password')
+        ) {
           throw err;
         }
-        if (i < retries - 1 && (err.response?.status === 429 || err.response?.status >= 500 || err.code === 'ECONNABORTED' || !navigator.onLine)) {
+        if (
+          i < retries - 1 &&
+          (err.response?.status === 429 ||
+            err.response?.status >= 500 ||
+            err.code === 'ECONNABORTED' ||
+            !navigator.onLine)
+        ) {
           await new Promise((resolve) => setTimeout(resolve, Math.pow(2, i) * baseDelay));
           continue;
         }
@@ -154,6 +160,7 @@ const LoginScreen = () => {
             formData.append('password', password);
             formData.append('username', username);
             formData.append('country', selectedCountry);
+            formData.append('role', '0'); // Changed: Add default role
             return formData;
           })();
 
@@ -163,8 +170,8 @@ const LoginScreen = () => {
 
       const response = await retryRequest(data, config);
 
-      // Changed: Use Redux to store auth state
-      dispatch(setAuth({
+      // Changed: Dispatch auth state and navigate
+      await dispatch(setAuth({
         token: response.token,
         userId: response.userId,
         role: response.role,
@@ -173,6 +180,8 @@ const LoginScreen = () => {
         username: response.username,
         privateKey: response.privateKey || '',
       }));
+
+      navigate('/feed'); // Changed: Navigate to main app
     } catch (error) {
       console.error(`${isLogin ? 'Login' : 'Register'} error:`, {
         status: error.response?.status,
@@ -185,7 +194,7 @@ const LoginScreen = () => {
           ? 'You are offline. Please check your internet connection.'
           : error.response?.status === 429
           ? 'Too many requests, please try again later'
-          : error.response?.data?.error ||
+          : error.response?.data?.error || // Changed: Prioritize backend error
             error.response?.data?.details ||
             error.message ||
             (isLogin ? 'Login failed' : 'Registration failed. Please try again.');
@@ -195,7 +204,6 @@ const LoginScreen = () => {
     }
   };
 
-  // Changed: Optimize reset inputs
   const resetInputs = useCallback(() => {
     setEmail('');
     setPassword('');
@@ -215,19 +223,25 @@ const LoginScreen = () => {
     setIsCountryInputFocused(false);
   }, []);
 
-  const handleCountryKeyDown = useCallback((e) => {
-    if (e.key === 'Enter' && filteredCountries.length > 0) {
-      e.preventDefault();
-      handleCountrySelect(filteredCountries[0]);
-    }
-  }, [filteredCountries, handleCountrySelect]);
+  const handleCountryKeyDown = useCallback(
+    (e) => {
+      if (e.key === 'Enter' && filteredCountries.length > 0) {
+        e.preventDefault();
+        handleCountrySelect(filteredCountries[0]);
+      }
+    },
+    [filteredCountries, handleCountrySelect]
+  );
 
-  const handleCountryChange = useCallback((e) => {
-    setSearch(e.target.value);
-    if (selectedCountry) {
-      setSelectedCountry('');
-    }
-  }, [selectedCountry]);
+  const handleCountryChange = useCallback(
+    (e) => {
+      setSearch(e.target.value);
+      if (selectedCountry) {
+        setSelectedCountry('');
+      }
+    },
+    [selectedCountry]
+  );
 
   useEffect(() => {
     const handleClickOutside = (e) => {
@@ -295,7 +309,9 @@ const LoginScreen = () => {
                           <li
                             key={c.code}
                             onClick={() => handleCountrySelect(c)}
-                            className={`p-2 cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-600 ${index === 0 ? 'bg-gray-100 dark:bg-gray-600' : ''}`}
+                            className={`p-2 cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-600 ${
+                              index === 0 ? 'bg-gray-100 dark:bg-gray-600' : ''
+                            }`}
                             role="option"
                             aria-selected={index === 0}
                           >
@@ -367,7 +383,9 @@ const LoginScreen = () => {
           )}
           <button
             type="submit"
-            className={`w-full bg-primary text-white p-2 rounded-lg hover:bg-secondary focus:outline-none focus:ring-2 focus:ring-primary ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}
+            className={`w-full bg-primary text-white p-2 rounded-lg hover:bg-secondary focus:outline-none focus:ring-2 focus:ring-primary ${
+              loading ? 'opacity-50 cursor-not-allowed' : ''
+            }`}
             disabled={loading}
             aria-label={isLogin ? 'Login' : 'Register'}
           >
@@ -383,7 +401,9 @@ const LoginScreen = () => {
                 resetInputs();
               }
             }}
-            className={`text-primary cursor-pointer hover:underline focus:outline-none ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}
+            className={`text-primary cursor-pointer hover:underline focus:outline-none ${
+              loading ? 'opacity-50 cursor-not-allowed' : ''
+            }`}
             role="button"
             tabIndex={0}
             onKeyDown={(e) => e.key === 'Enter' && !loading && (setIsLogin(!isLogin), resetInputs())}

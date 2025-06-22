@@ -760,7 +760,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
                 <span className="timestamp">{new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                 {isMine && (
                   <span className="message-status">
-                    {msg.status === 'pending' && <span className="status-pending">🕒</span>}
+                    {msg.status === 'pending' && <span className="status-pending">o</span>}
                     {msg.status === 'sent' && <span className="status-sent">✓</span>}
                     {msg.status === 'delivered' && <span className="status-delivered">✓✓</span>}
                     {msg.status === 'read' && <span className="status-read">✓✓</span>}
