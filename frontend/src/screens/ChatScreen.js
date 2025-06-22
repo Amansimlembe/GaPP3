@@ -89,7 +89,8 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     } catch (err) {
       console.error('getPublicKey error:', err.message);
       if (err.response?.status === 401) {
-            setTimeout(() => handleLogout(), 5000);
+        setError('Session expired, please log in again');
+        setTimeout(() => handleLogout(), 5000);
       }
       logClientError('Failed to fetch public key', err);
       throw new Error('Failed to fetch public key');
@@ -145,12 +146,14 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       console.error('ChatList fetch error:', err.message, err.response?.data);
       logClientError('Chat list fetch failed', err);
       if (err.response?.status === 401) {
+        setError('Session expired');
         setTimeout(() => handleLogout(), 5000);
       } else if (err.response?.status === 500 && !isRetry && retryCountRef.current.chatList < maxRetries) {
         retryCountRef.current.chatList += 1;
         setTimeout(() => fetchChatList(true), 1000 * retryCountRef.current.chatList);
-      
+        setError(`Retrying chat list fetch (${retryCountRef.current.chatList}/${maxRetries})...`);
       } else {
+        //setError(`Failed to load chat list: ${err.response?.data?.error || 'Unknown error'}. Click to retry...`);
         retryCountRef.current.chatList = 0;
       }
     } finally {
@@ -181,6 +184,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         setAuth('', '', '', '', '', '');
         navigate('/');
       } else {
+        setError('Failed to logout');
         logClientError('Logout failed', err);
       }
     }
@@ -222,12 +226,14 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       console.error('fetchMessages error:', err.message, err.response?.data);
       logClientError('Messages fetch failed', err);
       if (err.response?.status === 401) {
+       // setError('Session expired');
         setTimeout(() => handleLogout(), 5000);
       } else if (err.response?.status === 500 && !isRetry && retryCountRef.current.messages < maxRetries) {
         retryCountRef.current.messages += 1;
         setTimeout(() => fetchMessages(chatId, true), 1000 * retryCountRef.current.messages);
-      
+        setError(`Retrying messages fetch (${retryCountRef.current.messages}/${maxRetries})...`);
       } else {
+        //setError(`Failed to load messages: ${err.response?.data?.error || 'Unknown error'}`);
         retryCountRef.current.messages = 0;
       }
     }
@@ -278,6 +284,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     try {
       if (!socket.connected) {
         offlineQueueRef.current.push(messageData);
+        setError('You are offline. Message will be sent when reconnected.');
         return;
       }
       const recipientPublicKey = await getPublicKey(selectedChat);
@@ -383,6 +390,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     try {
       if (!socket.connected) {
         offlineQueueRef.current.push(tempMessage);
+        setError('You are offline. File will be sent when reconnected.');
         return;
       }
       const formData = new FormData();
