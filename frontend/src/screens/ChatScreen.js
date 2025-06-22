@@ -303,7 +303,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       if (!socket.connected) {
         offlineQueueRef.current.push(messageData);
         localStorage.setItem('offlineMessageQueue', JSON.stringify(offlineQueueRef.current));
-        setErrors((prev) => [...prev, 'You are offline. Message will be sent when reconnected.']);
+       // setErrors((prev) => [...prev, 'You are offline. Message will be sent when reconnected.']);
         return;
       }
       const recipientPublicKey = await getPublicKey(selectedChat);
@@ -439,7 +439,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       if (!socket.connected) {
         offlineQueueRef.current.push({ ...tempMessage, file: selectedFile });
         localStorage.setItem('offlineMessageQueue', JSON.stringify(offlineQueueRef.current));
-        setErrors((prev) => [...prev, 'You are offline. File will be sent when reconnected.']);
+        //setErrors((prev) => [...prev, 'You are offline. File will be sent when reconnected.']);
         return;
       }
       const formData = new FormData();
