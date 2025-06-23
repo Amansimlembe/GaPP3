@@ -149,7 +149,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       if (socket) {
         socket.emit('leave', userId);
         socket.disconnect();
-        await axios.post(`${BASE_URL}/auth/logout`, {}, {
+        await axios.post(`${BASE_URL}/social/logout`, {}, {
           headers: { Authorization: `Bearer ${token}` },
           timeout: 5000,
         });
