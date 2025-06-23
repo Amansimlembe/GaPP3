@@ -6,10 +6,14 @@ import { openDB } from 'idb';
 
 
 
+
+
 // store.js
 const DB_NAME = 'chatApp';
 const STORE_NAME = 'reduxState';
-const VERSION = 2; // Incremented version
+const VERSION = 2;
+const MAX_MESSAGES_PER_CHAT = 100; // Define constant
+const MESSAGE_TTL = 30 * 24 * 60 * 60 * 1000; // 30 days in milliseconds
 
 const initDB = async () => {
   return openDB(DB_NAME, VERSION, {
@@ -18,12 +22,13 @@ const initDB = async () => {
         db.createObjectStore(STORE_NAME, { keyPath: 'key' });
       }
       if (oldVersion < 2) {
-        // Handle future schema changes if needed
         console.log('Upgraded IndexedDB from version', oldVersion, 'to', newVersion);
       }
     },
   });
 };
+
+
 
 
 // ObjectId validation

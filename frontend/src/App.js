@@ -323,6 +323,10 @@ useEffect(() => {
   );
 };
 
+
+
+
+// App.js (only showing the modified AuthenticatedApp component)
 const AuthenticatedApp = ({
   token,
   userId,
@@ -336,12 +340,12 @@ const AuthenticatedApp = ({
   toggleTheme,
   handleChatNavigation,
   theme,
-  handleLogout, // Changed: Receive logout handler
+  handleLogout,
 }) => {
   const location = useLocation();
   const dispatch = useDispatch();
   const { selectedChat } = useSelector((state) => state.messages);
-  const isChatRouteWithSelectedChat = location.pathname === '/chat' && selectedChat;
+  const isChatRouteWithSelectedChat = location.pathname === '/chat' && !!selectedChat; // Added !! for explicit boolean
 
   useEffect(() => {
     console.log('Current route:', location.pathname);
@@ -388,7 +392,7 @@ const AuthenticatedApp = ({
                 username={username}
                 virtualNumber={virtualNumber}
                 photo={photo}
-                onLogout={handleLogout} // Changed: Pass logout handler
+                onLogout={handleLogout}
               />
             }
           />
@@ -400,6 +404,7 @@ const AuthenticatedApp = ({
         animate={{ y: isChatRouteWithSelectedChat ? 200 : 0 }}
         transition={{ duration: 0.3 }}
         className="fixed bottom-0 left-0 right-0 bg-primary text-white p-2 flex justify-around items-center shadow-lg z-20"
+        key={location.pathname} // Force re-render on route change
       >
         <NavLink
           to="/feed"
@@ -451,5 +456,7 @@ const AuthenticatedApp = ({
     </div>
   );
 };
+
+
 
 export default App;
