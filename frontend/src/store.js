@@ -1,22 +1,30 @@
 import { configureStore, createSlice } from '@reduxjs/toolkit';
 import { openDB } from 'idb';
 
+
+
+
+
+
+// store.js
 const DB_NAME = 'chatApp';
 const STORE_NAME = 'reduxState';
-const VERSION = 1;
-const MESSAGE_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days in ms
-const MAX_MESSAGES_PER_CHAT = 1000;
+const VERSION = 2; // Incremented version
 
-// Initialize IndexedDB
 const initDB = async () => {
   return openDB(DB_NAME, VERSION, {
-    upgrade(db) {
-      if (!db.objectStoreNames.contains(STORE_NAME)) {
+    upgrade(db, oldVersion, newVersion, transaction) {
+      if (oldVersion < 1) {
         db.createObjectStore(STORE_NAME, { keyPath: 'key' });
+      }
+      if (oldVersion < 2) {
+        // Handle future schema changes if needed
+        console.log('Upgraded IndexedDB from version', oldVersion, 'to', newVersion);
       }
     },
   });
 };
+
 
 // ObjectId validation
 const isValidObjectId = (id) => /^[0-9a-fA-F]{24}$/.test(id);

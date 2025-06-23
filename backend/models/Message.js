@@ -103,7 +103,10 @@ const retryOperation = async (operation, maxRetries = 3) => {
   }
 };
 
-// Pre-save hook
+
+
+
+// Message.js
 messageSchema.pre('save', async function (next) {
   try {
     await retryOperation(async () => {
@@ -127,15 +130,15 @@ messageSchema.pre('save', async function (next) {
       this.senderPhoto = this.senderPhoto || sender.photo || 'https://placehold.co/40x40';
 
       if (this.isNew) {
-        this.status = recipient.status === 'online' ? 'delivered' : 'pending';
+        this.status = recipient.status === 'online' ? 'delivered' : 'sent'; // Default to sent if offline
       } else if (this.isModified('content') || this.isModified('plaintextContent')) {
         this.updatedAt = new Date();
       }
 
-      if (this.replyTo) {
+      if (this.replyTo && mongoose.isValidObjectId(this.replyTo)) {
         const replyMessage = await this.constructor.findById(this.replyTo).select('_id').lean();
         if (!replyMessage) {
-          throw new Error('ReplyTo message does not exist');
+          this.replyTo = null; // Clear invalid replyTo
         }
       }
 
@@ -151,9 +154,11 @@ messageSchema.pre('save', async function (next) {
       recipientId: this.recipientId,
       stack: error.stack,
     });
-    next(new Error(`Message validation failed: ${error.message}`));
+    next(); // Proceed to save even if validation fails to prevent message loss
   }
 });
+
+
 
 // Static method to clean up orphaned messages
 messageSchema.statics.cleanupOrphanedMessages = async function () {

@@ -294,22 +294,42 @@ module.exports = (app) => {
     }
   });
 
-  io.on('connection', (socket) => {
-    logger.info('Socket.IO connection', { socketId: socket.id, userId: socket.user?.id });
 
-    socket.on('join', async (userId) => {
-      if (!mongoose.isValidObjectId(userId) || userId !== socket.user.id) {
-        socket.emit('error', { message: 'Invalid join attempt' });
-        return;
+
+  
+
+io.on('connection', (socket) => {
+  logger.info('Socket.IO connection', { socketId: socket.id, userId: socket.user?.id });
+
+  socket.on('join', async (userId) => {
+    if (!mongoose.isValidObjectId(userId) || userId !== socket.user.id) {
+      socket.emit('error', { message: 'Invalid join attempt' });
+      return;
+    }
+    socket.join(userId);
+    await retryOperation(async () => {
+      const user = await User.findByIdAndUpdate(userId, { status: 'online', lastSeen: new Date() }, { new: true }).lean();
+      io.to(userId).emit('userStatus', { userId, status: 'online', lastSeen: new Date() });
+      await emitUpdatedChatList(io, userId);
+      // Emit pending messages
+      const pendingMessages = await Message.find({
+        recipientId: userId,
+        status: { $in: ['pending', 'sent'] },
+      }).lean();
+      for (const msg of pendingMessages) {
+        io.to(userId).emit('message', {
+          ...msg,
+          senderId: msg.senderId.toString(),
+          recipientId: msg.recipientId.toString(),
+        });
+        await Message.updateOne({ _id: msg._id }, { status: 'delivered', updatedAt: new Date() });
+        io.to(msg.senderId.toString()).emit('messageStatus', { messageIds: [msg._id], status: 'delivered' });
       }
-      socket.join(userId);
-      await retryOperation(async () => {
-        await User.findByIdAndUpdate(userId, { status: 'online', lastSeen: new Date() }, { new: true });
-        io.to(userId).emit('userStatus', { userId, status: 'online', lastSeen: new Date() });
-        await emitUpdatedChatList(io, userId);
-      });
-      logger.info('User joined', { userId });
     });
+    logger.info('User joined', { userId });
+  });
+
+
 
     socket.on('reconnect', async (userId) => {
       if (!mongoose.isValidObjectId(userId) || userId !== socket.user.id) {
@@ -658,85 +678,91 @@ module.exports = (app) => {
     }
   });
 
-  router.post('/messages', authMiddleware, messageLimiter, async (req, res) => {
-    try {
-      const { error } = messageSchema.validate(req.body);
-      if (error) return res.status(400).json({ error: error.details[0].message });
-      const {
+
+
+
+  // social.js
+router.post('/messages', authMiddleware, messageLimiter, async (req, res) => {
+  try {
+    const { error } = messageSchema.validate(req.body);
+    if (error) return res.status(400).json({ error: error.details[0].message });
+    const {
+      senderId,
+      recipientId,
+      content,
+      contentType,
+      plaintextContent,
+      caption,
+      replyTo,
+      clientMessageId,
+      senderVirtualNumber,
+      senderUsername,
+      senderPhoto,
+    } = req.body;
+    if (senderId !== req.user._id.toString()) return res.status(403).json({ error: 'Unauthorized sender' });
+    await retryOperation(async () => {
+      const recipient = await User.findById(recipientId).select('status').lean();
+      if (!recipient) return res.status(404).json({ error: 'Recipient not found' });
+      const existingMessage = await Message.findOne({ clientMessageId }).lean();
+      if (existingMessage) return res.status(200).json({ message: existingMessage });
+      const sender = await User.findById(senderId).select('virtualNumber username photo').lean();
+      const message = new Message({
         senderId,
         recipientId,
-        content,
+        content: content || '',
         contentType,
-        plaintextContent,
+        plaintextContent: plaintextContent || '',
+        status: recipient.status === 'online' ? 'delivered' : 'sent',
         caption,
-        replyTo,
+        replyTo: replyTo && mongoose.isValidObjectId(replyTo) ? replyTo : undefined,
+        originalFilename: req.body.originalFilename,
         clientMessageId,
-        senderVirtualNumber,
-        senderUsername,
-        senderPhoto,
-      } = req.body;
-      if (senderId !== req.user._id.toString()) return res.status(403).json({ error: 'Unauthorized sender' });
-      await retryOperation(async () => {
-        const recipient = await User.findById(recipientId).select('status').lean();
-        const existingMessage = await Message.findOne({ clientMessageId }).lean();
-        if (existingMessage) return res.status(200).json({ message: existingMessage });
-        const sender = await User.findById(senderId).select('virtualNumber username photo').lean();
-        const message = new Message({
-          senderId,
-          recipientId,
-          content: content || '',
-          contentType,
-          plaintextContent: plaintextContent || '',
-          status: recipient?.status === 'online' ? 'delivered' : 'sent',
-          caption,
-          replyTo: replyTo && mongoose.isValidObjectId(replyTo) ? replyTo : undefined,
-          originalFilename: req.body.originalFilename,
-          clientMessageId,
-          senderVirtualNumber: senderVirtualNumber || sender.virtualNumber,
-          senderUsername: senderUsername || sender.username,
-          senderPhoto: senderPhoto || sender.photo,
-        });
-        await message.save();
-        const populatedMessage = await Message.findById(message._id)
-          .populate('senderId', 'username virtualNumber photo')
-          .populate('recipientId', 'username virtualNumber photo')
-          .populate('replyTo', 'content contentType senderId recipientId createdAt')
-          .lean();
-        chatListCache.delete(`chatList:${senderId}`);
-        chatListCache.delete(`chatList:${recipientId}`);
-        io.to(recipientId).emit('message', {
-          ...populatedMessage,
-          senderId: populatedMessage.senderId._id.toString(),
-          recipientId: populatedMessage.recipientId._id.toString(),
-          replyTo: populatedMessage.replyTo
-            ? {
-                ...populatedMessage.replyTo,
-                senderId: populatedMessage.replyTo.senderId.toString(),
-                recipientId: populatedMessage.replyTo.recipientId.toString(),
-              }
-            : null,
-        });
-        io.to(senderId).emit('message', {
-          ...populatedMessage,
-          senderId: populatedMessage.senderId._id.toString(),
-          recipientId: populatedMessage.recipientId._id.toString(),
-          replyTo: populatedMessage.replyTo
-            ? {
-                ...populatedMessage.replyTo,
-                senderId: populatedMessage.replyTo.senderId.toString(),
-                recipientId: populatedMessage.replyTo.recipientId.toString(),
-              }
-            : null,
-        });
-        io.to(senderId).emit('messageStatus', { messageIds: [message._id], status: recipient?.status === 'online' ? 'delivered' : 'sent' });
-        await Promise.all([emitUpdatedChatList(io, senderId), emitUpdatedChatList(io, recipientId)]);
-        res.status(201).json({ message: populatedMessage });
+        senderVirtualNumber: senderVirtualNumber || sender.virtualNumber,
+        senderUsername: senderUsername || sender.username,
+        senderPhoto: senderPhoto || sender.photo,
       });
-    } catch (error) {
-      logger.error('Save message error', { error: error.message, senderId: req.body.senderId });
-      res.status(500).json({ error: 'Failed to save message' });
-    }
-  });
+      await message.save();
+      const populatedMessage = await Message.findById(message._id)
+        .populate('senderId', 'username virtualNumber photo')
+        .populate('recipientId', 'username virtualNumber photo')
+        .populate('replyTo', 'content contentType senderId recipientId createdAt')
+        .lean();
+      io.to(recipientId).emit('message', {
+        ...populatedMessage,
+        senderId: populatedMessage.senderId._id.toString(),
+        recipientId: populatedMessage.recipientId._id.toString(),
+        replyTo: populatedMessage.replyTo
+          ? {
+              ...populatedMessage.replyTo,
+              senderId: populatedMessage.replyTo.senderId.toString(),
+              recipientId: populatedMessage.replyTo.recipientId.toString(),
+            }
+          : null,
+      });
+      io.to(senderId).emit('message', {
+        ...populatedMessage,
+        senderId: populatedMessage.senderId._id.toString(),
+        recipientId: populatedMessage.recipientId._id.toString(),
+        replyTo: populatedMessage.replyTo
+          ? {
+              ...populatedMessage.replyTo,
+              senderId: populatedMessage.replyTo.senderId.toString(),
+              recipientId: populatedMessage.replyTo.recipientId.toString(),
+            }
+          : null,
+      });
+      io.to(senderId).emit('messageStatus', { messageIds: [message._id], status: recipient.status === 'online' ? 'delivered' : 'sent' });
+      await Promise.all([emitUpdatedChatList(io, senderId), emitUpdatedChatList(io, recipientId)]);
+      res.status(201).json({ message: populatedMessage });
+    });
+  } catch (error) {
+    logger.error('Save message error', { error: error.message, senderId: req.body.senderId });
+    res.status(500).json({ error: 'Failed to save message' });
+  }
+});
+
+
+
 
   router.post('/edit_message', authMiddleware, async (req, res) => {
     try {

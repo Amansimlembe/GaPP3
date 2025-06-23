@@ -132,77 +132,83 @@ const App = () => {
     }
   }, [dispatch, token, userId, socket]);
 
-  // Changed: Initialize socket reactively based on auth state
-  useEffect(() => {
-    if (!token || !userId) {
-      console.warn('Invalid token or userId, skipping socket initialization');
-      if (socket) {
-        socket.disconnect();
-        setSocket(null);
-      }
-      return;
-    }
 
-    const newSocket = io(BASE_URL, {
-      auth: { token, userId },
-      transports: ['websocket', 'polling'],
-      reconnectionAttempts: 5,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 5000,
-      timeout: 10000,
-    });
-    setSocket(newSocket);
 
-    newSocket.on('connect', () => {
-      newSocket.emit('join', { userId });
-      console.log('Socket connected:', newSocket.id);
-    });
-
-    newSocket.on('connect_error', async (error) => {
-      console.error('Socket connect error:', error.message);
-      if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
-        setError('Authentication error, logging out');
-        await handleLogout();
-      }
-    });
-
-    newSocket.on('disconnect', (reason) => {
-      console.warn('Socket disconnected:', reason);
-      if (reason === 'io server disconnect' && navigator.onLine) {
-        newSocket.connect();
-      }
-    });
-
-    newSocket.on('message', (msg) => {
-      if (msg.recipientId === userId && (!selectedChat || selectedChat !== msg.senderId)) {
-        setChatNotifications((prev) => prev + 1);
-      }
-    });
-
-    newSocket.on('newContact', (contactData) => {
-      console.log('New contact:', contactData);
-    });
-
-    // Changed: Handle online/offline events
-    const handleOnline = () => newSocket.connect();
-    const handleOffline = () => console.warn('Offline: Socket disconnected');
-    window.addEventListener('online', handleOnline);
-    window.removeEventListener('offline', handleOffline);
-
-    return () => {
-      newSocket.emit('leave', userId);
-      newSocket.off('connect');
-      newSocket.off('connect_error');
-      newSocket.off('disconnect');
-      newSocket.off('message');
-      newSocket.off('newContact');
-      newSocket.disconnect();
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
+  // App.js
+useEffect(() => {
+  if (!token || !userId) {
+    console.warn('Invalid token or userId, skipping socket initialization');
+    if (socket) {
+      socket.disconnect();
       setSocket(null);
-      console.log('Socket cleanup');
-    };
-  }, [token, userId, selectedChat, handleLogout]); // Changed: Depend on token and userId
+    }
+    return;
+  }
+
+  const newSocket = io(BASE_URL, {
+    auth: { token, userId },
+    transports: ['websocket', 'polling'],
+    reconnectionAttempts: 10, // Increased attempts
+    reconnectionDelay: 500,
+    reconnectionDelayMax: 3000,
+    timeout: 5000,
+  });
+  setSocket(newSocket);
+
+  newSocket.on('connect', () => {
+    newSocket.emit('join', userId); // Use single userId
+    console.log('Socket connected:', newSocket.id);
+    refreshToken(); // Refresh token on connect
+  });
+
+  newSocket.on('connect_error', async (error) => {
+    console.error(error.message.includes('Socket connect error:', error.message));
+    if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
+      setError('Authentication error, logging out');
+      await handleLogout();
+    } else {
+      console.warn('Socket reconnecting:', error.message);
+    }
+  });
+
+  newSocket.on('disconnect', (reason) => {
+    console.warn('Socket disconnected:', reason);
+    if (reason === 'io server disconnect' && navigator.onLine) {
+      newSocket.connect();
+    }
+  });
+
+  newSocket.on('message', (msg) => {
+    if (msg.recipientId === userId && (!selectedChat || selectedChat !== msg.senderId)) {
+      setChatNotifications((prev) => prev + 1);
+    }
+  });
+
+  newSocket.on('newContact', (contactData) => {
+    console.log('New contact:', contactData);
+  });
+
+  const handleOnline = () => newSocket.connect();
+  const handleOffline = () => console.warn('Offline: Socket disconnected');
+  window.addEventListener('online', handleOnline);
+  window.addEventListener('offline', handleOffline);
+
+  return () => {
+    newSocket.emit('leave', userId);
+    newSocket.off('connect');
+    newSocket.off('connect_error');
+    newSocket.off('disconnect');
+    newSocket.off('message');
+    newSocket.off('newContact');
+    newSocket.disconnect();
+    window.removeEventListener('online', handleOnline);
+    window.removeEventListener('offline', handleOffline);
+    setSocket(null);
+    console.log('Socket cleanup');
+  };
+}, [token, userId, selectedChat, handleLogout, refreshToken]);
+
+
 
   // Changed: Optimize token refresh logic
   const refreshToken = useCallback(async () => {
