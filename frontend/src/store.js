@@ -1,15 +1,23 @@
 import { configureStore, createSlice } from '@reduxjs/toolkit';
 import { openDB } from 'idb';
 
+
+
+
+
+
+
+
+// store.js
 const DB_NAME = 'chatApp';
 const STORE_NAME = 'reduxState';
 const VERSION = 2;
-const MAX_MESSAGES_PER_CHAT = 100;
+const MAX_MESSAGES_PER_CHAT = 100; // Define constant
 const MESSAGE_TTL = 30 * 24 * 60 * 60 * 1000; // 30 days in milliseconds
 
 const initDB = async () => {
   return openDB(DB_NAME, VERSION, {
-    upgrade(db, oldVersion, newVersion) {
+    upgrade(db, oldVersion, newVersion, transaction) {
       if (oldVersion < 1) {
         db.createObjectStore(STORE_NAME, { keyPath: 'key' });
       }
@@ -20,6 +28,10 @@ const initDB = async () => {
   });
 };
 
+
+
+
+// ObjectId validation
 const isValidObjectId = (id) => /^[0-9a-fA-F]{24}$/.test(id);
 
 const authSlice = createSlice({
@@ -179,7 +191,7 @@ const messageSlice = createSlice({
     },
     setSelectedChat: (state, action) => {
       const recipientId = action.payload;
-      if (recipientId === null || recipientId === '') { // Handle empty string
+      if (recipientId === null) {
         state.selectedChat = null;
       } else if (isValidObjectId(recipientId)) {
         state.chats[recipientId] = state.chats[recipientId] || [];
@@ -230,6 +242,7 @@ export const {
 
 export const { setAuth, clearAuth } = authSlice.actions;
 
+// Persistence middleware with IndexedDB
 const persistenceMiddleware = (store) => (next) => (action) => {
   const result = next(action);
   const actionsToPersist = [
@@ -315,6 +328,7 @@ const persistenceMiddleware = (store) => (next) => (action) => {
   return result;
 };
 
+// Load persisted state
 const loadPersistedState = async () => {
   try {
     const db = await initDB();
@@ -390,21 +404,17 @@ const loadPersistedState = async () => {
   }
 };
 
+// Hydrate store after initialization
 export const initializeStore = async () => {
-  try {
-    const persistedState = await loadPersistedState();
-    if (persistedState) {
-      store.dispatch(setAuth(persistedState.auth));
-      Object.keys(persistedState.messages.chats).forEach((recipientId) => {
-        store.dispatch(setMessages({ recipientId, messages: persistedState.messages.chats[recipientId] }));
-      });
-      store.dispatch(setChatList(persistedState.messages.chatList));
-    }
-  } catch (error) {
-    console.error('Failed to initialize store:', error);
+  const persistedState = await loadPersistedState();
+  if (persistedState) {
+    store.dispatch(setAuth(persistedState.auth));
+    store.dispatch(setMessages({ recipientId: 'global', messages: Object.values(persistedState.messages.chats).flat() }));
+    store.dispatch(setChatList(persistedState.messages.chatList));
   }
 };
 
+// Create store with default initial state
 export const store = configureStore({
   reducer: {
     messages: messageSlice.reducer,
@@ -431,3 +441,6 @@ export const store = configureStore({
       },
     }).concat(persistenceMiddleware),
 });
+
+// Initialize store with persisted state
+initializeStore();
