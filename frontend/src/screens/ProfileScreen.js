@@ -291,19 +291,9 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
   const logout = useCallback(() => {
     socket.emit('leave', userId);
     socket.disconnect(); // Changed: Explicitly disconnect
-    
-          if (socket) {
-            socket.emit('leave', userId);
-            socket.disconnect();
-            await axios.post(`${BASE_URL}/social/logout`, {}, {
-              headers: { Authorization: `Bearer ${token}` },
-              timeout: 5000,
-            });
-          },
+    setAuth('', '', '', '', '', '');
+    localStorage.clear();
   }, [userId, setAuth]);
-  
-
-  
 
   return (
     <motion.div
