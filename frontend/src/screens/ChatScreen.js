@@ -1,3 +1,4 @@
+// ChatScreen.js
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
@@ -12,38 +13,35 @@ import { setMessages, addMessage, replaceMessage, updateMessageStatus, setSelect
 import './ChatScreen.css';
 
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
-const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
+const CACHE_DURATION = 3 * 60 * 1000; // Changed: Reduced to 3 minutes for fresher data
 const MAX_OFFLINE_QUEUE_SIZE = 100;
 const MAX_MESSAGES = 100;
 const MAX_RETRIES = 3;
-const DB_NAME = 'chatApp'; // Updated to match store.js
+const DB_NAME = 'chatApp';
 
-const isValidObjectId = (id) => /^[0-9a-fA-F]{24}$/.test(id);
-const isValidVirtualNumber = (number) => /^\+\d{7,15}$/.test(number?.trim());
+const isValidObjectId = (id) => /^[0-9a-fA-F]{24}$/.test(id?.toString() || '');
+const isValidVirtualNumber = (number) => /^\+\d{7,15}$/.test(number?.trim() || '');
 const generateClientMessageId = () => `${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
 
-class LRUMap {
+class LRUCache {
   constructor(maxSize) {
     this.maxSize = maxSize;
-    this.map = new Map();
+    this.cache = new Map();
   }
   set(key, value) {
-    if (this.map.size >= this.maxSize) {
-      const firstKey = this.map.keys().next().value;
-      this.map.delete(firstKey);
+    if (this.cache.size >= this.maxSize) {
+      const firstKey = this.cache.keys().next().value;
+      this.cache.delete(firstKey);
     }
-    this.map.set(key, value);
+    this.cache.set(key, value);
   }
   get(key) {
-    const value = this.map.get(key);
+    const value = this.cache.get(key);
     if (value) {
-      this.map.delete(key);
-      this.map.set(key, value);
+      this.cache.delete(key);
+      this.cache.set(key, value);
     }
     return value;
-  }
-  has(key) {
-    return this.map.has(key);
   }
 }
 
@@ -75,7 +73,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   const menuRef = useRef(null);
   const typingTimeoutRef = useRef(null);
   const typingDebounceRef = useRef(null);
-  const sentStatusesRef = useRef(new LRUMap(1000));
+  const sentStatusesRef = useRef(new LRUCache(1000));
   const offlineQueueRef = useRef([]);
   const abortControllerRef = useRef(new AbortController());
   const isFetchingChatListRef = useRef(false);
@@ -89,50 +87,9 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         if (oldVersion < 1) {
           db.createObjectStore('offlineMessages', { keyPath: 'clientMessageId' });
         }
-        if (oldVersion < 2) {
-          // Handle future schema changes if needed
-        }
       },
     });
   };
-
-  // Debug rendering with more details
-  useEffect(() => {
-    console.log('ChatScreen rendered with props:', {
-      token: !!token,
-      userId: !!userId,
-      username: !!username,
-      virtualNumber: !!virtualNumber,
-      socket: !!socket,
-      selectedChat: selectedChat,
-      chatListLength: chatList.length,
-      isForgeReady,
-      isLoadingChatList,
-    });
-  }, [token, userId, username, virtualNumber, socket, selectedChat, chatList.length, isForgeReady, isLoadingChatList]);
-
-  // Restore offline queue
-  useEffect(() => {
-    let isMounted = true;
-    const restoreQueue = async () => {
-      try {
-        const db = await initDB();
-        const messages = await db.getAll('offlineMessages');
-        if (isMounted) {
-          const uniqueMessages = Array.from(
-            new Map(messages.map((msg) => [msg.clientMessageId, msg])).values()
-          ).slice(-MAX_OFFLINE_QUEUE_SIZE);
-          offlineQueueRef.current = uniqueMessages;
-          console.debug('Restored offline queue:', uniqueMessages.length);
-        }
-      } catch (err) {
-        console.error('Failed to restore offline queue:', err);
-        setErrors((prev) => [...prev, 'Failed to restore offline messages']);
-      }
-    };
-    restoreQueue();
-    return () => { isMounted = false; };
-  }, []);
 
   // Load node-forge
   useEffect(() => {
@@ -143,10 +100,11 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         if (isMounted) {
           setForge(forgeModule.default || forgeModule);
           setIsForgeReady(true);
+          console.log('node-forge loaded successfully');
         }
       } catch (err) {
         if (isMounted) {
-          setErrors((prev) => [...prev, 'Failed to load encryption library']);
+          setErrors((prev) => [...prev, 'Encryption library failed to load']);
           console.error('Failed to load node-forge:', err);
           logClientError('node-forge load failed', err);
         }
@@ -156,8 +114,9 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     };
     loadForge();
     return () => { isMounted = false; };
-  }, [logClientError]); // Stable dependency
+  }, []); // Changed: Removed logClientError dependency to avoid potential loop
 
+  // Log client errors
   const logClientError = useCallback(async (message, error) => {
     try {
       await axios.post(`${BASE_URL}/social/log-error`, {
@@ -172,8 +131,9 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     }
   }, [userId]);
 
+  // Get public key
   const getPublicKey = useCallback(async (recipientId) => {
-    if (!isValidObjectId(recipientId)) throw new Error('Invalid recipientId');
+    if (!isValidObjectId(recipientId)) throw new Error('Invalid recipient ID');
     const cacheKey = `publicKey:${recipientId}`;
     const cachedKey = sessionStorage.getItem(cacheKey);
     if (cachedKey) return cachedKey;
@@ -191,11 +151,11 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         setErrors((prev) => [...prev, 'Session expired, please log in again']);
         setTimeout(() => handleLogout(), 2000);
       }
-      logClientError('Failed to fetch public key', err);
       throw err;
     }
-  }, [token, logClientError]); // Removed handleLogout to avoid potential loop
+  }, [token, handleLogout]);
 
+  // Encrypt message
   const encryptMessage = useCallback(async (content, recipientPublicKey, isMedia = false) => {
     if (!forge || !recipientPublicKey) throw new Error('Encryption dependencies missing');
     try {
@@ -210,11 +170,11 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       )}`;
       return encrypted;
     } catch (err) {
-      logClientError('Encryption failed', err);
       throw new Error('Failed to encrypt message');
     }
-  }, [forge, logClientError]);
+  }, [forge]);
 
+  // Decrypt message
   const decryptMessage = useCallback(async (encryptedContent) => {
     if (!forge || !privateKey) throw new Error('Decryption dependencies missing');
     try {
@@ -226,11 +186,11 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       decipher.finish();
       return forge.util.decodeUtf8(decipher.output.getBytes());
     } catch (err) {
-      logClientError('Decryption failed', err);
       return '[Message not decrypted]';
     }
-  }, [forge, privateKey, logClientError]);
+  }, [forge, privateKey]);
 
+  // Retry with backoff
   const retryWithBackoff = useCallback(async (fn, maxRetries, attempt = 1) => {
     try {
       await fn();
@@ -242,7 +202,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         return false;
       }
       if (err.response?.status === 429) {
-        setErrors((prev) => [...prev, err.response.data.message || 'Too many requests, please try again later']);
+        setErrors((prev) => [...prev, err.response.data.message || 'Too many requests']);
         return false;
       }
       if (attempt < maxRetries) {
@@ -251,11 +211,11 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         return retryWithBackoff(fn, maxRetries, attempt + 1);
       }
       setErrors((prev) => [...prev, `Failed: ${err.response?.data?.error || err.message || 'Unknown error'}`]);
-      logClientError('Retry failed', err);
       return false;
     }
-  }, [logClientError]); // Removed handleLogout to avoid potential loop
+  }, [handleLogout]);
 
+  // Fetch chat list
   const fetchChatList = useCallback(async () => {
     if (!isForgeReady || !token || !userId || isFetchingChatListRef.current) return;
     if (chatListTimestamp > Date.now() - CACHE_DURATION && chatList.length) {
@@ -276,12 +236,14 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
           });
           dispatch(setChatList(data.map((chat) => ({
             ...chat,
-            _id: chat.id.toString(),
-            id: chat.id.toString(),
+            _id: chat.id?.toString(),
+            id: chat.id?.toString(),
             unreadCount: unreadMessages[chat.id] || chat.unreadCount || 0,
           }))));
           setErrors((prev) => prev.filter((e) => !e.includes('chat list')));
         }, MAX_RETRIES);
+      } catch (err) {
+        console.error('Fetch chat list error:', err);
       } finally {
         isFetchingChatListRef.current = false;
         setIsLoadingChatList(false);
@@ -289,6 +251,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     }, 500);
   }, [isForgeReady, token, userId, chatListTimestamp, chatList.length, dispatch, unreadMessages, retryWithBackoff]);
 
+  // Logout handler
   const handleLogout = useCallback(async () => {
     try {
       socket?.emit('leave', userId);
@@ -302,18 +265,18 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       setAuth('', '', '', '', '', '');
       const db = await initDB();
       await db.clear('offlineMessages');
-      navigate('/');
+      navigate('/login');
     } catch (err) {
       dispatch(clearAuth());
       dispatch(resetState());
       setAuth('', '', '', '', '', '');
       const db = await initDB();
       await db.clear('offlineMessages');
-      navigate('/');
-      logClientError('Logout failed', err);
+      navigate('/login');
     }
-  }, [socket, userId, token, dispatch, setAuth, navigate, logClientError]);
+  }, [socket, userId, token, dispatch, setAuth, navigate]);
 
+  // Fetch messages
   const fetchMessages = useCallback(async (chatId) => {
     if (!isValidObjectId(chatId) || !token || !hasMore || isFetchingMessagesRef.current.get(chatId)) return;
     isFetchingMessagesRef.current.set(chatId, true);
@@ -328,51 +291,55 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         const existingMessages = chats[chatId] || [];
         const existingIds = new Set(existingMessages.map((msg) => msg._id || msg.clientMessageId));
         const newMessages = await Promise.all(
-          data.messages
-            .filter((msg) => !existingIds.has(msg._id))
-            .map(async (msg) => ({
+          data.map(async (msg) => {
+            if (existingIds.has(msg._id)) return null;
+            return {
               ...msg,
-              _id: msg._id.toString(),
-              senderId: msg.senderId.toString(),
-              recipientId: msg.recipientId.toString(),
+              _id: msg._id?.toString(),
+              senderId: msg.senderId?.toString(),
+              recipientId: msg.recipientId?.toString(),
               plaintextContent: msg.contentType === 'text' && msg.content ? await decryptMessage(msg.content) : msg.content,
               status: msg.status || 'sent',
               createdAt: new Date(msg.createdAt),
               updatedAt: msg.updatedAt ? new Date(msg.updatedAt) : undefined,
-            }))
-        );
+            };
+          })
+        ).filter(Boolean);
         dispatch(setMessages({
           recipientId: chatId,
           messages: [...newMessages, ...existingMessages]
             .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt))
             .slice(-MAX_MESSAGES),
         }));
-        setTotalMessages(data.total);
-        setHasMore(page * 20 + data.messages.length < data.total);
+        setTotalMessages(data.totalMessages || data.total);
+        setHasMore(page * 20 + data.length < data.totalMessages || data.total);
         setPage((prev) => prev + 1);
         setUnreadMessages((prev) => ({ ...prev, [chatId]: 0 }));
         const failedMessages = (chats[chatId] || []).filter((m) => m.status === 'failed');
         failedMessages.forEach((msg) => retrySendMessage(msg));
       }, MAX_RETRIES);
-    } catch (err) {
-      logClientError('Fetch messages failed', err);
     } finally {
       isFetchingMessagesRef.current.delete(chatId);
     }
-  }, [token, userId, chats, page, hasMore, dispatch, decryptMessage, retryWithBackoff, retrySendMessage, logClientError]);
+  }, [token, userId, chats, page, hasMore, dispatch, decryptMessage, retryWithBackoff, retrySendMessage]);
 
+  // Select chat
   const selectChat = useCallback((chatId) => {
-    dispatch(setSelectedChat(chatId || null)); // Ensure null for empty string
+    if (!isForgeReady) {
+      setErrors((prev) => [...prev, 'Chat is still loading, please wait.']);
+      return;
+    }
+    dispatch(setSelectedChat(chatId || null));
     setShowMenu(false);
     setErrors([]);
     setPage(0);
     setHasMore(true);
     setTotalMessages(0);
-    if (chatId && socket && isValidObjectId(chatId) && !isFetchingMessagesRef.current.get(chatId)) {
+    if (chatId && socket && isValidObjectId(chatId)) {
       fetchMessages(chatId);
       const unreadMessageIds = (chats[chatId] || [])
-        .filter((m) => m.status !== 'read' && m.recipientId.toString() === userId && !sentStatusesRef.current.has(m.clientMessageId))
-        .map((m) => m._id);
+        .filter((msg) => msg.status !== 'read' && msg.recipientId?.toString() === userId && !sentStatusesRef.current?.get(msg._id))
+        .map((msg) => msg._id);
       if (unreadMessageIds.length) {
         socket.emit('batchMessageStatus', {
           messageIds: unreadMessageIds,
@@ -380,15 +347,16 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
           recipientId: userId,
         });
         unreadMessageIds.forEach((id) => {
-          const msg = chats[chatId].find((m) => m._id === id);
-          if (msg) sentStatusesRef.current.set(msg.clientMessageId, 'read');
+          const msg = chats[chatId]?.find((m) => m._id === id);
+          if (msg) sentStatusesRef.current.set(id, 'read');
         });
       }
       setUnreadMessages((prev) => ({ ...prev, [chatId]: 0 }));
     }
     inputRef.current?.focus();
-  }, [socket, chats, userId, dispatch, fetchMessages]);
+  }, [socket, isForgeReady, chats, userId, dispatch, fetchMessages]);
 
+  // Send message
   const sendMessage = useCallback(async () => {
     if (!isForgeReady || !message.trim() || !selectedChat || !isValidObjectId(selectedChat)) return;
     const clientMessageId = generateClientMessageId();
@@ -417,12 +385,12 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         }
         offlineQueueRef.current.push(messageData);
         await db.put('offlineMessages', messageData);
-        setErrors((prev) => [...prev, 'Offline. Message queued for retry.']);
+        setErrors((prev) => [...prev, 'Offline. Message queued.']);
         return;
       }
       const recipientPublicKey = await getPublicKey(selectedChat);
       messageData.content = await encryptMessage(plaintextContent, recipientPublicKey);
-      await axios.post(`${BASE_URL}/social/messages`, messageData, {
+      const { data } = await axios.post(`${BASE_URL}/social/messages`, messageData, {
         headers: { Authorization: `Bearer ${token}` },
         timeout: 5000,
         signal: abortControllerRef.current.signal,
@@ -432,14 +400,13 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
           dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: clientMessageId, status: 'failed' }));
           offlineQueueRef.current.push(messageData);
           await db.put('offlineMessages', messageData);
-          logClientError('Socket message failed', new Error(ack.error));
           return;
         }
         const populatedMessage = {
           ...ack.message,
-          _id: ack.message._id.toString(),
-          senderId: ack.message.senderId.toString(),
-          recipientId: ack.message.recipientId.toString(),
+          _id: ack.message._id?.toString(),
+          senderId: ack.message.senderId?.toString(),
+          recipientId: ack.message.recipientId?.toString(),
           plaintextContent,
           status: ack.message.status || 'sent',
         };
@@ -460,10 +427,10 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: clientMessageId, status: 'failed' }));
       offlineQueueRef.current.push(messageData);
       await db.put('offlineMessages', messageData);
-      logClientError('Send message failed', err);
     }
-  }, [isForgeReady, message, selectedChat, userId, virtualNumber, username, photo, socket, token, getPublicKey, encryptMessage, dispatch, chats, logClientError]);
+  }, [isForgeReady, message, selectedChat, userId, virtualNumber, username, photo, socket, token, getPublicKey, encryptMessage, dispatch, chats]);
 
+  // Retry send message
   const retrySendMessage = useCallback(async (message) => {
     if (!socket?.connected || !isValidObjectId(message.recipientId) || !navigator.onLine) return;
     const db = await initDB();
@@ -488,18 +455,20 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
           recipientId: message.recipientId,
           message: {
             ...data.message,
-            _id: data.message._id.toString(),
-            senderId: data.message.senderId.toString(),
-            recipientId: data.message.recipientId.toString(),
+            _id: data.message._id?.toString(),
+            senderId: data.message.senderId?.toString(),
+            recipientId: data.message.recipientId?.toString(),
           },
           replaceId: message.clientMessageId,
         }));
         dispatch(updateMessageStatus({
           recipientId: message.recipientId,
-          messageId: data.message._id.toString(),
+          messageId: data.message._id?.toString(),
           status: data.message.status || 'sent',
         }));
       } else {
+        const recipientPublicKey = await getPublicKey(message.recipientId);
+        message.content = await encryptMessage(message.plaintextContent, recipientPublicKey);
         const { data } = await axios.post(`${BASE_URL}/social/messages`, message, {
           headers: { Authorization: `Bearer ${token}` },
           timeout: 5000,
@@ -512,16 +481,15 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
               messageId: message.clientMessageId,
               status: 'failed',
             }));
-            logClientError('Retry socket message failed', new Error(ack.error));
             return;
           }
           dispatch(replaceMessage({
             recipientId: message.recipientId,
             message: {
               ...ack.message,
-              _id: ack.message._id.toString(),
-              senderId: ack.message.senderId.toString(),
-              recipientId: ack.message.recipientId.toString(),
+              _id: ack.message._id?.toString(),
+              senderId: ack.message.senderId?.toString(),
+              recipientId: ack.message.recipientId?.toString(),
               plaintextContent: message.plaintextContent,
               status: ack.message.status || 'sent',
             },
@@ -529,7 +497,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
           }));
           dispatch(updateMessageStatus({
             recipientId: message.recipientId,
-            messageId: ack.message._id.toString(),
+            messageId: ack.message._id?.toString(),
             status: ack.message.status || 'sent',
           }));
         });
@@ -542,15 +510,15 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         messageId: message.clientMessageId,
         status: 'failed',
       }));
-      logClientError('Retry send message failed', err);
     }
-  }, [socket, dispatch, token, logClientError]);
+  }, [socket, dispatch, token, getPublicKey, encryptMessage]);
 
+  // Handle attachment
   const handleAttachment = useCallback(async (e) => {
     const selectedFile = e.target.files[0];
     if (!selectedFile || !selectedChat || !isValidObjectId(selectedChat)) return;
     if (selectedFile.size > 50 * 1024 * 1024) {
-      setErrors((prev) => [...prev, 'File size exceeds 50MB limit']);
+      setErrors((prev) => [...prev, 'File size exceeds 50MB']);
       return;
     }
     setFile(selectedFile);
@@ -578,7 +546,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         }
         offlineQueueRef.current.push({ ...tempMessage, file: await selectedFile.arrayBuffer() });
         await db.put('offlineMessages', { ...tempMessage, file: await selectedFile.arrayBuffer() });
-        setErrors((prev) => [...prev, 'Offline. File queued for retry.']);
+        setErrors((prev) => [...prev, 'Offline. File queued.']);
         return;
       }
       const formData = new FormData();
@@ -598,15 +566,15 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         recipientId: selectedChat,
         message: {
           ...data.message,
-          _id: data.message._id.toString(),
-          senderId: data.message.senderId.toString(),
-          recipientId: data.message.recipientId.toString(),
+          _id: data.message._id?.toString(),
+          senderId: data.message.senderId?.toString(),
+          recipientId: data.message.recipientId?.toString(),
         },
         replaceId: clientMessageId,
       }));
       dispatch(updateMessageStatus({
         recipientId: selectedChat,
-        messageId: data.message._id.toString(),
+        messageId: data.message._id?.toString(),
         status: data.message.status || 'sent',
       }));
       setFile(null);
@@ -616,51 +584,56 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: clientMessageId, status: 'failed' }));
       offlineQueueRef.current.push({ ...tempMessage, file: await selectedFile.arrayBuffer() });
       await db.put('offlineMessages', { ...tempMessage, file: await selectedFile.arrayBuffer() });
-      logClientError('File upload failed', err);
     }
-  }, [selectedChat, userId, virtualNumber, username, photo, token, dispatch, socket, logClientError, chats]);
+  }, [selectedChat, userId, virtualNumber, username, photo, token, dispatch, socket, chats]);
 
+  // Add contact
   const handleAddContact = useCallback(async () => {
     if (!contactInput.trim() || !isValidVirtualNumber(contactInput)) {
-      setContactError('Invalid virtual number format (e.g., +1234567890)');
+      setContactError('Invalid virtual number (e.g., +1234567890)');
       return;
     }
     setIsLoadingAddContact(true);
-    const success = await retryWithBackoff(async () => {
-      const { data } = await axios.post(
-        `${BASE_URL}/social/add_contact`,
-        { userId, virtualNumber: contactInput.trim() },
-        { headers: { Authorization: `Bearer ${token}` }, timeout: 5000, signal: abortControllerRef.current.signal }
-      );
-      const newChat = {
-        id: data.id.toString(),
-        _id: data.id.toString(),
-        username: data.username || 'Unknown',
-        virtualNumber: data.virtualNumber || '',
-        photo: data.photo || 'https://placehold.co/40x40',
-        status: data.status || 'offline',
-        lastSeen: data.lastSeen || null,
-        latestMessage: null,
-        unreadCount: 0,
-      };
-      dispatch(setChatList([...chatList.filter((msg) => msg.id !== newChat.id), newChat]));
-      setContactInput('');
-      setContactError('');
-      setShowAddContact(false);
-      setErrors([]);
-    }, MAX_RETRIES);
-    setIsLoadingAddContact(false);
+    try {
+      const success = await retryWithBackoff(async () => {
+        const { data } = await axios.post(
+          `${BASE_URL}/social/add_contact`,
+          { userId, virtualNumber: contactInput.trim() },
+          { headers: { Authorization: `Bearer ${token}` }, timeout: 5000, signal: abortControllerRef.current.signal }
+        );
+        const newChat = {
+          id: data.id?.toString(),
+          _id: data.id?.toString(),
+          username: data.username || 'Unknown',
+          virtualNumber: data.virtualNumber || '',
+          photo: data.photo || 'https://placehold.co/40x40',
+          status: data.status || 'offline',
+          lastSeen: data.lastSeen || null,
+          latestMessage: null,
+          unreadCount: 0,
+        };
+        dispatch(setChatList([...chatList.filter((msg) => msg.id !== newChat.id), newChat]));
+        setContactInput('');
+        setContactError('');
+        setShowAddContact(false);
+        setErrors([]);
+      }, MAX_RETRIES);
+    } finally {
+      setIsLoadingAddContact(false);
+    }
   }, [contactInput, token, userId, chatList, dispatch, retryWithBackoff]);
 
+  // Handle incoming message
   const handleMessage = useCallback(async (msg) => {
     try {
-      const senderId = typeof msg.senderId === 'object' ? msg.senderId._id.toString() : msg.senderId.toString();
-      const recipientId = typeof msg.recipientId === 'object' ? msg.recipientId._id.toString() : msg.recipientId.toString();
+      const senderId = typeof msg.senderId === 'object' ? msg.senderId._id?.toString() : msg.senderId?.toString();
+      const recipientId = typeof msg.recipientId === 'object' ? msg.recipientId._id?.toString() : msg.recipientId?.toString();
+      if (!isValidObjectId(senderId) || !isValidObjectId(recipientId)) return;
       const targetId = senderId === userId ? recipientId : senderId;
       const plaintextContent = msg.contentType === 'text' && msg.content ? await decryptMessage(msg.content) : msg.content;
       const messageData = {
         ...msg,
-        _id: msg._id.toString(),
+        _id: msg._id?.toString(),
         senderId,
         recipientId,
         plaintextContent,
@@ -670,12 +643,12 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       };
       dispatch(addMessage({ recipientId: targetId, message: messageData }));
       if (selectedChat === targetId && document.hasFocus()) {
-        if (!sentStatusesRef.current.has(msg.clientMessageId)) {
+        if (!sentStatusesRef.current.get(msg._id)) {
           socket.emit('messageStatus', {
             messageId: msg._id,
             status: 'read',
           });
-          sentStatusesRef.current.set(msg.clientMessageId, 'read');
+          sentStatusesRef.current.set(msg._id, 'read');
           dispatch(updateMessageStatus({
             recipientId: targetId,
             messageId: msg._id,
@@ -688,17 +661,18 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         setUnreadMessages((prev) => ({ ...prev, [targetId]: (prev[targetId] || 0) + 1 }));
       }
     } catch (err) {
-      logClientError('Handle message failed', err);
+      console.error('Handle message error:', err);
     }
-  }, [dispatch, decryptMessage, selectedChat, userId, socket, chats, logClientError]);
+  }, [dispatch, decryptMessage, selectedChat, userId, socket, chats]);
 
+  // Socket event listeners
   useEffect(() => {
     if (!socket || !isForgeReady || !userId) return;
 
     const handleConnect = () => {
       socket.emit('join', userId);
       if (!isFetchingChatListRef.current) fetchChatList();
-      if (selectedChat && isValidObjectId(selectedChat) && !isFetchingMessagesRef.current.get(selectedChat)) {
+      if (selectedChat && isValidObjectId(selectedChat)) {
         fetchMessages(selectedChat);
       }
       offlineQueueRef.current.forEach((message) => retrySendMessage(message));
@@ -707,19 +681,16 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     const handleConnectError = (err) => {
       console.error('Socket connect error:', err.message);
       if (err.message.includes('Invalid token')) {
-        setErrors((prev) => [...prev, 'Session expired. Please log in again.']);
+        setErrors((prev) => [...prev, 'Session expired']);
         handleLogout();
       }
     };
 
-    const handleNewContact = ({ userId: emitterId, contactData }) => {
-      if (!contactData?.id || !isValidObjectId(contactData.id)) {
-        logClientError('Invalid contactData', new Error('Invalid contact id'));
-        return;
-      }
+    const handleNewContact = ({ contactData }) => {
+      if (!contactData?.id || !isValidObjectId(contactData.id)) return;
       const newChat = {
-        id: contactData.id.toString(),
-        _id: contactData.id.toString(),
+        id: contactData.id?.toString(),
+        _id: contactData.id?.toString(),
         username: contactData.username || 'Unknown',
         virtualNumber: contactData.virtualNumber || '',
         photo: contactData.photo || 'https://placehold.co/40x40',
@@ -735,8 +706,8 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       if (emitterId !== userId) return;
       dispatch(setChatList(users.map((message) => ({
         ...message,
-        id: message.id.toString(),
-        _id: message.id.toString(),
+        id: message.id?.toString(),
+        _id: message.id?.toString(),
         unreadCount: unreadMessages[message.id] || message.unreadCount || 0,
       }))));
     };
@@ -760,14 +731,14 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     const handleMessageStatus = ({ messageIds, status }) => {
       messageIds.forEach((messageId) => {
         Object.keys(chats).forEach((chatId) => {
-          const message = chats[chatId].find((msg) => msg._id === messageId && msg.senderId.toString() === userId);
+          const message = chats[chatId]?.find((msg) => msg._id === messageId && msg.senderId?.toString() === userId);
           if (message) {
             dispatch(updateMessageStatus({
               recipientId: chatId,
               messageId: message._id,
               status,
             }));
-            sentStatusesRef.current.set(message.clientMessageId, status);
+            sentStatusesRef.current.set(message._id, status);
           }
         });
       });
@@ -794,11 +765,12 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       socket.emit('leave', userId);
       clearTimeout(fetchChatListDebounceRef.current);
     };
-  }, [socket, isForgeReady, selectedChat, userId, chats, chatList, unreadMessages, dispatch, fetchChatList, fetchMessages, retrySendMessage, handleMessage, logClientError, handleLogout]);
+  }, [socket, isForgeReady, selectedChat, userId, chats, chatList, unreadMessages, dispatch, fetchChatList, fetchMessages, retrySendMessage, handleMessage, handleLogout]);
 
+  // Validate auth and fetch initial data
   useEffect(() => {
     if (!token || !userId) {
-      setErrors((prev) => [...prev, 'Please log in to access chat']);
+      setErrors((prev) => [...prev, 'Please log in']);
       setIsLoadingChatList(false);
       navigate('/login');
       return;
@@ -813,6 +785,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     };
   }, [token, userId, isForgeReady, fetchChatList, navigate]);
 
+  // Handle click outside
   useEffect(() => {
     const handleClickOutside = (e) => {
       if (menuRef.current && !menuRef.current.contains(e.target)) {
@@ -826,6 +799,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
+  // Handle typing
   const handleTyping = useCallback(() => {
     if (!socket || !selectedChat) return;
     clearTimeout(typingDebounceRef.current);
@@ -838,6 +812,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     }, 500);
   }, [socket, selectedChat, userId]);
 
+  // Get item size for VariableSizeList
   const getItemSize = useCallback(
     (index) => {
       const msg = chats[selectedChat]?.[index];
@@ -848,13 +823,14 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     [chats, selectedChat]
   );
 
+  // Render message row
   const Row = useCallback(
     ({ index, style }) => {
       const msg = chats[selectedChat]?.[index];
       if (!msg) return null;
       const prevMsg = index > 0 ? chats[selectedChat][index - 1] : null;
       const showDate = !prevMsg || new Date(msg.createdAt).toDateString() !== new Date(prevMsg.createdAt).toDateString();
-      const isMine = msg.senderId.toString() === userId;
+      const isMine = msg.senderId?.toString() === userId;
 
       return (
         <>
@@ -899,6 +875,11 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     },
     [chats, selectedChat, userId]
   );
+
+  // Render
+  if (!isForgeReady) {
+    return <div className="loading-screen">Loading chat...</div>;
+  }
 
   return (
     <div className="chat-screen">
@@ -1018,8 +999,8 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
                   {chat.latestMessage && (
                     <p className="chat-list-preview">{chat.latestMessage.plaintextContent || `[${chat.latestMessage.contentType}]`}</p>
                   )}
-                  {!!chat.unreadCount && (
-                    <span className="chat-list-unread">{chat.unreadCount}</span>
+                  {!!unreadMessages[chat.id] && (
+                    <span className="chat-list-unread">{unreadMessages[chat.id]}</span>
                   )}
                 </div>
               </div>
