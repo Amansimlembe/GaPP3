@@ -166,32 +166,42 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     }
   }, [isForgeReady, logClientError]);
 
-  const fetchChatList = useCallback(async (isRetry = false) => {
+  const fetchChatList = useCallback(async () => {
     if (!isForgeReady) return;
-    try {
-      const { data } = await axios.get(`${BASE_URL}/social/chat-list`, {
-        headers: { Authorization: `Bearer ${token}` },
-        params: { userId },
-        timeout: 5000,
-      });
-      setChatList(data.map((chat) => ({
-        ...chat,
-        _id: chat.id,
-        unreadCount: unreadMessages[chat.id] || chat.unreadCount || 0,
-      })));
-      retryCountRef.current.chatList = 0;
-    } catch (err) {
-      console.error('Chat list fetch failed:', err.message);
-      if (err.response?.status === 401) {
-        logClientError('Chat list fetch failed: Unauthorized', err);
-        setTimeout(() => handleLogout(), 5000);
-      } else if (err.response?.status === 500 && !isRetry && retryCountRef.current.chatList < maxRetries) {
-        retryCountRef.current.chatList += 1;
-        const delay = 1000 * Math.pow(2, retryCountRef.current.chatList);
-        clearTimeout(retryTimeoutRef.current.chatList);
-        retryTimeoutRef.current.chatList = setTimeout(() => fetchChatList(true), delay);
-      } else {
+    let retryCount = 0;
+    while (retryCount <= maxRetries) {
+      try {
+        const { data } = await axios.get(`${BASE_URL}/social/chat-list`, {
+          headers: { Authorization: `Bearer ${token}` },
+          params: { userId },
+          timeout: 5000,
+        });
+        setChatList(data.map((chat) => ({
+          ...chat,
+          _id: chat.id,
+          unreadCount: unreadMessages[chat.id] || chat.unreadCount || 0,
+        })));
         retryCountRef.current.chatList = 0;
+        return;
+      } catch (err) {
+        console.error('Chat list fetch failed:', err.message);
+        if (err.response?.status === 401) {
+          logClientError('Chat list fetch failed: Unauthorized', err);
+          setTimeout(() => handleLogout(), 5000);
+          return;
+        }
+        if ((err.code === 'ECONNABORTED' || err.response?.status === 503) && retryCount < maxRetries) {
+          retryCount += 1;
+          retryCountRef.current.chatList = retryCount;
+          const delay = 1000 * Math.pow(2, retryCount);
+          await new Promise((resolve) => {
+            clearTimeout(retryTimeoutRef.current.chatList);
+            retryTimeoutRef.current.chatList = setTimeout(resolve, delay);
+          });
+        } else {
+          retryCountRef.current.chatList = 0;
+          return;
+        }
       }
     }
   }, [isForgeReady, token, userId, handleLogout, unreadMessages, logClientError]);
@@ -323,46 +333,53 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       return;
     }
     setIsLoadingAddContact(true);
-    try {
-      const response = await axios.post(
-        `${BASE_URL}/social/add_contact`,
-        { userId, virtualNumber: contactInput.trim() },
-        { headers: { Authorization: `Bearer ${token}` }, timeout: 5000 }
-      );
-      const newChat = {
-        id: response.data.id,
-        _id: response.data.id,
-        username: response.data.username || 'Unknown',
-        virtualNumber: response.data.virtualNumber || '',
-        photo: response.data.photo || 'https://placehold.co/40x40',
-        status: response.data.status || 'offline',
-        lastSeen: response.data.lastSeen || null,
-        latestMessage: null,
-        unreadCount: 0,
-      };
-      setChatList((prev) => {
-        if (prev.find((chat) => chat.id === newChat.id)) return prev;
-        return [...prev, newChat];
-      });
-      setContactInput('');
-      setContactError('');
-      setShowAddContact(false);
-      retryCountRef.current.addContact = 0;
-    } catch (err) {
-      console.error('Add contact failed:', err.message);
-      const errorMsg = err.response?.data?.error || 'Failed to add contact';
-      if (err.response?.status === 500 && retryCountRef.current.addContact < maxRetries) {
-        retryCountRef.current.addContact += 1;
-        const delay = 1000 * Math.pow(2, retryCountRef.current.addContact);
-        setContactError(`Retrying (${retryCountRef.current.addContact}/${maxRetries})...`);
-        clearTimeout(retryTimeoutRef.current.addContact);
-        retryTimeoutRef.current.addContact = setTimeout(() => handleAddContact(), delay);
-      } else {
-        setContactError(errorMsg);
+    let retryCount = 0;
+    while (retryCount <= maxRetries) {
+      try {
+        const response = await axios.post(
+          `${BASE_URL}/social/add_contact`,
+          { userId, virtualNumber: contactInput.trim() },
+          { headers: { Authorization: `Bearer ${token}` }, timeout: 5000 }
+        );
+        const newChat = {
+          id: response.data.id,
+          _id: response.data.id,
+          username: response.data.username || 'Unknown',
+          virtualNumber: response.data.virtualNumber || '',
+          photo: response.data.photo || 'https://placehold.co/40x40',
+          status: response.data.status || 'offline',
+          lastSeen: response.data.lastSeen || null,
+          latestMessage: null,
+          unreadCount: 0,
+        };
+        setChatList((prev) => {
+          if (prev.find((chat) => chat.id === newChat.id)) return prev;
+          return [...prev, newChat];
+        });
+        setContactInput('');
+        setContactError('');
+        setShowAddContact(false);
         retryCountRef.current.addContact = 0;
+        return;
+      } catch (err) {
+        console.error('Add contact failed:', err.message);
+        const errorMsg = err.response?.data?.error || 'Failed to add contact';
+        if ((err.code === 'ECONNABORTED' || err.response?.status === 503) && retryCount < maxRetries) {
+          retryCount += 1;
+          retryCountRef.current.addContact = retryCount;
+          const delay = 1000 * Math.pow(2, retryCount);
+          await new Promise((resolve) => {
+            clearTimeout(retryTimeoutRef.current.addContact);
+            retryTimeoutRef.current.addContact = setTimeout(resolve, delay);
+          });
+        } else {
+          setContactError(errorMsg);
+          retryCountRef.current.addContact = 0;
+          return;
+        }
+      } finally {
+        setIsLoadingAddContact(false);
       }
-    } finally {
-      setIsLoadingAddContact(false);
     }
   }, [contactInput, token, userId]);
 
