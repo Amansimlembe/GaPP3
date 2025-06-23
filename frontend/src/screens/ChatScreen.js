@@ -44,21 +44,41 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   const typingDebounceRef = useRef(null);
   const sentStatusesRef = useRef(new Set());
   const retryCountRef = useRef({ chatList: 0, addContact: 0 });
+  const retryTimeoutRef = useRef({ chatList: null, addContact: null });
   const maxRetries = 3;
+  const maxStatuses = 1000;
 
-  useEffect(() => {
-    if (forge?.random && forge?.cipher && forge?.pki) {
-      setIsForgeReady(true);
-      setIsLoadingChatList(true);
-    } else {
-      setError('Encryption library failed to load');
-      console.error('node-forge initialization failed:', forge);
-      logClientError('node-forge initialization failed', new Error('Forge not loaded'));
-      setIsLoadingChatList(false);
-    }
+  // Throttle function for socket emissions
+  const throttle = useCallback((func, limit) => {
+    let lastFunc;
+    let lastRan;
+    return (...args) => {
+      if (!lastRan) {
+        func(...args);
+        lastRan = Date.now();
+      } else {
+        clearTimeout(lastFunc);
+        lastFunc = setTimeout(() => {
+          if (Date.now() - lastRan >= limit) {
+            func(...args);
+            lastRan = Date.now();
+          }
+        }, limit - (Date.now() - lastRan));
+      }
+    };
   }, []);
 
+  // Throttled error logging
+  const errorLogTimestamps = useRef([]);
+  const maxLogsPerMinute = 10;
   const logClientError = useCallback(async (message, error) => {
+    const now = Date.now();
+    errorLogTimestamps.current = errorLogTimestamps.current.filter((ts) => now - ts < 60 * 1000);
+    if (errorLogTimestamps.current.length >= maxLogsPerMinute) {
+      console.warn('Error logging throttled');
+      return;
+    }
+    errorLogTimestamps.current.push(now);
     try {
       await axios.post(`${BASE_URL}/social/log-error`, {
         error: message,
@@ -72,21 +92,35 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     }
   }, [userId]);
 
+  useEffect(() => {
+    if (forge?.random && forge?.cipher && forge?.pki) {
+      setIsForgeReady(true);
+      setIsLoadingChatList(true);
+    } else {
+      setError('Encryption library failed to load');
+      console.error('node-forge initialization failed:', forge);
+      logClientError('node-forge initialization failed', new Error('Forge not loaded'));
+      setIsLoadingChatList(false);
+    }
+  }, []);
+
   const handleLogout = useCallback(async () => {
     try {
       if (socket) {
         socket.emit('leave', userId);
+        socket.disconnect();
         await axios.post(`${BASE_URL}/auth/logout`, {}, {
           headers: { Authorization: `Bearer ${token}` },
           timeout: 5000,
         });
-        socket.disconnect();
       }
       sessionStorage.clear();
       localStorage.clear();
       dispatch(resetState());
-      setAuth('', '', '', '', '', '');
+      setAuth(null, null, null, null, null, null);
       setChatList([]);
+      setUnreadMessages({});
+      sentStatusesRef.current.clear();
       dispatch(setSelectedChat(null));
       navigate('/');
     } catch (err) {
@@ -168,8 +202,10 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         setTimeout(() => handleLogout(), 5000);
       } else if (err.response?.status === 500 && !isRetry && retryCountRef.current.chatList < maxRetries) {
         retryCountRef.current.chatList += 1;
-        setTimeout(() => fetchChatList(true), 1000 * retryCountRef.current.chatList);
+        const delay = 1000 * Math.pow(2, retryCountRef.current.chatList);
         setError(`Retrying chat list fetch (${retryCountRef.current.chatList}/${maxRetries})...`);
+        clearTimeout(retryTimeoutRef.current.chatList);
+        retryTimeoutRef.current.chatList = setTimeout(() => fetchChatList(true), delay);
       } else {
         setError(`Failed to load chat list: ${err.response?.data?.error || 'Unknown error'}. Click to retry...`);
         retryCountRef.current.chatList = 0;
@@ -321,7 +357,6 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         { userId, virtualNumber: contactInput.trim() },
         { headers: { Authorization: `Bearer ${token}` }, timeout: 5000 }
       );
-      console.log('Add contact response:', response.data);
       const newChat = {
         id: response.data.id,
         _id: response.data.id,
@@ -334,11 +369,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         unreadCount: 0,
       };
       setChatList((prev) => {
-        if (prev.find((chat) => chat.id === newChat.id)) {
-          console.log('Contact already in chat list:', newChat.id);
-          return prev;
-        }
-        console.log('Adding new contact to chat list:', newChat);
+        if (prev.find((chat) => chat.id === newChat.id)) return prev;
         return [...prev, newChat];
       });
       setContactInput('');
@@ -352,8 +383,10 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       const errorMsg = err.response?.data?.error || 'Failed to add contact';
       if (err.response?.status === 500 && retryCountRef.current.addContact < maxRetries) {
         retryCountRef.current.addContact += 1;
-        setTimeout(() => handleAddContact(), 1000 * retryCountRef.current.addContact);
+        const delay = 1000 * Math.pow(2, retryCountRef.current.addContact);
         setContactError(`Retrying (${retryCountRef.current.addContact}/${maxRetries})...`);
+        clearTimeout(retryTimeoutRef.current.addContact);
+        retryTimeoutRef.current.addContact = setTimeout(() => handleAddContact(), delay);
       } else {
         setContactError(errorMsg);
         retryCountRef.current.addContact = 0;
@@ -363,21 +396,27 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     }
   }, [contactInput, token, userId, logClientError]);
 
+  // Limit sentStatusesRef size
+  useEffect(() => {
+    if (sentStatusesRef.current.size > maxStatuses) {
+      const iterator = sentStatusesRef.current.values();
+      for (let i = 0; i < sentStatusesRef.current.size - maxStatuses; i++) {
+        sentStatusesRef.current.delete(iterator.next().value);
+      }
+    }
+  }, [chats]);
+
   useEffect(() => {
     if (!socket || !isForgeReady || !userId) return;
 
     const handleNewContact = ({ userId: emitterId, contactData }) => {
-      console.log('Received contactData event:', { emitterId, contactData });
       if (!contactData?.id || !isValidObjectId(contactData.id)) {
         console.error('Invalid contactData received:', contactData);
         logClientError('Invalid contactData received', new Error('Invalid contact id'));
         return;
       }
       setChatList((prev) => {
-        if (prev.find((chat) => chat.id === contactData.id)) {
-          console.log('Contact already exists in chat list:', contactData.id);
-          return prev;
-        }
+        if (prev.find((chat) => chat.id === contactData.id)) return prev;
         const newChat = {
           id: contactData.id,
           _id: contactData.id,
@@ -389,13 +428,11 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
           latestMessage: null,
           unreadCount: 0,
         };
-        console.log('Adding new contact from socket:', newChat);
         return [...prev, newChat];
       });
     };
 
     const handleChatListUpdated = ({ userId: emitterId, users }) => {
-      console.log('Received chatListUpdated event:', { emitterId, users });
       if (emitterId !== userId) return;
       setChatList(users.map((chat) => ({
         ...chat,
@@ -405,7 +442,6 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     };
 
     const handleMessage = (msg) => {
-      console.log('Received message:', msg);
       const senderId = typeof msg.senderId === 'object' ? msg.senderId._id.toString() : msg.senderId.toString();
       const recipientId = typeof msg.recipientId === 'object' ? msg.recipientId._id.toString() : msg.recipientId.toString();
       const targetId = senderId === userId ? recipientId : senderId;
@@ -443,7 +479,6 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     };
 
     const handleMessageStatus = ({ messageIds, status }) => {
-      console.log('Received messageStatus:', { messageIds, status });
       messageIds.forEach((messageId) => {
         Object.keys(chats).forEach((chatId) => {
           if (chats[chatId].some((msg) => msg._id === messageId && msg.senderId.toString() === userId)) {
@@ -467,6 +502,10 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       socket.off('typing');
       socket.off('stopTyping');
       socket.off('messageStatus');
+      clearTimeout(typingTimeoutRef.current);
+      clearTimeout(typingDebounceRef.current);
+      clearTimeout(retryTimeoutRef.current.chatList);
+      clearTimeout(retryTimeoutRef.current.addContact);
     };
   }, [socket, isForgeReady, selectedChat, userId, chats, dispatch, unreadMessages, logClientError]);
 
@@ -477,10 +516,13 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       return;
     }
     if (isForgeReady) {
-      console.log('Connecting to Socket.IO at:', BASE_URL);
       socket.emit('join', userId);
       fetchChatList();
     }
+    return () => {
+      clearTimeout(retryTimeoutRef.current.chatList);
+      clearTimeout(retryTimeoutRef.current.addContact);
+    };
   }, [token, userId, isForgeReady, fetchChatList, socket]);
 
   useEffect(() => {
@@ -489,7 +531,6 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     }
   }, [selectedChat, fetchMessages, chats]);
 
-  
   useEffect(() => {
     const handleClickOutside = (e) => {
       if (menuRef.current && !menuRef.current.contains(e.target)) {
@@ -503,17 +544,19 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
+  const throttledEmit = useMemo(() => throttle((event, data) => socket?.emit(event, data), 500), [socket, throttle]);
+
   const handleTyping = useCallback(() => {
     if (!socket || !selectedChat) return;
     clearTimeout(typingDebounceRef.current);
     typingDebounceRef.current = setTimeout(() => {
-      socket.emit('typing', { userId, recipientId: selectedChat });
+      throttledEmit('typing', { userId, recipientId: selectedChat });
       clearTimeout(typingTimeoutRef.current);
       typingTimeoutRef.current = setTimeout(() => {
-        socket.emit('stopTyping', { userId, recipientId: selectedChat });
+        throttledEmit('stopTyping', { userId, recipientId: selectedChat });
       }, 3000);
     }, 500);
-  }, [socket, selectedChat, userId]);
+  }, [socket, selectedChat, userId, throttledEmit]);
 
   const selectChat = useCallback((chatId) => {
     dispatch(setSelectedChat(chatId));
