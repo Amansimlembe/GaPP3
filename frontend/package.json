@@ -27,6 +27,11 @@
     "react-window": "^1.8.10",
     "react-virtualized": "^9.22.5"
   },
+  "devDependencies": {
+    "tailwindcss": "^3.4.1",
+    "postcss": "^8.4.21",
+    "autoprefixer": "^10.4.13"
+  },
   "scripts": {
     "start": "react-scripts start",
     "build": "react-scripts build",
@@ -34,9 +39,9 @@
     "eject": "react-scripts eject"
   },
   "resolutions": {
-  "react": "^18.2.0",
-  "react-dom": "^18.2.0"
-},
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
   "browserslist": {
     "production": [
       ">0.2%",
