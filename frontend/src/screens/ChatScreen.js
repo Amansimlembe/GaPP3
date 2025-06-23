@@ -1,15 +1,17 @@
-import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo, lazy, Suspense } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
 import axios from 'axios';
-import forge from 'node-forge';
 import { FaArrowLeft, FaEllipsisV, FaPaperclip, FaSmile, FaPaperPlane, FaTimes, FaSignOutAlt, FaPlus, FaImage, FaVideo, FaFile, FaMusic } from 'react-icons/fa';
 import { motion, AnimatePresence } from 'framer-motion';
-import Picker from 'emoji-picker-react';
 import { VariableSizeList } from 'react-window';
 import AutoSizer from 'react-virtualized-auto-sizer';
 import { setMessages, addMessage, replaceMessage, updateMessageStatus, setSelectedChat, resetState } from '../store';
 import './ChatScreen.css';
+
+// Lazy-load large libraries
+const forge = lazy(() => import('node-forge'));
+const Picker = lazy(() => import('emoji-picker-react'));
 
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
 
@@ -41,10 +43,11 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   const typingTimeoutRef = useRef(null);
   const typingDebounceRef = useRef(null);
   const sentStatusesRef = useRef(new Set());
-  const retryCountRef = useRef({ chatList: 0, addContact: 0 });
-  const retryTimeoutRef = useRef({ chatList: null, addContact: null });
+  const offlineQueueRef = useRef([]);
+  const retryTimeoutRef = useRef({ chatList: null, messages: null, addContact: null });
   const maxRetries = 3;
   const maxStatuses = 1000;
+  const maxQueueSize = 100;
 
   const throttle = useCallback((func, limit) => {
     let lastFunc;
@@ -69,9 +72,9 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   const maxLogsPerMinute = 10;
   const logClientError = useCallback(async (message, error) => {
     const now = Date.now();
-    errorLogTimestamps.current = errorLogTimestamps.current.filter((ts) => now - ts < 60 * 1000);
+    errorLogTimestamps.current = errorLogTimestamps.current.filter((ts) => now - ts < 60000);
     if (errorLogTimestamps.current.length >= maxLogsPerMinute) {
-      console.warn('Error logging throttled');
+      console.log('Error logging throttled');
       return;
     }
     errorLogTimestamps.current.push(now);
@@ -80,22 +83,58 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         error: message,
         stack: error?.stack || '',
         userId,
-        route: window.location.pathname,
+        route: '/',
         timestamp: new Date().toISOString(),
       }, { timeout: 5000 });
     } catch (err) {
-      console.error('Failed to log client error:', err.message);
+      console.log('Failed to log client error:', err.message);
     }
   }, [userId]);
 
+  // Centralized retry logic
+  const retryOperation = useCallback(async (operation, key, label) => {
+    let retryCount = 0;
+    const execute = async () => {
+      try {
+        const result = await operation();
+        retryCount = 0;
+        return result;
+      } catch (err) {
+        console.error(`${label} error:`, err.message, err.response?.data);
+        if (err.response?.status === 401) {
+          console.log('Session expired');
+          setTimeout(() => handleLogout(), 5000);
+          return;
+        }
+        if (err.response?.status === 500 && retryCount < maxRetries) {
+          retryCount++;
+          const delay = 1000 * Math.pow(2, retryCount);
+          console.log(`Retrying ${label} (${retryCount}/${maxRetries})...`);
+          clearTimeout(retryTimeoutRef.current[key]);
+          return new Promise((resolve) => {
+            retryTimeoutRef.current[key] = setTimeout(() => resolve(execute()), delay);
+          });
+        }
+        console.log(`Failed to ${label}: ${err.response?.data?.error || 'Unknown error'}`);
+        logClientError(`Failed to ${label}`, err);
+      }
+    };
+    return execute();
+  }, [maxRetries, handleLogout, logClientError]);
+
   useEffect(() => {
-    if (forge?.random && forge?.cipher && forge?.pki) {
-      setIsForgeReady(true);
-    } else {
-      console.log('Encryption library failed to load');
-      console.error('node-forge initialization failed:', forge);
-      logClientError('node-forge initialization failed', new Error('Forge not loaded'));
-    }
+    forge.then((forgeModule) => {
+      if (forgeModule?.random && forgeModule?.cipher && forgeModule?.pki) {
+        setIsForgeReady(true);
+      } else {
+        console.log('Encryption library failed to load');
+        console.error('node-forge initialization failed:', forgeModule);
+        logClientError('node-forge initialization failed', new Error('Forge not loaded'));
+      }
+    }).catch((err) => {
+      console.log('Failed to load encryption library');
+      logClientError('Forge lazy-load failed', err);
+    });
   }, []);
 
   const handleLogout = useCallback(async () => {
@@ -103,7 +142,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       if (socket) {
         socket.emit('leave', userId);
         socket.disconnect();
-        await axios.post(`${BASE_URL}/auth/logout`, {}, {
+        await axios.post(`${BASE_URL}/social/logout`, {}, {
           headers: { Authorization: `Bearer ${token}` },
           timeout: 5000,
         });
@@ -115,6 +154,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       setChatList([]);
       setUnreadMessages({});
       sentStatusesRef.current.clear();
+      offlineQueueRef.current = [];
       dispatch(setSelectedChat(null));
       navigate('/');
     } catch (err) {
@@ -151,18 +191,19 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   const encryptMessage = useCallback(async (content, recipientPublicKey, isMedia = false) => {
     if (!isForgeReady || !recipientPublicKey) {
       const err = new Error('Encryption dependencies missing');
-      logClientError('Encryption dependencies missing', err);
+      console.log('Encryption dependencies missing');
       throw err;
     }
     try {
-      const aesKey = forge.random.getBytesSync(32);
-      const iv = forge.random.getBytesSync(16);
-      const cipher = forge.cipher.createCipher('AES-CBC', aesKey);
+      const forgeModule = await forge;
+      const aesKey = forgeModule.random.getBytesSync(32);
+      const iv = forgeModule.random.getBytesSync(16);
+      const cipher = forgeModule.cipher.createCipher('AES-CBC', aesKey);
       cipher.start({ iv });
-      cipher.update(forge.util.createBuffer(isMedia ? content : forge.util.encodeUtf8(content)));
+      cipher.update(forgeModule.util.createBuffer(isMedia ? content : forgeModule.util.encodeUtf8(content)));
       cipher.finish();
-      const encrypted = `${forge.util.encode64(cipher.output.getBytes())}|${encodeURIComponent(forge.util.encode64(iv))}|${encodeURIComponent(
-        forge.util.encode64(forge.pki.publicKeyFromPem(recipientPublicKey).encrypt(aesKey, 'RSA-OAEP', { md: forge.md.sha256.create() }))
+      const encrypted = `${forgeModule.util.encode64(cipher.output.getBytes())}|${encodeURIComponent(forgeModule.util.encode64(iv))}|${encodeURIComponent(
+        forgeModule.util.encode64(forgeModule.pki.publicKeyFromPem(recipientPublicKey).encrypt(aesKey, 'RSA-OAEP', { md: forgeModule.md.sha256.create() }))
       )}`;
       return encrypted;
     } catch (err) {
@@ -173,9 +214,9 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     }
   }, [isForgeReady, logClientError]);
 
-  const fetchChatList = useCallback(async (isRetry = false) => {
+  const fetchChatList = useCallback(() => {
     if (!isForgeReady) return;
-    try {
+    return retryOperation(async () => {
       const { data } = await axios.get(`${BASE_URL}/social/chat-list`, {
         headers: { Authorization: `Bearer ${token}` },
         params: { userId },
@@ -186,29 +227,12 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         _id: chat.id,
         unreadCount: unreadMessages[chat.id] || chat.unreadCount || 0,
       })));
-      retryCountRef.current.chatList = 0;
-    } catch (err) {
-      console.error('ChatList fetch error:', err.message, err.response?.data);
-      logClientError('Chat list fetch failed', err);
-      if (err.response?.status === 401) {
-        console.log('Session expired');
-        setTimeout(() => handleLogout(), 5000);
-      } else if (err.response?.status === 500 && !isRetry && retryCountRef.current.chatList < maxRetries) {
-        retryCountRef.current.chatList += 1;
-        const delay = 1000 * Math.pow(2, retryCountRef.current.chatList);
-        console.log(`Retrying chat list fetch (${retryCountRef.current.chatList}/${maxRetries})...`);
-        clearTimeout(retryTimeoutRef.current.chatList);
-        retryTimeoutRef.current.chatList = setTimeout(() => fetchChatList(true), delay);
-      } else {
-        console.log(`Failed to load chat list: ${err.response?.data?.error || 'Unknown error'}. Click to retry...`);
-        retryCountRef.current.chatList = 0;
-      }
-    }
-  }, [isForgeReady, token, userId, handleLogout, unreadMessages, logClientError]);
+    }, 'chatList', 'fetch chat list');
+  }, [isForgeReady, token, userId, unreadMessages, retryOperation]);
 
-  const fetchMessages = useCallback(async (chatId) => {
+  const fetchMessages = useCallback((chatId) => {
     if (!isForgeReady || !isValidObjectId(chatId)) return;
-    try {
+    return retryOperation(async () => {
       const { data } = await axios.get(`${BASE_URL}/social/messages`, {
         headers: { Authorization: `Bearer ${token}` },
         params: { userId, recipientId: chatId },
@@ -228,16 +252,24 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         unreadMessageIds.forEach((id) => sentStatusesRef.current.add(id));
       }
       listRef.current?.scrollToItem(data.messages.length, 'end');
-    } catch (err) {
-      console.error('fetchMessages error:', err.message, err.response?.data);
-      console.log(`Failed to load messages: ${err.response?.data?.error || 'Unknown error'}`);
-      logClientError('Messages fetch failed', err);
-      if (err.response?.status === 401) {
-        console.log('Session expired, please log in again');
-        setTimeout(() => handleLogout(), 5000);
-      }
+    }, 'messages', 'fetch messages');
+  }, [isForgeReady, token, userId, socket, dispatch, retryOperation]);
+
+  const processOfflineQueue = useCallback(() => {
+    if (!socket?.connected || !offlineQueueRef.current.length) return;
+    while (offlineQueueRef.current.length) {
+      const messageData = offlineQueueRef.current.shift();
+      socket.emit('message', messageData, (ack) => {
+        if (ack?.error) {
+          console.log(`Failed to send queued message: ${ack.error}`);
+          dispatch(updateMessageStatus({ recipientId: messageData.recipientId, messageId: messageData.clientMessageId, status: 'failed' }));
+          return;
+        }
+        dispatch(replaceMessage({ recipientId: messageData.recipientId, message: { ...ack.message, plaintextContent: messageData.plaintextContent }, replaceId: messageData.clientMessageId }));
+        dispatch(updateMessageStatus({ recipientId: messageData.recipientId, messageId: ack.message._id, status: 'sent' }));
+      });
     }
-  }, [isForgeReady, token, userId, socket, dispatch, logClientError]);
+  }, [socket, dispatch]);
 
   const sendMessage = useCallback(async () => {
     if (!isForgeReady || !message.trim() || !selectedChat || !isValidObjectId(selectedChat)) return;
@@ -261,17 +293,24 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         createdAt: new Date(),
       };
       dispatch(addMessage({ recipientId: selectedChat, message: messageData }));
-      socket?.emit('message', messageData, (ack) => {
-        if (ack?.error) {
-          console.error('Socket message error:', ack.error);
-          console.log(`Failed to send message: ${ack.error}`);
-          dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: clientMessageId, status: 'failed' }));
-          logClientError('Socket message failed', new Error(ack.error));
-          return;
+      if (!socket?.connected) {
+        if (offlineQueueRef.current.length >= maxQueueSize) {
+          offlineQueueRef.current.shift(); // Remove oldest
         }
-        dispatch(replaceMessage({ recipientId: selectedChat, message: { ...ack.message, plaintextContent }, replaceId: clientMessageId }));
-        dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: ack.message._id, status: 'sent' }));
-      });
+        offlineQueueRef.current.push(messageData);
+        console.log('Message queued offline');
+      } else {
+        socket.emit('message', messageData, (ack) => {
+          if (ack?.error) {
+            console.log(`Failed to send message: ${ack.error}`);
+            dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: clientMessageId, status: 'failed' }));
+            logClientError('Socket message failed', new Error(ack.error));
+            return;
+          }
+          dispatch(replaceMessage({ recipientId: selectedChat, message: { ...ack.message, plaintextContent }, replaceId: clientMessageId }));
+          dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: ack.message._id, status: 'sent' }));
+        });
+      }
       setMessage('');
       inputRef.current?.focus();
       listRef.current?.scrollToItem((chats[selectedChat]?.length || 0) + 1, 'end');
@@ -331,7 +370,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     }
   }, [selectedChat, userId, virtualNumber, username, photo, token, dispatch, chats, logClientError]);
 
-  const handleAddContact = useCallback(async () => {
+  const handleAddContact = useCallback(() => {
     if (!contactInput.trim()) {
       setContactError('Please enter a virtual number');
       return;
@@ -341,7 +380,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       return;
     }
     setIsLoadingAddContact(true);
-    try {
+    return retryOperation(async () => {
       const response = await axios.post(
         `${BASE_URL}/social/add_contact`,
         { userId, virtualNumber: contactInput.trim() },
@@ -365,25 +404,8 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       setContactInput('');
       setContactError('');
       setShowAddContact(false);
-      retryCountRef.current.addContact = 0;
-    } catch (err) {
-      console.error('handleAddContact error:', err.message, err.response?.data);
-      logClientError('Add contact failed', err);
-      const errorMsg = err.response?.data?.error || 'Failed to add contact';
-      if (err.response?.status === 500 && retryCountRef.current.addContact < maxRetries) {
-        retryCountRef.current.addContact += 1;
-        const delay = 1000 * Math.pow(2, retryCountRef.current.addContact);
-        setContactError(`Retrying (${retryCountRef.current.addContact}/${maxRetries})...`);
-        clearTimeout(retryTimeoutRef.current.addContact);
-        retryTimeoutRef.current.addContact = setTimeout(() => handleAddContact(), delay);
-      } else {
-        setContactError(errorMsg);
-        retryCountRef.current.addContact = 0;
-      }
-    } finally {
-      setIsLoadingAddContact(false);
-    }
-  }, [contactInput, token, userId, logClientError]);
+    }, 'addContact', 'add contact').finally(() => setIsLoadingAddContact(false));
+  }, [contactInput, token, userId, retryOperation]);
 
   useEffect(() => {
     if (sentStatusesRef.current.size > maxStatuses) {
@@ -391,6 +413,9 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       for (let i = 0; i < sentStatusesRef.current.size - maxStatuses; i++) {
         sentStatusesRef.current.delete(iterator.next().value);
       }
+    }
+    if (offlineQueueRef.current.length > maxQueueSize) {
+      offlineQueueRef.current = offlineQueueRef.current.slice(-maxQueueSize);
     }
   }, [chats]);
 
@@ -476,6 +501,12 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       });
     };
 
+    const handleConnect = () => {
+      socket.emit('join', userId);
+      processOfflineQueue();
+    };
+
+    socket.on('connect', handleConnect);
     socket.on('contactData', handleNewContact);
     socket.on('chatListUpdated', handleChatListUpdated);
     socket.on('message', handleMessage);
@@ -484,18 +515,18 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     socket.on('messageStatus', handleMessageStatus);
 
     return () => {
-      socket.off('contactData');
-      socket.off('chatListUpdated');
-      socket.off('message');
-      socket.off('typing');
-      socket.off('stopTyping');
-      socket.off('messageStatus');
+      socket.off('connect', handleConnect);
+      socket.off('contactData', handleNewContact);
+      socket.off('chatListUpdated', handleChatListUpdated);
+      socket.off('message', handleMessage);
+      socket.off('typing', handleTyping);
+      socket.off('stopTyping', handleStopTyping);
+      socket.off('messageStatus', handleMessageStatus);
       clearTimeout(typingTimeoutRef.current);
       clearTimeout(typingDebounceRef.current);
-      clearTimeout(retryTimeoutRef.current.chatList);
-      clearTimeout(retryTimeoutRef.current.addContact);
+      Object.values(retryTimeoutRef.current).forEach(clearTimeout);
     };
-  }, [socket, isForgeReady, selectedChat, userId, chats, dispatch, unreadMessages, logClientError]);
+  }, [socket, isForgeReady, selectedChat, userId, chats, dispatch, unreadMessages, processOfflineQueue, logClientError]);
 
   useEffect(() => {
     if (!token || !userId) {
@@ -503,14 +534,12 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       return;
     }
     if (isForgeReady) {
-      socket.emit('join', userId);
       fetchChatList();
     }
     return () => {
-      clearTimeout(retryTimeoutRef.current.chatList);
-      clearTimeout(retryTimeoutRef.current.addContact);
+      Object.values(retryTimeoutRef.current).forEach(clearTimeout);
     };
-  }, [token, userId, isForgeReady, fetchChatList, socket]);
+  }, [token, userId, isForgeReady, fetchChatList]);
 
   useEffect(() => {
     if (selectedChat && !chats[selectedChat]) {
@@ -626,236 +655,238 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     [chats, selectedChat, userId]
   );
 
-  if (!isForgeReady) {
-    return (
-      <div className="chat-screen">
-        <div className="loading-screen">Encryption library failed to load</div>
-      </div>
-    );
-  }
-
   return (
-    <div className="chat-screen">
-      <div className="chat-header">
-        <h1 className="title">Grok Chat</h1>
-        <div className="chat-menu">
-          <FaEllipsisV className="menu-icon" onClick={() => setShowMenu(!showMenu)} />
-          <AnimatePresence>
-            {showMenu && (
-              <motion.div
-                ref={menuRef}
-                className="menu-dropdown"
-                initial={{ opacity: 0, y: 0 }}
-                animate={{ opacity: 1, y: 10 }}
-                exit={{ opacity: 0, y: 0 }}
-                transition={{ duration: 0.2 }}
-              >
-                <div className="menu-item" onClick={() => { setShowAddContact(true); setShowMenu(false); }}>
-                  <FaPlus className="menu-item-icon" />
-                  Add Contact
+    <Suspense fallback={<div>Loading dependencies...</div>}>
+      {!isForgeReady ? (
+        <div className="chat-screen">
+          <div className="loading-screen">Encryption library failed to load</div>
+        </div>
+      ) : (
+        <div className="chat-screen">
+          <div className="chat-header">
+            <h1 className="title">Grok Chat</h1>
+            <div className="chat-menu">
+              <FaEllipsisV className="menu-icon" onClick={() => setShowMenu(!showMenu)} />
+              <AnimatePresence>
+                {showMenu && (
+                  <motion.div
+                    ref={menuRef}
+                    className="menu-dropdown"
+                    initial={{ opacity: 0, y: 0 }}
+                    animate={{ opacity: 1, y: 10 }}
+                    exit={{ opacity: 0, y: 0 }}
+                    transition={{ duration: 0.2 }}
+                  >
+                    <div className="menu-item" onClick={() => { setShowAddContact(true); setShowMenu(false); }}>
+                      <FaPlus className="menu-item-icon" />
+                      Add Contact
+                    </div>
+                    <div className="menu-item logout" onClick={handleLogout}>
+                      <FaSignOutAlt className="menu-item-icon" />
+                      Logout
+                    </div>
+                    {showAddContact && (
+                      <div className="menu-add-contact">
+                        <div className="contact-input-group">
+                          <input
+                            type="text"
+                            className={`contact-input input ${contactError ? 'error' : ''}`}
+                            value={contactInput}
+                            onChange={(e) => setContactInput(e.target.value)}
+                            placeholder="Enter virtual number (e.g., +1234567890)"
+                            disabled={isLoadingAddContact}
+                          />
+                          {contactInput && (
+                            <FaTimes
+                              className="clear-input-icon"
+                              onClick={() => setContactInput('')}
+                            />
+                          )}
+                        </div>
+                        {contactError && <p className="error-text">{contactError}</p>}
+                        <button
+                          className="contact-button"
+                          onClick={handleAddContact}
+                          disabled={!contactInput.trim() || isLoadingAddContact}
+                        >
+                          {isLoadingAddContact ? 'Adding...' : 'Add Contact'}
+                        </button>
+                      </div>
+                    )}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+          </div>
+          <div className="chat-content">
+            <div className={`chat-list ${selectedChat ? 'hidden md:block' : 'block'}`}>
+              {chatList.length === 0 ? (
+                <div className="no-contacts-message">
+                  <p>No contacts to display. Add a contact to start chatting!</p>
+                  <button
+                    className="add-contact-button bg-primary text-white px-4 py-2 rounded mt-2"
+                    onClick={() => { setShowAddContact(true); setShowMenu(true); }}
+                  >
+                    Add Contact
+                  </button>
                 </div>
-                <div className="menu-item logout" onClick={handleLogout}>
-                  <FaSignOutAlt className="menu-item-icon" />
-                  Logout
-                </div>
-                {showAddContact && (
-                  <div className="menu-add-contact">
-                    <div className="contact-input-group">
-                      <input
-                        type="text"
-                        className={`contact-input input ${contactError ? 'error' : ''}`}
-                        value={contactInput}
-                        onChange={(e) => setContactInput(e.target.value)}
-                        placeholder="Enter virtual number (e.g., +1234567890)"
-                        disabled={isLoadingAddContact}
-                      />
-                      {contactInput && (
-                        <FaTimes
-                          className="clear-input-icon"
-                          onClick={() => setContactInput('')}
-                        />
+              ) : (
+                chatList.map((chat) => (
+                  <div
+                    key={chat.id}
+                    className={`chat-list-item ${selectedChat === chat.id ? 'selected' : ''}`}
+                    onClick={() => selectChat(chat.id)}
+                  >
+                    <img
+                      src={chat.photo || 'https://placehold.co/40x40'}
+                      alt="Avatar"
+                      className="chat-list-avatar"
+                    />
+                    <div className="chat-list-info">
+                      <div className="chat-list-header">
+                        <span className="chat-list-username">{chat.username}</span>
+                        {chat.latestMessage && (
+                          <span className="chat-list-time">
+                            {new Date(chat.latestMessage.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                          </span>
+                        )}
+                      </div>
+                      {chat.latestMessage && (
+                        <p className="chat-list-preview">{chat.latestMessage.plaintextContent || `[${chat.latestMessage.contentType}]`}</p>
+                      )}
+                      {!!chat.unreadCount && (
+                        <span className="chat-list-unread">{chat.unreadCount}</span>
                       )}
                     </div>
-                    {contactError && <p className="error-text">{contactError}</p>}
-                    <button
-                      className="contact-button"
-                      onClick={handleAddContact}
-                      disabled={!contactInput.trim() || isLoadingAddContact}
-                    >
-                      {isLoadingAddContact ? 'Adding...' : 'Add Contact'}
-                    </button>
                   </div>
-                )}
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </div>
-      </div>
-      <div className="chat-content">
-        <div className={`chat-list ${selectedChat ? 'hidden md:block' : 'block'}`}>
-          {chatList.length === 0 ? (
-            <div className="no-contacts-message">
-              <p>No contacts to display. Add a contact to start chatting!</p>
-              <button
-                className="add-contact-button bg-primary text-white px-4 py-2 rounded mt-2"
-                onClick={() => { setShowAddContact(true); setShowMenu(true); }}
-              >
-                Add Contact
-              </button>
+                ))
+              )}
             </div>
-          ) : (
-            chatList.map((chat) => (
-              <div
-                key={chat.id}
-                className={`chat-list-item ${selectedChat === chat.id ? 'selected' : ''}`}
-                onClick={() => selectChat(chat.id)}
-              >
-                <img
-                  src={chat.photo || 'https://placehold.co/40x40'}
-                  alt="Avatar"
-                  className="chat-list-avatar"
-                />
-                <div className="chat-list-info">
-                  <div className="chat-list-header">
-                    <span className="chat-list-username">{chat.username}</span>
-                    {chat.latestMessage && (
-                      <span className="chat-list-time">
-                        {new Date(chat.latestMessage.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                      </span>
+            <div className={`chat-conversation ${selectedChat ? 'block' : 'hidden md:block'}`}>
+              {selectedChat ? (
+                <>
+                  <div className="conversation-header">
+                    <FaArrowLeft className="back-icon md:hidden" onClick={() => selectChat(null)} />
+                    <img
+                      src={chatList.find((c) => c.id === selectedChat)?.photo || 'https://placehold.co/40x40'}
+                      alt="Avatar"
+                      className="conversation-avatar-img"
+                    />
+                    <div className="conversation-info">
+                      <h2 className="title">{chatList.find((c) => c.id === selectedChat)?.username || ''}</h2>
+                      {isTyping[selectedChat] && <span className="typing-indicator">Typing...</span>}
+                    </div>
+                  </div>
+                  <div className="conversation-messages">
+                    {chats[selectedChat]?.length ? (
+                      <AutoSizer>
+                        {({ height, width }) => (
+                          <VariableSizeList
+                            ref={listRef}
+                            height={height}
+                            width={width}
+                            itemCount={chats[selectedChat].length}
+                            itemSize={getItemSize}
+                            initialScrollOffset={chats[selectedChat].length * 60}
+                          >
+                            {Row}
+                          </VariableSizeList>
+                        )}
+                      </AutoSizer>
+                    ) : (
+                      <p className="no-messages">No messages yet</p>
                     )}
                   </div>
-                  {chat.latestMessage && (
-                    <p className="chat-list-preview">{chat.latestMessage.plaintextContent || `[${chat.latestMessage.contentType}]`}</p>
-                  )}
-                  {!!chat.unreadCount && (
-                    <span className="chat-list-unread">{chat.unreadCount}</span>
-                  )}
-                </div>
-              </div>
-            ))
-          )}
-        </div>
-        <div className={`chat-conversation ${selectedChat ? 'block' : 'hidden md:block'}`}>
-          {selectedChat ? (
-            <>
-              <div className="conversation-header">
-                <FaArrowLeft className="back-icon md:hidden" onClick={() => selectChat(null)} />
-                <img
-                  src={chatList.find((c) => c.id === selectedChat)?.photo || 'https://placehold.co/40x40'}
-                  alt="Avatar"
-                  className="conversation-avatar-img"
-                />
-                <div className="conversation-info">
-                  <h2 className="title">{chatList.find((c) => c.id === selectedChat)?.username || ''}</h2>
-                  {isTyping[selectedChat] && <span className="typing-indicator">Typing...</span>}
-                </div>
-              </div>
-              <div className="conversation-messages">
-                {chats[selectedChat]?.length ? (
-                  <AutoSizer>
-                    {({ height, width }) => (
-                      <VariableSizeList
-                        ref={listRef}
-                        height={height}
-                        width={width}
-                        itemCount={chats[selectedChat].length}
-                        itemSize={getItemSize}
-                        initialScrollOffset={chats[selectedChat].length * 60}
-                      >
-                        {Row}
-                      </VariableSizeList>
+                  <div className="input-bar">
+                    <FaSmile
+                      className="emoji-icon"
+                      onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+                    />
+                    {showEmojiPicker && (
+                      <Suspense fallback={<div>Loading emoji picker...</div>}>
+                        <Picker
+                          onEmojiClick={(emojiObject) => {
+                            setMessage((prev) => prev + emojiObject.emoji);
+                            setShowEmojiPicker(false);
+                          }}
+                        />
+                      </Suspense>
                     )}
-                  </AutoSizer>
-                ) : (
-                  <p className="no-messages">No messages yet</p>
-                )}
-              </div>
-              <div className="input-bar">
-                <FaSmile
-                  className="emoji-icon"
-                  onClick={() => setShowEmojiPicker(!showEmojiPicker)}
-                />
-                {showEmojiPicker && (
-                  <Picker
-                    onEmojiClick={(emojiObject) => {
-                      setMessage((prev) => prev + emojiObject.emoji);
-                      setShowEmojiPicker(false);
-                    }}
-                  />
-                )}
-                <FaPaperclip
-                  className="attachment-icon"
-                  onClick={() => setShowAttachmentPicker(!showAttachmentPicker)}
-                />
-                {showAttachmentPicker && (
-                  <div className="attachment-picker">
-                    <label htmlFor="attach-image" className="picker-item">
-                      <FaImage />
-                      <input
-                        id="attach-image"
-                        type="file"
-                        accept="image/*"
-                        onChange={handleAttachment}
-                        ref={fileInputRef}
-                        style={{ display: 'none' }}
-                      />
-                    </label>
-                    <label htmlFor="attach-video" className="picker-item">
-                      <FaVideo />
-                      <input
-                        id="attach-video"
-                        type="file"
-                        accept="video/*"
-                        onChange={handleAttachment}
-                        style={{ display: 'none' }}
-                      />
-                    </label>
-                    <label htmlFor="attach-audio" className="picker-item">
-                      <FaMusic />
-                      <input
-                        id="attach-audio"
-                        type="file"
-                        accept="audio/*"
-                        onChange={handleAttachment}
-                        style={{ display: 'none' }}
-                      />
-                    </label>
-                    <label htmlFor="attach-document" className="picker-item">
-                      <FaFile />
-                      <input
-                        id="attach-document"
-                        type="file"
-                        accept=".pdf,.doc,.docx,.txt"
-                        onChange={handleAttachment}
-                        style={{ display: 'none' }}
-                      />
-                    </label>
+                    <FaPaperclip
+                      className="attachment-icon"
+                      onClick={() => setShowAttachmentPicker(!showAttachmentPicker)}
+                    />
+                    {showAttachmentPicker && (
+                      <div className="attachment-picker">
+                        <label htmlFor="attach-image" className="picker-item">
+                          <FaImage />
+                          <input
+                            id="attach-image"
+                            type="file"
+                            accept="image/*"
+                            onChange={handleAttachment}
+                            ref={fileInputRef}
+                            style={{ display: 'none' }}
+                          />
+                        </label>
+                        <label htmlFor="attach-video" className="picker-item">
+                          <FaVideo />
+                          <input
+                            id="attach-video"
+                            type="file"
+                            accept="video/*"
+                            onChange={handleAttachment}
+                            style={{ display: 'none' }}
+                          />
+                        </label>
+                        <label htmlFor="attach-audio" className="picker-item">
+                          <FaMusic />
+                          <input
+                            id="attach-audio"
+                            type="file"
+                            accept="audio/*"
+                            onChange={handleAttachment}
+                            style={{ display: 'none' }}
+                          />
+                        </label>
+                        <label htmlFor="attach-document" className="picker-item">
+                          <FaFile />
+                          <input
+                            id="attach-document"
+                            type="file"
+                            accept=".pdf,.doc,.docx,.txt"
+                            onChange={handleAttachment}
+                            style={{ display: 'none' }}
+                          />
+                        </label>
+                      </div>
+                    )}
+                    <input
+                      ref={inputRef}
+                      type="text"
+                      className="message-input input"
+                      value={message}
+                      onChange={(e) => setMessage(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                          e.preventDefault();
+                          sendMessage();
+                        }
+                      }}
+                      onKeyUp={handleTyping}
+                      placeholder="Type a message..."
+                    />
+                    <FaPaperPlane className="send-icon" onClick={sendMessage} />
                   </div>
-                )}
-                <input
-                  ref={inputRef}
-                  type="text"
-                  className="message-input input"
-                  value={message}
-                  onChange={(e) => setMessage(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      sendMessage();
-                    }
-                  }}
-                  onKeyUp={handleTyping}
-                  placeholder="Type a message..."
-                />
-                <FaPaperPlane className="send-icon" onClick={sendMessage} />
-              </div>
-            </>
-          ) : (
-            <p className="no-messages">Select a chat to start messaging</p>
-          )}
+                </>
+              ) : (
+                <p className="no-messages">Select a chat to start messaging</p>
+              )}
+            </div>
+          </div>
         </div>
-      </div>
-    </div>
+      )}
+    </Suspense>
   );
 });
 
