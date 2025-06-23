@@ -132,83 +132,77 @@ const App = () => {
     }
   }, [dispatch, token, userId, socket]);
 
-
-
-  // App.js
-useEffect(() => {
-  if (!token || !userId) {
-    console.warn('Invalid token or userId, skipping socket initialization');
-    if (socket) {
-      socket.disconnect();
-      setSocket(null);
+  // Changed: Initialize socket reactively based on auth state
+  useEffect(() => {
+    if (!token || !userId) {
+      console.warn('Invalid token or userId, skipping socket initialization');
+      if (socket) {
+        socket.disconnect();
+        setSocket(null);
+      }
+      return;
     }
-    return;
-  }
 
-  const newSocket = io(BASE_URL, {
-    auth: { token, userId },
-    transports: ['websocket', 'polling'],
-    reconnectionAttempts: 10, // Increased attempts
-    reconnectionDelay: 500,
-    reconnectionDelayMax: 3000,
-    timeout: 5000,
-  });
-  setSocket(newSocket);
+    const newSocket = io(BASE_URL, {
+      auth: { token, userId },
+      transports: ['websocket', 'polling'],
+      reconnectionAttempts: 5,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+      timeout: 10000,
+    });
+    setSocket(newSocket);
 
-  newSocket.on('connect', () => {
-    newSocket.emit('join', userId); // Use single userId
-    console.log('Socket connected:', newSocket.id);
-    refreshToken(); // Refresh token on connect
-  });
+    newSocket.on('connect', () => {
+      newSocket.emit('join', { userId });
+      console.log('Socket connected:', newSocket.id);
+    });
 
-  newSocket.on('connect_error', async (error) => {
-    console.error(error.message.includes('Socket connect error:', error.message));
-    if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
-      setError('Authentication error, logging out');
-      await handleLogout();
-    } else {
-      console.warn('Socket reconnecting:', error.message);
-    }
-  });
+    newSocket.on('connect_error', async (error) => {
+      console.error('Socket connect error:', error.message);
+      if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
+        setError('Authentication error, logging out');
+        await handleLogout();
+      }
+    });
 
-  newSocket.on('disconnect', (reason) => {
-    console.warn('Socket disconnected:', reason);
-    if (reason === 'io server disconnect' && navigator.onLine) {
-      newSocket.connect();
-    }
-  });
+    newSocket.on('disconnect', (reason) => {
+      console.warn('Socket disconnected:', reason);
+      if (reason === 'io server disconnect' && navigator.onLine) {
+        newSocket.connect();
+      }
+    });
 
-  newSocket.on('message', (msg) => {
-    if (msg.recipientId === userId && (!selectedChat || selectedChat !== msg.senderId)) {
-      setChatNotifications((prev) => prev + 1);
-    }
-  });
+    newSocket.on('message', (msg) => {
+      if (msg.recipientId === userId && (!selectedChat || selectedChat !== msg.senderId)) {
+        setChatNotifications((prev) => prev + 1);
+      }
+    });
 
-  newSocket.on('newContact', (contactData) => {
-    console.log('New contact:', contactData);
-  });
+    newSocket.on('newContact', (contactData) => {
+      console.log('New contact:', contactData);
+    });
 
-  const handleOnline = () => newSocket.connect();
-  const handleOffline = () => console.warn('Offline: Socket disconnected');
-  window.addEventListener('online', handleOnline);
-  window.addEventListener('offline', handleOffline);
-
-  return () => {
-    newSocket.emit('leave', userId);
-    newSocket.off('connect');
-    newSocket.off('connect_error');
-    newSocket.off('disconnect');
-    newSocket.off('message');
-    newSocket.off('newContact');
-    newSocket.disconnect();
-    window.removeEventListener('online', handleOnline);
+    // Changed: Handle online/offline events
+    const handleOnline = () => newSocket.connect();
+    const handleOffline = () => console.warn('Offline: Socket disconnected');
+    window.addEventListener('online', handleOnline);
     window.removeEventListener('offline', handleOffline);
-    setSocket(null);
-    console.log('Socket cleanup');
-  };
-}, [token, userId, selectedChat, handleLogout, refreshToken]);
 
-
+    return () => {
+      newSocket.emit('leave', userId);
+      newSocket.off('connect');
+      newSocket.off('connect_error');
+      newSocket.off('disconnect');
+      newSocket.off('message');
+      newSocket.off('newContact');
+      newSocket.disconnect();
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+      setSocket(null);
+      console.log('Socket cleanup');
+    };
+  }, [token, userId, selectedChat, handleLogout]); // Changed: Depend on token and userId
 
   // Changed: Optimize token refresh logic
   const refreshToken = useCallback(async () => {
@@ -323,7 +317,6 @@ useEffect(() => {
   );
 };
 
-// App.js (only showing the modified AuthenticatedApp component)
 const AuthenticatedApp = ({
   token,
   userId,
@@ -337,21 +330,16 @@ const AuthenticatedApp = ({
   toggleTheme,
   handleChatNavigation,
   theme,
-  handleLogout,
+  handleLogout, // Changed: Receive logout handler
 }) => {
   const location = useLocation();
   const dispatch = useDispatch();
-  const { selectedChat } = useSelector((state) => state.messages || {});
-  const isChatRouteWithSelectedChat = location.pathname === '/chat' && !!selectedChat; // Safe access
+  const { selectedChat } = useSelector((state) => state.messages);
+  const isChatRouteWithSelectedChat = location.pathname === '/chat' && selectedChat;
 
   useEffect(() => {
-    console.log('Current route:', location.pathname, 'Selected chat:', selectedChat);
-  }, [location.pathname, selectedChat]);
-
-  // Fallback for animation to prevent errors
-  const navAnimation = {
-    y: isChatRouteWithSelectedChat ? 200 : 0,
-  };
+    console.log('Current route:', location.pathname);
+  }, [location.pathname]);
 
   return (
     <div className={`min-h-screen flex flex-col ${theme === 'dark' ? 'dark' : ''} bg-gray-100 dark:bg-gray-900`}>
@@ -394,7 +382,7 @@ const AuthenticatedApp = ({
                 username={username}
                 virtualNumber={virtualNumber}
                 photo={photo}
-                onLogout={handleLogout}
+                onLogout={handleLogout} // Changed: Pass logout handler
               />
             }
           />
@@ -403,10 +391,9 @@ const AuthenticatedApp = ({
       </div>
       <motion.nav
         initial={{ y: 0 }}
-        animate={navAnimation} // Use computed animation object
+        animate={{ y: isChatRouteWithSelectedChat ? 200 : 0 }}
         transition={{ duration: 0.3 }}
         className="fixed bottom-0 left-0 right-0 bg-primary text-white p-2 flex justify-around items-center shadow-lg z-20"
-        key={location.pathname} // Force re-render on route change
       >
         <NavLink
           to="/feed"
@@ -458,7 +445,5 @@ const AuthenticatedApp = ({
     </div>
   );
 };
-
-
 
 export default App;

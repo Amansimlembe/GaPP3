@@ -1,5 +1,11 @@
 export default {
   build: {
-    minify: false, // Disable minification for debugging
+    sourcemap: true,
+    minify: 'terser',
+    terserOptions: {
+      mangle: {
+        keep_names: true,
+      },
+    },
   },
 };
