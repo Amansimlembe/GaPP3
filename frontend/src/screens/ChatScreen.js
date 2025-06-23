@@ -16,6 +16,7 @@ const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
 const MAX_OFFLINE_QUEUE_SIZE = 100;
 const MAX_MESSAGES = 100;
 const MAX_RETRIES = 3;
+const DB_NAME = 'chatApp'; // Updated to match store.js
 
 const isValidObjectId = (id) => /^[0-9a-fA-F]{24}$/.test(id);
 const isValidVirtualNumber = (number) => /^\+\d{7,15}$/.test(number?.trim());
@@ -83,7 +84,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
 
   // Initialize IndexedDB
   const initDB = async () => {
-    return openDB('chat-app', 2, {
+    return openDB(DB_NAME, 2, {
       upgrade(db, oldVersion) {
         if (oldVersion < 1) {
           db.createObjectStore('offlineMessages', { keyPath: 'clientMessageId' });
@@ -94,6 +95,21 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       },
     });
   };
+
+  // Debug rendering with more details
+  useEffect(() => {
+    console.log('ChatScreen rendered with props:', {
+      token: !!token,
+      userId: !!userId,
+      username: !!username,
+      virtualNumber: !!virtualNumber,
+      socket: !!socket,
+      selectedChat: selectedChat,
+      chatListLength: chatList.length,
+      isForgeReady,
+      isLoadingChatList,
+    });
+  }, [token, userId, username, virtualNumber, socket, selectedChat, chatList.length, isForgeReady, isLoadingChatList]);
 
   // Restore offline queue
   useEffect(() => {
@@ -111,6 +127,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         }
       } catch (err) {
         console.error('Failed to restore offline queue:', err);
+        setErrors((prev) => [...prev, 'Failed to restore offline messages']);
       }
     };
     restoreQueue();
@@ -139,7 +156,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     };
     loadForge();
     return () => { isMounted = false; };
-  }, []); // Removed logClientError from deps to avoid potential re-renders
+  }, [logClientError]); // Stable dependency
 
   const logClientError = useCallback(async (message, error) => {
     try {
@@ -177,7 +194,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       logClientError('Failed to fetch public key', err);
       throw err;
     }
-  }, [token, logClientError, handleLogout]);
+  }, [token, logClientError]); // Removed handleLogout to avoid potential loop
 
   const encryptMessage = useCallback(async (content, recipientPublicKey, isMedia = false) => {
     if (!forge || !recipientPublicKey) throw new Error('Encryption dependencies missing');
@@ -237,7 +254,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       logClientError('Retry failed', err);
       return false;
     }
-  }, [logClientError, handleLogout]);
+  }, [logClientError]); // Removed handleLogout to avoid potential loop
 
   const fetchChatList = useCallback(async () => {
     if (!isForgeReady || !token || !userId || isFetchingChatListRef.current) return;
@@ -337,13 +354,15 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         const failedMessages = (chats[chatId] || []).filter((m) => m.status === 'failed');
         failedMessages.forEach((msg) => retrySendMessage(msg));
       }, MAX_RETRIES);
+    } catch (err) {
+      logClientError('Fetch messages failed', err);
     } finally {
       isFetchingMessagesRef.current.delete(chatId);
     }
-  }, [token, userId, chats, page, hasMore, dispatch, decryptMessage, retryWithBackoff, retrySendMessage]);
+  }, [token, userId, chats, page, hasMore, dispatch, decryptMessage, retryWithBackoff, retrySendMessage, logClientError]);
 
   const selectChat = useCallback((chatId) => {
-    dispatch(setSelectedChat(chatId));
+    dispatch(setSelectedChat(chatId || null)); // Ensure null for empty string
     setShowMenu(false);
     setErrors([]);
     setPage(0);
@@ -881,11 +900,6 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
     [chats, selectedChat, userId]
   );
 
-  // Debug rendering
-  useEffect(() => {
-    console.log('ChatScreen rendered with props:', { token, userId, username, virtualNumber, socket: !!socket });
-  }, [token, userId, username, virtualNumber, socket]);
-
   return (
     <div className="chat-screen">
       {errors.length > 0 && (
@@ -1016,7 +1030,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
           {selectedChat ? (
             <>
               <div className="conversation-header">
-                <FaArrowLeft className="back-icon md:hidden" onClick={() => selectChat('')} />
+                <FaArrowLeft className="back-icon md:hidden" onClick={() => selectChat(null)} />
                 <img
                   src={chatList.find((c) => c.id === selectedChat)?.photo || 'https://placehold.co/40x40'}
                   alt="Avatar"
