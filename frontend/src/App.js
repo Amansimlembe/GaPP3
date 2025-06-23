@@ -323,9 +323,6 @@ useEffect(() => {
   );
 };
 
-
-
-
 // App.js (only showing the modified AuthenticatedApp component)
 const AuthenticatedApp = ({
   token,
@@ -344,12 +341,17 @@ const AuthenticatedApp = ({
 }) => {
   const location = useLocation();
   const dispatch = useDispatch();
-  const { selectedChat } = useSelector((state) => state.messages);
-  const isChatRouteWithSelectedChat = location.pathname === '/chat' && !!selectedChat; // Added !! for explicit boolean
+  const { selectedChat } = useSelector((state) => state.messages || {});
+  const isChatRouteWithSelectedChat = location.pathname === '/chat' && !!selectedChat; // Safe access
 
   useEffect(() => {
-    console.log('Current route:', location.pathname);
-  }, [location.pathname]);
+    console.log('Current route:', location.pathname, 'Selected chat:', selectedChat);
+  }, [location.pathname, selectedChat]);
+
+  // Fallback for animation to prevent errors
+  const navAnimation = {
+    y: isChatRouteWithSelectedChat ? 200 : 0,
+  };
 
   return (
     <div className={`min-h-screen flex flex-col ${theme === 'dark' ? 'dark' : ''} bg-gray-100 dark:bg-gray-900`}>
@@ -401,7 +403,7 @@ const AuthenticatedApp = ({
       </div>
       <motion.nav
         initial={{ y: 0 }}
-        animate={{ y: isChatRouteWithSelectedChat ? 200 : 0 }}
+        animate={navAnimation} // Use computed animation object
         transition={{ duration: 0.3 }}
         className="fixed bottom-0 left-0 right-0 bg-primary text-white p-2 flex justify-around items-center shadow-lg z-20"
         key={location.pathname} // Force re-render on route change
