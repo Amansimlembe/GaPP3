@@ -7,7 +7,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { VariableSizeList } from 'react-window';
 import AutoSizer from 'react-virtualized-auto-sizer';
 import { setMessages, addMessage, replaceMessage, updateMessageStatus, setSelectedChat, resetState } from '../store';
-
+import './ChatScreen.css';
 
 // Lazy-load large libraries
 const forge = lazy(() => import('node-forge'));
