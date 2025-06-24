@@ -200,7 +200,9 @@ const chatListCache = new LRUCache(1000, 5 * 60 * 1000);
 
 
 
-// Optimized emitUpdatedChatList with pagination and indexing
+
+
+// Optimized emitUpdatedChatList with pagination
 const emitUpdatedChatList = async (io, userId, page = 0, limit = 50) => {
   try {
     if (!mongoose.isValidObjectId(userId)) {
@@ -259,7 +261,6 @@ const emitUpdatedChatList = async (io, userId, page = 0, limit = 50) => {
           },
         },
       },
-      // Removed invalid $index stage
     ]);
     const chatList = user.contacts.map((contact) => {
       const messageData = latestMessages.find((m) => m._id.toString() === contact._id.toString());
@@ -292,8 +293,8 @@ const emitUpdatedChatList = async (io, userId, page = 0, limit = 50) => {
 router.get('/chat-list', authMiddleware, async (req, res) => {
   const { userId, page = 0, limit = 50 } = req.query;
   try {
-    if (!mongoose.isValidObjectId(userId) || userId !== req.user._id.toString()) {
-      return res.status(400).json({ error: 'Invalid or unauthorized request' });
+    if (!mongoose.isValidObjectId(userId)) {
+      return res.status(400).json({ error: 'Invalid userId' });
     }
     const cacheKey = `chatList:${userId}:${page}:${limit}`;
     const cached = chatListCache.get(cacheKey);
@@ -345,7 +346,6 @@ router.get('/chat-list', authMiddleware, async (req, res) => {
           },
         },
       },
-      // Removed invalid $index stage
     ]);
     const chatList = user.contacts.map((contact) => {
       const messageData = latestMessages.find((m) => m._id.toString() === contact._id.toString());
@@ -373,7 +373,6 @@ router.get('/chat-list', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch chat list' });
   }
 });
-
 
 
 
