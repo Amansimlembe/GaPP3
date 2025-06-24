@@ -1,23 +1,21 @@
 import { configureStore, createSlice } from '@reduxjs/toolkit';
 import { openDB } from 'idb';
 
-
-
-
-
-
-
-
-// store.js
+// Constants
 const DB_NAME = 'chatApp';
 const STORE_NAME = 'reduxState';
 const VERSION = 2;
-const MAX_MESSAGES_PER_CHAT = 100; // Define constant
+const MAX_MESSAGES_PER_CHAT = 100;
 const MESSAGE_TTL = 30 * 24 * 60 * 60 * 1000; // 30 days in milliseconds
+const PERSISTENCE_DEBOUNCE_MS = 500;
 
+// ObjectId validation
+const isValidObjectId = (id) => /^[0-9a-fA-F]{24}$/.test(id);
+
+// Initialize IndexedDB
 const initDB = async () => {
   return openDB(DB_NAME, VERSION, {
-    upgrade(db, oldVersion, newVersion, transaction) {
+    upgrade(db, oldVersion, newVersion) {
       if (oldVersion < 1) {
         db.createObjectStore(STORE_NAME, { keyPath: 'key' });
       }
@@ -28,12 +26,26 @@ const initDB = async () => {
   });
 };
 
+// Error logging (simplified for store, aligns with ChatScreen.js)
+const logError = async (message, error, userId = null) => {
+  try {
+    await fetch('https://gapp-6yc3.onrender.com/social/log-error', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        error: message,
+        stack: error?.stack || '',
+        userId,
+        route: window.location.pathname,
+        timestamp: new Date().toISOString(),
+      }),
+    });
+  } catch (err) {
+    console.error('Failed to log error:', err.message);
+  }
+};
 
-
-
-// ObjectId validation
-const isValidObjectId = (id) => /^[0-9a-fA-F]{24}$/.test(id);
-
+// Auth Slice
 const authSlice = createSlice({
   name: 'auth',
   initialState: {
@@ -48,13 +60,13 @@ const authSlice = createSlice({
   reducers: {
     setAuth: (state, action) => {
       const { token, userId, role, photo, virtualNumber, username, privateKey } = action.payload;
-      state.token = token;
+      state.token = typeof token === 'string' ? token : null;
       state.userId = isValidObjectId(userId) ? userId : null;
-      state.role = role;
-      state.photo = photo;
-      state.virtualNumber = virtualNumber;
-      state.username = username;
-      state.privateKey = privateKey;
+      state.role = typeof role === 'string' ? role : null;
+      state.photo = typeof photo === 'string' ? photo : null;
+      state.virtualNumber = typeof virtualNumber === 'string' ? virtualNumber : null;
+      state.username = typeof username === 'string' ? username : null;
+      state.privateKey = privateKey || null; // Not persisted
     },
     clearAuth: (state) => {
       Object.assign(state, authSlice.getInitialState());
@@ -62,6 +74,7 @@ const authSlice = createSlice({
   },
 });
 
+// Messages Slice
 const messageSlice = createSlice({
   name: 'messages',
   initialState: {
@@ -242,90 +255,105 @@ export const {
 
 export const { setAuth, clearAuth } = authSlice.actions;
 
-// Persistence middleware with IndexedDB
-const persistenceMiddleware = (store) => (next) => (action) => {
-  const result = next(action);
-  const actionsToPersist = [
-    setSelectedChat.type,
-    setAuth.type,
-    setMessages.type,
-    addMessage.type,
-    replaceMessage.type,
-    updateMessageStatus.type,
-    deleteMessage.type,
-    setChatList.type,
-    cleanupMessages.type,
-  ];
+// Debounce utility
+const debounce = (func, wait) => {
+  let timeout;
+  return (...args) => {
+    clearTimeout(timeout);
+    timeout = setTimeout(() => func(...args), wait);
+  };
+};
 
-  if (actionsToPersist.includes(action.type)) {
-    requestAnimationFrame(async () => {
+// Persistence middleware with debounced writes
+const persistenceMiddleware = (store) => {
+  let persistTimeout = null;
+  const debouncedPersist = debounce(async (state, action) => {
+    try {
+      const db = await initDB();
+      const serializableState = {
+        messages: {
+          selectedChat: isValidObjectId(state.messages.selectedChat) ? state.messages.selectedChat : null,
+          chats: Object.keys(state.messages.chats).reduce((acc, recipientId) => {
+            if (isValidObjectId(recipientId)) {
+              acc[recipientId] = state.messages.chats[recipientId].map((msg) => ({
+                _id: msg._id,
+                clientMessageId: msg.clientMessageId,
+                senderId: msg.senderId,
+                recipientId: msg.recipientId,
+                content: msg.content,
+                contentType: msg.contentType,
+                plaintextContent: msg.plaintextContent,
+                status: msg.status,
+                caption: msg.caption,
+                replyTo: msg.replyTo,
+                originalFilename: msg.originalFilename,
+                senderVirtualNumber: msg.senderVirtualNumber,
+                senderUsername: msg.senderUsername,
+                senderPhoto: msg.senderPhoto,
+                createdAt: msg.createdAt.toISOString(),
+                updatedAt: msg.updatedAt ? msg.updatedAt.toISOString() : undefined,
+              }));
+            }
+            return acc;
+          }, {}),
+          chatList: state.messages.chatList,
+          chatListTimestamp: state.messages.chatListTimestamp,
+          messagesTimestamp: state.messages.messagesTimestamp,
+          chatMessageCount: state.messages.chatMessageCount,
+        },
+        auth: {
+          token: state.auth.token,
+          userId: state.auth.userId,
+          role: state.auth.role,
+          photo: state.auth.photo,
+          virtualNumber: state.auth.virtualNumber,
+          username: state.auth.username,
+          privateKey: null, // Never persist private key
+        },
+      };
+      await db.put(STORE_NAME, { key: 'state', value: serializableState });
+    } catch (error) {
+      logError('Failed to persist state', error, state.auth.userId);
+    }
+  }, PERSISTENCE_DEBOUNCE_MS);
+
+  return (next) => (action) => {
+    const result = next(action);
+    const actionsToPersist = [
+      setSelectedChat.type,
+      setAuth.type,
+      setMessages.type,
+      addMessage.type,
+      replaceMessage.type,
+      updateMessageStatus.type,
+      deleteMessage.type,
+      setChatList.type,
+      cleanupMessages.type,
+    ];
+
+    if (actionsToPersist.includes(action.type)) {
       const state = store.getState();
-      try {
-        const db = await initDB();
-        const serializableState = {
-          messages: {
-            selectedChat: isValidObjectId(state.messages.selectedChat) ? state.messages.selectedChat : null,
-            chats: Object.keys(state.messages.chats).reduce((acc, recipientId) => {
-              if (isValidObjectId(recipientId)) {
-                acc[recipientId] = state.messages.chats[recipientId].map((msg) => ({
-                  _id: msg._id,
-                  clientMessageId: msg.clientMessageId,
-                  senderId: msg.senderId,
-                  recipientId: msg.recipientId,
-                  content: msg.content,
-                  contentType: msg.contentType,
-                  plaintextContent: msg.plaintextContent,
-                  status: msg.status,
-                  caption: msg.caption,
-                  replyTo: msg.replyTo,
-                  originalFilename: msg.originalFilename,
-                  senderVirtualNumber: msg.senderVirtualNumber,
-                  senderUsername: msg.senderUsername,
-                  senderPhoto: msg.senderPhoto,
-                  createdAt: msg.createdAt.toISOString(),
-                  updatedAt: msg.updatedAt ? msg.updatedAt.toISOString() : undefined,
-                }));
-              }
-              return acc;
-            }, {}),
-            chatList: state.messages.chatList,
-            chatListTimestamp: state.messages.chatListTimestamp,
-            messagesTimestamp: state.messages.messagesTimestamp,
-            chatMessageCount: state.messages.chatMessageCount,
-          },
-          auth: {
-            token: state.auth.token,
-            userId: state.auth.userId,
-            role: state.auth.role,
-            photo: state.auth.photo,
-            virtualNumber: state.auth.virtualNumber,
-            username: state.auth.username,
-            privateKey: null,
-          },
-        };
-        await db.put(STORE_NAME, { key: 'state', value: serializableState });
-      } catch (error) {
-        console.error('Failed to persist state:', error);
-      }
-    });
-  } else if (action.type === clearAuth.type || action.type === resetState.type) {
-    requestAnimationFrame(async () => {
-      try {
-        const db = await initDB();
-        await db.put(STORE_NAME, {
-          key: 'state',
-          value: {
-            messages: messageSlice.getInitialState(),
-            auth: authSlice.getInitialState(),
-          },
-        });
-      } catch (error) {
-        console.error('Failed to clear state:', error);
-      }
-    });
-  }
+      debouncedPersist(state, action);
+    } else if (action.type === clearAuth.type || action.type === resetState.type) {
+      clearTimeout(persistTimeout);
+      requestAnimationFrame(async () => {
+        try {
+          const db = await initDB();
+          await db.put(STORE_NAME, {
+            key: 'state',
+            value: {
+              messages: messageSlice.getInitialState(),
+              auth: authSlice.getInitialState(),
+            },
+          });
+        } catch (error) {
+          logError('Failed to clear persisted state', error);
+        }
+      });
+    }
 
-  return result;
+    return result;
+  };
 };
 
 // Load persisted state
@@ -399,22 +427,12 @@ const loadPersistedState = async () => {
       },
     };
   } catch (error) {
-    console.error('Failed to load persisted state:', error);
+    logError('Failed to load persisted state', error);
     return null;
   }
 };
 
-// Hydrate store after initialization
-export const initializeStore = async () => {
-  const persistedState = await loadPersistedState();
-  if (persistedState) {
-    store.dispatch(setAuth(persistedState.auth));
-    store.dispatch(setMessages({ recipientId: 'global', messages: Object.values(persistedState.messages.chats).flat() }));
-    store.dispatch(setChatList(persistedState.messages.chatList));
-  }
-};
-
-// Create store with default initial state
+// Create store
 export const store = configureStore({
   reducer: {
     messages: messageSlice.reducer,
@@ -428,12 +446,14 @@ export const store = configureStore({
     getDefaultMiddleware({
       serializableCheck: {
         ignoredActions: [
+          setAuth.type,
+          clearAuth.type,
+          setMessages.type,
           addMessage.type,
           replaceMessage.type,
           updateMessageStatus.type,
           deleteMessage.type,
-          setMessages.type,
-          setAuth.type,
+          setSelectedChat.type,
           setChatList.type,
           cleanupMessages.type,
         ],
@@ -443,4 +463,23 @@ export const store = configureStore({
 });
 
 // Initialize store with persisted state
+export const initializeStore = async () => {
+  try {
+    const persistedState = await loadPersistedState();
+    if (persistedState) {
+      store.dispatch(setAuth(persistedState.auth));
+      Object.entries(persistedState.messages.chats).forEach(([recipientId, messages]) => {
+        if (isValidObjectId(recipientId)) {
+          store.dispatch(setMessages({ recipientId, messages }));
+        }
+      });
+      store.dispatch(setChatList(persistedState.messages.chatList));
+      store.dispatch(cleanupMessages());
+    }
+  } catch (error) {
+    logError('Failed to initialize store with persisted state', error);
+  }
+};
+
+// Run initialization
 initializeStore();

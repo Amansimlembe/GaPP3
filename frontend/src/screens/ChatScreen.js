@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
@@ -18,7 +17,7 @@ const isValidObjectId = (id) => /^[0-9a-fA-F]{24}$/.test(id);
 const isValidVirtualNumber = (number) => /^\+\d{7,15}$/.test(number.trim());
 const generateClientMessageId = () => `${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
 
-const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtualNumber, photo }) => {
+const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber, photo }) => {
   const navigate = useNavigate();
   const dispatch = useDispatch();
   const { selectedChat, chats } = useSelector((state) => state.messages);
@@ -89,7 +88,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   }, [userId]);
 
   useEffect(() => {
-    if (forge?.random && forge && forge?.pki && forge.cipher) {
+    if (forge?.random && forge?.pki && forge.cipher) {
       setIsForgeReady(true);
     } else {
       console.error('Encryption library failed to load');
@@ -102,15 +101,14 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       if (socket) {
         socket.emit('leave', userId);
         socket.disconnect();
-        await axios.post(`${BASE_URL}/auth/logout`, {}, {
-          headers: { Authorization: `Bearer ${token}` },
-          timeout: 5000,
-        });
       }
+      await axios.post(`${BASE_URL}/social/logout`, {}, {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 5000,
+      });
       sessionStorage.clear();
       localStorage.clear();
       dispatch(resetState());
-      setAuth(null, null, null, null, null, null);
       setChatList([]);
       setUnreadMessages({});
       sentStatusesRef.current.clear();
@@ -124,7 +122,6 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
           sessionStorage.clear();
           localStorage.clear();
           dispatch(resetState());
-          setAuth(null, null, null, null, null, null);
           setChatList([]);
           setUnreadMessages({});
           sentStatusesRef.current.clear();
@@ -133,7 +130,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
         }, 1000);
       }
     }
-  }, [socket, userId, setAuth, token, navigate, dispatch, logClientError]);
+  }, [socket, userId, token, navigate, dispatch, logClientError]);
 
   const getPublicKey = useCallback(async (recipientId) => {
     if (!isValidObjectId(recipientId)) throw new Error('Invalid recipientId');
@@ -538,6 +535,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
   useEffect(() => {
     if (!token || !userId) {
       console.error('Please log in to access chat');
+      navigate('/');
       return;
     }
     if (isForgeReady) {
@@ -550,7 +548,7 @@ const ChatScreen = React.memo(({ token, userId, setAuth, socket, username, virtu
       sentStatusesRef.current.clear();
       errorLogTimestamps.current = [];
     };
-  }, [token, userId, isForgeReady, fetchChatList, socket]);
+  }, [token, userId, isForgeReady, fetchChatList, socket, navigate]);
 
   useEffect(() => {
     if (selectedChat && !chats[selectedChat]) {

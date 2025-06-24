@@ -12,7 +12,7 @@ import FeedScreen from './screens/FeedScreen';
 import ChatScreen from './screens/ChatScreen';
 import ProfileScreen from './screens/ProfileScreen';
 import CountrySelector from './components/CountrySelector';
-import { setAuth, clearAuth, setSelectedChat } from './store';
+import { setAuth, clearAuth, setSelectedChat, resetState } from './store';
 
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
 
@@ -33,9 +33,11 @@ class ErrorBoundary extends React.Component {
             {
               error: error.message,
               stack: errorInfo.componentStack,
+              userId: this.props.userId || null,
+              route: window.location.pathname,
               timestamp: new Date().toISOString(),
             },
-            { timeout: 5000 }
+            { headers: { Authorization: `Bearer ${this.props.token}` }, timeout: 5000 }
           );
           return;
         } catch (err) {
@@ -53,9 +55,9 @@ class ErrorBoundary extends React.Component {
   render() {
     if (this.state.hasError) {
       return (
-        <div className="error-screen p-4 text-center">
-          <h2 className="text-xl font-bold">Something went wrong</h2>
-          <p className="my-2">{this.state.error?.message || 'Unknown error'}</p>
+        <div className="error-screen p-4 text-center bg-gray-100 dark:bg-gray-900 min-h-screen flex flex-col justify-center">
+          <h2 className="text-xl font-bold text-gray-800 dark:text-gray-200">Something went wrong</h2>
+          <p className="my-2 text-gray-600 dark:text-gray-400">{this.state.error?.message || 'Unknown error'}</p>
           <button
             className="bg-primary text-white px-4 py-2 rounded focus:outline-none focus:ring-2 focus:ring-primary"
             onClick={() => window.location.reload()}
@@ -70,7 +72,7 @@ class ErrorBoundary extends React.Component {
   }
 }
 
-const getTokenExpiration = (token) => {
+const getTokenExpiration = useCallback((token) => {
   try {
     if (!token || typeof token !== 'string' || !token.includes('.')) {
       console.warn('Invalid token format');
@@ -94,22 +96,41 @@ const getTokenExpiration = (token) => {
     console.error('Error decoding token:', error.message);
     return null;
   }
-};
+}, []);
 
 const App = () => {
   const dispatch = useDispatch();
   const { token, userId, role, photo, virtualNumber, username } = useSelector((state) => state.auth);
   const { selectedChat } = useSelector((state) => state.messages);
   const [chatNotifications, setChatNotifications] = useState(0);
-  const [socket, setSocket] = useState(null); // Changed: Use state for socket
+  const [socket, setSocket] = useState(null);
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
   const [error, setError] = useState(null);
 
-  // Changed: Handle logout explicitly
+  // Error logging consistent with ChatScreen.js and store.js
+  const logError = useCallback(async (message, error) => {
+    try {
+      await axios.post(
+        `${BASE_URL}/social/log-error`,
+        {
+          error: message,
+          stack: error?.stack || '',
+          userId: userId || null,
+          route: window.location.pathname,
+          timestamp: new Date().toISOString(),
+        },
+        { headers: { Authorization: `Bearer ${token}` }, timeout: 5000 }
+      );
+    } catch (err) {
+      console.warn('Failed to log error:', err.message);
+    }
+  }, [token, userId]);
+
+  // Logout handler
   const handleLogout = useCallback(async () => {
     try {
       await axios.post(
-        `${BASE_URL}/auth/logout`,
+        `${BASE_URL}/social/logout`, // Updated to /social/logout
         {},
         {
           headers: { Authorization: `Bearer ${token}` },
@@ -121,21 +142,36 @@ const App = () => {
         socket.disconnect();
       }
       dispatch(clearAuth());
+      dispatch(resetState());
       setSocket(null);
       setChatNotifications(0);
       setError(null);
-      localStorage.removeItem('theme'); // Preserve theme preference
+      localStorage.removeItem('token');
+      localStorage.removeItem('userId');
+      localStorage.removeItem('username');
+      localStorage.removeItem('virtualNumber');
+      localStorage.removeItem('photo');
       console.log('Logout successful');
     } catch (error) {
       console.error('Logout error:', error.message);
+      logError('Logout failed', error);
       setError('Failed to logout, please try again');
+      if (error.response?.status === 401) {
+        setTimeout(() => {
+          dispatch(clearAuth());
+          dispatch(resetState());
+          setSocket(null);
+          setChatNotifications(0);
+          localStorage.clear();
+          window.location.href = '/login';
+        }, 1000);
+      }
     }
-  }, [dispatch, token, userId, socket]);
+  }, [dispatch, token, userId, socket, logError]);
 
-  // Changed: Initialize socket reactively based on auth state
+  // Socket initialization
   useEffect(() => {
     if (!token || !userId) {
-      console.warn('Invalid token or userId, skipping socket initialization');
       if (socket) {
         socket.disconnect();
         setSocket(null);
@@ -160,6 +196,7 @@ const App = () => {
 
     newSocket.on('connect_error', async (error) => {
       console.error('Socket connect error:', error.message);
+      logError('Socket connection failed', error);
       if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
         setError('Authentication error, logging out');
         await handleLogout();
@@ -174,7 +211,8 @@ const App = () => {
     });
 
     newSocket.on('message', (msg) => {
-      if (msg.recipientId === userId && (!selectedChat || selectedChat !== msg.senderId)) {
+      const senderId = typeof msg.senderId === 'object' ? msg.senderId._id : msg.senderId;
+      if (msg.recipientId === userId && (!selectedChat || selectedChat !== senderId)) {
         setChatNotifications((prev) => prev + 1);
       }
     });
@@ -183,11 +221,10 @@ const App = () => {
       console.log('New contact:', contactData);
     });
 
-    // Changed: Handle online/offline events
     const handleOnline = () => newSocket.connect();
     const handleOffline = () => console.warn('Offline: Socket disconnected');
     window.addEventListener('online', handleOnline);
-    window.removeEventListener('offline', handleOffline);
+    window.addEventListener('offline', handleOffline);
 
     return () => {
       newSocket.emit('leave', userId);
@@ -200,11 +237,10 @@ const App = () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
       setSocket(null);
-      console.log('Socket cleanup');
     };
-  }, [token, userId, selectedChat, handleLogout]); // Changed: Depend on token and userId
+  }, [token, userId, selectedChat, handleLogout, logError]);
 
-  // Changed: Optimize token refresh logic
+  // Token refresh
   const refreshToken = useCallback(async () => {
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
@@ -216,7 +252,7 @@ const App = () => {
           { userId },
           {
             headers: { Authorization: `Bearer ${token}` },
-            timeout: 5000, // Changed: Reduced timeout
+            timeout: 5000,
           }
         );
         const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername, privateKey } = response.data;
@@ -229,10 +265,16 @@ const App = () => {
           username: newUsername || null,
           privateKey: privateKey || null,
         }));
+        localStorage.setItem('token', newToken);
+        localStorage.setItem('userId', newUserId);
+        localStorage.setItem('username', newUsername || '');
+        localStorage.setItem('virtualNumber', newVirtualNumber || '');
+        localStorage.setItem('photo', newPhoto || 'https://placehold.co/40x40');
         console.log('Token refreshed');
         return newToken;
       } catch (error) {
         console.error(`Token refresh attempt ${attempt} failed:`, error.response?.data || error.message);
+        logError(`Token refresh attempt ${attempt} failed`, error);
         if (attempt < 3 && (error.response?.status === 429 || error.response?.status >= 500 || error.code === 'ECONNABORTED' || !navigator.onLine)) {
           await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * 1000));
           continue;
@@ -241,7 +283,7 @@ const App = () => {
         return null;
       }
     }
-  }, [token, userId, dispatch, handleLogout]);
+  }, [token, userId, dispatch, handleLogout, logError]);
 
   useEffect(() => {
     if (!token || !userId) return;
@@ -252,11 +294,12 @@ const App = () => {
       isRefreshing = true;
       try {
         const expTime = getTokenExpiration(token);
-        if (expTime && expTime - Date.now() < 10 * 60 * 1000) { // 10 minutes
+        if (expTime && expTime - Date.now() < 10 * 60 * 1000) {
           await refreshToken();
         }
       } catch (err) {
         console.error('Token expiration check failed:', err.message);
+        logError('Token expiration check failed', err);
         setError('Authentication error, please log in again');
         handleLogout();
       } finally {
@@ -267,8 +310,9 @@ const App = () => {
     checkTokenExpiration();
     const interval = setInterval(checkTokenExpiration, 5 * 60 * 1000);
     return () => clearInterval(interval);
-  }, [token, userId, refreshToken, handleLogout]);
+  }, [token, userId, refreshToken, handleLogout, logError]);
 
+  // Theme management
   useEffect(() => {
     document.documentElement.className = theme === 'dark' ? 'dark' : '';
     localStorage.setItem('theme', theme);
@@ -277,13 +321,12 @@ const App = () => {
   const toggleTheme = useCallback(() => setTheme((prev) => (prev === 'light' ? 'dark' : 'light')), []);
 
   const handleChatNavigation = useCallback(() => {
-    console.log('Navigating to ChatScreen');
     setChatNotifications(0);
     dispatch(setSelectedChat(null));
   }, [dispatch]);
 
   return (
-    <ErrorBoundary>
+    <ErrorBoundary token={token} userId={userId}>
       {error && (
         <div className="fixed top-0 left-0 right-0 bg-red-500 text-white p-2 text-center z-50">
           {error}
@@ -299,12 +342,11 @@ const App = () => {
             virtualNumber={virtualNumber}
             username={username}
             chatNotifications={chatNotifications}
-            setAuth={dispatch(setAuth)} // Changed: Pass dispatch(setAuth)
             socket={socket}
             toggleTheme={toggleTheme}
             handleChatNavigation={handleChatNavigation}
             theme={theme}
-            handleLogout={handleLogout} // Changed: Pass logout handler
+            handleLogout={handleLogout}
           />
         ) : (
           <Routes>
@@ -325,12 +367,11 @@ const AuthenticatedApp = ({
   virtualNumber,
   username,
   chatNotifications,
-  setAuth,
   socket,
   toggleTheme,
   handleChatNavigation,
   theme,
-  handleLogout, // Changed: Receive logout handler
+  handleLogout,
 }) => {
   const location = useLocation();
   const dispatch = useDispatch();
@@ -348,7 +389,17 @@ const AuthenticatedApp = ({
           token={token}
           userId={userId}
           virtualNumber={virtualNumber}
-          onComplete={(newVirtualNumber) => setAuth({ token, userId, role, photo, virtualNumber: newVirtualNumber, username })}
+          onComplete={(newVirtualNumber) => {
+            dispatch(setAuth({
+              token,
+              userId,
+              role,
+              photo,
+              virtualNumber: newVirtualNumber,
+              username,
+            }));
+            localStorage.setItem('virtualNumber', newVirtualNumber);
+          }}
         />
       )}
       <div className="flex-1 p-0 relative">
@@ -356,7 +407,7 @@ const AuthenticatedApp = ({
           <Route path="/jobs" element={role === 0 ? <JobSeekerScreen token={token} userId={userId} /> : <EmployerScreen token={token} userId={userId} />} />
           <Route
             path="/feed"
-            element={<FeedScreen token={token} userId={userId} onUnauthorized={() => handleLogout()} />}
+            element={<FeedScreen token={token} userId={userId} onUnauthorized={handleLogout} />}
           />
           <Route
             path="/chat"
@@ -364,11 +415,10 @@ const AuthenticatedApp = ({
               <ChatScreen
                 token={token}
                 userId={userId}
-                setAuth={setAuth}
-                socket={socket}
                 username={username}
                 virtualNumber={virtualNumber}
                 photo={photo}
+                socket={socket}
               />
             }
           />
@@ -378,11 +428,10 @@ const AuthenticatedApp = ({
               <ProfileScreen
                 token={token}
                 userId={userId}
-                setAuth={setAuth}
                 username={username}
                 virtualNumber={virtualNumber}
                 photo={photo}
-                onLogout={handleLogout} // Changed: Pass logout handler
+                onLogout={handleLogout}
               />
             }
           />

@@ -1,4 +1,3 @@
-
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
@@ -69,6 +68,13 @@ const upload = multer({
       cb(new Error('Invalid file type'), false);
     }
   },
+});
+
+// Global rate limiter
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // 100 requests per window
+  message: 'Too many requests, please try again later',
 });
 
 // Stricter rate limiters
@@ -269,6 +275,25 @@ const retryOperation = async (operation, maxRetries = 3) => {
   }
 };
 
+// Request duration logging middleware
+router.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    logger.info('Request processed', {
+      method: req.method,
+      url: req.url,
+      status: res.statusCode,
+      duration,
+      userId: req.user?._id?.toString() || 'unauthenticated',
+    });
+  });
+  next();
+});
+
+// Apply global rate limiter
+router.use(globalLimiter);
+
 // Socket.IO setup
 module.exports = (app) => {
   const io = app.get('io');
@@ -282,7 +307,7 @@ module.exports = (app) => {
     if (!token) return next(new Error('No token provided'));
     try {
       const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
-      const user = await User.findById(decoded.userId || decoded.id).select('_id');
+      const user = await User.findById(decoded.userId || decoded.id).select('_id').lean();
       if (!user) return next(new Error('User not found'));
       const blacklisted = await TokenBlacklist.findOne({ token }).lean();
       if (blacklisted) return next(new Error('Token invalidated'));
@@ -294,42 +319,35 @@ module.exports = (app) => {
     }
   });
 
+  io.on('connection', (socket) => {
+    logger.info('Socket.IO connection', { socketId: socket.id, userId: socket.user?.id });
 
-
-  
-
-io.on('connection', (socket) => {
-  logger.info('Socket.IO connection', { socketId: socket.id, userId: socket.user?.id });
-
-  socket.on('join', async (userId) => {
-    if (!mongoose.isValidObjectId(userId) || userId !== socket.user.id) {
-      socket.emit('error', { message: 'Invalid join attempt' });
-      return;
-    }
-    socket.join(userId);
-    await retryOperation(async () => {
-      const user = await User.findByIdAndUpdate(userId, { status: 'online', lastSeen: new Date() }, { new: true }).lean();
-      io.to(userId).emit('userStatus', { userId, status: 'online', lastSeen: new Date() });
-      await emitUpdatedChatList(io, userId);
-      // Emit pending messages
-      const pendingMessages = await Message.find({
-        recipientId: userId,
-        status: { $in: ['pending', 'sent'] },
-      }).lean();
-      for (const msg of pendingMessages) {
-        io.to(userId).emit('message', {
-          ...msg,
-          senderId: msg.senderId.toString(),
-          recipientId: msg.recipientId.toString(),
-        });
-        await Message.updateOne({ _id: msg._id }, { status: 'delivered', updatedAt: new Date() });
-        io.to(msg.senderId.toString()).emit('messageStatus', { messageIds: [msg._id], status: 'delivered' });
+    socket.on('join', async (userId) => {
+      if (!mongoose.isValidObjectId(userId) || userId !== socket.user.id) {
+        socket.emit('error', { message: 'Invalid join attempt' });
+        return;
       }
+      socket.join(userId);
+      await retryOperation(async () => {
+        const user = await User.findByIdAndUpdate(userId, { status: 'online', lastSeen: new Date() }, { new: true }).lean();
+        io.to(userId).emit('userStatus', { userId, status: 'online', lastSeen: new Date() });
+        await emitUpdatedChatList(io, userId);
+        const pendingMessages = await Message.find({
+          recipientId: userId,
+          status: { $in: ['pending', 'sent'] },
+        }).lean();
+        for (const msg of pendingMessages) {
+          io.to(userId).emit('message', {
+            ...msg,
+            senderId: msg.senderId.toString(),
+            recipientId: msg.recipientId.toString(),
+          });
+          await Message.updateOne({ _id: msg._id }, { status: 'delivered', updatedAt: new Date() });
+          io.to(msg.senderId.toString()).emit('messageStatus', { messageIds: [msg._id], status: 'delivered' });
+        }
+      });
+      logger.info('User joined', { userId });
     });
-    logger.info('User joined', { userId });
-  });
-
-
 
     socket.on('reconnect', async (userId) => {
       if (!mongoose.isValidObjectId(userId) || userId !== socket.user.id) {
@@ -338,7 +356,7 @@ io.on('connection', (socket) => {
       }
       socket.join(userId);
       await retryOperation(async () => {
-        await User.findByIdAndUpdate(userId, { status: 'online', lastSeen: new Date() }, { new: true });
+        await User.findByIdAndUpdate(userId, { status: 'online', lastSeen: new Date() }, { new: true }).lean();
         io.to(userId).emit('userStatus', { userId, status: 'online', lastSeen: new Date() });
         await emitUpdatedChatList(io, userId);
       });
@@ -678,91 +696,84 @@ io.on('connection', (socket) => {
     }
   });
 
-
-
-
-  // social.js
-router.post('/messages', authMiddleware, messageLimiter, async (req, res) => {
-  try {
-    const { error } = messageSchema.validate(req.body);
-    if (error) return res.status(400).json({ error: error.details[0].message });
-    const {
-      senderId,
-      recipientId,
-      content,
-      contentType,
-      plaintextContent,
-      caption,
-      replyTo,
-      clientMessageId,
-      senderVirtualNumber,
-      senderUsername,
-      senderPhoto,
-    } = req.body;
-    if (senderId !== req.user._id.toString()) return res.status(403).json({ error: 'Unauthorized sender' });
-    await retryOperation(async () => {
-      const recipient = await User.findById(recipientId).select('status').lean();
-      if (!recipient) return res.status(404).json({ error: 'Recipient not found' });
-      const existingMessage = await Message.findOne({ clientMessageId }).lean();
-      if (existingMessage) return res.status(200).json({ message: existingMessage });
-      const sender = await User.findById(senderId).select('virtualNumber username photo').lean();
-      const message = new Message({
+  router.post('/messages', authMiddleware, messageLimiter, async (req, res) => {
+    try {
+      const { error } = messageSchema.validate(req.body);
+      if (error) return res.status(400).json({ error: error.details[0].message });
+      const {
         senderId,
         recipientId,
-        content: content || '',
+        content,
         contentType,
-        plaintextContent: plaintextContent || '',
-        status: recipient.status === 'online' ? 'delivered' : 'sent',
+        plaintextContent,
         caption,
-        replyTo: replyTo && mongoose.isValidObjectId(replyTo) ? replyTo : undefined,
-        originalFilename: req.body.originalFilename,
+        replyTo,
         clientMessageId,
-        senderVirtualNumber: senderVirtualNumber || sender.virtualNumber,
-        senderUsername: senderUsername || sender.username,
-        senderPhoto: senderPhoto || sender.photo,
+        senderVirtualNumber,
+        senderUsername,
+        senderPhoto,
+      } = req.body;
+      if (senderId !== req.user._id.toString()) return res.status(403).json({ error: 'Unauthorized sender' });
+      await retryOperation(async () => {
+        const recipient = await User.findById(recipientId).select('status').lean();
+        if (!recipient) return res.status(404).json({ error: 'Recipient not found' });
+        const existingMessage = await Message.findOne({ clientMessageId }).lean();
+        if (existingMessage) return res.status(200).json({ message: existingMessage });
+        const sender = await User.findById(senderId).select('virtualNumber username photo').lean();
+        const message = new Message({
+          senderId,
+          recipientId,
+          content: content || '',
+          contentType,
+          plaintextContent: plaintextContent || '',
+          status: recipient.status === 'online' ? 'delivered' : 'sent',
+          caption,
+          replyTo: replyTo && mongoose.isValidObjectId(replyTo) ? replyTo : undefined,
+          originalFilename: req.body.originalFilename,
+          clientMessageId,
+          senderVirtualNumber: senderVirtualNumber || sender.virtualNumber,
+          senderUsername: senderUsername || sender.username,
+          senderPhoto: senderPhoto || sender.photo,
+        });
+        await message.save();
+        const populatedMessage = await Message.findById(message._id)
+          .populate('senderId', 'username virtualNumber photo')
+          .populate('recipientId', 'username virtualNumber photo')
+          .populate('replyTo', 'content contentType senderId recipientId createdAt')
+          .lean();
+        io.to(recipientId).emit('message', {
+          ...populatedMessage,
+          senderId: populatedMessage.senderId._id.toString(),
+          recipientId: populatedMessage.recipientId._id.toString(),
+          replyTo: populatedMessage.replyTo
+            ? {
+                ...populatedMessage.replyTo,
+                senderId: populatedMessage.replyTo.senderId.toString(),
+                recipientId: populatedMessage.replyTo.recipientId.toString(),
+              }
+            : null,
+        });
+        io.to(senderId).emit('message', {
+          ...populatedMessage,
+          senderId: populatedMessage.senderId._id.toString(),
+          recipientId: populatedMessage.recipientId._id.toString(),
+          replyTo: populatedMessage.replyTo
+            ? {
+                ...populatedMessage.replyTo,
+                senderId: populatedMessage.replyTo.senderId.toString(),
+                recipientId: populatedMessage.replyTo.recipientId.toString(),
+              }
+            : null,
+        });
+        io.to(senderId).emit('messageStatus', { messageIds: [message._id], status: recipient.status === 'online' ? 'delivered' : 'sent' });
+        await Promise.all([emitUpdatedChatList(io, senderId), emitUpdatedChatList(io, recipientId)]);
+        res.status(201).json({ message: populatedMessage });
       });
-      await message.save();
-      const populatedMessage = await Message.findById(message._id)
-        .populate('senderId', 'username virtualNumber photo')
-        .populate('recipientId', 'username virtualNumber photo')
-        .populate('replyTo', 'content contentType senderId recipientId createdAt')
-        .lean();
-      io.to(recipientId).emit('message', {
-        ...populatedMessage,
-        senderId: populatedMessage.senderId._id.toString(),
-        recipientId: populatedMessage.recipientId._id.toString(),
-        replyTo: populatedMessage.replyTo
-          ? {
-              ...populatedMessage.replyTo,
-              senderId: populatedMessage.replyTo.senderId.toString(),
-              recipientId: populatedMessage.replyTo.recipientId.toString(),
-            }
-          : null,
-      });
-      io.to(senderId).emit('message', {
-        ...populatedMessage,
-        senderId: populatedMessage.senderId._id.toString(),
-        recipientId: populatedMessage.recipientId._id.toString(),
-        replyTo: populatedMessage.replyTo
-          ? {
-              ...populatedMessage.replyTo,
-              senderId: populatedMessage.replyTo.senderId.toString(),
-              recipientId: populatedMessage.replyTo.recipientId.toString(),
-            }
-          : null,
-      });
-      io.to(senderId).emit('messageStatus', { messageIds: [message._id], status: recipient.status === 'online' ? 'delivered' : 'sent' });
-      await Promise.all([emitUpdatedChatList(io, senderId), emitUpdatedChatList(io, recipientId)]);
-      res.status(201).json({ message: populatedMessage });
-    });
-  } catch (error) {
-    logger.error('Save message error', { error: error.message, senderId: req.body.senderId });
-    res.status(500).json({ error: 'Failed to save message' });
-  }
-});
-
-
-
+    } catch (error) {
+      logger.error('Save message error', { error: error.message, senderId: req.body.senderId });
+      res.status(500).json({ error: 'Failed to save message' });
+    }
+  });
 
   router.post('/edit_message', authMiddleware, async (req, res) => {
     try {
@@ -998,11 +1009,17 @@ router.post('/messages', authMiddleware, messageLimiter, async (req, res) => {
         sockets.forEach((socket) => socket.disconnect(true));
         await User.findByIdAndUpdate(req.user.id, { status: 'offline', lastSeen: new Date() });
         io.to(req.user.id).emit('userStatus', { userId: req.user.id, status: 'offline', lastSeen: new Date() });
-        res.status(200).json({ message: 'Logged out successfully' });
       });
+      res.status(200).json({ message: 'Logged out successfully' });
     } catch (error) {
       logger.error('Logout error', { error: error.message, userId: req.user?.id });
-      res.status(500).json({ error: 'Failed to logout' });
+      // Attempt to blacklist token even on failure
+      try {
+        await TokenBlacklist.create({ token: req.token });
+      } catch (blacklistErr) {
+        logger.error('Failed to blacklist token during logout', { error: blacklistErr.message });
+      }
+      res.status(500).json({ error: 'Failed to logout, please try again' });
     }
   });
 
