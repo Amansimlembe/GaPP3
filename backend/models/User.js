@@ -37,7 +37,7 @@ const retryOperation = async (operation, maxRetries = 3, baseDelay = 2000) => {
         logger.error('MongoDB operation failed after retries', { error: err.message, stack: err.stack });
         throw err;
       }
-      const delay = Math.pow(2, attempt) * baseDelay; // Exponential backoff: 2s, 4s, 8s
+      const delay = Math.pow(2, attempt) * baseDelay;
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
@@ -52,7 +52,7 @@ const userSchema = new mongoose.Schema(
       lowercase: true,
       trim: true,
       match: [/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/, 'Invalid email format'],
-      index: true, // Explicit index
+      index: true,
     },
     password: {
       type: String,
@@ -65,8 +65,8 @@ const userSchema = new mongoose.Schema(
       unique: true,
       trim: true,
       minlength: [3, 'Username must be at least 3 characters'],
-      maxlength: [50, 'Username cannot exceed 50 characters'], // Increased to align with social.js
-      index: true, // Explicit index
+      maxlength: [50, 'Username cannot exceed 50 characters'],
+      index: true,
     },
     photo: {
       type: String,
@@ -97,14 +97,14 @@ const userSchema = new mongoose.Schema(
         },
         message: 'Invalid virtual number format for the specified country.',
       },
-      index: true, // Explicit index
+      index: true,
     },
     contacts: {
       type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
       default: [],
       validate: {
         validator: function (value) {
-          return value.length <= 500; // Reduced to 500 for performance
+          return value.length <= 500;
         },
         message: 'Contacts list cannot exceed 500 entries.',
       },
@@ -134,7 +134,7 @@ const userSchema = new mongoose.Schema(
     },
   },
   {
-    timestamps: true, // Keep enabled for createdAt/updatedAt
+    timestamps: true,
   }
 );
 
@@ -151,7 +151,7 @@ userSchema.pre('save', async function (next) {
     await retryOperation(async () => {
       if (this.isModified('contacts') && this.contacts.length) {
         const uniqueContacts = [...new Set(this.contacts.map((id) => id.toString()))].filter(
-          (id) => mongoose.isValidObjectId(id) && id !== this._id.toString() // Prevent self-reference
+          (id) => mongoose.isValidObjectId(id) && id !== this._id.toString()
         );
         if (uniqueContacts.length > 500) {
           throw new Error('Contacts list cannot exceed 500 entries.');
@@ -188,7 +188,7 @@ userSchema.pre('save', async function (next) {
 userSchema.statics.cleanupInvalidContacts = async function () {
   try {
     logger.info('Starting invalid contacts cleanup');
-    const batchSize = 500; // Reduced for faster processing
+    const batchSize = 500;
     let totalUpdated = 0;
 
     const userStream = this.find({ contacts: { $ne: [] } })
@@ -276,6 +276,18 @@ userSchema.statics.resetStaleStatuses = async function (thresholdMinutes = 15) {
   }
 };
 
+const User = mongoose.model('User', userSchema);
+
+// Defer initialization until after model definition
+setImmediate(() => {
+  User.cleanupInvalidContacts().catch((err) => {
+    logger.error('Initial invalid contacts cleanup failed', { error: err.message });
+  });
+  User.resetStaleStatuses().catch((err) => {
+    logger.error('Initial stale status cleanup failed', { error: err.message });
+  });
+});
+
 // Periodic cleanup for stale statuses every 10 minutes
 setInterval(() => {
   User.resetStaleStatuses().catch((err) => {
@@ -283,13 +295,4 @@ setInterval(() => {
   });
 }, 10 * 60 * 1000);
 
-// Initial cleanup on startup
-User.cleanupInvalidContacts().catch((err) => {
-  logger.error('Initial invalid contacts cleanup failed', { error: err.message });
-});
-User.resetStaleStatuses().catch((err) => {
-  logger.error('Initial stale status cleanup failed', { error: err.message });
-});
-
-const User = mongoose.model('User', userSchema);
 module.exports = User;
