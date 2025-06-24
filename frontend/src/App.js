@@ -91,9 +91,18 @@ const getTokenExpiration = (token) => {
     const decoded = JSON.parse(jsonPayload);
     return decoded.exp ? decoded.exp * 1000 : null;
   } catch (error) {
-    console.error('Error decoding token:', error.message);
+    console.warn('Error decoding token:', error.message);
     return null;
   }
+};
+
+// Debounce utility for error logging
+const debounce = (func, wait) => {
+  let timeout;
+  return (...args) => {
+    clearTimeout(timeout);
+    timeout = setTimeout(() => func(...args), wait);
+  };
 };
 
 const App = () => {
@@ -101,41 +110,79 @@ const App = () => {
   const { token, userId, role, photo, virtualNumber, username } = useSelector((state) => state.auth);
   const { selectedChat } = useSelector((state) => state.messages);
   const [chatNotifications, setChatNotifications] = useState(0);
-  const [socket, setSocket] = useState(null); // Changed: Use state for socket
+  const [socket, setSocket] = useState(null);
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
   const [error, setError] = useState(null);
+  const errorLogTimestamps = React.useRef([]);
+  const maxLogsPerMinute = 5;
 
-  // Changed: Handle logout explicitly
+  // Error logging with debouncing
+  const logSocketError = useCallback(
+    debounce(async (message, errorDetails, userId) => {
+      const now = Date.now();
+      errorLogTimestamps.current = errorLogTimestamps.current.filter((ts) => now - ts < 60 * 1000);
+      if (errorLogTimestamps.current.length >= maxLogsPerMinute) {
+        console.warn('Error log rate limit reached');
+        return;
+      }
+      errorLogTimestamps.current.push(now);
+      try {
+        await axios.post(
+          `${BASE_URL}/social/log-error`,
+          {
+            error: message,
+            stack: errorDetails || '',
+            userId,
+            route: window.location.pathname,
+            timestamp: new Date().toISOString(),
+          },
+          { timeout: 5000 }
+        );
+      } catch (err) {
+        console.warn('Failed to log socket error:', err.message);
+      }
+    }, 500),
+    []
+  );
+
   const handleLogout = useCallback(async () => {
     try {
+      if (socket) {
+        socket.emit('leave', userId);
+        socket.disconnect();
+      }
       await axios.post(
-        `${BASE_URL}/auth/logout`,
+        `${BASE_URL}/social/logout`, // Changed to /social/logout
         {},
         {
           headers: { Authorization: `Bearer ${token}` },
           timeout: 5000,
         }
       );
-      if (socket) {
-        socket.emit('leave', userId);
-        socket.disconnect();
-      }
       dispatch(clearAuth());
       setSocket(null);
       setChatNotifications(0);
       setError(null);
       localStorage.removeItem('theme'); // Preserve theme preference
+      sessionStorage.clear();
+      localStorage.clear();
       console.log('Logout successful');
     } catch (error) {
-      console.error('Logout error:', error.message);
+      console.warn('Logout error:', error.message);
       setError('Failed to logout, please try again');
+      logSocketError('Logout failed', error.message, userId);
+      if (error.response?.status === 401) {
+        dispatch(clearAuth());
+        setSocket(null);
+        setChatNotifications(0);
+        sessionStorage.clear();
+        localStorage.clear();
+      }
     }
-  }, [dispatch, token, userId, socket]);
+  }, [dispatch, token, userId, socket, logSocketError]);
 
-  // Changed: Initialize socket reactively based on auth state
   useEffect(() => {
     if (!token || !userId) {
-      console.warn('Invalid token or userId, skipping socket initialization');
       if (socket) {
         socket.disconnect();
         setSocket(null);
@@ -143,80 +190,95 @@ const App = () => {
       return;
     }
 
+    // Prevent duplicate socket connections
+    if (socket) {
+      socket.disconnect();
+    }
+
     const newSocket = io(BASE_URL, {
       auth: { token, userId },
       transports: ['websocket', 'polling'],
-      reconnectionAttempts: 5,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 5000,
-      timeout: 10000,
+      reconnectionAttempts: 3, // Reduced for free tier
+      reconnectionDelay: 2000,
+      reconnectionDelayMax: 6000,
+      timeout: 8000,
     });
     setSocket(newSocket);
 
-    newSocket.on('connect', () => {
+    const handleConnect = () => {
       newSocket.emit('join', { userId });
       console.log('Socket connected:', newSocket.id);
-    });
+    };
 
-    newSocket.on('connect_error', async (error) => {
-      console.error('Socket connect error:', error.message);
+    const handleConnectError = async (error) => {
+      console.warn('Socket connect error:', error.message);
       if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
         setError('Authentication error, logging out');
+        logSocketError('Socket authentication failed', error.message, userId);
         await handleLogout();
+      } else if (!['websocket error', 'ping timeout'].includes(error.message)) {
+        logSocketError('Socket connect error', error.message, userId);
       }
-    });
+    };
 
-    newSocket.on('disconnect', (reason) => {
+    const handleDisconnect = (reason) => {
       console.warn('Socket disconnected:', reason);
       if (reason === 'io server disconnect' && navigator.onLine) {
         newSocket.connect();
       }
-    });
+    };
 
-    newSocket.on('message', (msg) => {
+    const handleMessage = (msg) => {
       if (msg.recipientId === userId && (!selectedChat || selectedChat !== msg.senderId)) {
         setChatNotifications((prev) => prev + 1);
       }
-    });
+    };
 
-    newSocket.on('newContact', (contactData) => {
+    const handleNewContact = (contactData) => {
       console.log('New contact:', contactData);
-    });
+    };
 
-    // Changed: Handle online/offline events
+    newSocket.on('connect', handleConnect);
+    newSocket.on('connect_error', handleConnectError);
+    newSocket.on('disconnect', handleDisconnect);
+    newSocket.on('message', handleMessage);
+    newSocket.on('newContact', handleNewContact);
+
+    // Online/offline handling
     const handleOnline = () => newSocket.connect();
     const handleOffline = () => console.warn('Offline: Socket disconnected');
     window.addEventListener('online', handleOnline);
-    window.removeEventListener('offline', handleOffline);
+    window.addEventListener('offline', handleOffline);
 
     return () => {
+      newSocket.off('connect', handleConnect);
+      newSocket.off('connect_error', handleConnectError);
+      newSocket.off('disconnect', handleDisconnect);
+      newSocket.off('message', handleMessage);
+      newSocket.off('newContact', handleNewContact);
       newSocket.emit('leave', userId);
-      newSocket.off('connect');
-      newSocket.off('connect_error');
-      newSocket.off('disconnect');
-      newSocket.off('message');
-      newSocket.off('newContact');
       newSocket.disconnect();
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
       setSocket(null);
-      console.log('Socket cleanup');
+      console.log('Socket cleanup complete');
+      errorLogTimestamps.current = [];
     };
-  }, [token, userId, selectedChat, handleLogout]); // Changed: Depend on token and userId
+  }, [token, userId, selectedChat, handleLogout, logSocketError]);
 
-  // Changed: Optimize token refresh logic
   const refreshToken = useCallback(async () => {
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
         if (!navigator.onLine) {
-          throw new Error('Offline: Cannot refresh token');
+          console.warn('Offline: Cannot refresh token');
+          return null;
         }
         const response = await axios.post(
           `${BASE_URL}/auth/refresh`,
           { userId },
           {
             headers: { Authorization: `Bearer ${token}` },
-            timeout: 5000, // Changed: Reduced timeout
+            timeout: 5000,
           }
         );
         const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername, privateKey } = response.data;
@@ -232,7 +294,8 @@ const App = () => {
         console.log('Token refreshed');
         return newToken;
       } catch (error) {
-        console.error(`Token refresh attempt ${attempt} failed:`, error.response?.data || error.message);
+        console.warn(`Token refresh attempt ${attempt} failed:`, error.message);
+        logSocketError(`Token refresh failed (attempt ${attempt})`, error.message, userId);
         if (attempt < 3 && (error.response?.status === 429 || error.response?.status >= 500 || error.code === 'ECONNABORTED' || !navigator.onLine)) {
           await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * 1000));
           continue;
@@ -241,23 +304,25 @@ const App = () => {
         return null;
       }
     }
-  }, [token, userId, dispatch, handleLogout]);
+  }, [token, userId, dispatch, handleLogout, logSocketError]);
 
   useEffect(() => {
     if (!token || !userId) return;
 
     let isRefreshing = false;
+    let intervalId;
     const checkTokenExpiration = async () => {
       if (isRefreshing) return;
       isRefreshing = true;
       try {
         const expTime = getTokenExpiration(token);
-        if (expTime && expTime - Date.now() < 10 * 60 * 1000) { // 10 minutes
+        if (expTime && expTime - Date.now() < 10 * 60 * 1000) {
           await refreshToken();
         }
       } catch (err) {
-        console.error('Token expiration check failed:', err.message);
+        console.warn('Token expiration check failed:', err.message);
         setError('Authentication error, please log in again');
+        logSocketError('Token expiration check failed', err.message, userId);
         handleLogout();
       } finally {
         isRefreshing = false;
@@ -265,9 +330,12 @@ const App = () => {
     };
 
     checkTokenExpiration();
-    const interval = setInterval(checkTokenExpiration, 5 * 60 * 1000);
-    return () => clearInterval(interval);
-  }, [token, userId, refreshToken, handleLogout]);
+    intervalId = setInterval(checkTokenExpiration, 5 * 60 * 1000);
+    return () => {
+      clearInterval(intervalId);
+      isRefreshing = false;
+    };
+  }, [token, userId, refreshToken, handleLogout, logSocketError]);
 
   useEffect(() => {
     document.documentElement.className = theme === 'dark' ? 'dark' : '';
@@ -299,12 +367,11 @@ const App = () => {
             virtualNumber={virtualNumber}
             username={username}
             chatNotifications={chatNotifications}
-            setAuth={dispatch(setAuth)} // Changed: Pass dispatch(setAuth)
             socket={socket}
             toggleTheme={toggleTheme}
             handleChatNavigation={handleChatNavigation}
             theme={theme}
-            handleLogout={handleLogout} // Changed: Pass logout handler
+            handleLogout={handleLogout}
           />
         ) : (
           <Routes>
@@ -325,12 +392,11 @@ const AuthenticatedApp = ({
   virtualNumber,
   username,
   chatNotifications,
-  setAuth,
   socket,
   toggleTheme,
   handleChatNavigation,
   theme,
-  handleLogout, // Changed: Receive logout handler
+  handleLogout,
 }) => {
   const location = useLocation();
   const dispatch = useDispatch();
@@ -348,7 +414,7 @@ const AuthenticatedApp = ({
           token={token}
           userId={userId}
           virtualNumber={virtualNumber}
-          onComplete={(newVirtualNumber) => setAuth({ token, userId, role, photo, virtualNumber: newVirtualNumber, username })}
+          onComplete={(newVirtualNumber) => dispatch(setAuth({ token, userId, role, photo, virtualNumber: newVirtualNumber, username }))}
         />
       )}
       <div className="flex-1 p-0 relative">
@@ -356,7 +422,7 @@ const AuthenticatedApp = ({
           <Route path="/jobs" element={role === 0 ? <JobSeekerScreen token={token} userId={userId} /> : <EmployerScreen token={token} userId={userId} />} />
           <Route
             path="/feed"
-            element={<FeedScreen token={token} userId={userId} onUnauthorized={() => handleLogout()} />}
+            element={<FeedScreen token={token} userId={userId} onUnauthorized={handleLogout} />}
           />
           <Route
             path="/chat"
@@ -364,7 +430,6 @@ const AuthenticatedApp = ({
               <ChatScreen
                 token={token}
                 userId={userId}
-                setAuth={setAuth}
                 socket={socket}
                 username={username}
                 virtualNumber={virtualNumber}
@@ -378,11 +443,10 @@ const AuthenticatedApp = ({
               <ProfileScreen
                 token={token}
                 userId={userId}
-                setAuth={setAuth}
                 username={username}
                 virtualNumber={virtualNumber}
                 photo={photo}
-                onLogout={handleLogout} // Changed: Pass logout handler
+                onLogout={handleLogout}
               />
             }
           />
