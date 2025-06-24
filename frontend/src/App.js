@@ -33,6 +33,8 @@ class ErrorBoundary extends React.Component {
             {
               error: error.message,
               stack: errorInfo.componentStack,
+              userId: this.props.userId || null,
+              route: window.location.pathname,
               timestamp: new Date().toISOString(),
             },
             { timeout: 5000 }
@@ -91,18 +93,41 @@ const getTokenExpiration = (token) => {
     const decoded = JSON.parse(jsonPayload);
     return decoded.exp ? decoded.exp * 1000 : null;
   } catch (error) {
-    console.warn('Error decoding token:', error.message);
+    console.error('Error decoding token:', error.message);
     return null;
   }
 };
 
-// Debounce utility for error logging
-const debounce = (func, wait) => {
-  let timeout;
-  return (...args) => {
-    clearTimeout(timeout);
-    timeout = setTimeout(() => func(...args), wait);
-  };
+// Rate-limited error logging
+const errorLogTimestamps = [];
+const maxLogsPerMinute = 5;
+const logClientError = async (message, error, userId = null) => {
+  const now = Date.now();
+  errorLogTimestamps.length = errorLogTimestamps.filter((ts) => now - ts < 60 * 1000).length;
+  if (errorLogTimestamps.length >= maxLogsPerMinute) return;
+  errorLogTimestamps.push(now);
+  for (let i = 0; i < 3; i++) {
+    try {
+      await axios.post(
+        `${BASE_URL}/social/log-error`,
+        {
+          error: message,
+          stack: error?.stack || '',
+          userId,
+          route: window.location.pathname,
+          timestamp: new Date().toISOString(),
+        },
+        { timeout: 5000 }
+      );
+      return;
+    } catch (err) {
+      if (i < 2) {
+        await new Promise((resolve) => setTimeout(resolve, Math.pow(2, i) * 1000));
+        continue;
+      }
+      console.warn('Failed to log error:', err.message);
+    }
+  }
 };
 
 const App = () => {
@@ -113,73 +138,40 @@ const App = () => {
   const [socket, setSocket] = useState(null);
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
   const [error, setError] = useState(null);
-  const errorLogTimestamps = React.useRef([]);
-  const maxLogsPerMinute = 5;
-
-  // Error logging with debouncing
-  const logSocketError = useCallback(
-    debounce(async (message, errorDetails, userId) => {
-      const now = Date.now();
-      errorLogTimestamps.current = errorLogTimestamps.current.filter((ts) => now - ts < 60 * 1000);
-      if (errorLogTimestamps.current.length >= maxLogsPerMinute) {
-        console.warn('Error log rate limit reached');
-        return;
-      }
-      errorLogTimestamps.current.push(now);
-      try {
-        await axios.post(
-          `${BASE_URL}/social/log-error`,
-          {
-            error: message,
-            stack: errorDetails || '',
-            userId,
-            route: window.location.pathname,
-            timestamp: new Date().toISOString(),
-          },
-          { timeout: 5000 }
-        );
-      } catch (err) {
-        console.warn('Failed to log socket error:', err.message);
-      }
-    }, 500),
-    []
-  );
 
   const handleLogout = useCallback(async () => {
     try {
-      if (socket) {
-        socket.emit('leave', userId);
-        socket.disconnect();
-      }
       await axios.post(
-        `${BASE_URL}/social/logout`, // Changed to /social/logout
+        `${BASE_URL}/social/logout`, // Updated: Changed to /social/logout
         {},
         {
           headers: { Authorization: `Bearer ${token}` },
           timeout: 5000,
         }
       );
+      if (socket) {
+        socket.emit('leave', userId);
+        socket.disconnect();
+      }
       dispatch(clearAuth());
+      dispatch(setSelectedChat(null));
       setSocket(null);
       setChatNotifications(0);
       setError(null);
       localStorage.removeItem('theme'); // Preserve theme preference
-      sessionStorage.clear();
-      localStorage.clear();
       console.log('Logout successful');
     } catch (error) {
-      console.warn('Logout error:', error.message);
-      setError('Failed to logout, please try again');
-      logSocketError('Logout failed', error.message, userId);
+      console.error('Logout error:', error.message);
+      logClientError('Logout failed', error, userId);
       if (error.response?.status === 401) {
         dispatch(clearAuth());
+        dispatch(setSelectedChat(null));
         setSocket(null);
         setChatNotifications(0);
-        sessionStorage.clear();
-        localStorage.clear();
+        setError(null);
       }
     }
-  }, [dispatch, token, userId, socket, logSocketError]);
+  }, [dispatch, token, userId, socket]);
 
   useEffect(() => {
     if (!token || !userId) {
@@ -190,18 +182,13 @@ const App = () => {
       return;
     }
 
-    // Prevent duplicate socket connections
-    if (socket) {
-      socket.disconnect();
-    }
-
     const newSocket = io(BASE_URL, {
       auth: { token, userId },
       transports: ['websocket', 'polling'],
       reconnectionAttempts: 3, // Reduced for free tier
-      reconnectionDelay: 2000,
-      reconnectionDelayMax: 6000,
-      timeout: 8000,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 3000, // Reduced for free tier
+      timeout: 5000, // Tighter timeout
     });
     setSocket(newSocket);
 
@@ -211,30 +198,37 @@ const App = () => {
     };
 
     const handleConnectError = async (error) => {
-      console.warn('Socket connect error:', error.message);
+      console.error('Socket connect error:', error.message);
+      logClientError('Socket connect error', error, userId);
       if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
         setError('Authentication error, logging out');
-        logSocketError('Socket authentication failed', error.message, userId);
         await handleLogout();
-      } else if (!['websocket error', 'ping timeout'].includes(error.message)) {
-        logSocketError('Socket connect error', error.message, userId);
       }
     };
 
     const handleDisconnect = (reason) => {
       console.warn('Socket disconnected:', reason);
+      logClientError(`Socket disconnected: ${reason}`, new Error(reason), userId);
       if (reason === 'io server disconnect' && navigator.onLine) {
         newSocket.connect();
       }
     };
 
     const handleMessage = (msg) => {
+      if (!msg.senderId || !msg.recipientId) {
+        console.warn('Invalid message payload:', msg);
+        return;
+      }
       if (msg.recipientId === userId && (!selectedChat || selectedChat !== msg.senderId)) {
         setChatNotifications((prev) => prev + 1);
       }
     };
 
     const handleNewContact = (contactData) => {
+      if (!contactData?.id) {
+        console.warn('Invalid contact data:', contactData);
+        return;
+      }
       console.log('New contact:', contactData);
     };
 
@@ -244,34 +238,32 @@ const App = () => {
     newSocket.on('message', handleMessage);
     newSocket.on('newContact', handleNewContact);
 
-    // Online/offline handling
     const handleOnline = () => newSocket.connect();
     const handleOffline = () => console.warn('Offline: Socket disconnected');
+
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
 
     return () => {
+      newSocket.emit('leave', userId);
       newSocket.off('connect', handleConnect);
       newSocket.off('connect_error', handleConnectError);
       newSocket.off('disconnect', handleDisconnect);
       newSocket.off('message', handleMessage);
       newSocket.off('newContact', handleNewContact);
-      newSocket.emit('leave', userId);
       newSocket.disconnect();
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
       setSocket(null);
-      console.log('Socket cleanup complete');
-      errorLogTimestamps.current = [];
+      console.log('Socket cleanup completed');
     };
-  }, [token, userId, selectedChat, handleLogout, logSocketError]);
+  }, [token, userId, selectedChat, handleLogout]);
 
   const refreshToken = useCallback(async () => {
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
         if (!navigator.onLine) {
-          console.warn('Offline: Cannot refresh token');
-          return null;
+          throw new Error('Offline: Cannot refresh token');
         }
         const response = await axios.post(
           `${BASE_URL}/auth/refresh`,
@@ -294,8 +286,8 @@ const App = () => {
         console.log('Token refreshed');
         return newToken;
       } catch (error) {
-        console.warn(`Token refresh attempt ${attempt} failed:`, error.message);
-        logSocketError(`Token refresh failed (attempt ${attempt})`, error.message, userId);
+        console.error(`Token refresh attempt ${attempt} failed:`, error.response?.data || error.message);
+        logClientError(`Token refresh failed: attempt ${attempt}`, error, userId);
         if (attempt < 3 && (error.response?.status === 429 || error.response?.status >= 500 || error.code === 'ECONNABORTED' || !navigator.onLine)) {
           await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * 1000));
           continue;
@@ -304,13 +296,12 @@ const App = () => {
         return null;
       }
     }
-  }, [token, userId, dispatch, handleLogout, logSocketError]);
+  }, [token, userId, dispatch, handleLogout]);
 
   useEffect(() => {
     if (!token || !userId) return;
 
     let isRefreshing = false;
-    let intervalId;
     const checkTokenExpiration = async () => {
       if (isRefreshing) return;
       isRefreshing = true;
@@ -320,9 +311,9 @@ const App = () => {
           await refreshToken();
         }
       } catch (err) {
-        console.warn('Token expiration check failed:', err.message);
+        console.error('Token expiration check failed:', err.message);
+        logClientError('Token expiration check failed', err, userId);
         setError('Authentication error, please log in again');
-        logSocketError('Token expiration check failed', err.message, userId);
         handleLogout();
       } finally {
         isRefreshing = false;
@@ -330,12 +321,9 @@ const App = () => {
     };
 
     checkTokenExpiration();
-    intervalId = setInterval(checkTokenExpiration, 5 * 60 * 1000);
-    return () => {
-      clearInterval(intervalId);
-      isRefreshing = false;
-    };
-  }, [token, userId, refreshToken, handleLogout, logSocketError]);
+    const interval = setInterval(checkTokenExpiration, 5 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, [token, userId, refreshToken, handleLogout]);
 
   useEffect(() => {
     document.documentElement.className = theme === 'dark' ? 'dark' : '';
@@ -351,7 +339,7 @@ const App = () => {
   }, [dispatch]);
 
   return (
-    <ErrorBoundary>
+    <ErrorBoundary userId={userId}>
       {error && (
         <div className="fixed top-0 left-0 right-0 bg-red-500 text-white p-2 text-center z-50">
           {error}
