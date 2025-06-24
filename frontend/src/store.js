@@ -1,13 +1,15 @@
+
 import { configureStore, createSlice } from '@reduxjs/toolkit';
 import { openDB } from 'idb';
 
 // Constants
 const DB_NAME = 'chatApp';
 const STORE_NAME = 'reduxState';
-const VERSION = 2;
+const VERSION = 3; // Incremented for new cleanup logic
 const MAX_MESSAGES_PER_CHAT = 100;
 const MESSAGE_TTL = 30 * 24 * 60 * 60 * 1000; // 30 days in milliseconds
-const PERSISTENCE_DEBOUNCE_MS = 500;
+const PERSISTENCE_DEBOUNCE_MS = 300; // Reduced for faster persistence
+const CACHE_TIMEOUT = 5 * 60 * 1000; // 5 minutes for chat list cache
 
 // ObjectId validation
 const isValidObjectId = (id) => /^[0-9a-fA-F]{24}$/.test(id);
@@ -19,14 +21,14 @@ const initDB = async () => {
       if (oldVersion < 1) {
         db.createObjectStore(STORE_NAME, { keyPath: 'key' });
       }
-      if (oldVersion < 2) {
+      if (oldVersion < 3) {
         console.log('Upgraded IndexedDB from version', oldVersion, 'to', newVersion);
       }
     },
   });
 };
 
-// Error logging (simplified for store, aligns with ChatScreen.js)
+// Error logging aligned with backend
 const logError = async (message, error, userId = null) => {
   try {
     await fetch('https://gapp-6yc3.onrender.com/social/log-error', {
@@ -60,7 +62,7 @@ const authSlice = createSlice({
   reducers: {
     setAuth: (state, action) => {
       const { token, userId, role, photo, virtualNumber, username, privateKey } = action.payload;
-      state.token = typeof token === 'string' ? token : null;
+      state.token = typeof token === 'string' && token ? token : null;
       state.userId = isValidObjectId(userId) ? userId : null;
       state.role = typeof role === 'string' ? role : null;
       state.photo = typeof photo === 'string' ? photo : null;
@@ -113,7 +115,9 @@ const messageSlice = createSlice({
           createdAt: msg.createdAt ? new Date(msg.createdAt) : new Date(),
           updatedAt: msg.updatedAt ? new Date(msg.updatedAt) : undefined,
         };
-        messageMap.set(key, normalizedMsg);
+        if (isValidObjectId(normalizedMsg.senderId) && isValidObjectId(normalizedMsg.recipientId)) {
+          messageMap.set(key, normalizedMsg);
+        }
       });
       state.chats[recipientId] = Array.from(messageMap.values())
         .filter((msg) => now - new Date(msg.createdAt).getTime() <= MESSAGE_TTL)
@@ -145,10 +149,12 @@ const messageSlice = createSlice({
         createdAt: message.createdAt ? new Date(message.createdAt) : new Date(),
         updatedAt: message.updatedAt ? new Date(message.updatedAt) : undefined,
       };
-      state.chats[recipientId].push(normalizedMsg);
-      state.chats[recipientId] = state.chats[recipientId].slice(-MAX_MESSAGES_PER_CHAT);
-      state.chatMessageCount[recipientId] = (state.chatMessageCount[recipientId] || 0) + 1;
-      state.messagesTimestamp[recipientId] = Date.now();
+      if (isValidObjectId(normalizedMsg.senderId) && isValidObjectId(normalizedMsg.recipientId)) {
+        state.chats[recipientId].push(normalizedMsg);
+        state.chats[recipientId] = state.chats[recipientId].slice(-MAX_MESSAGES_PER_CHAT);
+        state.chatMessageCount[recipientId] = (state.chatMessageCount[recipientId] || 0) + 1;
+        state.messagesTimestamp[recipientId] = Date.now();
+      }
     },
     replaceMessage: (state, action) => {
       const { recipientId, message, replaceId } = action.payload;
@@ -175,14 +181,16 @@ const messageSlice = createSlice({
         createdAt: message.createdAt ? new Date(message.createdAt) : new Date(),
         updatedAt: message.updatedAt ? new Date(message.updatedAt) : undefined,
       };
-      if (index !== -1) {
-        state.chats[recipientId][index] = normalizedMsg;
-      } else {
-        state.chats[recipientId].push(normalizedMsg);
-        state.chats[recipientId] = state.chats[recipientId].slice(-MAX_MESSAGES_PER_CHAT);
-        state.chatMessageCount[recipientId] = (state.chatMessageCount[recipientId] || 0) + 1;
+      if (isValidObjectId(normalizedMsg.senderId) && isValidObjectId(normalizedMsg.recipientId)) {
+        if (index !== -1) {
+          state.chats[recipientId][index] = normalizedMsg;
+        } else {
+          state.chats[recipientId].push(normalizedMsg);
+          state.chats[recipientId] = state.chats[recipientId].slice(-MAX_MESSAGES_PER_CHAT);
+          state.chatMessageCount[recipientId] = (state.chatMessageCount[recipientId] || 0) + 1;
+        }
+        state.messagesTimestamp[recipientId] = Date.now();
       }
-      state.messagesTimestamp[recipientId] = Date.now();
     },
     updateMessageStatus: (state, action) => {
       const { recipientId, messageId, status, uploadProgress } = action.payload;
@@ -192,6 +200,7 @@ const messageSlice = createSlice({
           ? { ...msg, status, uploadProgress: uploadProgress !== undefined ? uploadProgress : msg.uploadProgress }
           : msg
       );
+      state.messagesTimestamp[recipientId] = Date.now();
     },
     deleteMessage: (state, action) => {
       const { recipientId, messageId } = action.payload;
@@ -212,8 +221,28 @@ const messageSlice = createSlice({
       }
     },
     setChatList: (state, action) => {
-      state.chatList = action.payload.filter((contact) => isValidObjectId(contact.id));
-      state.chatListTimestamp = Date.now();
+      const now = Date.now();
+      state.chatList = action.payload
+        .filter((contact) => isValidObjectId(contact.id) && contact.virtualNumber)
+        .map((contact) => ({
+          id: contact.id,
+          username: contact.username || 'Unknown',
+          virtualNumber: contact.virtualNumber || '',
+          photo: contact.photo || 'https://placehold.co/40x40',
+          status: contact.status || 'offline',
+          lastSeen: contact.lastSeen ? new Date(contact.lastSeen) : null,
+          latestMessage: contact.latestMessage
+            ? {
+                ...contact.latestMessage,
+                senderId: contact.latestMessage.senderId,
+                recipientId: contact.latestMessage.recipientId,
+                createdAt: contact.latestMessage.createdAt ? new Date(contact.latestMessage.createdAt) : new Date(),
+                updatedAt: contact.latestMessage.updatedAt ? new Date(contact.latestMessage.updatedAt) : undefined,
+              }
+            : null,
+          unreadCount: contact.unreadCount || 0,
+        }));
+      state.chatListTimestamp = now;
     },
     resetState: (state) => {
       Object.assign(state, messageSlice.getInitialState());
@@ -237,6 +266,10 @@ const messageSlice = createSlice({
           delete state.messagesTimestamp[recipientId];
         }
       });
+      if (now - state.chatListTimestamp > CACHE_TIMEOUT) {
+        state.chatList = [];
+        state.chatListTimestamp = 0;
+      }
     },
   },
 });
@@ -266,7 +299,6 @@ const debounce = (func, wait) => {
 
 // Persistence middleware with debounced writes
 const persistenceMiddleware = (store) => {
-  let persistTimeout = null;
   const debouncedPersist = debounce(async (state, action) => {
     try {
       const db = await initDB();
@@ -296,7 +328,22 @@ const persistenceMiddleware = (store) => {
             }
             return acc;
           }, {}),
-          chatList: state.messages.chatList,
+          chatList: state.messages.chatList.map((contact) => ({
+            id: contact.id,
+            username: contact.username,
+            virtualNumber: contact.virtualNumber,
+            photo: contact.photo,
+            status: contact.status,
+            lastSeen: contact.lastSeen ? contact.lastSeen.toISOString() : null,
+            latestMessage: contact.latestMessage
+              ? {
+                  ...contact.latestMessage,
+                  createdAt: contact.latestMessage.createdAt.toISOString(),
+                  updatedAt: contact.latestMessage.updatedAt ? contact.latestMessage.updatedAt.toISOString() : undefined,
+                }
+              : null,
+            unreadCount: contact.unreadCount,
+          })),
           chatListTimestamp: state.messages.chatListTimestamp,
           messagesTimestamp: state.messages.messagesTimestamp,
           chatMessageCount: state.messages.chatMessageCount,
@@ -335,7 +382,6 @@ const persistenceMiddleware = (store) => {
       const state = store.getState();
       debouncedPersist(state, action);
     } else if (action.type === clearAuth.type || action.type === resetState.type) {
-      clearTimeout(persistTimeout);
       requestAnimationFrame(async () => {
         try {
           const db = await initDB();
@@ -405,19 +451,40 @@ const loadPersistedState = async () => {
       return acc;
     }, {});
 
+    const chatList = Array.isArray(messages.chatList)
+      ? messages.chatList
+          .filter((contact) => isValidObjectId(contact.id) && contact.virtualNumber)
+          .map((contact) => ({
+            id: contact.id,
+            username: contact.username || 'Unknown',
+            virtualNumber: contact.virtualNumber || '',
+            photo: contact.photo || 'https://placehold.co/40x40',
+            status: contact.status || 'offline',
+            lastSeen: contact.lastSeen ? new Date(contact.lastSeen) : null,
+            latestMessage: contact.latestMessage
+              ? {
+                  ...contact.latestMessage,
+                  senderId: contact.latestMessage.senderId,
+                  recipientId: contact.latestMessage.recipientId,
+                  createdAt: contact.latestMessage.createdAt ? new Date(contact.latestMessage.createdAt) : new Date(),
+                  updatedAt: contact.latestMessage.updatedAt ? new Date(contact.latestMessage.updatedAt) : undefined,
+                }
+              : null,
+            unreadCount: contact.unreadCount || 0,
+          }))
+      : [];
+
     return {
       messages: {
         selectedChat: isValidObjectId(messages.selectedChat) ? messages.selectedChat : null,
         chats,
-        chatList: Array.isArray(messages.chatList)
-          ? messages.chatList.filter((contact) => isValidObjectId(contact.id))
-          : [],
-        chatListTimestamp: messages.chatListTimestamp || 0,
+        chatList: now - messages.chatListTimestamp > CACHE_TIMEOUT ? [] : chatList,
+        chatListTimestamp: now - messages.chatListTimestamp > CACHE_TIMEOUT ? 0 : messages.chatListTimestamp,
         messagesTimestamp: messages.messagesTimestamp || {},
         chatMessageCount,
       },
       auth: {
-        token: typeof auth.token === 'string' ? auth.token : null,
+        token: typeof auth.token === 'string' && auth.token ? auth.token : null,
         userId: isValidObjectId(auth.userId) ? auth.userId : null,
         role: typeof auth.role === 'string' ? auth.role : null,
         photo: typeof auth.photo === 'string' ? auth.photo : null,

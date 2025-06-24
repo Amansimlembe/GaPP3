@@ -1,3 +1,4 @@
+
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
@@ -12,14 +13,27 @@ const Message = require('../models/Message');
 const TokenBlacklist = require('../models/TokenBlacklist');
 const router = express.Router();
 
+// Logger configuration with deduplication
 const logger = winston.createLogger({
   level: 'info',
-  format: winston.format.combine(winston.format.timestamp(), winston.format.json()),
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.json(),
+    winston.format((info) => {
+      const errorKey = `${info.error}:${info.userId || 'unknown'}`;
+      info.errorCount = logger.errorCounts.get(errorKey) || 0;
+      if (info.level === 'error' && info.errorCount >= 2) return false;
+      logger.errorCounts.set(errorKey, info.errorCount + 1);
+      setTimeout(() => logger.errorCounts.delete(errorKey), 60 * 1000);
+      return info;
+    })()
+  ),
   transports: [
     new winston.transports.Console(),
     new winston.transports.File({ filename: 'logs/social-error.log', level: 'error' }),
     new winston.transports.File({ filename: 'logs/social-combined.log' }),
   ],
+  errorCounts: new Map(),
 });
 
 // Configure Cloudinary with retry logic
@@ -51,7 +65,7 @@ const configureCloudinary = () => {
     logger.error('Cloudinary configuration missing');
     throw new Error('Cloudinary configuration missing');
   }
-  cloudinary.config({ ...cloudinaryConfig, secure: true, timeout: 10000 });
+  cloudinary.config({ ...cloudinaryConfig, secure: true, timeout: 15000 });
   logger.info('Cloudinary configured', { cloud_name: cloudinaryConfig.cloud_name });
 };
 configureCloudinary();
@@ -70,27 +84,28 @@ const upload = multer({
   },
 });
 
-// Global rate limiter
+// Rate limiters with adjusted windows
 const globalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // 100 requests per window
+  windowMs: 10 * 60 * 1000, // 10 minutes
+  max: 150,
   message: 'Too many requests, please try again later',
 });
 
-// Stricter rate limiters
 const addContactLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 5,
+  windowMs: 10 * 60 * 1000,
+  max: 10,
   message: 'Too many contact addition requests, please try again later',
 });
+
 const uploadLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 10,
+  windowMs: 10 * 60 * 1000,
+  max: 15,
   message: 'Too many upload requests, please try again later',
 });
+
 const messageLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 50,
+  max: 100,
   message: 'Too many message requests, please try again later',
 });
 
@@ -149,14 +164,21 @@ const deleteMessageSchema = Joi.object({
   }).required(),
 });
 
-// Bounded LRU cache
+// Bounded LRU cache with Redis support
+const Redis = require('ioredis');
+const redis = process.env.REDIS_URL ? new Redis(process.env.REDIS_URL) : null;
+
 class LRUCache {
   constructor(maxSize, ttl) {
     this.maxSize = maxSize;
     this.ttl = ttl;
     this.cache = new Map();
   }
-  get(key) {
+  async get(key) {
+    if (redis) {
+      const cached = await redis.get(key);
+      if (cached) return JSON.parse(cached);
+    }
     const item = this.cache.get(key);
     if (item && item.timestamp > Date.now() - this.ttl) {
       this.cache.delete(key);
@@ -166,23 +188,30 @@ class LRUCache {
     this.cache.delete(key);
     return null;
   }
-  set(key, data) {
+  async set(key, data) {
+    if (redis) {
+      await redis.set(key, JSON.stringify(data), 'EX', Math.floor(this.ttl / 1000));
+    }
     if (this.cache.size >= this.maxSize) {
       const firstKey = this.cache.keys().next().value;
       this.cache.delete(firstKey);
     }
     this.cache.set(key, { data, timestamp: Date.now() });
   }
+  async delete(key) {
+    if (redis) await redis.del(key);
+    this.cache.delete(key);
+  }
 }
 
 const chatListCache = new LRUCache(1000, 5 * 60 * 1000);
 
-// Optimized emitUpdatedChatList with pagination
+// Optimized emitUpdatedChatList with pagination and indexing
 const emitUpdatedChatList = async (io, userId, page = 0, limit = 50) => {
   try {
     if (!mongoose.isValidObjectId(userId)) return;
     const cacheKey = `chatList:${userId}:${page}:${limit}`;
-    const cached = chatListCache.get(cacheKey);
+    const cached = await chatListCache.get(cacheKey);
     if (cached) {
       io.to(userId).emit('chatListUpdated', { userId, users: cached, page, limit });
       logger.info('Served cached chat list', { userId, page, count: cached.length });
@@ -198,7 +227,7 @@ const emitUpdatedChatList = async (io, userId, page = 0, limit = 50) => {
       .lean();
     if (!user?.contacts?.length) {
       io.to(userId).emit('chatListUpdated', { userId, users: [], page, limit });
-      chatListCache.set(cacheKey, []);
+      await chatListCache.set(cacheKey, []);
       return;
     }
     const contactIds = user.contacts.map((c) => c._id);
@@ -233,6 +262,7 @@ const emitUpdatedChatList = async (io, userId, page = 0, limit = 50) => {
           },
         },
       },
+      { $index: { key: { senderId: 1, recipientId: 1, createdAt: -1 }, name: 'chatListIndex' } },
     ]);
     const chatList = user.contacts.map((contact) => {
       const messageData = latestMessages.find((m) => m._id.toString() === contact._id.toString());
@@ -253,7 +283,7 @@ const emitUpdatedChatList = async (io, userId, page = 0, limit = 50) => {
         unreadCount: messageData?.unreadCount || 0,
       };
     });
-    chatListCache.set(cacheKey, chatList);
+    await chatListCache.set(cacheKey, chatList);
     io.to(userId).emit('chatListUpdated', { userId, users: chatList, page, limit });
     logger.info('Emitted updated chat list', { userId, page, count: chatList.length });
   } catch (error) {
@@ -620,7 +650,7 @@ module.exports = (app) => {
         return res.status(400).json({ error: 'Invalid or unauthorized request' });
       }
       const cacheKey = `chatList:${userId}:${page}:${limit}`;
-      const cached = chatListCache.get(cacheKey);
+      const cached = await chatListCache.get(cacheKey);
       if (cached) {
         return res.status(200).json(cached);
       }
@@ -633,7 +663,7 @@ module.exports = (app) => {
         })
         .lean();
       if (!user?.contacts?.length) {
-        chatListCache.set(cacheKey, []);
+        await chatListCache.set(cacheKey, []);
         return res.status(200).json([]);
       }
       const contactIds = user.contacts.map((c) => c._id);
@@ -688,7 +718,7 @@ module.exports = (app) => {
           unreadCount: messageData?.unreadCount || 0,
         };
       });
-      chatListCache.set(cacheKey, chatList);
+      await chatListCache.set(cacheKey, chatList);
       res.status(200).json(chatList);
     } catch (error) {
       logger.error('Chat list fetch failed', { userId, error: error.message });
@@ -749,9 +779,9 @@ module.exports = (app) => {
             ? {
                 ...populatedMessage.replyTo,
                 senderId: populatedMessage.replyTo.senderId.toString(),
-                recipientId: populatedMessage.replyTo.recipientId.toString(),
-              }
-            : null,
+                  recipientId: populatedMessage.replyTo.recipientId.toString(),
+                }
+              : null,
         });
         io.to(senderId).emit('message', {
           ...populatedMessage,
@@ -913,8 +943,8 @@ module.exports = (app) => {
           latestMessage: null,
           unreadCount: 0,
         };
-        chatListCache.delete(`chatList:${userId}`);
-        chatListCache.delete(`chatList:${contact._id.toString()}`);
+        await chatListCache.delete(`chatList:${userId}`);
+        await chatListCache.delete(`chatList:${contact._id.toString()}`);
         io.to(userId).emit('contactData', { userId, contactData });
         io.to(contact._id.toString()).emit('contactData', {
           userId: contact._id.toString(),
@@ -977,8 +1007,8 @@ module.exports = (app) => {
         const populatedMessage = await Message.findById(message._id)
           .select('senderId recipientId content contentType plaintextContent status caption replyTo originalFilename clientMessageId senderVirtualNumber senderUsername senderPhoto createdAt updatedAt')
           .lean();
-        chatListCache.delete(`chatList:${userId}`);
-        chatListCache.delete(`chatList:${recipientId}`);
+        await chatListCache.delete(`chatList:${userId}`);
+        await chatListCache.delete(`chatList:${recipientId}`);
         io.to(recipientId).emit('message', {
           ...populatedMessage,
           senderId: populatedMessage.senderId.toString(),
@@ -1013,7 +1043,6 @@ module.exports = (app) => {
       res.status(200).json({ message: 'Logged out successfully' });
     } catch (error) {
       logger.error('Logout error', { error: error.message, userId: req.user?.id });
-      // Attempt to blacklist token even on failure
       try {
         await TokenBlacklist.create({ token: req.token });
       } catch (blacklistErr) {
