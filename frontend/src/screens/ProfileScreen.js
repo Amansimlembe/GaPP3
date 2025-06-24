@@ -31,6 +31,7 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
   const [loading, setLoading] = useState(false);
   const [page, setPage] = useState(1); // Changed: Add pagination
   const [hasMore, setHasMore] = useState(true); // Changed: Add pagination
+  const navigate = useNavigate(); // Changed: Added useNavigate hook
 
   // Changed: Optimize retry logic
   const retryOperation = async (operation, options = {}, retries = 3, baseDelay = 1000) => {

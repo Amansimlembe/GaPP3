@@ -146,6 +146,7 @@ const App = () => {
   const [socket, setSocket] = useState(null);
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
   const [error, setError] = useState(null);
+  const navigate = useNavigate(); // Changed: Added useNavigate hook
 
 
   // App.js (only the relevant handleLogout function is shown for brevity)
