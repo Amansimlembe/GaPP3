@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useCallback } from 'react';
 import { BrowserRouter as Router, Route, Routes, Navigate, NavLink, useLocation } from 'react-router-dom';
 import { motion } from 'framer-motion';
@@ -36,6 +37,8 @@ class ErrorBoundary extends React.Component {
               userId: this.props.userId || null,
               route: window.location.pathname,
               timestamp: new Date().toISOString(),
+              component: 'App',
+              additionalInfo: JSON.stringify({ token: !!this.props.userId, location: window.location.pathname }),
             },
             { timeout: 5000 }
           );
@@ -104,7 +107,6 @@ const getTokenExpiration = (token) => {
   }
 };
 
-// Rate-limited error logging
 const errorLogTimestamps = [];
 const maxLogsPerMinute = 5;
 const logClientError = async (message, error, userId = null) => {
@@ -147,6 +149,7 @@ const App = () => {
 
   const handleLogout = useCallback(async () => {
     try {
+      if (!token || !userId) throw new Error('Missing token or userId');
       await axios.post(
         `${BASE_URL}/social/logout`,
         {},
@@ -179,6 +182,48 @@ const App = () => {
     }
   }, [dispatch, token, userId, socket]);
 
+  const refreshToken = useCallback(async () => {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        if (!navigator.onLine) {
+          throw new Error('Offline: Cannot refresh token');
+        }
+        if (!token || !userId) {
+          throw new Error('Missing token or userId');
+        }
+        const response = await axios.post(
+          `${BASE_URL}/auth/refresh`,
+          { userId },
+          {
+            headers: { Authorization: `Bearer ${token}` },
+            timeout: 5000,
+          }
+        );
+        const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername, privateKey } = response.data;
+        dispatch(setAuth({
+          token: newToken,
+          userId: newUserId,
+          role: Number(newRole),
+          photo: newPhoto || 'https://placehold.co/40x40',
+          virtualNumber: newVirtualNumber || null,
+          username: newUsername || null,
+          privateKey: privateKey || null,
+        }));
+        console.log('Token refreshed');
+        return newToken;
+      } catch (error) {
+        console.error(`Token refresh attempt ${attempt} failed:`, error.response?.data || error.message);
+        logClientError(`Token refresh failed: attempt ${attempt}`, error, userId);
+        if (attempt < 3 && (error.response?.status === 429 || error.response?.status >= 500 || error.code === 'ECONNABORTED' || !navigator.onLine)) {
+          await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * 1000));
+          continue;
+        }
+        await handleLogout();
+        return null;
+      }
+    }
+  }, [dispatch, token, userId, handleLogout]);
+
   useEffect(() => {
     if (!token || !userId) {
       if (socket) {
@@ -194,12 +239,12 @@ const App = () => {
       reconnectionAttempts: 3,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 3000,
-      timeout: 5000,
+      timeout: 10000,
     });
     setSocket(newSocket);
 
     const handleConnect = () => {
-      newSocket.emit('join', { userId });
+      newSocket.emit('join', userId);
       console.log('Socket connected:', newSocket.id);
     };
 
@@ -274,7 +319,7 @@ const App = () => {
       isRefreshing = true;
       try {
         const expTime = getTokenExpiration(token);
-        if (expTime && expTime - Date.now() < 10 * 60 * 1000) {
+        if (expTime && expTime - Date.now() < 2 * 60 * 1000) { // Reduced to 2 minutes
           await refreshToken();
         }
       } catch (err) {
@@ -288,48 +333,9 @@ const App = () => {
     };
 
     checkTokenExpiration();
-    const interval = setInterval(checkTokenExpiration, 5 * 60 * 1000);
+    const interval = setInterval(checkTokenExpiration, 1 * 60 * 1000); // Reduced to 1 minute
     return () => clearInterval(interval);
   }, [token, userId, refreshToken, handleLogout]);
-
-  const refreshToken = useCallback(async () => {
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        if (!navigator.onLine) {
-          throw new Error('Offline: Cannot refresh token');
-        }
-        const response = await axios.post(
-          `${BASE_URL}/auth/refresh`,
-          { userId },
-          {
-            headers: { Authorization: `Bearer ${token}` },
-            timeout: 5000,
-          }
-        );
-        const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername, privateKey } = response.data;
-        dispatch(setAuth({
-          token: newToken,
-          userId: newUserId,
-          role: Number(newRole),
-          photo: newPhoto || 'https://placehold.co/40x40',
-          virtualNumber: newVirtualNumber || null,
-          username: newUsername || null,
-          privateKey: privateKey || null,
-        }));
-        console.log('Token refreshed');
-        return newToken;
-      } catch (error) {
-        console.error(`Token refresh attempt ${attempt} failed:`, error.response?.data || error.message);
-        logClientError(`Token refresh failed: attempt ${attempt}`, error, userId);
-        if (attempt < 3 && (error.response?.status === 429 || error.response?.status >= 500 || error.code === 'ECONNABORTED' || !navigator.onLine)) {
-          await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * 1000));
-          continue;
-        }
-        await handleLogout();
-        return null;
-      }
-    }
-  }, [token, userId, dispatch, handleLogout]);
 
   useEffect(() => {
     document.documentElement.className = theme === 'dark' ? 'dark' : '';
@@ -347,8 +353,15 @@ const App = () => {
   return (
     <ErrorBoundary userId={userId}>
       {error && (
-        <div className="fixed top-0 left-0 right-0 bg-red-500 text-white p-2 text-center z-50">
-          {error}
+        <div className="fixed top-4 left-1/2 transform -translate-x-1/2 bg-red-500 text-white p-4 rounded-lg shadow-lg z-50 max-w-md w-full">
+          <p className="text-sm">{error}</p>
+          <button
+            className="bg-white text-red-500 px-3 py-1 mt-2 rounded hover:bg-gray-200 focus:outline-none focus:ring-2 focus:ring-white"
+            onClick={() => setError(null)}
+            aria-label="Dismiss error"
+          >
+            OK
+          </button>
         </div>
       )}
       <Router>
@@ -395,11 +408,18 @@ const AuthenticatedApp = ({
   const location = useLocation();
   const dispatch = useDispatch();
   const { selectedChat } = useSelector((state) => state.messages);
-  const isChatRouteWithSelectedChat = location.pathname === '/chat' && selectedChat;
+  const isChatRouteWithSelectedChat = location?.pathname === '/chat' && selectedChat;
 
   useEffect(() => {
-    console.log('Current route:', location.pathname);
-  }, [location.pathname]);
+    if (location?.pathname) {
+      console.log('Current route:', location.pathname);
+    }
+  }, [location?.pathname]);
+
+  if (!location || !dispatch) {
+    console.error('AuthenticatedApp: Missing location or dispatch');
+    return null; // Prevent rendering if critical hooks are unavailable
+  }
 
   return (
     <div className={`min-h-screen flex flex-col ${theme === 'dark' ? 'dark' : ''} bg-gray-100 dark:bg-gray-900`}>

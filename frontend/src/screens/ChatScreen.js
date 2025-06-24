@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
@@ -261,7 +262,7 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
         }
       }
     }, 1000),
-    [isForgeReady, token, userId, handleLogout, unreadMessages, logClientError, dispatch, debounce, chatList, chatListTimestamp]
+    [isForgeReady, token, userId, handleLogout, unreadMessages, logClientError, dispatch, chatList, chatListTimestamp]
   );
 
   const fetchMessages = useCallback(async (chatId) => {
@@ -617,7 +618,7 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
       } else {
         fetchChatList();
       }
-      socket.emit('join', userId);
+      socket?.emit('join', userId);
     }
     const handleOffline = () => {
       setFetchError('You are offline. Displaying cached contacts.');
@@ -632,7 +633,7 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
       errorLogMap.current = new Map();
       window.removeEventListener('offline', handleOffline);
     };
-  }, [token, userId, isForgeReady, socket, navigate, fetchChatListLocked, chatList, chatListTimestamp]);
+  }, [token, userId, isForgeReady, socket, navigate, fetchChatList, chatList, chatListTimestamp]);
 
   useEffect(() => {
     if (selectedChat && !chats[selectedChat]) {
