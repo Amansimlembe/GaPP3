@@ -1,175 +1,145 @@
-
 const mongoose = require('mongoose');
 const { getCountries, parsePhoneNumberFromString } = require('libphonenumber-js');
 const winston = require('winston');
 
-// Logger configuration with deduplication
 const logger = winston.createLogger({
   level: 'info',
-  format: winston.format.combine(
-    winston.format.timestamp(),
-    winston.format.json(),
-    winston.format((info) => {
-      const errorKey = `${info.error}:${info.userId || 'unknown'}`;
-      info.errorCount = logger.errorCounts.get(errorKey) || 0;
-      if (info.level === 'error' && info.errorCount >= 2) return false;
-      logger.errorCounts.set(errorKey, info.errorCount + 1);
-      setTimeout(() => logger.errorCounts.delete(errorKey), 60 * 1000);
-      return info;
-    })()
-  ),
+  format: winston.format.combine(winston.format.timestamp(), winston.format.json()),
   transports: [
     new winston.transports.Console(),
     new winston.transports.File({ filename: 'logs/user-error.log', level: 'error' }),
     new winston.transports.File({ filename: 'logs/user-combined.log' }),
   ],
-  errorCounts: new Map(),
 });
 
-// Retry with exponential backoff
-const retryOperation = async (operation, maxRetries = 3, baseDelay = 2000) => {
+// Changed: Retry with exponential backoff
+const retryOperation = async (operation, maxRetries = 3) => {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       return await operation();
     } catch (err) {
-      logger.warn('Retrying MongoDB operation', { attempt, error: err.message, stack: err.stack });
-      if (attempt === maxRetries) {
-        logger.error('MongoDB operation failed after retries', { error: err.message, stack: err.stack });
-        throw err;
-      }
-      const delay = Math.pow(2, attempt) * baseDelay;
+      if (attempt === maxRetries) throw err;
+      const delay = Math.pow(2, attempt) * 1000;
+      logger.warn('Retrying operation', { attempt, error: err.message });
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
 };
 
-const userSchema = new mongoose.Schema(
-  {
-    email: {
-      type: String,
-      required: true,
-      unique: true,
-      lowercase: true,
-      trim: true,
-      match: [/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/, 'Invalid email format'],
-      index: true,
-    },
-    password: {
-      type: String,
-      required: true,
-      minlength: [8, 'Password must be at least 8 characters'],
-    },
-    username: {
-      type: String,
-      required: true,
-      unique: true,
-      trim: true,
-      minlength: [3, 'Username must be at least 3 characters'],
-      maxlength: [50, 'Username cannot exceed 50 characters'],
-      index: true,
-    },
-    photo: {
-      type: String,
-      default: 'https://placehold.co/40x40',
-    },
-    country: {
-      type: String,
-      required: true,
-      uppercase: true,
-      validate: {
-        validator: function (value) {
-          const validCountries = getCountries();
-          return validCountries.includes(value.toUpperCase());
-        },
-        message: 'Invalid country code. Must be a valid ISO 3166-1 alpha-2 code.',
+const userSchema = new mongoose.Schema({
+  email: {
+    type: String,
+    required: true,
+    unique: true,
+    lowercase: true,
+    trim: true,
+    match: [/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/, 'Invalid email format'],
+  },
+  password: {
+    type: String,
+    required: true,
+    minlength: [8, 'Password must be at least 8 characters'],
+  },
+  username: {
+    type: String,
+    required: true,
+    unique: true,
+    trim: true,
+    minlength: [3, 'Username must be at least 3 characters'],
+    maxlength: [20, 'Username cannot exceed 20 characters'],
+  },
+  photo: {
+    type: String,
+    default: 'https://placehold.co/40x40',
+  },
+  country: {
+    type: String,
+    required: true,
+    uppercase: true,
+    validate: {
+      validator: function (value) {
+        const validCountries = getCountries();
+        return validCountries.includes(value.toUpperCase());
       },
-    },
-    virtualNumber: {
-      type: String,
-      unique: true,
-      sparse: true,
-      default: null,
-      validate: {
-        validator: function (value) {
-          if (!value) return true;
-          const phoneNumber = parsePhoneNumberFromString(value, this.country);
-          return phoneNumber ? phoneNumber.isValid() : false;
-        },
-        message: 'Invalid virtual number format for the specified country.',
-      },
-      index: true,
-    },
-    contacts: {
-      type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
-      default: [],
-      validate: {
-        validator: function (value) {
-          return value.length <= 500;
-        },
-        message: 'Contacts list cannot exceed 500 entries.',
-      },
-    },
-    role: {
-      type: Number,
-      enum: { values: [0, 1], message: 'Role must be 0 (Job Seeker) or 1 (Employer)' },
-      default: 0,
-    },
-    publicKey: {
-      type: String,
-      required: true,
-    },
-    privateKey: {
-      type: String,
-      required: true,
-      select: false,
-    },
-    status: {
-      type: String,
-      enum: { values: ['online', 'offline'], message: 'Status must be online or offline' },
-      default: 'offline',
-    },
-    lastSeen: {
-      type: Date,
-      default: null,
+      message: 'Invalid country code. Must be a valid ISO 3166-1 alpha-2 code.',
     },
   },
-  {
-    timestamps: true,
-  }
-);
+  virtualNumber: {
+    type: String,
+    unique: true,
+    sparse: true,
+    default: null,
+    validate: {
+      validator: function (value) {
+        if (!value) return true;
+        const phoneNumber = parsePhoneNumberFromString(value, this.country);
+        return phoneNumber ? phoneNumber.isValid() : false;
+      },
+      message: 'Invalid virtual number format for the specified country.',
+    },
+  },
+  contacts: {
+    type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+    default: [],
+    // Changed: Add max length for contacts
+    validate: {
+      validator: function (value) {
+        return value.length <= 1000; // Max 1000 contacts
+      },
+      message: 'Contacts list cannot exceed 1000 entries.',
+    },
+  },
+  role: {
+    type: Number,
+    enum: { values: [0, 1], message: 'Role must be 0 (Job Seeker) or 1 (Employer)' },
+    default: 0,
+  },
+  publicKey: {
+    type: String,
+    required: true,
+  },
+  privateKey: {
+    type: String,
+    required: true,
+    select: false,
+  },
+  status: {
+    type: String,
+    enum: { values: ['online', 'offline'], message: 'Status must be online or offline' },
+    default: 'offline',
+  },
+  lastSeen: {
+    type: Date,
+  },
+}, {
+  timestamps: true,
+});
 
-// Optimized indexes with names
-userSchema.index({ email: 1 }, { unique: true, name: 'email_unique_idx' });
-userSchema.index({ username: 1 }, { unique: true, name: 'username_unique_idx' });
-userSchema.index({ virtualNumber: 1 }, { unique: true, sparse: true, name: 'virtual_number_unique_idx' });
-userSchema.index({ contacts: 1, name: 'contacts_idx' });
-userSchema.index({ status: 1, lastSeen: 1 }, { name: 'status_lastSeen_idx' });
+// Changed: Optimized indexes
+userSchema.index({ email: 1 }, { unique: true });
+userSchema.index({ username: 1 }, { unique: true });
+userSchema.index({ virtualNumber: 1 }, { unique: true, sparse: true });
+userSchema.index({ contacts: 1 });
+userSchema.index({ status: 1, lastSeen: 1 }); // Changed: Support status cleanup
 
-// Pre-save hook with optimized contact validation
+// Pre-save hook
 userSchema.pre('save', async function (next) {
   try {
     await retryOperation(async () => {
       if (this.isModified('contacts') && this.contacts.length) {
+        // Changed: Use Set for deduplication and bulk validation
         const uniqueContacts = [...new Set(this.contacts.map((id) => id.toString()))].filter(
-          (id) => mongoose.isValidObjectId(id) && id !== this._id.toString()
+          (id) => mongoose.isValidObjectId(id)
         );
-        if (uniqueContacts.length > 500) {
-          throw new Error('Contacts list cannot exceed 500 entries.');
+        if (uniqueContacts.length > 1000) {
+          throw new Error('Contacts list cannot exceed 1000 entries.');
         }
-        const existingContacts = await this.constructor
-          .find({ _id: { $in: uniqueContacts } })
-          .select('_id')
-          .lean();
-        const validContacts = existingContacts.map((contact) => contact._id.toString());
-        this.contacts = uniqueContacts
-          .filter((id) => validContacts.includes(id))
-          .map((id) => new mongoose.Types.ObjectId(id));
-      }
-      if (this.isModified('virtualNumber') && this.virtualNumber) {
-        const phoneNumber = parsePhoneNumberFromString(this.virtualNumber, this.country);
-        if (!phoneNumber || !phoneNumber.isValid()) {
-          throw new Error('Invalid virtual number format for the specified country.');
-        }
+        const existingContacts = await this.constructor.find(
+          { _id: { $in: uniqueContacts } },
+          '_id'
+        ).lean();
+        const validContacts = existingContacts.map((contact) => contact._id);
+        this.contacts = validContacts;
       }
     });
     logger.info('User pre-save validation completed', { userId: this._id?.toString() });
@@ -188,9 +158,10 @@ userSchema.pre('save', async function (next) {
 userSchema.statics.cleanupInvalidContacts = async function () {
   try {
     logger.info('Starting invalid contacts cleanup');
-    const batchSize = 500;
+    const batchSize = 1000;
     let totalUpdated = 0;
 
+    // Changed: Stream users to reduce memory usage
     const userStream = this.find({ contacts: { $ne: [] } })
       .select('_id contacts')
       .lean()
@@ -203,59 +174,48 @@ userSchema.statics.cleanupInvalidContacts = async function () {
     const updates = [];
     for await (const user of userStream) {
       const validContacts = user.contacts
-        .filter((id) => existingUserIds.has(id.toString()) && id.toString() !== user._id.toString())
+        .filter((id) => existingUserIds.has(id.toString()))
         .map((id) => new mongoose.Types.ObjectId(id));
       if (validContacts.length !== user.contacts.length) {
         updates.push({
           updateOne: {
             filter: { _id: user._id },
-            update: {
-              $set: {
-                contacts: [...new Set(validContacts.map((id) => id.toString()))].map(
-                  (id) => new mongoose.Types.ObjectId(id)
-                ),
-              },
-            },
+            update: { $set: { contacts: [...new Set(validContacts.map((id) => id.toString()))].map(
+              (id) => new mongoose.Types.ObjectId(id)
+            ) } },
           },
         });
       }
+      // Changed: Process batches incrementally
       if (updates.length >= batchSize) {
         await retryOperation(async () => {
-          const result = await this.bulkWrite(updates, { ordered: false });
+          const result = await this.bulkWrite(updates);
           totalUpdated += result.modifiedCount || 0;
-          logger.debug('Invalid contacts cleanup batch', {
-            updated: result.modifiedCount,
-            batchSize,
-          });
+          logger.debug('Invalid contacts cleanup batch', { updated: result.modifiedCount, batchSize });
         });
-        updates.length = 0;
+        updates.length = 0; // Clear array
       }
     }
 
+    // Process remaining updates
     if (updates.length) {
       await retryOperation(async () => {
-        const result = await this.bulkWrite(updates, { ordered: false });
+        const result = await this.bulkWrite(updates);
         totalUpdated += result.modifiedCount || 0;
-        logger.debug('Invalid contacts cleanup final batch', {
-          updated: result.modifiedCount,
-          batchSize: updates.length,
-        });
+        logger.debug('Invalid contacts cleanup final batch', { updated: result.modifiedCount, batchSize: updates.length });
       });
     }
 
     logger.info('Invalid contacts cleanup completed', { updatedCount: totalUpdated });
     return { updatedCount: totalUpdated };
   } catch (error) {
-    logger.error('Invalid contacts cleanup failed', {
-      error: error.message,
-      stack: error.stack,
-    });
+    logger.error('Invalid contacts cleanup failed', { error: error.message, stack: error.stack });
     throw new Error(`Cleanup failed: ${error.message}`);
   }
 };
 
 // Static method to reset stale online statuses
-userSchema.statics.resetStaleStatuses = async function (thresholdMinutes = 15) {
+userSchema.statics.resetStaleStatuses = async function (thresholdMinutes = 30) {
   try {
     logger.info('Starting stale status cleanup');
     const threshold = new Date(Date.now() - thresholdMinutes * 60 * 1000);
@@ -268,31 +228,10 @@ userSchema.statics.resetStaleStatuses = async function (thresholdMinutes = 15) {
     logger.info('Stale status cleanup completed', { updatedCount: result.modifiedCount });
     return { updatedCount: result.modifiedCount };
   } catch (error) {
-    logger.error('Stale status cleanup failed', {
-      error: error.message,
-      stack: error.stack,
-    });
+    logger.error('Stale status cleanup failed', { error: error.message, stack: error.stack });
     throw new Error(`Stale status cleanup failed: ${error.message}`);
   }
 };
 
 const User = mongoose.model('User', userSchema);
-
-// Defer initialization until after model definition
-setImmediate(() => {
-  User.cleanupInvalidContacts().catch((err) => {
-    logger.error('Initial invalid contacts cleanup failed', { error: err.message });
-  });
-  User.resetStaleStatuses().catch((err) => {
-    logger.error('Initial stale status cleanup failed', { error: err.message });
-  });
-});
-
-// Periodic cleanup for stale statuses every 10 minutes
-setInterval(() => {
-  User.resetStaleStatuses().catch((err) => {
-    logger.error('Periodic stale status cleanup failed', { error: err.message });
-  });
-}, 10 * 60 * 1000);
-
 module.exports = User;
