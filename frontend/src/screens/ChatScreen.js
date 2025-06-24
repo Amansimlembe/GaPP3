@@ -112,16 +112,35 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
     };
   }, [logClientError]);
 
-  const handleLogout = useCallback(async () => {
-    try {
-      if (socket) {
-        socket.emit('leave', userId);
-        socket.disconnect();
-      }
-      await axios.post(`${BASE_URL}/social/logout`, {}, {
+
+
+  // ChatScreen.js (only the relevant handleLogout function is shown for brevity)
+const handleLogout = useCallback(async () => {
+  try {
+    if (socket) {
+      socket.emit('leave', userId);
+      socket.disconnect();
+    }
+    await axios.post(
+      `${BASE_URL}/auth/logout`, // Changed: Use /auth/logout instead of /social/logout
+      {},
+      {
         headers: { Authorization: `Bearer ${token}` },
         timeout: 5000,
-      });
+      }
+    );
+    sessionStorage.clear();
+    localStorage.clear();
+    dispatch(resetState());
+    setChatList([]);
+    setUnreadMessages({});
+    sentStatusesRef.current.clear();
+    dispatch(setSelectedChat(null));
+    navigate('/login'); // Changed: Explicitly navigate to login
+  } catch (err) {
+    console.error('Logout failed:', err.message);
+    logClientError('Logout failed', err);
+    if (err.response?.status === 401) {
       sessionStorage.clear();
       localStorage.clear();
       dispatch(resetState());
@@ -129,24 +148,13 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
       setUnreadMessages({});
       sentStatusesRef.current.clear();
       dispatch(setSelectedChat(null));
-      navigate('/');
-    } catch (err) {
-      console.error('Logout failed:', err.message);
-      logClientError('Logout failed', err);
-      if (err.response?.status === 401) {
-        setTimeout(() => {
-          sessionStorage.clear();
-          localStorage.clear();
-          dispatch(resetState());
-          setChatList([]);
-          setUnreadMessages({});
-          sentStatusesRef.current.clear();
-          dispatch(setSelectedChat(null));
-          navigate('/');
-        }, 1000);
-      }
+      navigate('/login');
     }
-  }, [socket, userId, token, navigate, dispatch, logClientError]);
+  }
+}, [socket, userId, token, navigate, dispatch, logClientError]);
+
+
+
 
   const getPublicKey = useCallback(async (recipientId) => {
     if (!isValidObjectId(recipientId)) throw new Error('Invalid recipientId');

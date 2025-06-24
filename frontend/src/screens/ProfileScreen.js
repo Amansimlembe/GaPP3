@@ -288,13 +288,36 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
     }
   };
 
-  const logout = useCallback(() => {
+  // ProfileScreen.js (only the relevant logout function is shown for brevity)
+const logout = useCallback(async () => {
+  try {
+    await axios.post(
+      `${BASE_URL}/auth/logout`, // Changed: Use /auth/logout instead of /social/logout
+      {},
+      {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 5000,
+      }
+    );
     socket.emit('leave', userId);
-    socket.disconnect(); // Changed: Explicitly disconnect
+    socket.disconnect();
     setAuth('', '', '', '', '', '');
     localStorage.clear();
-  }, [userId, setAuth]);
-
+    sessionStorage.clear(); // Changed: Clear sessionStorage
+    navigate('/login'); // Changed: Explicitly navigate to login
+  } catch (error) {
+    console.error('Logout error:', error.message);
+    setError('Failed to logout, please try again');
+    if (error.response?.status === 401) {
+      socket.emit('leave', userId);
+      socket.disconnect();
+      setAuth('', '', '', '', '', '');
+      localStorage.clear();
+      sessionStorage.clear();
+      navigate('/login');
+    }
+  }
+}, [userId, token, setAuth, navigate]);
   return (
     <motion.div
       initial={{ y: 50, opacity: 0 }}
