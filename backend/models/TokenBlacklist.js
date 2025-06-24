@@ -2,7 +2,10 @@
 const mongoose = require('mongoose');
 const winston = require('winston');
 
-// Logger configuration with deduplication
+
+
+const errorCounts = new Map();
+
 const logger = winston.createLogger({
   level: 'info',
   format: winston.format.combine(
@@ -10,10 +13,10 @@ const logger = winston.createLogger({
     winston.format.json(),
     winston.format((info) => {
       const errorKey = `${info.error}:${info.token || 'unknown'}`;
-      info.errorCount = logger.errorCounts.get(errorKey) || 0;
+      info.errorCount = errorCounts.get(errorKey) || 0;
       if (info.level === 'error' && info.errorCount >= 2) return false;
-      logger.errorCounts.set(errorKey, info.errorCount + 1);
-      setTimeout(() => logger.errorCounts.delete(errorKey), 60 * 1000);
+      errorCounts.set(errorKey, info.errorCount + 1);
+      setTimeout(() => errorCounts.delete(errorKey), 60 * 1000);
       return info;
     })()
   ),
@@ -22,8 +25,10 @@ const logger = winston.createLogger({
     new winston.transports.File({ filename: 'logs/token-blacklist-error.log', level: 'error' }),
     new winston.transports.File({ filename: 'logs/token-blacklist-combined.log' }),
   ],
-  errorCounts: new Map(),
 });
+
+
+
 
 const tokenBlacklistSchema = new mongoose.Schema(
   {
