@@ -1,5 +1,4 @@
-
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Route, Routes, Navigate, NavLink, useLocation } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { FaHome, FaBriefcase, FaComments, FaUser } from 'react-icons/fa';
@@ -26,38 +25,13 @@ class ErrorBoundary extends React.Component {
 
   componentDidCatch(error, errorInfo) {
     console.error('ErrorBoundary caught:', error, errorInfo);
-    const retryLog = async (retries = 3, baseDelay = 1000) => {
-      for (let i = 0; i < retries; i++) {
-        try {
-          await axios.post(
-            `${BASE_URL}/social/log-error`,
-            {
-              error: error.message,
-              stack: errorInfo.componentStack,
-              userId: this.props.userId || null,
-              route: window.location.pathname,
-              timestamp: new Date().toISOString(),
-              component: 'App',
-              additionalInfo: JSON.stringify({ token: !!this.props.userId, location: window.location.pathname }),
-            },
-            { timeout: 5000 }
-          );
-          return;
-        } catch (err) {
-          if (i < retries - 1) {
-            await new Promise((resolve) => setTimeout(resolve, Math.pow(2, i) * baseDelay));
-            continue;
-          }
-          console.warn('Failed to log error:', err.message);
-        }
-      }
-    };
-    retryLog();
+    axios.post(`${BASE_URL}/social/log-error`, {
+      error: error.message,
+      stack: errorInfo.componentStack,
+      timestamp: new Date().toISOString(),
+    }).catch((err) => console.warn('Failed to log error:', err.message));
   }
 
-  handleDismiss = () => {
-    this.setState({ hasError: false, error: null });
-  };
 
   render() {
     return (
@@ -107,211 +81,93 @@ const getTokenExpiration = (token) => {
   }
 };
 
-const errorLogTimestamps = [];
-const maxLogsPerMinute = 5;
-const logClientError = async (message, error, userId = null) => {
-  const now = Date.now();
-  errorLogTimestamps.length = errorLogTimestamps.filter((ts) => now - ts < 60 * 1000).length;
-  if (errorLogTimestamps.length >= maxLogsPerMinute) return;
-  errorLogTimestamps.push(now);
-  for (let i = 0; i < 3; i++) {
-    try {
-      await axios.post(
-        `${BASE_URL}/social/log-error`,
-        {
-          error: message,
-          stack: error?.stack || '',
-          userId,
-          route: window.location.pathname,
-          timestamp: new Date().toISOString(),
-        },
-        { timeout: 5000 }
-      );
-      return;
-    } catch (err) {
-      if (i < 2) {
-        await new Promise((resolve) => setTimeout(resolve, Math.pow(2, i) * 1000));
-        continue;
-      }
-      console.warn('Failed to log error:', err.message);
-    }
-  }
-};
-
 const App = () => {
   const dispatch = useDispatch();
   const { token, userId, role, photo, virtualNumber, username } = useSelector((state) => state.auth);
   const { selectedChat } = useSelector((state) => state.messages);
   const [chatNotifications, setChatNotifications] = useState(0);
+  const [isAuthenticated, setIsAuthenticated] = useState(!!token);
   const [socket, setSocket] = useState(null);
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
   const [error, setError] = useState(null);
 
-  const handleLogout = useCallback(async () => {
-    try {
-      if (!token || !userId) throw new Error('Missing token or userId');
-      await axios.post(
-        `${BASE_URL}/social/logout`,
-        {},
-        {
-          headers: { Authorization: `Bearer ${token}` },
-          timeout: 5000,
-        }
-      );
-      if (socket) {
-        socket.emit('leave', userId);
-        socket.disconnect();
-      }
+  const setAuthData = (newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername, privateKey) => {
+    dispatch(setAuth({
+      token: newToken || null,
+      userId: newUserId || null,
+      role: Number(newRole) || null,
+      photo: newPhoto || 'https://placehold.co/40x40',
+      virtualNumber: newVirtualNumber || null,
+      username: newUsername || null,
+      privateKey: privateKey || null,
+    }));
+    if (newToken && newUserId) {
+      localStorage.setItem('token', newToken);
+      localStorage.setItem('userId', newUserId);
+      localStorage.setItem('role', String(newRole));
+      localStorage.setItem('photo', newPhoto || 'https://placehold.co/40x40');
+      localStorage.setItem('virtualNumber', newVirtualNumber || '');
+      localStorage.setItem('username', newUsername || '');
+      localStorage.setItem('privateKey', privateKey || '');
+      setIsAuthenticated(true);
+    } else {
+      localStorage.clear();
+      setIsAuthenticated(false);
       dispatch(clearAuth());
-      dispatch(setSelectedChat(null));
-      setSocket(null);
       setChatNotifications(0);
-      setError(null);
-      localStorage.removeItem('theme');
-      console.log('Logout successful');
-    } catch (error) {
-      console.error('Logout error:', error.message);
-      logClientError('Logout failed', error, userId);
-      if (error.response?.status === 401) {
-        dispatch(clearAuth());
-        dispatch(setSelectedChat(null));
-        setSocket(null);
-        setChatNotifications(0);
-        setError(null);
-      }
+      setSocket(null);
+      setError('Authentication failed, please log in again');
     }
-  }, [dispatch, token, userId, socket]);
-
-  const refreshToken = useCallback(async () => {
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        if (!navigator.onLine) {
-          throw new Error('Offline: Cannot refresh token');
-        }
-        if (!token || !userId) {
-          throw new Error('Missing token or userId');
-        }
-        const response = await axios.post(
-          `${BASE_URL}/auth/refresh`,
-          { userId },
-          {
-            headers: { Authorization: `Bearer ${token}` },
-            timeout: 5000,
-          }
-        );
-        const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername, privateKey } = response.data;
-        dispatch(setAuth({
-          token: newToken,
-          userId: newUserId,
-          role: Number(newRole),
-          photo: newPhoto || 'https://placehold.co/40x40',
-          virtualNumber: newVirtualNumber || null,
-          username: newUsername || null,
-          privateKey: privateKey || null,
-        }));
-        console.log('Token refreshed');
-        return newToken;
-      } catch (error) {
-        console.error(`Token refresh attempt ${attempt} failed:`, error.response?.data || error.message);
-        logClientError(`Token refresh failed: attempt ${attempt}`, error, userId);
-        if (attempt < 3 && (error.response?.status === 429 || error.response?.status >= 500 || error.code === 'ECONNABORTED' || !navigator.onLine)) {
-          await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * 1000));
-          continue;
-        }
-        await handleLogout();
-        return null;
-      }
-    }
-  }, [dispatch, token, userId, handleLogout]);
+  };
 
   useEffect(() => {
     if (!token || !userId) {
-      if (socket) {
-        socket.disconnect();
-        setSocket(null);
-      }
+      console.warn('Invalid token or userId, skipping socket initialization');
+      setAuthData(null, null, null, null, null, null, null);
       return;
     }
 
     const newSocket = io(BASE_URL, {
-      auth: { token, userId },
+      auth: { token },
       transports: ['websocket', 'polling'],
-      reconnectionAttempts: 3,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 3000,
+      reconnectionAttempts: 10,
+      reconnectionDelay: 3000,
       timeout: 10000,
     });
     setSocket(newSocket);
 
-    const handleConnect = () => {
-      newSocket.emit('join', userId);
-      console.log('Socket connected:', newSocket.id);
-    };
-
-    const handleConnectError = async (error) => {
-      console.error('Socket connect error:', error.message);
-      logClientError('Socket connect error', error, userId);
-      if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
-        setError('Authentication error, logging out');
-        await handleLogout();
-      }
-    };
-
-    const handleDisconnect = (reason) => {
-      console.warn('Socket disconnected:', reason);
-      logClientError(`Socket disconnected: ${reason}`, new Error(reason), userId);
-      if (reason === 'io server disconnect' && navigator.onLine) {
-        newSocket.connect();
-      }
-    };
-
-    const handleMessage = (msg) => {
-      if (!msg.senderId || !msg.recipientId) {
-        console.warn('Invalid message payload:', msg);
-        return;
-      }
-      if (msg.recipientId === userId && (!selectedChat || selectedChat !== msg.senderId)) {
-        setChatNotifications((prev) => prev + 1);
-      }
-    };
-
-    const handleNewContact = (contactData) => {
-      if (!contactData?.id) {
-        console.warn('Invalid contact data:', contactData);
-        return;
-      }
-      console.log('New contact:', contactData);
-    };
-
-    newSocket.on('connect', handleConnect);
-    newSocket.on('connect_error', handleConnectError);
-    newSocket.on('disconnect', handleDisconnect);
-    newSocket.on('message', handleMessage);
-    newSocket.on('newContact', handleNewContact);
-
-    const handleOnline = () => newSocket.connect();
-    const handleOffline = () => console.warn('Offline: Socket disconnected');
-
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-
     return () => {
       newSocket.emit('leave', userId);
-      newSocket.off('connect', handleConnect);
-      newSocket.off('connect_error', handleConnectError);
-      newSocket.off('disconnect', handleDisconnect);
-      newSocket.off('message', handleMessage);
-      newSocket.off('newContact', handleNewContact);
       newSocket.disconnect();
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
+      console.log('Socket cleanup');
       setSocket(null);
-      console.log('Socket cleanup completed');
     };
-  }, [token, userId, selectedChat, handleLogout]);
+  }, [token, userId]);
+
+  const refreshToken = async () => {
+    try {
+      const response = await axios.post(
+        `${BASE_URL}/auth/refresh`,
+        { userId },
+        {
+          headers: { Authorization: `Bearer ${token}` },
+          timeout: 15000,
+        }
+      );
+      const { token: newToken, userId: newUserId, role: newRole, photo: newPhoto, virtualNumber: newVirtualNumber, username: newUsername, privateKey } = response.data;
+      setAuthData(newToken, newUserId, newRole, newPhoto, newVirtualNumber, newUsername, privateKey);
+      console.log('Token refreshed');
+      return newToken;
+    } catch (error) {
+      console.error('Token refresh failed:', error.response?.data || error.message);
+      setAuthData(null, null, null, null, null, null, null);
+      setError('Session expired, please log in again');
+      return null;
+    }
+  };
 
   useEffect(() => {
-    if (!token || !userId) return;
+    if (!isAuthenticated || !token || !userId || !socket) return;
 
     let isRefreshing = false;
     const checkTokenExpiration = async () => {
@@ -319,73 +175,117 @@ const App = () => {
       isRefreshing = true;
       try {
         const expTime = getTokenExpiration(token);
-        if (expTime && expTime - Date.now() < 2 * 60 * 1000) { // Reduced to 2 minutes
+        if (expTime && expTime - Date.now() < 10 * 60 * 1000) {
           await refreshToken();
         }
       } catch (err) {
         console.error('Token expiration check failed:', err.message);
-        logClientError('Token expiration check failed', err, userId);
         setError('Authentication error, please log in again');
-        handleLogout();
       } finally {
         isRefreshing = false;
       }
     };
 
     checkTokenExpiration();
-    const interval = setInterval(checkTokenExpiration, 1 * 60 * 1000); // Reduced to 1 minute
+    const interval = setInterval(checkTokenExpiration, 5 * 60 * 1000);
     return () => clearInterval(interval);
-  }, [token, userId, refreshToken, handleLogout]);
+  }, [isAuthenticated, token, userId, socket]);
+
+  useEffect(() => {
+    if (!socket) return;
+
+    socket.on('connect', () => {
+      socket.emit('join', userId);
+      console.log('Socket connected:', socket.id);
+    });
+
+    socket.on('connect_error', async (error) => {
+      console.error('Socket connect error:', error.message);
+      if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
+        const newToken = await refreshToken();
+        if (newToken) {
+          socket.auth.token = newToken;
+          socket.disconnect().connect();
+        } else {
+          setAuthData(null, null, null, null, null, null, null);
+        }
+      }
+    });
+
+    socket.on('disconnect', (reason) => {
+      console.warn('Socket disconnected:', reason);
+      if (reason === 'io server disconnect') {
+        socket.connect();
+      }
+    });
+
+    socket.on('message', (msg) => {
+      if (msg.recipientId === userId && (!selectedChat || selectedChat !== msg.senderId)) {
+        setChatNotifications((prev) => prev + 1);
+      }
+    });
+
+    socket.on('newContact', (contactData) => {
+      console.log('New contact:', contactData);
+    });
+
+    return () => {
+      socket.off('connect');
+      socket.off('connect_error');
+      socket.off('disconnect');
+      socket.off('message');
+      socket.off('newContact');
+    };
+  }, [socket, userId, selectedChat]);
 
   useEffect(() => {
     document.documentElement.className = theme === 'dark' ? 'dark' : '';
     localStorage.setItem('theme', theme);
   }, [theme]);
 
-  const toggleTheme = useCallback(() => setTheme((prev) => (prev === 'light' ? 'dark' : 'light')), []);
+  const toggleTheme = () => setTheme(theme === 'light' ? 'dark' : 'light');
 
-  const handleChatNavigation = useCallback(() => {
-    console.log('Navigating to ChatScreen');
+  const handleChatNavigation = () => {
+    console.log('Navigating to ChatScreen'); // Debug log
     setChatNotifications(0);
     dispatch(setSelectedChat(null));
-  }, [dispatch]);
+  };
+
+  if (!isAuthenticated) {
+    return (
+      <ErrorBoundary>
+        {error && (
+          <div className="fixed top-0 left-0 right-0 bg-red-500 text-white p-2 text-center">
+            {error}
+          </div>
+        )}
+        <LoginScreen setAuth={setAuthData} />
+      </ErrorBoundary>
+    );
+  }
 
   return (
-    <ErrorBoundary userId={userId}>
+    <ErrorBoundary>
       {error && (
-        <div className="fixed top-4 left-1/2 transform -translate-x-1/2 bg-red-500 text-white p-4 rounded-lg shadow-lg z-50 max-w-md w-full">
-          <p className="text-sm">{error}</p>
-          <button
-            className="bg-white text-red-500 px-3 py-1 mt-2 rounded hover:bg-gray-200 focus:outline-none focus:ring-2 focus:ring-white"
-            onClick={() => setError(null)}
-            aria-label="Dismiss error"
-          >
-            OK
-          </button>
+        <div className="fixed top-0 left-0 right-0 bg-red-500 text-white p-2 text-center">
+          {error}
         </div>
       )}
       <Router>
-        {token && userId ? (
-          <AuthenticatedApp
-            token={token}
-            userId={userId}
-            role={role}
-            photo={photo}
-            virtualNumber={virtualNumber}
-            username={username}
-            chatNotifications={chatNotifications}
-            socket={socket}
-            toggleTheme={toggleTheme}
-            handleChatNavigation={handleChatNavigation}
-            theme={theme}
-            handleLogout={handleLogout}
-          />
-        ) : (
-          <Routes>
-            <Route path="/login" element={<LoginScreen />} />
-            <Route path="*" element={<Navigate to="/login" replace />} />
-          </Routes>
-        )}
+        <AuthenticatedApp
+          token={token}
+          userId={userId}
+          role={role}
+          photo={photo}
+          virtualNumber={virtualNumber}
+          username={username}
+          chatNotifications={chatNotifications}
+          setAuth={setAuthData}
+          socket={socket}
+          toggleTheme={toggleTheme}
+          handleChatNavigation={handleChatNavigation}
+          theme={theme}
+        />
       </Router>
     </ErrorBoundary>
   );
@@ -399,27 +299,21 @@ const AuthenticatedApp = ({
   virtualNumber,
   username,
   chatNotifications,
+  setAuth,
   socket,
   toggleTheme,
   handleChatNavigation,
   theme,
-  handleLogout,
 }) => {
   const location = useLocation();
   const dispatch = useDispatch();
   const { selectedChat } = useSelector((state) => state.messages);
-  const isChatRouteWithSelectedChat = location?.pathname === '/chat' && selectedChat;
+  const isChatRouteWithSelectedChat = location.pathname === '/chat' && selectedChat;
 
+  // Debug log to check current route
   useEffect(() => {
-    if (location?.pathname) {
-      console.log('Current route:', location.pathname);
-    }
-  }, [location?.pathname]);
-
-  if (!location || !dispatch) {
-    console.error('AuthenticatedApp: Missing location or dispatch');
-    return null; // Prevent rendering if critical hooks are unavailable
-  }
+    console.log('Current route:', location.pathname);
+  }, [location.pathname]);
 
   return (
     <div className={`min-h-screen flex flex-col ${theme === 'dark' ? 'dark' : ''} bg-gray-100 dark:bg-gray-900`}>
@@ -428,22 +322,20 @@ const AuthenticatedApp = ({
           token={token}
           userId={userId}
           virtualNumber={virtualNumber}
-          onComplete={(newVirtualNumber) => dispatch(setAuth({ token, userId, role, photo, virtualNumber: newVirtualNumber, username }))}
+          onComplete={(newVirtualNumber) => setAuth(token, userId, role, photo, newVirtualNumber, username)}
         />
       )}
       <div className="flex-1 p-0 relative">
         <Routes>
           <Route path="/jobs" element={role === 0 ? <JobSeekerScreen token={token} userId={userId} /> : <EmployerScreen token={token} userId={userId} />} />
-          <Route
-            path="/feed"
-            element={<FeedScreen token={token} userId={userId} onUnauthorized={handleLogout} />}
-          />
+          <Route path="/feed" element={<FeedScreen token={token} userId={userId} onUnauthorized={() => setAuth(null, null, null, null, null, null, null)} />} />
           <Route
             path="/chat"
             element={
               <ChatScreen
                 token={token}
                 userId={userId}
+                setAuth={setAuth}
                 socket={socket}
                 username={username}
                 virtualNumber={virtualNumber}
@@ -453,16 +345,7 @@ const AuthenticatedApp = ({
           />
           <Route
             path="/profile"
-            element={
-              <ProfileScreen
-                token={token}
-                userId={userId}
-                username={username}
-                virtualNumber={virtualNumber}
-                photo={photo}
-                onLogout={handleLogout}
-              />
-            }
+            element={<ProfileScreen token={token} userId={userId} setAuth={setAuth} username={username} virtualNumber={virtualNumber} photo={photo} />}
           />
           <Route path="*" element={<Navigate to="/feed" replace />} />
         </Routes>
@@ -475,31 +358,26 @@ const AuthenticatedApp = ({
       >
         <NavLink
           to="/feed"
-          className={({ isActive }) =>
-            `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'} focus:outline-none focus:ring-2 focus:ring-white`
-          }
-          aria-label="Feed"
+          className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}
         >
           <FaHome className="text-xl" />
           <span className="text-xs">Feed</span>
         </NavLink>
         <NavLink
           to="/jobs"
-          className={({ isActive }) =>
-            `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'} focus:outline-none focus:ring-2 focus:ring-white`
-          }
-          aria-label="Jobs"
+          className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}
         >
           <FaBriefcase className="text-xl" />
           <span className="text-xs">Jobs</span>
         </NavLink>
         <NavLink
           to="/chat"
-          onClick={handleChatNavigation}
-          className={({ isActive }) =>
-            `flex flex-col items-center p-2 rounded relative ${isActive ? 'bg-secondary' : 'hover:bg-secondary'} focus:outline-none focus:ring-2 focus:ring-white`
-          }
-          aria-label={`Chat ${chatNotifications > 0 ? `with ${chatNotifications} notifications` : ''}`}
+          onClick={() => {
+            console.log('Chat NavLink clicked'); // Debug log
+            handleChatNavigation();
+            dispatch(setSelectedChat(null)); // Ensure chat state is reset
+          }}
+          className={({ isActive }) => `flex flex-col items-center p-2 rounded relative ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}
         >
           <FaComments className="text-xl" />
           {chatNotifications > 0 && (
@@ -511,10 +389,7 @@ const AuthenticatedApp = ({
         </NavLink>
         <NavLink
           to="/profile"
-          className={({ isActive }) =>
-            `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'} focus:outline-none focus:ring-2 focus:ring-white`
-          }
-          aria-label="Profile"
+          className={({ isActive }) => `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'}`}
         >
           <FaUser className="text-xl" />
           <span className="text-xs">Profile</span>
