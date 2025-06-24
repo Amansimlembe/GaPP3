@@ -52,23 +52,29 @@ class ErrorBoundary extends React.Component {
     retryLog();
   }
 
+  handleDismiss = () => {
+    this.setState({ hasError: false, error: null });
+  };
+
   render() {
-    if (this.state.hasError) {
-      return (
-        <div className="error-screen p-4 text-center">
-          <h2 className="text-xl font-bold">Something went wrong</h2>
-          <p className="my-2">{this.state.error?.message || 'Unknown error'}</p>
-          <button
-            className="bg-primary text-white px-4 py-2 rounded focus:outline-none focus:ring-2 focus:ring-primary"
-            onClick={() => window.location.reload()}
-            aria-label="Reload page"
-          >
-            Reload
-          </button>
-        </div>
-      );
-    }
-    return this.props.children;
+    return (
+      <>
+        {this.state.hasError && (
+          <div className="fixed top-4 left-1/2 transform -translate-x-1/2 bg-red-500 text-white p-4 rounded-lg shadow-lg z-50 max-w-md w-full">
+            <h2 className="text-lg font-semibold">Error</h2>
+            <p className="my-2 text-sm">{this.state.error?.message || 'Unknown error'}</p>
+            <button
+              className="bg-white text-red-500 px-3 py-1 rounded hover:bg-gray-200 focus:outline-none focus:ring-2 focus:ring-white"
+              onClick={this.handleDismiss}
+              aria-label="Dismiss error"
+            >
+              OK
+            </button>
+          </div>
+        )}
+        {this.props.children}
+      </>
+    );
   }
 }
 
@@ -142,7 +148,7 @@ const App = () => {
   const handleLogout = useCallback(async () => {
     try {
       await axios.post(
-        `${BASE_URL}/social/logout`, // Updated: Changed to /social/logout
+        `${BASE_URL}/social/logout`,
         {},
         {
           headers: { Authorization: `Bearer ${token}` },
@@ -158,7 +164,7 @@ const App = () => {
       setSocket(null);
       setChatNotifications(0);
       setError(null);
-      localStorage.removeItem('theme'); // Preserve theme preference
+      localStorage.removeItem('theme');
       console.log('Logout successful');
     } catch (error) {
       console.error('Logout error:', error.message);
@@ -185,10 +191,10 @@ const App = () => {
     const newSocket = io(BASE_URL, {
       auth: { token, userId },
       transports: ['websocket', 'polling'],
-      reconnectionAttempts: 3, // Reduced for free tier
+      reconnectionAttempts: 3,
       reconnectionDelay: 1000,
-      reconnectionDelayMax: 3000, // Reduced for free tier
-      timeout: 5000, // Tighter timeout
+      reconnectionDelayMax: 3000,
+      timeout: 5000,
     });
     setSocket(newSocket);
 
@@ -259,6 +265,33 @@ const App = () => {
     };
   }, [token, userId, selectedChat, handleLogout]);
 
+  useEffect(() => {
+    if (!token || !userId) return;
+
+    let isRefreshing = false;
+    const checkTokenExpiration = async () => {
+      if (isRefreshing) return;
+      isRefreshing = true;
+      try {
+        const expTime = getTokenExpiration(token);
+        if (expTime && expTime - Date.now() < 10 * 60 * 1000) {
+          await refreshToken();
+        }
+      } catch (err) {
+        console.error('Token expiration check failed:', err.message);
+        logClientError('Token expiration check failed', err, userId);
+        setError('Authentication error, please log in again');
+        handleLogout();
+      } finally {
+        isRefreshing = false;
+      }
+    };
+
+    checkTokenExpiration();
+    const interval = setInterval(checkTokenExpiration, 5 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, [token, userId, refreshToken, handleLogout]);
+
   const refreshToken = useCallback(async () => {
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
@@ -297,33 +330,6 @@ const App = () => {
       }
     }
   }, [token, userId, dispatch, handleLogout]);
-
-  useEffect(() => {
-    if (!token || !userId) return;
-
-    let isRefreshing = false;
-    const checkTokenExpiration = async () => {
-      if (isRefreshing) return;
-      isRefreshing = true;
-      try {
-        const expTime = getTokenExpiration(token);
-        if (expTime && expTime - Date.now() < 10 * 60 * 1000) {
-          await refreshToken();
-        }
-      } catch (err) {
-        console.error('Token expiration check failed:', err.message);
-        logClientError('Token expiration check failed', err, userId);
-        setError('Authentication error, please log in again');
-        handleLogout();
-      } finally {
-        isRefreshing = false;
-      }
-    };
-
-    checkTokenExpiration();
-    const interval = setInterval(checkTokenExpiration, 5 * 60 * 1000);
-    return () => clearInterval(interval);
-  }, [token, userId, refreshToken, handleLogout]);
 
   useEffect(() => {
     document.documentElement.className = theme === 'dark' ? 'dark' : '';
