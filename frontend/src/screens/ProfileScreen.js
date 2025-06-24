@@ -3,16 +3,9 @@ import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import { FaEdit, FaSignOutAlt, FaTrash, FaEllipsisH, FaMoon, FaSun } from 'react-icons/fa';
 import io from 'socket.io-client';
+import { useNavigate } from 'react-router-dom'; // Added: Import useNavigate
 
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
-const socket = io(BASE_URL, {
-  reconnection: true,
-  reconnectionAttempts: 50, // Changed: Limit attempts
-  reconnectionDelay: 500, // Changed: Faster initial retry
-  reconnectionDelayMax: 5000,
-  randomizationFactor: 0.5,
-  withCredentials: true,
-});
 
 const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virtualNumber: initialVirtualNumber, photo: initialPhoto }) => {
   const [cvFile, setCvFile] = useState(null);
@@ -27,13 +20,13 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
   const [showPosts, setShowPosts] = useState(false);
   const [selectedPost, setSelectedPost] = useState(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(null);
-  const [darkMode, setDarkMode] = useState(false);
+  const [darkMode, setDarkMode] = useState(localStorage.getItem('darkMode') === 'true');
   const [loading, setLoading] = useState(false);
-  const [page, setPage] = useState(1); // Changed: Add pagination
-  const [hasMore, setHasMore] = useState(true); // Changed: Add pagination
-  
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(true);
+  const [socket, setSocket] = useState(null); // Changed: Initialize socket in useEffect
+  const navigate = useNavigate(); // Added: Initialize navigate
 
-  // Changed: Optimize retry logic
   const retryOperation = async (operation, options = {}, retries = 3, baseDelay = 1000) => {
     for (let attempt = 1; attempt <= retries; attempt++) {
       try {
@@ -43,19 +36,79 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
         if (err.response?.status === 401 || attempt === retries) {
           throw err;
         }
-        const delay = Math.pow(2, attempt - 1) * baseDelay; // Changed: Exponential backoff
+        const delay = Math.pow(2, attempt - 1) * baseDelay;
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
     }
   };
 
-  // Changed: Optimize fetchMyPosts with pagination
+  useEffect(() => {
+    if (!token || !userId) {
+      setError('Authentication required. Please log in again.');
+      navigate('/login'); // Changed: Redirect to login
+      return;
+    }
+
+    // Initialize socket with auth
+    const newSocket = io(BASE_URL, {
+      auth: { token, userId }, // Changed: Include token and userId
+      reconnection: true,
+      reconnectionAttempts: 50,
+      reconnectionDelay: 500,
+      reconnectionDelayMax: 5000,
+      randomizationFactor: 0.5,
+      withCredentials: true,
+      transports: ['websocket', 'polling'],
+    });
+    setSocket(newSocket);
+
+    newSocket.on('connect', () => {
+      console.log('Socket connected:', newSocket.id);
+      newSocket.emit('join', userId);
+    });
+
+    newSocket.on('connect_error', (err) => {
+      console.warn('Socket connection error:', err.message);
+      setError('Connection lost. Trying to reconnect...');
+    });
+
+    newSocket.on('postDeleted', (postId) => {
+      if (postId) {
+        setMyPosts((prev) => prev.filter((p) => p._id.toString() !== postId.toString()));
+      }
+    });
+
+    newSocket.on('onlineStatus', ({ userId: updatedUserId, status, lastSeen }) => {
+      if (updatedUserId === userId) {
+        console.log(`User ${userId} is now ${status}, last seen: ${lastSeen}`);
+      }
+    });
+
+    fetchMyPosts();
+
+    document.documentElement.classList.toggle('dark', darkMode);
+    localStorage.setItem('darkMode', darkMode);
+
+    return () => {
+      newSocket.off('connect');
+      newSocket.off('connect_error');
+      newSocket.off('postDeleted');
+      newSocket.off('onlineStatus');
+      if (newSocket.connected) {
+        newSocket.emit('leave', userId);
+      }
+      newSocket.disconnect();
+      setSocket(null);
+      if (photoPreview) URL.revokeObjectURL(photoPreview);
+    };
+  }, [token, userId, darkMode, fetchMyPosts, photoPreview, navigate]);
+
   const fetchMyPosts = useCallback(
     async (pageNum = 1, isRefresh = false) => {
       if (!token || !userId || (loading && !isRefresh) || (!hasMore && !isRefresh)) return;
       setLoading(true);
       try {
-        const data = await retryOperation(() =>
+        const { data } = await retryOperation(() =>
           axios.get(`${BASE_URL}/social/my-posts/${userId}?page=${pageNum}&limit=9`, {
             headers: { Authorization: `Bearer ${token}` },
             timeout: 5000,
@@ -64,7 +117,7 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
         const posts = Array.isArray(data.posts) ? data.posts : [];
         setMyPosts((prev) => {
           const newPosts = isRefresh || pageNum === 1 ? posts : [...prev, ...posts];
-          return Array.from(new Map(newPosts.map((p) => [p._id.toString(), p])).values()); // Changed: Deduplicate
+          return Array.from(new Map(newPosts.map((p) => [p._id.toString(), p])).values());
         });
         setHasMore(data.hasMore || false);
         setError('');
@@ -76,59 +129,17 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
             ? 'You are offline'
             : error.response?.data?.error || 'Failed to load posts'
         );
-        if (error.response?.status === 401) setAuth('', '', '', '', '', '');
+        if (error.response?.status === 401) {
+          setAuth('', '', '', '', '', '');
+          navigate('/login');
+        }
       } finally {
         setLoading(false);
       }
     },
-    [token, userId, loading, hasMore, setAuth]
+    [token, userId, loading, hasMore, setAuth, navigate]
   );
 
-  // Changed: Optimize socket and cleanup
-  useEffect(() => {
-    if (!token || !userId) {
-      setError('Authentication required. Please log in again.');
-      return;
-    }
-
-    socket.emit('join', userId);
-    fetchMyPosts();
-
-    const handlePostDeleted = (postId) => {
-      if (postId) {
-        setMyPosts((prev) => prev.filter((p) => p._id.toString() !== postId.toString()));
-      }
-    };
-
-    const handleOnlineStatus = ({ userId: updatedUserId, status, lastSeen }) => {
-      if (updatedUserId === userId) {
-        console.log(`User ${userId} is now ${status}, last seen: ${lastSeen}`);
-      }
-    };
-
-    const handleConnectError = (err) => {
-      console.warn('Socket connection error:', err.message);
-      setError('Connection lost. Trying to reconnect...');
-    };
-
-    socket.on('postDeleted', handlePostDeleted);
-    socket.on('onlineStatus', handleOnlineStatus);
-    socket.on('connect_error', handleConnectError);
-
-    // Changed: Apply dark mode
-    document.documentElement.classList.toggle('dark', darkMode);
-    localStorage.setItem('darkMode', darkMode);
-
-    return () => {
-      socket.off('postDeleted', handlePostDeleted);
-      socket.off('onlineStatus', handleOnlineStatus);
-      socket.off('connect_error', handleConnectError);
-      socket.emit('leave', userId);
-      if (photoPreview) URL.revokeObjectURL(photoPreview); // Changed: Cleanup memory
-    };
-  }, [token, userId, darkMode, fetchMyPosts, photoPreview]);
-
-  // Changed: Optimize scroll for pagination
   useEffect(() => {
     const handleScroll = () => {
       if (!showPosts || loading || !hasMore) return;
@@ -146,7 +157,7 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
   const handlePhotoChange = useCallback((e) => {
     const file = e.target.files[0];
     if (file) {
-      if (file.size > 5 * 1024 * 1024) { // Changed: 5MB limit
+      if (file.size > 5 * 1024 * 1024) {
         setError('Photo must be under 5MB');
         return;
       }
@@ -161,7 +172,7 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
       setError('Please select a CV file');
       return;
     }
-    if (cvFile.size > 10 * 1024 * 1024) { // Changed: 10MB limit
+    if (cvFile.size > 10 * 1024 * 1024) {
       setError('CV must be under 10MB');
       return;
     }
@@ -187,7 +198,10 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
           ? 'You are offline'
           : error.response?.data?.error || 'Failed to upload CV'
       );
-      if (error.response?.status === 401) setAuth('', '', '', '', '', '');
+      if (error.response?.status === 401) {
+        setAuth('', '', '', '', '', '');
+        navigate('/login');
+      }
     } finally {
       setLoading(false);
     }
@@ -203,14 +217,14 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
     formData.append('photo', photoFile);
     formData.append('userId', userId);
     try {
-      const data = await retryOperation(() =>
+      const { data } = await retryOperation(() =>
         axios.post(`${BASE_URL}/auth/update_photo`, formData, {
           headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'multipart/form-data' },
           timeout: 15000,
         })
       );
-      setPhotoUrl(data.data.photo);
-      localStorage.setItem('photo', data.data.photo);
+      setPhotoUrl(data.photo);
+      localStorage.setItem('photo', data.photo);
       if (photoPreview) URL.revokeObjectURL(photoPreview);
       setPhotoFile(null);
       setPhotoPreview(null);
@@ -224,27 +238,30 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
           ? 'You are offline'
           : error.response?.data?.error || 'Failed to upload photo'
       );
-      if (error.response?.status === 401) setAuth('', '', '', '', '', '');
+      if (error.response?.status === 401) {
+        setAuth('', '', '', '', '', '');
+        navigate('/login');
+      }
     } finally {
       setLoading(false);
     }
   };
 
   const updateUsername = async () => {
-    if (!username.trim() || username.length > 30) { // Changed: Add length limit
+    if (!username.trim() || username.length > 30) {
       setError('Username must be non-empty and under 30 characters');
       return;
     }
     setLoading(true);
     try {
-      const data = await retryOperation(() =>
+      const { data } = await retryOperation(() =>
         axios.post(`${BASE_URL}/auth/update_username`, { userId, username: username.trim() }, {
           headers: { Authorization: `Bearer ${token}` },
           timeout: 5000,
         })
       );
-      setUsername(data.data.username);
-      localStorage.setItem('username', data.data.username);
+      setUsername(data.username);
+      localStorage.setItem('username', data.username);
       setEditUsername(false);
       setError('');
       alert('Username updated successfully');
@@ -256,7 +273,10 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
           ? 'You are offline'
           : error.response?.data?.error || 'Failed to update username'
       );
-      if (error.response?.status === 401) setAuth('', '', '', '', '', '');
+      if (error.response?.status === 401) {
+        setAuth('', '', '', '', '', '');
+        navigate('/login');
+      }
     } finally {
       setLoading(false);
     }
@@ -271,7 +291,9 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
           timeout: 5000,
         })
       );
-      socket.emit('postDeleted', postId);
+      if (socket && socket.connected) {
+        socket.emit('postDeleted', postId);
+      }
       setShowDeleteConfirm(null);
       setSelectedPost(null);
       setError('');
@@ -283,42 +305,49 @@ const ProfileScreen = ({ token, userId, setAuth, username: initialUsername, virt
           ? 'You are offline'
           : error.response?.data?.error || 'Failed to delete post'
       );
-      if (error.response?.status === 401) setAuth('', '', '', '', '', '');
+      if (error.response?.status === 401) {
+        setAuth('', '', '', '', '', '');
+        navigate('/login');
+      }
     } finally {
       setLoading(false);
     }
   };
 
-  // ProfileScreen.js (only the relevant logout function is shown for brevity)
-const logout = useCallback(async () => {
-  try {
-    await axios.post(
-      `${BASE_URL}/auth/logout`, // Changed: Use /auth/logout instead of /social/logout
-      {},
-      {
-        headers: { Authorization: `Bearer ${token}` },
-        timeout: 5000,
+  const logout = useCallback(async () => {
+    try {
+      await axios.post(
+        `${BASE_URL}/auth/logout`,
+        {},
+        {
+          headers: { Authorization: `Bearer ${token}` },
+          timeout: 5000,
+        }
+      );
+      if (socket && socket.connected) {
+        socket.emit('leave', userId);
+        socket.disconnect();
       }
-    );
-    socket.emit('leave', userId);
-    socket.disconnect();
-    setAuth('', '', '', '', '', '');
-    localStorage.clear();
-    sessionStorage.clear(); // Changed: Clear sessionStorage
-    navigate('/login'); // Changed: Explicitly navigate to login
-  } catch (error) {
-    console.error('Logout error:', error.message);
-    setError('Failed to logout, please try again');
-    if (error.response?.status === 401) {
-      socket.emit('leave', userId);
-      socket.disconnect();
       setAuth('', '', '', '', '', '');
       localStorage.clear();
       sessionStorage.clear();
       navigate('/login');
+    } catch (error) {
+      console.error('Logout error:', error.message);
+      setError('Failed to logout, please try again');
+      if (error.response?.status === 401) {
+        if (socket && socket.connected) {
+          socket.emit('leave', userId);
+          socket.disconnect();
+        }
+        setAuth('', '', '', '', '', '');
+        localStorage.clear();
+        sessionStorage.clear();
+        navigate('/login');
+      }
     }
-  }
-}, [userId, token, setAuth, navigate]);
+  }, [token, userId, socket, setAuth, navigate]);
+
   return (
     <motion.div
       initial={{ y: 50, opacity: 0 }}
@@ -387,7 +416,7 @@ const logout = useCallback(async () => {
                 <input
                   type="text"
                   value={username}
-                  onChange={(e) => setUsername(e.target.value.slice(0, 30))} // Changed: Limit length
+                  onChange={(e) => setUsername(e.target.value.slice(0, 30))}
                   className="flex-1 p-2 border rounded-lg dark:bg-gray-700 dark:text-white focus:ring-2 focus:ring-blue-600"
                   placeholder="Enter unique username (max 30 chars)"
                   disabled={loading}
@@ -458,7 +487,7 @@ const logout = useCallback(async () => {
         <button
           onClick={() => {
             setShowPosts((prev) => !prev);
-            if (!showPosts) fetchMyPosts(1, true); // Changed: Refresh posts
+            if (!showPosts) fetchMyPosts(1, true);
           }}
           className="bg-blue-600 text-white p-2 rounded-lg w-full hover:bg-blue-800 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-blue-600"
           disabled={loading}
@@ -497,7 +526,7 @@ const logout = useCallback(async () => {
                           className="w-full h-32 object-cover rounded"
                           loading="lazy"
                           muted
-                          preload="metadata" // Changed: Optimize video
+                          preload="metadata"
                         />
                       )}
                       <button
