@@ -13,6 +13,7 @@ import ChatScreen from './screens/ChatScreen';
 import ProfileScreen from './screens/ProfileScreen';
 import CountrySelector from './components/CountrySelector';
 import { setAuth, clearAuth, setSelectedChat } from './store';
+import { useNavigate } from 'react-router-dom';
 
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
 
@@ -146,40 +147,53 @@ const App = () => {
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
   const [error, setError] = useState(null);
 
-  const handleLogout = useCallback(async () => {
-    try {
-      if (!token || !userId) throw new Error('Missing token or userId');
-      await axios.post(
-        `${BASE_URL}/social/logout`,
-        {},
-        {
-          headers: { Authorization: `Bearer ${token}` },
-          timeout: 5000,
-        }
-      );
-      if (socket) {
-        socket.emit('leave', userId);
-        socket.disconnect();
-      }
-      dispatch(clearAuth());
-      dispatch(setSelectedChat(null));
-      setSocket(null);
-      setChatNotifications(0);
-      setError(null);
-      localStorage.removeItem('theme');
-      console.log('Logout successful');
-    } catch (error) {
-      console.error('Logout error:', error.message);
-      logClientError('Logout failed', error, userId);
-      if (error.response?.status === 401) {
-        dispatch(clearAuth());
-        dispatch(setSelectedChat(null));
-        setSocket(null);
-        setChatNotifications(0);
-        setError(null);
-      }
+  
+ const navigate = useNavigate();
+
+
+
+
+
+  // ChatScreen.js (only the relevant handleLogout function is shown for brevity)
+const handleLogout = useCallback(async () => {
+  try {
+    if (socket) {
+      socket.emit('leave', userId);
+      socket.disconnect();
     }
-  }, [dispatch, token, userId, socket]);
+    await axios.post(
+      `${BASE_URL}/auth/logout`, // Changed: Use /auth/logout instead of /social/logout
+      {},
+      {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 5000,
+      }
+    );
+    sessionStorage.clear();
+    localStorage.clear();
+    dispatch(resetState());
+    setChatList([]);
+    setUnreadMessages({});
+    sentStatusesRef.current.clear();
+    dispatch(setSelectedChat(null));
+    navigate('/login'); // Changed: Explicitly navigate to login
+  } catch (err) {
+    console.error('Logout failed:', err.message);
+    logClientError('Logout failed', err);
+    if (err.response?.status === 401) {
+      sessionStorage.clear();
+      localStorage.clear();
+      dispatch(resetState());
+      setChatList([]);
+      setUnreadMessages({});
+      sentStatusesRef.current.clear();
+      dispatch(setSelectedChat(null));
+      navigate('/login');
+    }
+  }
+}, [socket, userId, token, navigate, dispatch, logClientError]);
+
+
 
   const refreshToken = useCallback(async () => {
     for (let attempt = 1; attempt <= 3; attempt++) {
