@@ -146,51 +146,41 @@ const App = () => {
   const [socket, setSocket] = useState(null);
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
   const [error, setError] = useState(null);
-  const navigate = useNavigate(); // Changed: Added useNavigate hook
 
-
-  // App.js (only the relevant handleLogout function is shown for brevity)
-const handleLogout = useCallback(async () => {
-  try {
-    if (!token || !userId) throw new Error('Missing token or userId');
-    await axios.post(
-      `${BASE_URL}/auth/logout`, // Changed: Use /auth/logout instead of /social/logout
-      {},
-      {
-        headers: { Authorization: `Bearer ${token}` },
-        timeout: 5000,
+  const handleLogout = useCallback(async () => {
+    try {
+      if (!token || !userId) throw new Error('Missing token or userId');
+      await axios.post(
+        `${BASE_URL}/social/logout`,
+        {},
+        {
+          headers: { Authorization: `Bearer ${token}` },
+          timeout: 5000,
+        }
+      );
+      if (socket) {
+        socket.emit('leave', userId);
+        socket.disconnect();
       }
-    );
-    if (socket) {
-      socket.emit('leave', userId);
-      socket.disconnect();
-    }
-    dispatch(clearAuth());
-    dispatch(setSelectedChat(null));
-    setSocket(null);
-    setChatNotifications(0);
-    setError(null);
-    localStorage.clear(); // Changed: Clear all localStorage for consistency
-    sessionStorage.clear(); // Changed: Clear sessionStorage as well
-    console.log('Logout successful');
-    navigate('/login'); // Changed: Explicitly navigate to login
-  } catch (error) {
-    console.error('Logout error:', error.message);
-    logClientError('Logout failed', error, userId);
-    if (error.response?.status === 401) {
       dispatch(clearAuth());
       dispatch(setSelectedChat(null));
       setSocket(null);
       setChatNotifications(0);
       setError(null);
-      localStorage.clear();
-      sessionStorage.clear();
-      navigate('/login');
+      localStorage.removeItem('theme');
+      console.log('Logout successful');
+    } catch (error) {
+      console.error('Logout error:', error.message);
+      logClientError('Logout failed', error, userId);
+      if (error.response?.status === 401) {
+        dispatch(clearAuth());
+        dispatch(setSelectedChat(null));
+        setSocket(null);
+        setChatNotifications(0);
+        setError(null);
+      }
     }
-  }
-}, [dispatch, token, userId, socket, navigate, logClientError]);
-
-
+  }, [dispatch, token, userId, socket]);
 
   const refreshToken = useCallback(async () => {
     for (let attempt = 1; attempt <= 3; attempt++) {
