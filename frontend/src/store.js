@@ -1,15 +1,14 @@
-
 import { configureStore, createSlice } from '@reduxjs/toolkit';
 import { openDB } from 'idb';
 
 // Constants
 const DB_NAME = 'chatApp';
 const STORE_NAME = 'reduxState';
-const VERSION = 3; // Incremented for new cleanup logic
+const VERSION = 3;
 const MAX_MESSAGES_PER_CHAT = 100;
-const MESSAGE_TTL = 30 * 24 * 60 * 60 * 1000; // 30 days in milliseconds
-const PERSISTENCE_DEBOUNCE_MS = 300; // Reduced for faster persistence
-const CACHE_TIMEOUT = 5 * 60 * 1000; // 5 minutes for chat list cache
+const MESSAGE_TTL = 30 * 24 * 60 * 60 * 1000; // 30 days
+const PERSISTENCE_DEBOUNCE_MS = 300;
+const CACHE_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 
 // ObjectId validation
 const isValidObjectId = (id) => /^[0-9a-fA-F]{24}$/.test(id);
@@ -28,7 +27,7 @@ const initDB = async () => {
   });
 };
 
-// Error logging aligned with backend
+// Error logging
 const logError = async (message, error, userId = null) => {
   try {
     await fetch('https://gapp-6yc3.onrender.com/social/log-error', {
@@ -68,7 +67,7 @@ const authSlice = createSlice({
       state.photo = typeof photo === 'string' ? photo : null;
       state.virtualNumber = typeof virtualNumber === 'string' ? virtualNumber : null;
       state.username = typeof username === 'string' ? username : null;
-      state.privateKey = privateKey || null; // Not persisted
+      state.privateKey = privateKey || null;
     },
     clearAuth: (state) => {
       Object.assign(state, authSlice.getInitialState());
@@ -112,8 +111,8 @@ const messageSlice = createSlice({
           senderVirtualNumber: msg.senderVirtualNumber || msg.senderId?.virtualNumber || undefined,
           senderUsername: msg.senderUsername || msg.senderId?.username || undefined,
           senderPhoto: msg.senderPhoto || msg.senderId?.photo || undefined,
-          createdAt: msg.createdAt ? new Date(msg.createdAt) : new Date(),
-          updatedAt: msg.updatedAt ? new Date(msg.updatedAt) : undefined,
+          createdAt: msg.createdAt ? new Date(msg.createdAt).toISOString() : new Date().toISOString(),
+          updatedAt: msg.updatedAt ? new Date(msg.updatedAt).toISOString() : undefined,
         };
         if (isValidObjectId(normalizedMsg.senderId) && isValidObjectId(normalizedMsg.recipientId)) {
           messageMap.set(key, normalizedMsg);
@@ -146,8 +145,8 @@ const messageSlice = createSlice({
         senderVirtualNumber: message.senderVirtualNumber || undefined,
         senderUsername: message.senderUsername || undefined,
         senderPhoto: message.senderPhoto || undefined,
-        createdAt: message.createdAt ? new Date(message.createdAt) : new Date(),
-        updatedAt: message.updatedAt ? new Date(message.updatedAt) : undefined,
+        createdAt: message.createdAt ? new Date(message.createdAt).toISOString() : new Date().toISOString(),
+        updatedAt: message.updatedAt ? new Date(message.updatedAt).toISOString() : undefined,
       };
       if (isValidObjectId(normalizedMsg.senderId) && isValidObjectId(normalizedMsg.recipientId)) {
         state.chats[recipientId].push(normalizedMsg);
@@ -178,8 +177,8 @@ const messageSlice = createSlice({
         senderVirtualNumber: message.senderVirtualNumber || undefined,
         senderUsername: message.senderUsername || undefined,
         senderPhoto: message.senderPhoto || undefined,
-        createdAt: message.createdAt ? new Date(message.createdAt) : new Date(),
-        updatedAt: message.updatedAt ? new Date(message.updatedAt) : undefined,
+        createdAt: message.createdAt ? new Date(message.createdAt).toISOString() : new Date().toISOString(),
+        updatedAt: message.updatedAt ? new Date(message.updatedAt).toISOString() : undefined,
       };
       if (isValidObjectId(normalizedMsg.senderId) && isValidObjectId(normalizedMsg.recipientId)) {
         if (index !== -1) {
@@ -230,14 +229,14 @@ const messageSlice = createSlice({
           virtualNumber: contact.virtualNumber || '',
           photo: contact.photo || 'https://placehold.co/40x40',
           status: contact.status || 'offline',
-          lastSeen: contact.lastSeen ? new Date(contact.lastSeen) : null,
+          lastSeen: contact.lastSeen ? new Date(contact.lastSeen).toISOString() : null,
           latestMessage: contact.latestMessage
             ? {
                 ...contact.latestMessage,
                 senderId: contact.latestMessage.senderId,
                 recipientId: contact.latestMessage.recipientId,
-                createdAt: contact.latestMessage.createdAt ? new Date(contact.latestMessage.createdAt) : new Date(),
-                updatedAt: contact.latestMessage.updatedAt ? new Date(contact.latestMessage.updatedAt) : undefined,
+                createdAt: contact.latestMessage.createdAt ? new Date(contact.latestMessage.createdAt).toISOString() : new Date().toISOString(),
+                updatedAt: contact.latestMessage.updatedAt ? new Date(contact.latestMessage.updatedAt).toISOString() : undefined,
               }
             : null,
           unreadCount: contact.unreadCount || 0,
@@ -297,7 +296,7 @@ const debounce = (func, wait) => {
   };
 };
 
-// Persistence middleware with debounced writes
+// Persistence middleware
 const persistenceMiddleware = (store) => {
   const debouncedPersist = debounce(async (state, action) => {
     try {
@@ -322,8 +321,8 @@ const persistenceMiddleware = (store) => {
                 senderVirtualNumber: msg.senderVirtualNumber,
                 senderUsername: msg.senderUsername,
                 senderPhoto: msg.senderPhoto,
-                createdAt: msg.createdAt.toISOString(),
-                updatedAt: msg.updatedAt ? msg.updatedAt.toISOString() : undefined,
+                createdAt: msg.createdAt ? msg.createdAt : new Date().toISOString(),
+                updatedAt: msg.updatedAt ? msg.updatedAt : undefined,
               }));
             }
             return acc;
@@ -334,12 +333,14 @@ const persistenceMiddleware = (store) => {
             virtualNumber: contact.virtualNumber,
             photo: contact.photo,
             status: contact.status,
-            lastSeen: contact.lastSeen ? contact.lastSeen.toISOString() : null,
+            lastSeen: contact.lastSeen ? contact.lastSeen : null,
             latestMessage: contact.latestMessage
               ? {
                   ...contact.latestMessage,
-                  createdAt: contact.latestMessage.createdAt.toISOString(),
-                  updatedAt: contact.latestMessage.updatedAt ? contact.latestMessage.updatedAt.toISOString() : undefined,
+                  senderId: contact.latestMessage.senderId,
+                  recipientId: contact.latestMessage.recipientId,
+                  createdAt: contact.latestMessage.createdAt ? contact.latestMessage.createdAt : new Date().toISOString(),
+                  updatedAt: contact.latestMessage.updatedAt ? contact.latestMessage.updatedAt : undefined,
                 }
               : null,
             unreadCount: contact.unreadCount,
@@ -355,7 +356,7 @@ const persistenceMiddleware = (store) => {
           photo: state.auth.photo,
           virtualNumber: state.auth.virtualNumber,
           username: state.auth.username,
-          privateKey: null, // Never persist private key
+          privateKey: null,
         },
       };
       await db.put(STORE_NAME, { key: 'state', value: serializableState });

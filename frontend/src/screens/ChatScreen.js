@@ -194,76 +194,159 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
     }
   }, [isForgeReady, logClientError]);
 
+
   const fetchChatList = useCallback(
-    debounce(async (force = false) => {
-      if (!isForgeReady || !isMountedRef.current) return;
-      if (!force && chatListTimestamp && Date.now() - chatListTimestamp < 5 * 60 * 1000) {
-        setChatList(chatList);
+  debounce(async (force = false) => {
+    if (!isForgeReady || !isMountedRef.current) return;
+    if (!force && chatListTimestamp && Date.now() - chatListTimestamp < 5 * 60 * 1000) {
+      setChatList(chatList);
+      setFetchStatus('success');
+      setFetchError(null);
+      return;
+    }
+    setFetchStatus('loading');
+    let retryCount = retryCountRef.current.chatList;
+    if (retryCount > maxRetries) {
+      setFetchStatus('error');
+      setFetchError('Max retries exceeded for chat list fetch');
+      logClientError('Max retries exceeded for chat list fetch', new Error('Max retries exceeded'));
+      return;
+    }
+    try {
+      const { data } = await axios.get(`${BASE_URL}/social/chat-list`, {
+        headers: { Authorization: `Bearer ${token}` },
+        params: { userId },
+        timeout: 10000,
+      });
+      if (isMountedRef.current) {
+        const updatedChatList = data.map((chat) => ({
+          ...chat,
+          _id: chat.id,
+          unreadCount: unreadMessages[chat.id] || chat.unreadCount || 0,
+          lastSeen: chat.lastSeen ? new Date(chat.lastSeen).toISOString() : null,
+          latestMessage: chat.latestMessage
+            ? {
+                ...chat.latestMessage,
+                createdAt: chat.latestMessage.createdAt ? new Date(chat.latestMessage.createdAt).toISOString() : new Date().toISOString(),
+                updatedAt: chat.latestMessage.updatedAt ? new Date(chat.latestMessage.updatedAt).toISOString() : undefined,
+              }
+            : null,
+        }));
+        setChatList(updatedChatList);
+        dispatch(setChatList(updatedChatList));
         setFetchStatus('success');
         setFetchError(null);
+      }
+      retryCountRef.current.chatList = 0;
+      clearTimeout(retryTimeoutRef.current.chatList);
+    } catch (err) {
+      if (retryCount < maxRetries) {
+        console.warn(`Chat list fetch attempt ${retryCount + 1} failed: ${err.message}`);
+      } else {
+        console.error('Chat list fetch failed:', err.message);
+      }
+      if (!isMountedRef.current) return;
+      if (err.response?.status === 401) {
+        logClientError('Chat list fetch failed: Unauthorized', err);
+        setTimeout(() => handleLogout(), 1000);
         return;
       }
-      setFetchStatus('loading');
-      let retryCount = retryCountRef.current.chatList;
-      if (retryCount > maxRetries) {
-        setFetchStatus('error');
-        setFetchError('Max retries exceeded for chat list fetch');
-        logClientError('Max retries exceeded for chat list fetch', new Error('Max retries exceeded'));
-        return;
+      let delay = 2000 * Math.pow(2, retryCount);
+      if (err.response?.status === 429) {
+        delay = 60000;
+        setFetchError('Too many requests, please wait a minute');
+      } else {
+        setFetchError('Failed to load contacts, please try again');
       }
-      try {
-        const { data } = await axios.get(`${BASE_URL}/social/chat-list`, {
-          headers: { Authorization: `Bearer ${token}` },
-          params: { userId },
-          timeout: 10000,
-        });
-        if (isMountedRef.current) {
-          const updatedChatList = data.map((chat) => ({
-            ...chat,
-            _id: chat.id,
-            unreadCount: unreadMessages[chat.id] || chat.unreadCount || 0,
-          }));
-          setChatList(updatedChatList);
-          dispatch(setChatList(updatedChatList));
-          setFetchStatus('success');
-          setFetchError(null);
-        }
+      if ((err.code === 'ECONNABORTED' || err.response?.status === 429 || err.response?.status === 503) && retryCount < maxRetries) {
+        retryCount += 1;
+        retryCountRef.current.chatList = retryCount;
+        clearTimeout(retryTimeoutRef.current.chatList);
+        retryTimeoutRef.current.chatList = setTimeout(() => fetchChatList(force), delay);
+      } else {
         retryCountRef.current.chatList = 0;
         clearTimeout(retryTimeoutRef.current.chatList);
-      } catch (err) {
-        if (retryCount < maxRetries) {
-          console.warn(`Chat list fetch attempt ${retryCount + 1} failed: ${err.message}`);
-        } else {
-          console.error('Chat list fetch failed:', err.message);
-        }
-        if (!isMountedRef.current) return;
-        if (err.response?.status === 401) {
-          logClientError('Chat list fetch failed: Unauthorized', err);
-          setTimeout(() => handleLogout(), 1000);
-          return;
-        }
-        let delay = 2000 * Math.pow(2, retryCount);
-        if (err.response?.status === 429) {
-          delay = 60000;
-          setFetchError('Too many requests, please wait a minute');
-        } else {
-          setFetchError('Failed to load contacts, please try again');
-        }
-        if ((err.code === 'ECONNABORTED' || err.response?.status === 429 || err.response?.status === 503) && retryCount < maxRetries) {
-          retryCount += 1;
-          retryCountRef.current.chatList = retryCount;
-          clearTimeout(retryTimeoutRef.current.chatList);
-          retryTimeoutRef.current.chatList = setTimeout(() => fetchChatList(force), delay);
-        } else {
-          retryCountRef.current.chatList = 0;
-          clearTimeout(retryTimeoutRef.current.chatList);
-          setFetchStatus('error');
-          logClientError('Chat list fetch failed', err);
-        }
+        setFetchStatus('error');
+        logClientError('Chat list fetch failed', err);
       }
-    }, 1000),
-    [isForgeReady, token, userId, handleLogout, unreadMessages, logClientError, dispatch, chatList, chatListTimestamp]
-  );
+    }
+  }, 1000),
+  [isForgeReady, token, userId, handleLogout, unreadMessages, logClientError, dispatch, chatList, chatListTimestamp]
+);
+
+const handleAddContact = useCallback(async () => {
+  if (!contactInput.trim()) {
+    setContactError('Please enter a virtual number');
+    return;
+  }
+  if (!isValidVirtualNumber(contactInput)) {
+    setContactError('Invalid virtual number format (e.g., +1234567890)');
+    return;
+  }
+  setIsLoadingAddContact(true);
+  let retryCount = retryCountRef.current.addContact;
+  if (retryCount > maxRetries) {
+    setContactError('Max retries exceeded');
+    setIsLoadingAddContact(false);
+    retryCountRef.current.addContact = 0;
+    return;
+  }
+  try {
+    const response = await axios.post(
+      `${BASE_URL}/social/add_contact`,
+      { userId, virtualNumber: contactInput.trim() },
+      { headers: { Authorization: `Bearer ${token}` }, timeout: 5000 }
+    );
+    if (!isMountedRef.current) return;
+    const newChat = {
+      id: response.data.id,
+      _id: response.data.id,
+      username: response.data.username || 'Unknown',
+      virtualNumber: response.data.virtualNumber || '',
+      photo: response.data.photo || 'https://placehold.co/40x40',
+      status: response.data.status || 'offline',
+      lastSeen: response.data.lastSeen ? new Date(response.data.lastSeen).toISOString() : null,
+      latestMessage: null,
+      unreadCount: 0,
+    };
+    setChatList((prev) => {
+      if (prev.find((chat) => chat.id === newChat.id)) return prev;
+      const updatedChatList = [...prev, newChat];
+      dispatch(setChatList(updatedChatList));
+      return updatedChatList;
+    });
+    setContactInput('');
+    setContactError('');
+    setShowAddContact(false);
+    retryCountRef.current.addContact = 0;
+    clearTimeout(retryTimeoutRef.current.addContact);
+    // Force fetch chat list to ensure consistency
+    fetchChatList(true);
+  } catch (err) {
+    console.error('Add contact failed:', err.message);
+    if (!isMountedRef.current) return;
+    const errorMsg = err.response?.data?.error || 'Failed to add contact';
+    if ((err.code === 'ECONNABORTED' || err.response?.status === 429 || err.response?.status === 503) && retryCount < maxRetries) {
+      retryCount += 1;
+      retryCountRef.current.addContact = retryCount;
+      const delay = err.response?.status === 429 ? 60000 : 1000 * Math.pow(2, retryCount);
+      clearTimeout(retryTimeoutRef.current.addContact);
+      retryTimeoutRef.current.addContact = setTimeout(handleAddContact, delay);
+    } else {
+      setContactError(errorMsg);
+      retryCountRef.current.addContact = 0;
+      clearTimeout(retryTimeoutRef.current.addContact);
+      if (err.response?.status === 401) {
+        logClientError('Add contact failed: Unauthorized', err);
+        setTimeout(() => handleLogout(), 1000);
+      }
+    }
+  } finally {
+    if (isMountedRef.current) setIsLoadingAddContact(false);
+  }
+}, [contactInput, token, userId, handleLogout, logClientError, dispatch, fetchChatList]);
+
+
 
   const fetchMessages = useCallback(async (chatId) => {
     if (!isForgeReady || !isValidObjectId(chatId) || !isMountedRef.current) return;
@@ -397,75 +480,8 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
     }
   }, [selectedChat, userId, virtualNumber, username, photo, token, dispatch, chats]);
 
-  const handleAddContact = useCallback(async () => {
-    if (!contactInput.trim()) {
-      setContactError('Please enter a virtual number');
-      return;
-    }
-    if (!isValidVirtualNumber(contactInput)) {
-      setContactError('Invalid virtual number format (e.g., +1234567890)');
-      return;
-    }
-    setIsLoadingAddContact(true);
-    let retryCount = retryCountRef.current.addContact;
-    if (retryCount > maxRetries) {
-      setContactError('Max retries exceeded');
-      setIsLoadingAddContact(false);
-      retryCountRef.current.addContact = 0;
-      return;
-    }
-    try {
-      const response = await axios.post(
-        `${BASE_URL}/social/add_contact`,
-        { userId, virtualNumber: contactInput.trim() },
-        { headers: { Authorization: `Bearer ${token}` }, timeout: 5000 }
-      );
-      if (!isMountedRef.current) return;
-      const newChat = {
-        id: response.data.id,
-        _id: response.data.id,
-        username: response.data.username || 'Unknown',
-        virtualNumber: response.data.virtualNumber || '',
-        photo: response.data.photo || 'https://placehold.co/40x40',
-        status: response.data.status || 'offline',
-        lastSeen: response.data.lastSeen || null,
-        latestMessage: null,
-        unreadCount: 0,
-      };
-      setChatList((prev) => {
-        if (prev.find((chat) => chat.id === newChat.id)) return prev;
-        const updatedChatList = [...prev, newChat];
-        dispatch(setChatList(updatedChatList));
-        return updatedChatList;
-      });
-      setContactInput('');
-      setContactError('');
-      setShowAddContact(false);
-      retryCountRef.current.addContact = 0;
-      clearTimeout(retryTimeoutRef.current.addContact);
-    } catch (err) {
-      console.error('Add contact failed:', err.message);
-      if (!isMountedRef.current) return;
-      const errorMsg = err.response?.data?.error || 'Failed to add contact';
-      if ((err.code === 'ECONNABORTED' || err.response?.status === 429 || err.response?.status === 503) && retryCount < maxRetries) {
-        retryCount += 1;
-        retryCountRef.current.addContact = retryCount;
-        const delay = err.response?.status === 429 ? 60000 : 1000 * Math.pow(2, retryCount);
-        clearTimeout(retryTimeoutRef.current.addContact);
-        retryTimeoutRef.current.addContact = setTimeout(handleAddContact, delay);
-      } else {
-        setContactError(errorMsg);
-        retryCountRef.current.addContact = 0;
-        clearTimeout(retryTimeoutRef.current.addContact);
-        if (err.response?.status === 401) {
-          logClientError('Add contact failed: Unauthorized', err);
-          setTimeout(() => handleLogout(), 1000);
-        }
-      }
-    } finally {
-      if (isMountedRef.current) setIsLoadingAddContact(false);
-    }
-  }, [contactInput, token, userId, handleLogout, logClientError, dispatch]);
+
+
 
   useEffect(() => {
     if (sentStatusesRef.current.size > maxStatuses) {
@@ -496,6 +512,9 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
         statusUpdateQueue = [];
       }
     };
+
+
+    
 
     const handleNewContact = ({ userId: emitterId, contactData }) => {
       if (!contactData?.id || !isValidObjectId(contactData.id)) {

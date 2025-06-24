@@ -425,47 +425,120 @@ module.exports = (app) => {
       io.to(recipientId).emit('stopTyping', { userId });
     });
 
-    socket.on('contactData', async ({ userId, contactData }) => {
-      if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(contactData.id) || userId !== socket.user.id) {
-        socket.emit('error', { message: 'Invalid contactData event' });
-        return;
+
+
+
+    router.post('/add_contact', authMiddleware, addContactLimiter, async (req, res) => {
+  try {
+    const { error } = addContactSchema.validate(req.body);
+    if (error) return res.status(400).json({ error: error.details[0].message });
+    const { userId, virtualNumber } = req.body;
+    if (userId !== req.user._id.toString()) return res.status(403).json({ error: 'Unauthorized' });
+    await retryOperation(async () => {
+      const contact = await User.findOne({ virtualNumber })
+        .select('_id username virtualNumber photo status lastSeen contacts')
+        .lean();
+      if (!contact) return res.status(404).json({ error: 'Contact not registered' });
+      if (contact._id.toString() === userId) return res.status(400).json({ error: 'Cannot add self as contact' });
+      const user = await User.findById(userId).select('contacts username virtualNumber photo status lastSeen');
+      const userHasContact = user.contacts.some((id) => id.toString() === contact._id.toString());
+      const contactHasUser = contact.contacts.some((id) => id.toString() === userId);
+      if (userHasContact && contactHasUser) {
+        const contactData = {
+          id: contact._id.toString(),
+          username: contact.username || 'Unknown',
+          virtualNumber: contact.virtualNumber || '',
+          photo: contact.photo || 'https://placehold.co/40x40',
+          status: contact.status || 'offline',
+          lastSeen: contact.lastSeen ? contact.lastSeen.toISOString() : null,
+          latestMessage: null,
+          unreadCount: 0,
+        };
+        return res.status(200).json(contactData);
       }
-      await retryOperation(async () => {
-        const contact = await User.findById(contactData.id)
-          .select('username virtualNumber photo status lastSeen')
-          .lean();
-        if (contact) {
-          const contactObj = {
-            id: contact._id.toString(),
-            username: contact.username || 'Unknown',
-            virtualNumber: contact.virtualNumber || '',
-            photo: contact.photo || 'https://placehold.co/40x40',
-            status: contact.status || 'offline',
-            lastSeen: contact.lastSeen || null,
-            latestMessage: null,
-            unreadCount: 0,
-          };
-          io.to(userId).emit('contactData', { userId, contactData: contactObj });
-          const user = await User.findById(userId)
-            .select('username virtualNumber photo status lastSeen')
-            .lean();
-          io.to(contactData.id).emit('contactData', {
-            userId: contactData.id,
-            contactData: {
-              id: userId,
-              username: user.username || 'Unknown',
-              virtualNumber: user.virtualNumber || '',
-              photo: user.photo || 'https://placehold.co/40x40',
-              status: user.status || 'offline',
-              lastSeen: user.lastSeen || null,
-              latestMessage: null,
-              unreadCount: 0,
-            },
-          });
-          await Promise.all([emitUpdatedChatList(io, userId), emitUpdatedChatList(io, contactData.id)]);
-        }
-      });
+      const updates = [];
+      if (!userHasContact) updates.push(User.updateOne({ _id: userId }, { $addToSet: { contacts: contact._id } }));
+      if (!contactHasUser) updates.push(User.updateOne({ _id: contact._id }, { $addToSet: { contacts: userId } }));
+      await Promise.all(updates);
+      const contactData = {
+        id: contact._id.toString(),
+        username: contact.username || 'Unknown',
+        virtualNumber: contact.virtualNumber || '',
+        photo: contact.photo || 'https://placehold.co/40x40',
+        status: contact.status || 'offline',
+        lastSeen: contact.lastSeen ? contact.lastSeen.toISOString() : null,
+        latestMessage: null,
+        unreadCount: 0,
+      };
+      const userData = {
+        id: user._id.toString(),
+        username: user.username || 'Unknown',
+        virtualNumber: user.virtualNumber || '',
+        photo: user.photo || 'https://placehold.co/40x40',
+        status: user.status || 'offline',
+        lastSeen: user.lastSeen ? user.lastSeen.toISOString() : null,
+        latestMessage: null,
+        unreadCount: 0,
+      };
+      chatListCache.delete(`chatList:${userId}`);
+      chatListCache.delete(`chatList:${contact._id.toString()}`);
+      io.to(userId).emit('contactData', { userId, contactData });
+      io.to(contact._id.toString()).emit('contactData', { userId: contact._id.toString(), contactData: userData });
+      await Promise.all([emitUpdatedChatList(io, userId), emitUpdatedChatList(io, contact._id.toString())]);
+      res.status(201).json(contactData);
     });
+  } catch (error) {
+    logError('Add contact failed', { userId: req.body.userId, virtualNumber: req.body.virtualNumber, error: error.message });
+    res.status(500).json({ error: 'Failed to add contact' });
+  }
+});
+
+// Socket.IO contactData handler
+socket.on('contactData', async ({ userId, contactData }) => {
+  if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(contactData.id) || userId !== socket.user.id) {
+    socket.emit('error', { message: 'Invalid contactData event' });
+    return;
+  }
+  await retryOperation(async () => {
+    const contact = await User.findById(contactData.id)
+      .select('username virtualNumber photo status lastSeen')
+      .lean();
+    if (contact) {
+      const contactObj = {
+        id: contact._id.toString(),
+        username: contact.username || 'Unknown',
+        virtualNumber: contact.virtualNumber || '',
+        photo: contact.photo || 'https://placehold.co/40x40',
+        status: contact.status || 'offline',
+        lastSeen: contact.lastSeen ? contact.lastSeen.toISOString() : null,
+        latestMessage: null,
+        unreadCount: 0,
+      };
+      io.to(userId).emit('contactData', { userId, contactData: contactObj });
+      const user = await User.findById(userId)
+        .select('username virtualNumber photo status lastSeen')
+        .lean();
+      io.to(contactData.id).emit('contactData', {
+        userId: contactData.id,
+        contactData: {
+          id: userId,
+          username: user.username || 'Unknown',
+          virtualNumber: user.virtualNumber || '',
+          photo: user.photo || 'https://placehold.co/40x40',
+          status: user.status || 'offline',
+          lastSeen: user.lastSeen ? user.lastSeen.toISOString() : null,
+          latestMessage: null,
+          unreadCount: 0,
+        },
+      });
+      await Promise.all([emitUpdatedChatList(io, userId), emitUpdatedChatList(io, contactData.id)]);
+    }
+  });
+});
+
+
+
+
 
     socket.on('message', async (messageData, callback) => {
       try {
