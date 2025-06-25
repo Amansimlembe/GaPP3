@@ -555,6 +555,7 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
       socket.off('typing', handleTyping);
       socket.off('stopTyping', handleStopTyping);
       socket.off('messageStatus', handleMessageStatus);
+      socket.disconnect(); // Add explicit disconnect
       clearTimeout(typingTimeoutRef.current);
       clearTimeout(typingDebounceRef.current);
       clearTimeout(retryTimeoutRef.current.chatList);
@@ -1030,7 +1031,6 @@ ChatScreen.propTypes = {
   virtualNumber: PropTypes.string,
   photo: PropTypes.string,
   onLogout: PropTypes.func.isRequired,
-  theme: PropTypes.string.isRequired,
 };
 
 export default ChatScreen;

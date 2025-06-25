@@ -91,6 +91,7 @@ const ProfileScreen = ({ token, userId, socket, username: initialUsername, virtu
       socket.off('postDeleted');
       socket.off('onlineStatus');
       socket.off('connect_error');
+      socket.disconnect(); // Add explicit disconnect
       socket.emit('leave', userId);
     };
   }, [token, userId, socket, theme, onLogout]);
@@ -412,7 +413,6 @@ ProfileScreen.propTypes = {
   photo: PropTypes.string,
   onLogout: PropTypes.func.isRequired,
   toggleTheme: PropTypes.func.isRequired,
-  theme: PropTypes.string.isRequired,
 };
 
 export default ProfileScreen;

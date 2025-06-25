@@ -171,43 +171,53 @@ const App = () => {
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
   const [error, setError] = useState(null);
   const [isNavigating, setIsNavigating] = useState(false); // New: Prevent navigation loops
-
-  const handleLogout = useCallback(async () => {
-    try {
-      if (socket) {
-        socket.emit('leave', userId);
-        socket.disconnect();
-      }
-      await axios.post(
-        `${BASE_URL}/auth/logout`,
-        {},
-        {
-          headers: { Authorization: `Bearer ${token}` },
-          timeout: 5000,
-        }
-      );
-      sessionStorage.clear();
-      localStorage.clear();
-      dispatch(clearAuth());
-      dispatch(resetState());
-      setChatNotifications(0);
-      setSocket(null);
-      setIsNavigating(true);
-      navigate('/login', { replace: true });
-    } catch (err) {
-      console.error('Logout failed:', err.message);
-      logClientError('Logout failed', err, userId);
-      sessionStorage.clear();
-      localStorage.clear();
-      dispatch(clearAuth());
-      dispatch(resetState());
-      setChatNotifications(0);
-      setSocket(null);
-      setIsNavigating(true);
-      navigate('/login', { replace: true });
+  // Add refs and constants at the top of App.js
+const socketRef = useRef(null);
+const attemptRef = useRef(0);
+const maxReconnectAttempts = 5;
+const maxDelay = 30000; // 30 seconds
+const handleLogout = useCallback(async () => {
+  try {
+    if (socketRef.current) {
+      socketRef.current.emit('leave', userId);
+      socketRef.current.disconnect();
+      socketRef.current = null;
     }
-  }, [socket, userId, token, navigate, dispatch]);
-
+    await axios.post(
+      `${BASE_URL}/auth/logout`,
+      {},
+      {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 5000,
+      }
+    );
+    sessionStorage.clear();
+    localStorage.removeItem('theme'); // Clear theme to prevent leaks
+    localStorage.removeItem('username');
+    localStorage.removeItem('virtualNumber');
+    localStorage.removeItem('photo');
+    dispatch(clearAuth());
+    dispatch(resetState());
+    setChatNotifications(0);
+    setSocket(null);
+    setIsNavigating(true);
+    navigate('/login', { replace: true });
+  } catch (err) {
+    console.error('Logout failed:', err.message);
+    logClientError('Logout failed', err, userId);
+    sessionStorage.clear();
+    localStorage.removeItem('theme');
+    localStorage.removeItem('username');
+    localStorage.removeItem('virtualNumber');
+    localStorage.removeItem('photo');
+    dispatch(clearAuth());
+    dispatch(resetState());
+    setChatNotifications(0);
+    setSocket(null);
+    setIsNavigating(true);
+    navigate('/login', { replace: true });
+  }
+}, [userId, token, navigate, dispatch]);
   const refreshToken = useCallback(async () => {
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
@@ -253,6 +263,9 @@ const App = () => {
 
 
 
+
+
+
   useEffect(() => {
   console.log('App useEffect triggered:', { token, userId, location: location.pathname, isNavigating });
 
@@ -270,35 +283,35 @@ const App = () => {
       setIsNavigating(true);
       navigate('/login', { replace: true });
     }
-    if (socket) {
-      socket.disconnect();
-      setSocket(null);
+    if (socketRef.current) {
+      socketRef.current.disconnect();
+      socketRef.current = null;
     }
     return;
   }
 
-  // Use ref to prevent duplicate socket connections
-  const hasConnectedRef = useRef(false);
-
-  // Debounce socket connection
-  const debouncedConnect = debounce(() => {
-    if (hasConnectedRef.current || !navigator.onLine) return;
+  // Initialize socket with backoff
+  const connectSocket = (attempt = 0) => {
+    if (socketRef.current || !navigator.onLine || attempt > maxReconnectAttempts) {
+      if (attempt > maxReconnectAttempts) {
+        setError('Failed to connect to server after retries');
+      }
+      return;
+    }
 
     const newSocket = io(BASE_URL, {
       auth: { token, userId },
       transports: ['websocket', 'polling'],
-      reconnectionAttempts: 3,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 3000,
+      reconnection: false, // Handle reconnection manually
       timeout: 10000,
     });
 
-    setSocket(newSocket);
-    hasConnectedRef.current = true;
+    socketRef.current = newSocket;
 
     const handleConnect = () => {
       newSocket.emit('join', userId);
       console.log('Socket connected:', newSocket.id);
+      attemptRef.current = 0; // Reset attempt count
     };
 
     const handleConnectError = async (error) => {
@@ -307,15 +320,19 @@ const App = () => {
       if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
         setError('Authentication error, logging out');
         await handleLogout();
+      } else {
+        // Exponential backoff
+        const delay = Math.min(Math.pow(2, attempt) * 1000, maxDelay);
+        console.warn(`Retrying connection in ${delay}ms (attempt ${attempt + 1})`);
+        setTimeout(() => connectSocket(attempt + 1), delay);
       }
     };
 
     const handleDisconnect = (reason) => {
       console.warn('Socket disconnected:', reason);
       logClientError(`Socket disconnected: ${reason}`, new Error(reason), userId);
-      hasConnectedRef.current = false;
       if (reason === 'io server disconnect' && navigator.onLine) {
-        newSocket.connect();
+        connectSocket(attemptRef.current + 1);
       }
     };
 
@@ -343,11 +360,13 @@ const App = () => {
     newSocket.on('message', handleMessage);
     newSocket.on('newContact', handleNewContact);
 
-    const handleOnline = () => newSocket.connect();
+    const handleOnline = () => connectSocket(0);
     const handleOffline = () => console.warn('Offline: Socket disconnected');
 
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
+
+    setSocket(newSocket);
 
     return () => {
       newSocket.emit('leave', userId);
@@ -359,34 +378,21 @@ const App = () => {
       newSocket.disconnect();
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
-      setSocket(null);
-      hasConnectedRef.current = false;
+      socketRef.current = null;
       console.log('Socket cleanup completed');
     };
-  }, 1000);
+  };
 
-  debouncedConnect();
+  const cleanup = connectSocket(0);
 
   return () => {
-    clearTimeout(debouncedConnect);
-    if (socket) {
-      socket.emit('leave', userId);
-      socket.disconnect();
-      setSocket(null);
-    }
-    hasConnectedRef.current = false;
-    console.log('Effect cleanup');
+    if (cleanup) cleanup();
   };
-}, [token, userId, location.pathname, handleLogout, navigate]); // Removed selectedChat, added location.pathname
+}, [token, userId, location.pathname, handleLogout, navigate]);
 
-// Add debounce function if not defined elsewhere
-const debounce = (func, wait) => {
-  let timeout;
-  return (...args) => {
-    clearTimeout(timeout);
-    timeout = setTimeout(() => func(...args), wait);
-  };
-};
+
+
+
 
   useEffect(() => {
     if (!token || !userId) return;
@@ -414,13 +420,6 @@ const debounce = (func, wait) => {
     const interval = setInterval(checkTokenExpiration, 1 * 60 * 1000);
     return () => clearInterval(interval);
   }, [token, userId, refreshToken, handleLogout]);
-
-  useEffect(() => {
-    document.documentElement.className = theme === 'dark' ? 'dark' : '';
-    localStorage.setItem('theme', theme);
-  }, [theme]);
-
-  const toggleTheme = useCallback(() => setTheme((prev) => (prev === 'light' ? 'dark' : 'light')), []);
 
   const handleChatNavigation = useCallback(() => {
     console.log('Navigating to ChatScreen');
@@ -466,19 +465,17 @@ const debounce = (func, wait) => {
       )}
       {token && userId ? (
         <AuthenticatedApp
-          token={token}
-          userId={userId}
-          role={role}
-          photo={photo}
-          virtualNumber={virtualNumber}
-          username={username}
-          chatNotifications={chatNotifications}
-          socket={socket}
-          toggleTheme={toggleTheme}
-          handleChatNavigation={handleChatNavigation}
-          theme={theme}
-          handleLogout={handleLogout}
-        />
+  token={token}
+  userId={userId}
+  role={role}
+  photo={photo}
+  virtualNumber={virtualNumber}
+  username={username}
+  chatNotifications={chatNotifications}
+  socket={socket}
+  handleChatNavigation={handleChatNavigation}
+  handleLogout={handleLogout}
+/>
       ) : (
         <Routes>
           <Route path="/login" element={<LoginScreen />} />
@@ -498,9 +495,7 @@ const AuthenticatedApp = ({
   username,
   chatNotifications,
   socket,
-  toggleTheme,
   handleChatNavigation,
-  theme,
   handleLogout,
 }) => {
   const location = useLocation();
@@ -518,14 +513,14 @@ const AuthenticatedApp = ({
   }
 
   return (
-    <div className={`min-h-screen flex flex-col h-screen bg-gray-100 dark:bg-gray-900 ${theme === 'dark' ? 'dark' : ''}`}>
+    <div className="min-h-screen flex flex-col h-screen bg-gray-100">
       {!virtualNumber && (
         <CountrySelector
           token={token}
           userId={userId}
           virtualNumber={virtualNumber}
           onComplete={(newVirtualNumber) =>
-            dispatch(setAuth({ token, userId, role, photo, virtualNumber: newVirtualNumber, username }))
+            dispatch(setAuthenticity({ token, userId, role, photo, virtualNumber: newVirtualNumber, username }))
           }
         />
       )}
@@ -535,16 +530,15 @@ const AuthenticatedApp = ({
             path="/jobs"
             element={
               role === 0 ? (
-                <JobSeekerScreen token={token} userId={userId} onLogout={handleLogout} theme={theme} />
+                <JobSeekerScreen token={token} userId={userId} onLogout={handleLogout} />
               ) : (
-                <EmployerScreen token={token} userId={userId} onLogout={handleLogout} theme={theme} />
+                <EmployerScreen token={token} userId={userId} onLogout={handleLogout} />
               )
             }
           />
           <Route
             path="/feed"
-            element={<FeedScreen token={token} userId={userId} socket={socket} onLogout={handleLogout} theme={theme} />
-            }
+            element={<FeedScreen token={token} userId={userId} socket={socket} onLogout={handleLogout} />}
           />
           <Route
             path="/chat"
@@ -557,7 +551,6 @@ const AuthenticatedApp = ({
                 virtualNumber={virtualNumber}
                 photo={photo}
                 onLogout={handleLogout}
-                theme={theme}
               />
             }
           />
@@ -572,8 +565,6 @@ const AuthenticatedApp = ({
                 virtualNumber={virtualNumber}
                 photo={photo}
                 onLogout={handleLogout}
-                toggleTheme={toggleTheme}
-                theme={theme}
               />
             }
           />
@@ -584,61 +575,61 @@ const AuthenticatedApp = ({
         initial={{ y: 0 }}
         animate={{ y: isChatRouteWithSelectedChat ? 200 : 0 }}
         transition={{ duration: 0.3 }}
-        className="fixed bottom-0 left-0 right-0 bg-blue-500 dark:bg-gray-800 text-white p-2 flex justify-around items-center shadow-lg z-20"
+        className="fixed bottom-0 left-0 right-0 bg-blue-500 text-white p-2 flex justify-around items-center shadow-lg z-20"
       >
         <NavLink
           to="/feed"
           className={({ isActive }) =>
             `flex flex-col items-center p-2 rounded-md ${
-              isActive ? 'bg-blue-600 dark:bg-gray-700' : 'hover:bg-blue-600 dark:hover:bg-gray-700'
-            } focus:outline-none focus:ring-2 focus:ring-white dark:focus:ring-gray-300`
+              isActive ? 'bg-blue-600' : 'hover:bg-blue-600'
+            } focus:outline-none focus:ring-2 focus:ring-white`
           }
           aria-label="Feed"
         >
-          <FaHome className="text-xl text-white dark:text-gray-200" />
-          <span className="text-xs text-white dark:text-gray-200">Feed</span>
+          <FaHome className="text-xl text-white" />
+          <span className="text-xs text-white">Feed</span>
         </NavLink>
         <NavLink
           to="/jobs"
           className={({ isActive }) =>
             `flex flex-col items-center p-2 rounded-md ${
-              isActive ? 'bg-blue-600 dark:bg-gray-700' : 'hover:bg-blue-600 dark:hover:bg-gray-700'
-            } focus:outline-none focus:ring-2 focus:ring-white dark:focus:ring-gray-300`
+              isActive ? 'bg-blue-600' : 'hover:bg-blue-600'
+            } focus:outline-none focus:ring-2 focus:ring-white`
           }
           aria-label="Jobs"
         >
-          <FaBriefcase className="text-xl text-white dark:text-gray-200" />
-          <span className="text-xs text-white dark:text-gray-200">Jobs</span>
+          <FaBriefcase className="text-xl text-white" />
+          <span className="text-xs text-white">Jobs</span>
         </NavLink>
         <NavLink
           to="/chat"
           onClick={handleChatNavigation}
           className={({ isActive }) =>
             `flex flex-col items-center p-2 rounded-md relative ${
-              isActive ? 'bg-blue-600 dark:bg-gray-700' : 'hover:bg-blue-600 dark:hover:bg-gray-700'
-            } focus:outline-none focus:ring-2 focus:ring-white dark:focus:ring-gray-300`
+              isActive ? 'bg-blue-600' : 'hover:bg-blue-600'
+            } focus:outline-none focus:ring-2 focus:ring-white`
           }
           aria-label={`Chat ${chatNotifications > 0 ? `with ${chatNotifications} notifications` : ''}`}
         >
-          <FaComments className="text-xl text-white dark:text-gray-200" />
+          <FaComments className="text-xl text-white" />
           {chatNotifications > 0 && (
             <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
               {chatNotifications}
             </span>
           )}
-          <span className="text-xs text-white dark:text-gray-200">Chat</span>
+          <span className="text-xs text-white">Chat</span>
         </NavLink>
         <NavLink
           to="/profile"
           className={({ isActive }) =>
             `flex flex-col items-center p-2 rounded-md ${
-              isActive ? 'bg-blue-600 dark:bg-gray-700' : 'hover:bg-blue-600 dark:hover:bg-gray-700'
-            } focus:outline-none focus:ring-2 focus:ring-white dark:focus:ring-gray-300`
+              isActive ? 'bg-blue-600' : 'hover:bg-blue-600'
+            } focus:outline-none focus:ring-2 focus:ring-white`
           }
           aria-label="Profile"
         >
-          <FaUser className="text-xl text-white dark:text-gray-200" />
-          <span className="text-xs text-white dark:text-gray-200">Profile</span>
+          <FaUser className="text-xl text-white" />
+          <span className="text-xs text-white">Profile</span>
         </NavLink>
       </motion.nav>
     </div>
@@ -654,9 +645,7 @@ AuthenticatedApp.propTypes = {
   username: PropTypes.string,
   chatNotifications: PropTypes.number.isRequired,
   socket: PropTypes.object.isRequired,
-  toggleTheme: PropTypes.func.isRequired,
   handleChatNavigation: PropTypes.func.isRequired,
-  theme: PropTypes.string.isRequired,
   handleLogout: PropTypes.func.isRequired,
 };
 
