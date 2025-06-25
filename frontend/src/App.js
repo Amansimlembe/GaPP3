@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useCallback, useRef } from 'react'; // Add useRef
 import { BrowserRouter as Router, Route, Routes, Navigate, NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
@@ -13,7 +14,7 @@ import FeedScreen from './screens/FeedScreen';
 import ChatScreen from './screens/ChatScreen';
 import ProfileScreen from './screens/ProfileScreen';
 import CountrySelector from './components/CountrySelector';
-import { setAuth, clearAuth, setSelectedChat, resetState } from './store'; // Ensure correct import
+import { setAuth, clearAuth, setSelectedChat, resetState } from './store';
 
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
 
@@ -168,56 +169,56 @@ const App = () => {
   const { selectedChat } = useSelector((state) => state.messages);
   const [chatNotifications, setChatNotifications] = useState(0);
   const [socket, setSocket] = useState(null);
+  const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
   const [error, setError] = useState(null);
-  const [isNavigating, setIsNavigating] = useState(false);
-
-  // Refs for socket management
-  const socketRef = useRef(null);
-  const attemptRef = useRef(0);
-  const maxReconnectAttempts = 5;
-  const maxDelay = 30000; // 30 seconds
-
-  const handleLogout = useCallback(async () => {
-    try {
-      if (socketRef.current) {
-        socketRef.current.emit('leave', userId);
-        socketRef.current.disconnect();
-        socketRef.current = null;
-      }
-      await axios.post(
-        `${BASE_URL}/auth/logout`,
-        {},
-        {
-          headers: { Authorization: `Bearer ${token}` },
-          timeout: 5000,
-        }
-      );
-      sessionStorage.clear();
-      localStorage.removeItem('username');
-      localStorage.removeItem('virtualNumber');
-      localStorage.removeItem('photo');
-      dispatch(clearAuth());
-      dispatch(resetState());
-      setChatNotifications(0);
-      setSocket(null);
-      setIsNavigating(true);
-      navigate('/login', { replace: true });
-    } catch (err) {
-      console.error('Logout failed:', err.message);
-      logClientError('Logout failed', err, userId);
-      sessionStorage.clear();
-      localStorage.removeItem('username');
-      localStorage.removeItem('virtualNumber');
-      localStorage.removeItem('photo');
-      dispatch(clearAuth());
-      dispatch(resetState());
-      setChatNotifications(0);
-      setSocket(null);
-      setIsNavigating(true);
-      navigate('/login', { replace: true });
+  const [isNavigating, setIsNavigating] = useState(false); // New: Prevent navigation loops
+  // Add refs and constants at the top of App.js
+const socketRef = useRef(null);
+const attemptRef = useRef(0);
+const maxReconnectAttempts = 5;
+const maxDelay = 30000; // 30 seconds
+const handleLogout = useCallback(async () => {
+  try {
+    if (socketRef.current) {
+      socketRef.current.emit('leave', userId);
+      socketRef.current.disconnect();
+      socketRef.current = null;
     }
-  }, [userId, token, navigate, dispatch]);
-
+    await axios.post(
+      `${BASE_URL}/auth/logout`,
+      {},
+      {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 5000,
+      }
+    );
+    sessionStorage.clear();
+    localStorage.removeItem('theme'); // Clear theme to prevent leaks
+    localStorage.removeItem('username');
+    localStorage.removeItem('virtualNumber');
+    localStorage.removeItem('photo');
+    dispatch(clearAuth());
+    dispatch(resetState());
+    setChatNotifications(0);
+    setSocket(null);
+    setIsNavigating(true);
+    navigate('/login', { replace: true });
+  } catch (err) {
+    console.error('Logout failed:', err.message);
+    logClientError('Logout failed', err, userId);
+    sessionStorage.clear();
+    localStorage.removeItem('theme');
+    localStorage.removeItem('username');
+    localStorage.removeItem('virtualNumber');
+    localStorage.removeItem('photo');
+    dispatch(clearAuth());
+    dispatch(resetState());
+    setChatNotifications(0);
+    setSocket(null);
+    setIsNavigating(true);
+    navigate('/login', { replace: true });
+  }
+}, [userId, token, navigate, dispatch]);
   const refreshToken = useCallback(async () => {
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
@@ -261,129 +262,138 @@ const App = () => {
     }
   }, [dispatch, token, userId, handleLogout]);
 
+
+
+
+
+
   useEffect(() => {
-    console.log('App useEffect triggered:', { token, userId, location: location.pathname, isNavigating });
+  console.log('App useEffect triggered:', { token, userId, location: location.pathname, isNavigating });
 
-    // Skip if already navigating to /login
-    if (isNavigating && location.pathname === '/login') {
-      console.log('Skipping effect due to ongoing navigation to /login');
-      setIsNavigating(false);
+  // Skip if already navigating to /login
+  if (isNavigating && location.pathname === '/login') {
+    console.log('Skipping effect due to ongoing navigation to /login');
+    setIsNavigating(false);
+    return;
+  }
+
+  // Early return if no token or userId
+  if (!token || !userId) {
+    if (location.pathname !== '/login' && !isNavigating) {
+      console.log('Navigating to /login due to missing token or userId');
+      setIsNavigating(true);
+      navigate('/login', { replace: true });
+    }
+    if (socketRef.current) {
+      socketRef.current.disconnect();
+      socketRef.current = null;
+    }
+    return;
+  }
+
+  // Initialize socket with backoff
+  const connectSocket = (attempt = 0) => {
+    if (socketRef.current || !navigator.onLine || attempt > maxReconnectAttempts) {
+      if (attempt > maxReconnectAttempts) {
+        setError('Failed to connect to server after retries');
+      }
       return;
     }
 
-    // Early return if no token or userId
-    if (!token || !userId) {
-      if (location.pathname !== '/login' && !isNavigating) {
-        console.log('Navigating to /login due to missing token or userId');
-        setIsNavigating(true);
-        navigate('/login', { replace: true });
-      }
-      if (socketRef.current) {
-        socketRef.current.disconnect();
-        socketRef.current = null;
-      }
-      return;
-    }
+    const newSocket = io(BASE_URL, {
+      auth: { token, userId },
+      transports: ['websocket', 'polling'],
+      reconnection: false, // Handle reconnection manually
+      timeout: 10000,
+    });
 
-    // Initialize socket with backoff
-    const connectSocket = (attempt = 0) => {
-      if (socketRef.current || !navigator.onLine || attempt > maxReconnectAttempts) {
-        if (attempt > maxReconnectAttempts) {
-          setError('Failed to connect to server after retries');
-        }
+    socketRef.current = newSocket;
+
+    const handleConnect = () => {
+      newSocket.emit('join', userId);
+      console.log('Socket connected:', newSocket.id);
+      attemptRef.current = 0; // Reset attempt count
+    };
+
+    const handleConnectError = async (error) => {
+      console.error('Socket connect error:', error.message);
+      logClientError('Socket connect error', error, userId);
+      if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
+        setError('Authentication error, logging out');
+        await handleLogout();
+      } else {
+        // Exponential backoff
+        const delay = Math.min(Math.pow(2, attempt) * 1000, maxDelay);
+        console.warn(`Retrying connection in ${delay}ms (attempt ${attempt + 1})`);
+        setTimeout(() => connectSocket(attempt + 1), delay);
+      }
+    };
+
+    const handleDisconnect = (reason) => {
+      console.warn('Socket disconnected:', reason);
+      logClientError(`Socket disconnected: ${reason}`, new Error(reason), userId);
+      if (reason === 'io server disconnect' && navigator.onLine) {
+        connectSocket(attemptRef.current + 1);
+      }
+    };
+
+    const handleMessage = (msg) => {
+      if (!msg.senderId || !msg.recipientId) {
+        console.warn('Invalid message payload:', msg);
         return;
       }
-
-      const newSocket = io(BASE_URL, {
-        auth: { token, userId },
-        transports: ['websocket', 'polling'],
-        reconnection: false, // Handle reconnection manually
-        timeout: 10000,
-      });
-
-      socketRef.current = newSocket;
-
-      const handleConnect = () => {
-        newSocket.emit('join', userId);
-        console.log('Socket connected:', newSocket.id);
-        attemptRef.current = 0; // Reset attempt count
-      };
-
-      const handleConnectError = async (error) => {
-        console.error('Socket connect error:', error.message);
-        logClientError('Socket connect error', error, userId);
-        if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
-          setError('Authentication error, logging out');
-          await handleLogout();
-        } else {
-          // Exponential backoff
-          const delay = Math.min(Math.pow(2, attempt) * 1000, maxDelay);
-          console.warn(`Retrying connection in ${delay}ms (attempt ${attempt + 1})`);
-          setTimeout(() => connectSocket(attempt + 1), delay);
-        }
-      };
-
-      const handleDisconnect = (reason) => {
-        console.warn('Socket disconnected:', reason);
-        logClientError(`Socket disconnected: ${reason}`, new Error(reason), userId);
-        if (reason === 'io server disconnect' && navigator.onLine) {
-          connectSocket(attemptRef.current + 1);
-        }
-      };
-
-      const handleMessage = (msg) => {
-        if (!msg.senderId || !msg.recipientId) {
-          console.warn('Invalid message payload:', msg);
-          return;
-        }
-        if (msg.recipientId === userId && (!selectedChat || selectedChat !== msg.senderId)) {
-          setChatNotifications((prev) => prev + 1);
-        }
-      };
-
-      const handleNewContact = (contactData) => {
-        if (!contactData?.id) {
-          console.warn('Invalid contact data:', contactData);
-          return;
-        }
-        console.log('New contact:', contactData);
-      };
-
-      newSocket.on('connect', handleConnect);
-      newSocket.on('connect_error', handleConnectError);
-      newSocket.on('disconnect', handleDisconnect);
-      newSocket.on('message', handleMessage);
-      newSocket.on('newContact', handleNewContact);
-
-      const handleOnline = () => connectSocket(0);
-      const handleOffline = () => console.warn('Offline: Socket disconnected');
-
-      window.addEventListener('online', handleOnline);
-      window.addEventListener('offline', handleOffline);
-
-      setSocket(newSocket);
-
-      return () => {
-        newSocket.emit('leave', userId);
-        newSocket.off('connect', handleConnect);
-        newSocket.off('connect_error', handleConnectError);
-        newSocket.off('disconnect', handleDisconnect);
-        newSocket.off('message', handleMessage);
-        newSocket.off('newContact', handleNewContact);
-        newSocket.disconnect();
-        window.removeEventListener('online', handleOnline);
-        window.removeEventListener('offline', handleOffline);
-        socketRef.current = null;
-        console.log('Socket cleanup completed');
-      };
+      if (msg.recipientId === userId && (!selectedChat || selectedChat !== msg.senderId)) {
+        setChatNotifications((prev) => prev + 1);
+      }
     };
 
-    const cleanup = connectSocket(0);
+    const handleNewContact = (contactData) => {
+      if (!contactData?.id) {
+        console.warn('Invalid contact data:', contactData);
+        return;
+      }
+      console.log('New contact:', contactData);
+    };
+
+    newSocket.on('connect', handleConnect);
+    newSocket.on('connect_error', handleConnectError);
+    newSocket.on('disconnect', handleDisconnect);
+    newSocket.on('message', handleMessage);
+    newSocket.on('newContact', handleNewContact);
+
+    const handleOnline = () => connectSocket(0);
+    const handleOffline = () => console.warn('Offline: Socket disconnected');
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    setSocket(newSocket);
 
     return () => {
-      if (cleanup) cleanup();
+      newSocket.emit('leave', userId);
+      newSocket.off('connect', handleConnect);
+      newSocket.off('connect_error', handleConnectError);
+      newSocket.off('disconnect', handleDisconnect);
+      newSocket.off('message', handleMessage);
+      newSocket.off('newContact', handleNewContact);
+      newSocket.disconnect();
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+      socketRef.current = null;
+      console.log('Socket cleanup completed');
     };
-  }, [token, userId, location.pathname, handleLogout, navigate]);
+  };
+
+  const cleanup = connectSocket(0);
+
+  return () => {
+    if (cleanup) cleanup();
+  };
+}, [token, userId, location.pathname, handleLogout, navigate]);
+
+
+
+
 
   useEffect(() => {
     if (!token || !userId) return;
@@ -421,7 +431,7 @@ const App = () => {
   // Fallback UI for navigation failure
   if (error && location.pathname !== '/login') {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center bg-gray-100">
+      <div className="min-h-screen flex flex-col items-center justify-center bg-gray-100 dark:bg-gray-900">
         <div className="bg-red-500 text-white p-4 rounded-lg shadow-lg max-w-md w-full">
           <p className="text-sm">{error}</p>
           <button
@@ -456,17 +466,17 @@ const App = () => {
       )}
       {token && userId ? (
         <AuthenticatedApp
-          token={token}
-          userId={userId}
-          role={role}
-          photo={photo}
-          virtualNumber={virtualNumber}
-          username={username}
-          chatNotifications={chatNotifications}
-          socket={socket}
-          handleChatNavigation={handleChatNavigation}
-          handleLogout={handleLogout}
-        />
+  token={token}
+  userId={userId}
+  role={role}
+  photo={photo}
+  virtualNumber={virtualNumber}
+  username={username}
+  chatNotifications={chatNotifications}
+  socket={socket}
+  handleChatNavigation={handleChatNavigation}
+  handleLogout={handleLogout}
+/>
       ) : (
         <Routes>
           <Route path="/login" element={<LoginScreen />} />
@@ -511,7 +521,7 @@ const AuthenticatedApp = ({
           userId={userId}
           virtualNumber={virtualNumber}
           onComplete={(newVirtualNumber) =>
-            dispatch(setAuth({ token, userId, role, photo, virtualNumber: newVirtualNumber, username }))
+            dispatch(setAuthenticity({ token, userId, role, photo, virtualNumber: newVirtualNumber, username }))
           }
         />
       )}
