@@ -27,8 +27,20 @@ const initDB = async () => {
   });
 };
 
-// Error logging
+
+
+
+const errorLogTimestamps = new Map(); // Map to track error messages and their timestamps
+
 const logError = async (message, error, userId = null) => {
+  const now = Date.now();
+  const errorEntry = errorLogTimestamps.get(message) || { count: 0, timestamps: [] };
+  errorEntry.timestamps = errorEntry.timestamps.filter((ts) => now - ts < 60 * 1000);
+  if (errorEntry.count >= 2 || errorEntry.timestamps.length >= 2) return;
+  errorEntry.count += 1;
+  errorEntry.timestamps.push(now);
+  errorLogTimestamps.set(message, errorEntry);
+  
   try {
     await fetch('https://gapp-6yc3.onrender.com/social/log-error', {
       method: 'POST',
@@ -45,6 +57,8 @@ const logError = async (message, error, userId = null) => {
     console.error('Failed to log error:', err.message);
   }
 };
+
+
 
 // Auth Slice
 const authSlice = createSlice({

@@ -10,7 +10,7 @@ import { VariableSizeList } from 'react-window';
 import AutoSizer from 'react-virtualized-auto-sizer';
 import { setMessages, addMessage, replaceMessage, updateMessageStatus, setSelectedChat, setChatList } from '../store';
 import PropTypes from 'prop-types';
-import './ChatScreen.css';
+import '../index.css';
 
 
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
@@ -78,28 +78,38 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
     };
   }, []);
 
-  const errorLogTimestamps = useRef([]);
-  const logClientError = useCallback(async (message, error) => {
-    const now = Date.now();
-    errorLogTimestamps.current = errorLogTimestamps.current.filter((ts) => now - ts < 60 * 1000);
-    if (errorLogTimestamps.current.length >= maxLogsPerMinute) return;
-    errorLogTimestamps.current.push(now);
-    try {
-      await axios.post(
-        `${BASE_URL}/social/log-error`,
-        {
-          error: message,
-          stack: error?.stack || '',
-          userId,
-          route: window.location.pathname,
-          timestamp: new Date().toISOString(),
-        },
-        { timeout: 5000 }
-      );
-    } catch (err) {
-      console.error('Failed to log client error:', err.message);
-    }
-  }, [userId]);
+  const errorLogTimestamps = useRef(new Map()); // Map to track error messages and their timestamps
+
+const logClientError = useCallback(async (message, error) => {
+  const now = Date.now();
+  // Initialize or update error entry for the specific message
+  const errorEntry = errorLogTimestamps.current.get(message) || { count: 0, timestamps: [] };
+  // Filter out timestamps older than 1 minute
+  errorEntry.timestamps = errorEntry.timestamps.filter((ts) => now - ts < 60 * 1000);
+  // Check if we've logged this error too many times
+  if (errorEntry.count >= 2 || errorEntry.timestamps.length >= 2) return;
+  errorEntry.count += 1;
+  errorEntry.timestamps.push(now);
+  errorLogTimestamps.current.set(message, errorEntry);
+  
+  try {
+    await axios.post(
+      `${BASE_URL}/social/log-error`,
+      {
+        error: message,
+        stack: error?.stack || '',
+        userId,
+        route: window.location.pathname,
+        timestamp: new Date().toISOString(),
+      },
+      { timeout: 5000 }
+    );
+  } catch (err) {
+    console.error('Failed to log client error:', err.message);
+  }
+}, [userId]);
+
+
 
   useEffect(() => {
     if (forge?.random && forge?.pki && forge.cipher) {
@@ -159,22 +169,21 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
     }
   }, [isForgeReady, logClientError]);
 
+
   const fetchChatList = useCallback(
-    debounce(async (force = false) => {
-      if (!isForgeReady || !isMountedRef.current) return;
-      if (!force && chatListTimestamp && Date.now() - chatListTimestamp < 5 * 60 * 1000) {
-        setFetchStatus('success');
-        setFetchError(null);
-        return;
-      }
-      setFetchStatus('loading');
-      let retryCount = retryCountRef.current.chatList;
-      if (retryCount > maxRetries) {
-        setFetchStatus('error');
-        setFetchError('Max retries exceeded for chat list fetch');
-        logClientError('Max retries exceeded for chat list fetch', new Error('Max retries exceeded'));
-        return;
-      }
+  debounce(async (force = false) => {
+    if (!isForgeReady || !isMountedRef.current) return;
+    if (!force && chatListTimestamp && Date.now() - chatListTimestamp < 5 * 60 * 1000) {
+      setFetchStatus('success');
+      setFetchError(null);
+      return;
+    }
+    setFetchStatus('loading');
+    let retryCount = retryCountRef.current.chatList;
+    const maxRetries = 3;
+    const baseDelay = 2000;
+
+    const attemptFetch = async () => {
       try {
         const { data } = await axios.get(`${BASE_URL}/social/chat-list`, {
           headers: { Authorization: `Bearer ${token}` },
@@ -202,39 +211,35 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
         retryCountRef.current.chatList = 0;
         clearTimeout(retryTimeoutRef.current.chatList);
       } catch (err) {
-        if (retryCount < maxRetries) {
-          console.warn(`Chat list fetch attempt ${retryCount + 1} failed: ${err.message}`);
-        } else {
-          console.error('Chat list fetch failed:', err.message);
-        }
         if (!isMountedRef.current) return;
         if (err.response?.status === 401) {
           logClientError('Chat list fetch failed: Unauthorized', err);
           setTimeout(() => onLogout(), 1000);
           return;
         }
-        let delay = 2000 * Math.pow(2, retryCount);
-        if (err.response?.status === 429) {
-          delay = 60000;
-          setFetchError('Too many requests, please wait a minute');
-        } else {
-          setFetchError('Failed to load contacts, please try again');
-        }
-        if ((err.code === 'ECONNABORTED' || err.response?.status === 429 || err.response?.status === 503) && retryCount < maxRetries) {
+        if (retryCount < maxRetries) {
           retryCount += 1;
           retryCountRef.current.chatList = retryCount;
+          const delay = baseDelay * Math.pow(2, retryCount) * (1 + Math.random() * 0.1); // Add jitter
+          console.warn(`Chat list fetch attempt ${retryCount} failed: ${err.message}`);
           clearTimeout(retryTimeoutRef.current.chatList);
-          retryTimeoutRef.current.chatList = setTimeout(() => fetchChatList(force), delay);
+          retryTimeoutRef.current.chatList = setTimeout(attemptFetch, delay);
         } else {
+          setFetchStatus('error');
+          setFetchError('Failed to load contacts, please try again');
+          logClientError('Chat list fetch failed after max retries', err);
           retryCountRef.current.chatList = 0;
           clearTimeout(retryTimeoutRef.current.chatList);
-          setFetchStatus('error');
-          logClientError('Chat list fetch failed', err);
         }
       }
-    }, 1000),
-    [isForgeReady, token, userId, onLogout, unreadMessages, logClientError, dispatch, chatListTimestamp]
-  );
+    };
+
+    await attemptFetch();
+  }, 1000),
+  [isForgeReady, token, userId, onLogout, unreadMessages, logClientError, dispatch, chatListTimestamp]
+);
+
+
 
   const handleAddContact = useCallback(async () => {
     if (!contactInput.trim()) {
@@ -437,136 +442,164 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
     }
   }, [selectedChat, userId, virtualNumber, username, photo, token, dispatch, chats]);
 
+
+
   useEffect(() => {
-    if (sentStatusesRef.current.size > maxStatuses) {
-      const iterator = sentStatusesRef.current.values();
-      for (let i = 0; i < sentStatusesRef.current.size - maxStatuses; i++) {
-        sentStatusesRef.current.delete(iterator.next().value);
-      }
+  const maxStatuses = 1000;
+  const lruCache = new Map(); // Use Map as a simple LRU cache
+
+  // Function to add to cache with size limit
+  const addToCache = (id) => {
+    if (lruCache.size >= maxStatuses) {
+      const firstKey = lruCache.keys().next().value;
+      lruCache.delete(firstKey);
     }
-  }, [chats]);
+    lruCache.set(id, true);
+  };
 
-  useEffect(() => {
-    if (!socket || !isForgeReady || !userId) return;
+  // Replace sentStatusesRef with lruCache
+  sentStatusesRef.current = {
+    add: (id) => addToCache(id),
+    has: (id) => lruCache.has(id),
+    clear: () => lruCache.clear(),
+  };
+}, []);
 
-    let statusUpdateQueue = [];
-    let statusUpdateTimeout = null;
 
-    const flushStatusUpdates = () => {
-      if (statusUpdateQueue.length) {
-        socket.emit('batchMessageStatus', {
-          messageIds: statusUpdateQueue,
-          status: 'read',
-          recipientId: userId,
-        });
-        statusUpdateQueue.forEach((id) => sentStatusesRef.current.add(id));
-        statusUpdateQueue = [];
-      }
-    };
 
-    const handleNewContact = ({ userId: emitterId, contactData }) => {
-      if (!contactData?.id || !isValidObjectId(contactData.id)) {
-        console.error('Invalid contactData received:', contactData);
-        return;
-      }
-      if (!isMountedRef.current) return;
-      dispatch(setChatList((prev) => {
-        if (prev.find((chat) => chat.id === contactData.id)) return prev;
-        const newChat = {
-          id: contactData.id,
-          _id: contactData.id,
-          username: contactData.username || 'Unknown',
-          virtualNumber: contactData.virtualNumber || '',
-          photo: contactData.photo || 'https://placehold.co/40x40',
-          status: contactData.status || 'offline',
-          lastSeen: contactData.lastSeen || null,
-          latestMessage: null,
-          unreadCount: 0,
-        };
-        return [...prev, newChat];
-      }));
-    };
 
-    const handleChatListUpdated = ({ userId: emitterId, users }) => {
-      if (emitterId !== userId || !isMountedRef.current) return;
-      const updatedChatList = users.map((chat) => ({
-        ...chat,
-        _id: chat.id,
-        unreadCount: unreadMessages[chat.id] || chat.unreadCount || 0,
-      }));
-      dispatch(setChatList(updatedChatList));
-    };
+useEffect(() => {
+  if (!socket || !isForgeReady || !userId) return;
 
-    const handleMessage = (msg) => {
-      if (!isMountedRef.current) return;
-      const senderId = typeof msg.senderId === 'object' ? msg.senderId._id.toString() : msg.senderId.toString();
-      const recipientId = typeof msg.recipientId === 'object' ? msg.recipientId._id.toString() : msg.recipientId.toString();
-      const targetId = senderId === userId ? recipientId : senderId;
-      dispatch(addMessage({ recipientId: targetId, message: msg }));
-      if (selectedChat === targetId && document.hasFocus()) {
-        if (!sentStatusesRef.current.has(msg._id)) {
-          statusUpdateQueue.push(msg._id);
-          clearTimeout(statusUpdateTimeout);
-          statusUpdateTimeout = setTimeout(flushStatusUpdates, 500);
-        }
-        setUnreadMessages((prev) => ({ ...prev, [targetId]: 0 }));
-        listRef.current?.scrollToItem((chats[targetId]?.length || 0) + 1, 'end');
-      } else {
-        setUnreadMessages((prev) => ({ ...prev, [targetId]: (prev[targetId] || 0) + 1 }));
-      }
-    };
+  let statusUpdateQueue = [];
+  let statusUpdateTimeout = null;
 
-    const handleTyping = ({ userId: typingUserId }) => {
-      if (typingUserId === selectedChat && isMountedRef.current) {
-        setIsTyping((prev) => ({ ...prev, [typingUserId]: true }));
-        clearTimeout(typingTimeoutRef.current);
-        typingTimeoutRef.current = setTimeout(() => {
-          setIsTyping((prev) => ({ ...prev, [typingUserId]: false }));
-        }, 3000);
-      }
-    };
+  const flushStatusUpdates = () => {
+    if (statusUpdateQueue.length) {
+      socket.emit('batchMessageStatus', {
+        messageIds: statusUpdateQueue,
+        status: 'read',
+        recipientId: userId,
+      });
+      statusUpdateQueue.forEach((id) => sentStatusesRef.current.add(id));
+      statusUpdateQueue = [];
+    }
+  };
 
-    const handleStopTyping = ({ userId: typingUserId }) => {
-      if (typingUserId === selectedChat && isMountedRef.current) {
-        setIsTyping((prev) => ({ ...prev, [typingUserId]: false }));
-      }
-    };
+  const handleNewContact = ({ userId: emitterId, contactData }) => {
+    if (!contactData?.id || !isValidObjectId(contactData.id)) {
+      console.error('Invalid contactData received:', contactData);
+      return;
+    }
+    if (!isMountedRef.current) return;
+    dispatch(setChatList((prev) => {
+      if (prev.find((chat) => chat.id === contactData.id)) return prev;
+      return [...prev, {
+        id: contactData.id,
+        _id: contactData.id,
+        username: contactData.username || 'Unknown',
+        virtualNumber: contactData.virtualNumber || '',
+        photo: contactData.photo || 'https://placehold.co/40x40',
+        status: contactData.status || 'offline',
+        lastSeen: contactData.lastSeen || null,
+        latestMessage: null,
+        unreadCount: 0,
+      }];
+    }));
+  };
 
-    const handleMessageStatus = ({ messageIds, status }) => {
-      if (!isMountedRef.current) return;
-      messageIds.forEach((messageId) => {
-        Object.keys(chats).forEach((chatId) => {
-          if (chats[chatId].some((msg) => msg._id === messageId && msg.senderId.toString() === userId)) {
-            dispatch(updateMessageStatus({ recipientId: chatId, messageId, status }));
-          }
+  const handleChatListUpdated = ({ userId: emitterId, users }) => {
+    if (emitterId !== userId || !isMountedRef.current) return;
+    // Update only changed entries to avoid full list refresh
+    dispatch(setChatList((prev) => {
+      const updatedMap = new Map(prev.map((chat) => [chat.id, chat]));
+      users.forEach((chat) => {
+        updatedMap.set(chat.id, {
+          ...chat,
+          _id: chat.id,
+          unreadCount: unreadMessages[chat.id] || chat.unreadCount || 0,
         });
       });
-    };
+      return Array.from(updatedMap.values());
+    }));
+  };
 
-    socket.on('contactData', handleNewContact);
-    socket.on('chatListUpdated', handleChatListUpdated);
-    socket.on('message', handleMessage);
-    socket.on('typing', handleTyping);
-    socket.on('stopTyping', handleStopTyping);
-    socket.on('messageStatus', handleMessageStatus);
+  // Rest of the socket event handlers remain unchanged
+  const handleMessage = (msg) => {
+    if (!isMountedRef.current) return;
+    const senderId = typeof msg.senderId === 'object' ? msg.senderId._id.toString() : msg.senderId.toString();
+    const recipientId = typeof msg.recipientId === 'object' ? msg.recipientId._id.toString() : msg.recipientId.toString();
+    const targetId = senderId === userId ? recipientId : senderId;
+    dispatch(addMessage({ recipientId: targetId, message: msg }));
+    if (selectedChat === targetId && document.hasFocus()) {
+      if (!sentStatusesRef.current.has(msg._id)) {
+        statusUpdateQueue.push(msg._id);
+        clearTimeout(statusUpdateTimeout);
+        statusUpdateTimeout = setTimeout(flushStatusUpdates, 500);
+      }
+      setUnreadMessages((prev) => ({ ...prev, [targetId]: 0 }));
+      listRef.current?.scrollToItem((chats[targetId]?.length || 0) + 1, 'end');
+    } else {
+      setUnreadMessages((prev) => ({ ...prev, [targetId]: (prev[targetId] || 0) + 1 }));
+    }
+  };
 
-    return () => {
-      socket.off('contactData', handleNewContact);
-      socket.off('chatListUpdated', handleChatListUpdated);
-      socket.off('message', handleMessage);
-      socket.off('typing', handleTyping);
-      socket.off('stopTyping', handleStopTyping);
-      socket.off('messageStatus', handleMessageStatus);
+  const handleTyping = ({ userId: typingUserId }) => {
+    if (typingUserId === selectedChat && isMountedRef.current) {
+      setIsTyping((prev) => ({ ...prev, [typingUserId]: true }));
       clearTimeout(typingTimeoutRef.current);
-      clearTimeout(typingDebounceRef.current);
-      clearTimeout(retryTimeoutRef.current.chatList);
-      clearTimeout(retryTimeoutRef.current.addContact);
-      clearTimeout(statusUpdateTimeout);
-      flushStatusUpdates();
-      setUnreadMessages({});
-      setIsTyping({});
-    };
-  }, [socket, isForgeReady, selectedChat, userId, chats, dispatch, unreadMessages]);
+      typingTimeoutRef.current = setTimeout(() => {
+        setIsTyping((prev) => ({ ...prev, [typingUserId]: false }));
+      }, 3000
+
+);
+    }
+  };
+
+  const handleStopTyping = ({ userId: typingUserId }) => {
+    if (typingUserId === selectedChat && isMountedRef.current) {
+      setIsTyping((prev) => ({ ...prev, [typingUserId]: false }));
+    }
+  };
+
+  const handleMessageStatus = ({ messageIds, status }) => {
+    if (!isMountedRef.current) return;
+    messageIds.forEach((messageId) => {
+      Object.keys(chats).forEach((chatId) => {
+        if (chats[chatId].some((msg) => msg._id === messageId && msg.senderId.toString() === userId)) {
+          dispatch(updateMessageStatus({ recipientId: chatId, messageId, status }));
+        }
+      });
+    });
+  };
+
+  socket.on('contactData', handleNewContact);
+  socket.on('chatListUpdated', handleChatListUpdated);
+  socket.on('message', handleMessage);
+  socket.on('typing', handleTyping);
+  socket.on('stopTyping', handleStopTyping);
+  socket.on('messageStatus', handleMessageStatus);
+
+  return () => {
+    socket.off('contactData', handleNewContact);
+    socket.off('chatListUpdated', handleChatListUpdated);
+    socket.off('message', handleMessage);
+    socket.off('typing', handleTyping);
+    socket.off('stopTyping', handleStopTyping);
+    socket.off('messageStatus', handleMessageStatus);
+    clearTimeout(typingTimeoutRef.current);
+    clearTimeout(typingDebounceRef.current);
+    clearTimeout(retryTimeoutRef.current.chatList);
+    clearTimeout(retryTimeoutRef.current.addContact);
+    clearTimeout(statusUpdateTimeout);
+    flushStatusUpdates();
+    setUnreadMessages({});
+    setIsTyping({});
+  };
+}, [socket, isForgeReady, selectedChat, userId, chats, dispatch, unreadMessages]);
+
+
+
 
   useEffect(() => {
     if (!token || !userId) {
@@ -732,18 +765,11 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
     [chats, selectedChat, userId, theme]
   );
 
-  if (!isForgeReady) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-100 dark:bg-gray-900">
-        <p className="text-red-500 dark:text-red-400">Encryption library failed to load</p>
-      </div>
-    );
-  }
 
   return (
     <div className={`min-h-screen flex flex-col bg-gray-100 dark:bg-gray-900 ${theme === 'dark' ? 'dark' : ''}`}>
       <div className="flex justify-between items-center p-4 bg-blue-500 dark:bg-gray-800 text-white dark:text-gray-200">
-        <h1 className="text-xl font-bold">Grok Chat</h1>
+        <h1 className="text-xl font-bold">Gian Chat</h1>
         <div className="relative">
           <FaEllipsisV className="cursor-pointer" onClick={() => setShowMenu(!showMenu)} />
           <AnimatePresence>
@@ -760,7 +786,7 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
                   className="flex items-center w-full px-4 py-2 text-gray-900 dark:text-gray-100 hover:bg-gray-100 dark:hover:bg-gray-700"
                   onClick={() => {
                     setShowAddContact(true);
-                    setShowMenu(false);
+                    setShowMenu(true);
                   }}
                 >
                   <FaPlus className="mr-2" />
@@ -810,33 +836,7 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
       </div>
       <div className="flex flex-1 overflow-hidden">
         <div className={`w-full md:w-1/3 bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 ${selectedChat ? 'hidden md:block' : 'block'}`}>
-          <button
-            className="m-4 bg-blue-500 dark:bg-gray-700 text-white dark:text-gray-200 px-4 py-2 rounded-lg hover:bg-blue-600 dark:hover:bg-gray-600"
-            onClick={() => fetchChatList(true)}
-          >
-            Refresh Contacts
-          </button>
-          {fetchStatus === 'loading' && (
-            <div className="p-4 text-center">
-              <p className="text-gray-500 dark:text-gray-400">Loading contacts...</p>
-            </div>
-          )}
-          {(fetchStatus === 'error' || fetchStatus === 'cached') && (
-            <div className="p-4 text-center">
-              <p className="text-red-500 dark:text-red-400">{fetchError}</p>
-              {fetchStatus === 'error' && (
-                <button
-                  className="mt-2 bg-blue-500 dark:bg-gray-700 text-white dark:text-gray-200 px-4 py-2 rounded-lg hover:bg-blue-600 dark:hover:bg-gray-600"
-                  onClick={() => {
-                    retryCountRef.current.chatList = 0;
-                    fetchChatList(true);
-                  }}
-                >
-                  Retry
-                </button>
-              )}
-            </div>
-          )}
+    
           {(fetchStatus === 'success' || fetchStatus === 'cached') && chatList.length === 0 && (
             <div className="p-4 text-center">
               <p className="text-gray-500 dark:text-gray-400">No contacts to display. Add a contact to start chatting!</p>

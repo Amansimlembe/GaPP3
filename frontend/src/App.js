@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react'; // Add useRef
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { BrowserRouter as Router, Route, Routes, Navigate, NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { FaHome, FaBriefcase, FaComments, FaUser } from 'react-icons/fa';
@@ -13,7 +13,7 @@ import FeedScreen from './screens/FeedScreen';
 import ChatScreen from './screens/ChatScreen';
 import ProfileScreen from './screens/ProfileScreen';
 import CountrySelector from './components/CountrySelector';
-import { setAuth, clearAuth, setSelectedChat, resetState } from './store'; // Ensure correct import
+import { setAuth, clearAuth, setSelectedChat, resetState } from './store';
 
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
 
@@ -177,6 +177,39 @@ const App = () => {
   const maxReconnectAttempts = 5;
   const maxDelay = 30000; // 30 seconds
 
+  // Restore auth state from localStorage on mount
+  useEffect(() => {
+    const storedToken = localStorage.getItem('token');
+    const storedUserId = localStorage.getItem('userId');
+    const storedRole = localStorage.getItem('role');
+    const storedPhoto = localStorage.getItem('photo');
+    const storedVirtualNumber = localStorage.getItem('virtualNumber');
+    const storedUsername = localStorage.getItem('username');
+
+    if (storedToken && storedUserId && location.pathname !== '/login') {
+      const expTime = getTokenExpiration(storedToken);
+      if (expTime && expTime > Date.now()) {
+        dispatch(setAuth({
+          token: storedToken,
+          userId: storedUserId,
+          role: Number(storedRole) || 0,
+          photo: storedPhoto || 'https://via.placeholder.com/64',
+          virtualNumber: storedVirtualNumber || null,
+          username: storedUsername || null,
+        }));
+      } else {
+        localStorage.removeItem('token');
+        localStorage.removeItem('userId');
+        localStorage.removeItem('role');
+        localStorage.removeItem('photo');
+        localStorage.removeItem('virtualNumber');
+        localStorage.removeItem('username');
+        setIsNavigating(true);
+        navigate('/login', { replace: true });
+      }
+    }
+  }, [dispatch, navigate, location.pathname]);
+
   const handleLogout = useCallback(async () => {
     try {
       if (socketRef.current) {
@@ -192,10 +225,12 @@ const App = () => {
           timeout: 5000,
         }
       );
-      sessionStorage.clear();
-      localStorage.removeItem('username');
-      localStorage.removeItem('virtualNumber');
+      localStorage.removeItem('token');
+      localStorage.removeItem('userId');
+      localStorage.removeItem('role');
       localStorage.removeItem('photo');
+      localStorage.removeItem('virtualNumber');
+      localStorage.removeItem('username');
       dispatch(clearAuth());
       dispatch(resetState());
       setChatNotifications(0);
@@ -205,10 +240,12 @@ const App = () => {
     } catch (err) {
       console.error('Logout failed:', err.message);
       logClientError('Logout failed', err, userId);
-      sessionStorage.clear();
-      localStorage.removeItem('username');
-      localStorage.removeItem('virtualNumber');
+      localStorage.removeItem('token');
+      localStorage.removeItem('userId');
+      localStorage.removeItem('role');
       localStorage.removeItem('photo');
+      localStorage.removeItem('virtualNumber');
+      localStorage.removeItem('username');
       dispatch(clearAuth());
       dispatch(resetState());
       setChatNotifications(0);
@@ -246,6 +283,13 @@ const App = () => {
           username: username || null,
           privateKey: privateKey || null,
         }));
+        // Persist new auth state to localStorage
+        localStorage.setItem('token', newToken);
+        localStorage.setItem('userId', newUserId);
+        localStorage.setItem('role', newRole || '0');
+        localStorage.setItem('photo', photo || 'https://via.placeholder.com/64');
+        localStorage.setItem('virtualNumber', virtualNumber || '');
+        localStorage.setItem('username', username || '');
         console.log('Token refreshed successfully');
         return newToken;
       } catch (error) {
