@@ -1,45 +1,14 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import { FaPlus, FaPaperPlane, FaHeart, FaComment, FaShare, FaVolumeMute, FaVolumeUp, FaSyncAlt } from 'react-icons/fa';
 import { useSwipeable } from 'react-swipeable';
 import debounce from 'lodash/debounce';
+import PropTypes from 'prop-types';
 
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
 
-class ErrorBoundary extends React.Component {
-  state = { hasError: false, errorMessage: '' };
-
-  static getDerivedStateFromError(error) {
-    return { hasError: true, errorMessage: error.message };
-  }
-
-  componentDidCatch(error, errorInfo) {
-    console.error('ErrorBoundary caught:', error, errorInfo);
-  }
-
-  render() {
-    if (this.state.hasError) {
-      return (
-        <div className="h-screen flex items-center justify-center text-white bg-black">
-          <div className="text-center">
-            <h2 className="text-2xl font-bold mb-4">Something went wrong</h2>
-            <p className="text-red-500">{this.state.errorMessage}</p>
-            <button
-              onClick={() => window.location.reload()}
-              className="mt-4 px-4 py-2 bg-blue-500 rounded-lg text-white"
-            >
-              Reload Page
-            </button>
-          </div>
-        </div>
-      );
-    }
-    return this.props.children;
-  }
-}
-
-const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
+const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
   const [posts, setPosts] = useState([]);
   const [contentType, setContentType] = useState('video');
   const [caption, setCaption] = useState('');
@@ -50,7 +19,7 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
   const [showComments, setShowComments] = useState(null);
   const [uploadProgress, setUploadProgress] = useState(null);
   const [playingPostId, setPlayingPostId] = useState(null);
-  const [muted, setMuted] = useState(true);
+  const [muted, setMuted] = useState(localStorage.getItem('feedMuted') !== 'false');
   const [currentIndex, setCurrentIndex] = useState(0);
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
@@ -66,9 +35,10 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
         if (!navigator.onLine) throw new Error('Offline');
         return await operation();
       } catch (err) {
-        console.error(`Retry attempt ${attempt} failed:`, err.message);
+        console.error(`Retry attempt ${attempt} failed:`, err.response?.data || err.message);
         if (err.response?.status === 401 || err.message === 'Unauthorized') {
-          onUnauthorized?.();
+          setError('Unauthorized. Please log in again.');
+          onLogout();
           throw new Error('Unauthorized');
         }
         if (err.response?.status === 429) {
@@ -132,7 +102,7 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
 
       try {
         const { data } = await retryOperation(() =>
-          axios.get(`${BASE_URL}/feed?page=${pageNum}&limit=10`, {
+          axios.get(`${BASE_URL}/social/feed?page=${pageNum}&limit=10`, {
             headers: { Authorization: `Bearer ${token}` },
             timeout: 5000,
           })
@@ -168,14 +138,17 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
         setRefreshing(false);
       }
     }, 300),
-    [token, userId, hasMore, onUnauthorized]
+    [token, userId, hasMore, onLogout]
   );
 
   useEffect(() => {
-    if (!token || !userId || !socket) return;
+    if (!token || !userId || !socket) {
+      onLogout();
+      return;
+    }
 
     fetchFeed(1);
-    socket.emit('join', { userId });
+    socket.emit('join', userId);
 
     const handleNewPost = (post) => {
       if (!post?.isStory && post?._id) {
@@ -197,34 +170,56 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
 
     const handlePostDeleted = (postId) => {
       if (postId) {
-        setPosts((prev) => prev.filter((p) => p._id.toString() !== postId.toString()));
-        if (playingPostId === postId.toString()) {
-          setPlayingPostId(null);
-        }
+        setPosts((prev) => {
+          const newPosts = prev.filter((p) => p._id.toString() !== postId.toString());
+          if (newPosts.length === 0) {
+            setCurrentIndex(0);
+            setPlayingPostId(null);
+          } else if (currentIndex >= newPosts.length) {
+            setCurrentIndex(newPosts.length - 1);
+            setPlayingPostId(newPosts[newPosts.length - 1]?._id?.toString() || null);
+          } else if (playingPostId === postId.toString()) {
+            setPlayingPostId(newPosts[currentIndex]?._id?.toString() || null);
+          }
+          return newPosts;
+        });
       }
     };
 
     const handleConnectError = (error) => {
       console.error('Socket connect error:', error.message);
+      setError('Connection lost. Trying to reconnect...');
       if (error.message.includes('invalid token')) {
         setError('Session expired. Please log in again.');
-        onUnauthorized?.();
+        onLogout();
       }
+    };
+
+    const handleReconnect = () => {
+      console.log('Socket reconnected');
+      setError('');
+      socket.emit('join', userId);
     };
 
     socket.on('newPost', handleNewPost);
     socket.on('postUpdate', handlePostUpdate);
     socket.on('postDeleted', handlePostDeleted);
     socket.on('connect_error', handleConnectError);
+    socket.on('reconnect', handleReconnect);
 
     return () => {
       socket.off('newPost', handleNewPost);
       socket.off('postUpdate', handlePostUpdate);
       socket.off('postDeleted', handlePostDeleted);
       socket.off('connect_error', handleConnectError);
+      socket.off('reconnect', handleReconnect);
       socket.emit('leave', userId);
     };
-  }, [token, userId, socket, playingPostId, onUnauthorized, fetchFeed]);
+  }, [token, userId, socket, currentIndex, playingPostId, onLogout, fetchFeed]);
+
+  useEffect(() => {
+    localStorage.setItem('feedMuted', muted);
+  }, [muted]);
 
   const handleScroll = useCallback(
     debounce(() => {
@@ -269,7 +264,7 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
     try {
       setUploadProgress(0);
       const { data } = await retryOperation(() =>
-        axios.post(`${BASE_URL}/feed`, formData, {
+        axios.post(`${BASE_URL}/social/post`, formData, {
           headers: {
             Authorization: `Bearer ${token}`,
             'Content-Type': 'multipart/form-data',
@@ -307,7 +302,7 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
       const action = post.likedBy?.map((id) => id.toString()).includes(userId) ? '/unlike' : '/like';
       const { data } = await retryOperation(() =>
         axios.post(
-          `${BASE_URL}/feed${action}`,
+          `${BASE_URL}/social/post${action}`,
           { postId, userId },
           {
             headers: { Authorization: `Bearer ${token}` },
@@ -333,7 +328,7 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
     try {
       const { data } = await retryOperation(() =>
         axios.post(
-          `${BASE_URL}/feed/comment`,
+          `${BASE_URL}/social/post/comment`,
           { postId, comment: comment.trim(), userId },
           {
             headers: { Authorization: `Bearer ${token}` },
@@ -411,406 +406,415 @@ const FeedScreen = ({ token, userId, socket, onUnauthorized }) => {
   );
 
   const LoadingSkeleton = () => (
-    <div className="h-screen w-full bg-gray-200 animate-pulse relative snap-start md:max-w-[600px] md:h-[800px] md:rounded-lg">
+    <div className="h-screen w-full bg-gray-200 dark:bg-gray-700 animate-pulse relative snap-start md:max-w-[600px] md:h-[800px] md:rounded-lg">
       <div className="absolute top-4 left-4 flex items-center">
-        <div className="w-10 h-10 rounded-full bg-gray-300"></div>
+        <div className="w-10 h-10 rounded-full bg-gray-300 dark:bg-gray-600"></div>
         <div className="ml-2">
-          <div className="w-20 h-4 bg-gray-300 rounded"></div>
-          <div className="w-10 h-3 mt-1 bg-gray-300 rounded"></div>
+          <div className="w-20 h-4 bg-gray-300 dark:bg-gray-600 rounded"></div>
+          <div className="w-10 h-3 mt-1 bg-gray-300 dark:bg-gray-600 rounded"></div>
         </div>
       </div>
-      <div className="w-full h-full bg-gray-300"></div>
+      <div className="w-full h-full bg-gray-300 dark:bg-gray-600"></div>
       <div className="absolute right-4 bottom-20 flex flex-col space-y-4">
         {[...Array(3)].map((_, i) => (
-          <div key={i} className="w-8 h-8 bg-gray-300 rounded-full"></div>
+          <div key={i} className="w-8 h-8 bg-gray-300 dark:bg-gray-600 rounded-full"></div>
         ))}
       </div>
     </div>
   );
 
   return (
-    <ErrorBoundary>
-      <motion.div
-        ref={feedRef}
-        {...swipeHandlers}
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        transition={{ duration: 0.5 }}
-        className="h-screen overflow-y-auto bg-black snap-y snap-mandatory md:max-w-[600px] md:mx-auto md:rounded-lg md:shadow-lg"
-      >
-        <div className="fixed bottom-20 right-4 z-20">
-          <motion.button
-            whileHover={{ scale: 1.1, rotate: 90 }}
-            whileTap={{ scale: 0.9 }}
-            onClick={() => setShowPostModal(true)}
-            className="bg-gradient-to-r from-blue-500 to-purple-600 text-white p-4 rounded-full shadow-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-            aria-label="Create new post"
-          >
-            <FaPlus className="text-xl" />
-          </motion.button>
-        </div>
+    <motion.div
+      ref={feedRef}
+      {...swipeHandlers}
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.5 }}
+      className={`h-screen overflow-y-auto bg-gray-100 dark:bg-gray-900 snap-y snap-mandatory md:max-w-[600px] md:mx-auto md:rounded-lg md:shadow-lg ${theme === 'dark' ? 'dark' : ''}`}
+    >
+      <div className="fixed bottom-20 right-4 z-20">
+        <motion.button
+          whileHover={{ scale: 1.1, rotate: 90 }}
+          whileTap={{ scale: 0.9 }}
+          onClick={() => setShowPostModal(true)}
+          className="bg-gradient-to-r from-blue-500 to-purple-600 text-white p-4 rounded-full shadow-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+          aria-label="Create new post"
+        >
+          <FaPlus className="text-xl" />
+        </motion.button>
+      </div>
 
-        <AnimatePresence>
-          {showPostModal && (
-            <motion.div
-              initial={{ opacity: 0, y: 50 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 50 }}
-              className="fixed inset-0 bg-black bg-opacity-80 flex items-center justify-center z-30 px-4"
-              role="dialog"
-              aria-modal="true"
-            >
-              <div className="bg-gray-900 text-white p-6 rounded-2xl shadow-2xl w-full max-w-md relative">
-                {uploadProgress !== null && (
-                  <div className="absolute inset-0 flex items-center justify-center bg-gray-900 bg-opacity-75">
-                    <div className="relative w-20 h-20">
-                      <svg className="w-full h-full" viewBox="0 0 36 36">
-                        <path
-                          className="text-gray-700"
-                          d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="3"
-                        />
-                        <path
-                          className="text-blue-500"
-                          d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="3"
-                          strokeDasharray={`${uploadProgress}, 100`}
-                        />
-                      </svg>
-                      <span className="absolute inset-0 flex items-center justify-center text-blue-500 font-bold">
-                        {uploadProgress}%
-                      </span>
-                    </div>
+      <AnimatePresence>
+        {showPostModal && (
+          <motion.div
+            initial={{ opacity: 0, y: 50 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 50 }}
+            className="fixed inset-0 bg-black bg-opacity-80 flex items-center justify-center z-30 px-4"
+            role="dialog"
+            aria-modal="true"
+          >
+            <div className="bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 p-6 rounded-2xl shadow-2xl w-full max-w-md relative">
+              {uploadProgress !== null && (
+                <div className="absolute inset-0 flex items-center justify-center bg-gray-900 bg-opacity-75">
+                  <div className="relative w-20 h-20">
+                    <svg className="w-full h-full" viewBox="0 0 36 36">
+                      <path
+                        className="text-gray-300 dark:text-gray-700"
+                        d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="3"
+                      />
+                      <path
+                        className="text-blue-500"
+                        d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="3"
+                        strokeDasharray={`${uploadProgress}, 100`}
+                      />
+                    </svg>
+                    <span className="absolute inset-0 flex items-center justify-center text-blue-500 font-bold">
+                      {uploadProgress}%
+                    </span>
                   </div>
-                )}
-                <div className="relative mb-4">
-                  <select
-                    value={contentType}
-                    onChange={(e) => setContentType(e.target.value)}
-                    className="w-full p-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:ring-2 focus:ring-blue-500 focus:outline-none transition duration-200"
-                    aria-label="Select content type"
-                  >
-                    <option value="text">Text</option>
-                    <option value="image">Image</option>
-                    <option value="video">Video</option>
-                    <option value="audio">Audio</option>
-                    <option value="raw">Document</option>
-                  </select>
                 </div>
-                <div className="flex items-center mb-4">
-                  {contentType === 'text' ? (
-                    <textarea
-                      value={caption}
-                      onChange={(e) => setCaption(e.target.value.slice(0, 500))}
-                      className="flex-1 p-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:ring-2 focus:ring-blue-500 focus:outline-none transition duration-200 resize-none"
-                      placeholder="What's on your mind? (max 500 chars)"
-                      rows="4"
-                      aria-label="Text post content"
-                    />
-                  ) : (
-                    <input
-                      type="file"
-                      accept={
-                        contentType === 'image'
-                          ? 'image/jpeg,image/png'
-                          : contentType === 'video'
-                          ? 'video/mp4,video/webm'
-                          : contentType === 'audio'
-                          ? 'audio/mpeg,audio/wav'
-                          : 'application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-                      }
-                      onChange={(e) => setFile(e.target.files[0])}
-                      className="flex-1 p-3 bg-gray-800 border border-gray-700 rounded-lg text-white file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:bg-blue-500 file:text-white file:cursor-pointer"
-                      aria-label="Upload file"
-                    />
-                  )}
-                  <motion.button
-                    whileHover={{ scale: 1.1 }}
-                    whileTap={{ scale: 0.9 }}
-                    onClick={postContent}
-                    className="ml-3 p-3 bg-blue-500 rounded-full focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    aria-label="Submit post"
-                  >
-                    <FaPaperPlane className="text-xl text-white" />
-                  </motion.button>
-                </div>
-                {contentType !== 'text' && (
-                  <input
-                    type="text"
+              )}
+              <div className="relative mb-4">
+                <select
+                  value={contentType}
+                  onChange={(e) => setContentType(e.target.value)}
+                  className="w-full p-3 bg-gray-100 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:outline-none transition duration-200"
+                  aria-label="Select content type"
+                >
+                  <option value="text">Text</option>
+                  <option value="image">Image</option>
+                  <option value="video">Video</option>
+                  <option value="audio">Audio</option>
+                  <option value="raw">Document</option>
+                </select>
+              </div>
+              <div className="flex items-center mb-4">
+                {contentType === 'text' ? (
+                  <textarea
                     value={caption}
                     onChange={(e) => setCaption(e.target.value.slice(0, 500))}
-                    className="w-full p-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:ring-2 focus:ring-blue-500 focus:outline-none transition duration-200"
-                    placeholder="Add a caption... (max 500 chars)"
-                    aria-label="Post caption"
+                    className="flex-1 p-3 bg-gray-100 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:outline-none transition duration-200 resize-none"
+                    placeholder="What's on your mind? (max 500 chars)"
+                    rows="4"
+                    aria-label="Text post content"
+                  />
+                ) : (
+                  <input
+                    type="file"
+                    accept={
+                      contentType === 'image'
+                        ? 'image/jpeg,image/png'
+                        : contentType === 'video'
+                        ? 'video/mp4,video/webm'
+                        : contentType === 'audio'
+                        ? 'audio/mpeg,audio/wav'
+                        : 'application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+                    }
+                    onChange={(e) => setFile(e.target.files[0])}
+                    className="flex-1 p-3 bg-gray-100 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-gray-100 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:bg-blue-500 file:text-white file:cursor-pointer"
+                    aria-label="Upload file"
                   />
                 )}
                 <motion.button
-                  whileHover={{ scale: 1.05 }}
-                  whileTap={{ scale: 0.95 }}
-                  onClick={() => {
-                    setShowPostModal(false);
-                    setCaption('');
-                    setFile(null);
-                    setError('');
-                  }}
-                  className="mt-4 w-full bg-gray-700 text-white p-3 rounded-lg hover:bg-gray-600 transition duration-200 focus:outline-none focus:ring-2 focus:ring-gray-500"
-                  aria-label="Cancel post"
+                  whileHover={{ scale: 1.1 }}
+                  whileTap={{ scale: 0.9 }}
+                  onClick={postContent}
+                  className="ml-3 p-3 bg-blue-500 rounded-full focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  aria-label="Submit post"
                 >
-                  Cancel
+                  <FaPaperPlane className="text-xl text-white" />
                 </motion.button>
               </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {error && (
-          <motion.div
-            initial={{ opacity: 0, y: -20 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0 }}
-            className="text-red-500 text-center py-3 z-10 fixed top-0 w-full bg-black bg-opacity-75 md:max-w-[600px] md:mx-auto"
-            role="alert"
-          >
-            {error}
-            {error.includes('Unauthorized') && (
-              <button
-                onClick={() => onUnauthorized?.()}
-                className="ml-2 text-blue-500 underline focus:outline-none focus:ring-2 focus:ring-blue-500"
-                aria-label="Log in"
+              {contentType !== 'text' && (
+                <input
+                  type="text"
+                  value={caption}
+                  onChange={(e) => setCaption(e.target.value.slice(0, 500))}
+                  className="w-full p-3 bg-gray-100 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:outline-none transition duration-200"
+                  placeholder="Add a caption... (max 500 chars)"
+                  aria-label="Post caption"
+                />
+              )}
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={() => {
+                  setShowPostModal(false);
+                  setCaption('');
+                  setFile(null);
+                  setError('');
+                }}
+                className="mt-4 w-full bg-gray-300 dark:bg-gray-600 text-gray-900 dark:text-gray-100 p-3 rounded-lg hover:bg-gray-400 dark:hover:bg-gray-500 transition duration-200 focus:outline-none focus:ring-2 focus:ring-gray-500"
+                aria-label="Cancel post"
               >
-                Log In
-              </button>
-            )}
+                Cancel
+              </motion.button>
+            </div>
           </motion.div>
         )}
+      </AnimatePresence>
 
-        {refreshing && (
-          <div className="fixed top-4 left-0 right-0 text-center text-white z-10">
-            <FaSyncAlt className="inline-block w-6 h-6 animate-spin" aria-label="Refreshing feed" />
-          </div>
-        )}
-
-        {loading && !refreshing && (
-          <div className="fixed bottom-4 left-0 right-0 text-center text-white">
-            <div className="inline-block w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" aria-label="Loading more posts"></div>
-          </div>
-        )}
-
-        {posts.length === 0 && !loading && !refreshing ? (
-          <div className="h-screen flex items-center justify-center text-white" role="status">
-            <p>No posts available</p>
-          </div>
-        ) : posts.length === 0 && loading ? (
-          [...Array(3)].map((_, i) => <LoadingSkeleton key={i} />)
-        ) : (
-          posts.map((post, index) => (
-            <motion.div
-              key={post._id.toString()}
-              initial={{ opacity: 0 }}
-              animate={{ opacity: index === currentIndex ? 1 : 0.5 }}
-              transition={{ duration: 0.3 }}
-              className="h-screen w-full flex flex-col items-center justify-center text-white relative snap-start md:max-w-[600px] md:mx-auto md:h-[800px] md:rounded-lg md:shadow-lg md:bg-gray-900"
-              onDoubleClick={() => handleDoubleTap(post._id.toString())}
-              role="article"
-              aria-labelledby={`post-${post._id}`}
+      {error && (
+        <motion.div
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0 }}
+          className="text-red-500 text-center py-3 z-10 fixed top-0 w-full bg-gray-100 dark:bg-gray-900 bg-opacity-75 md:max-w-[600px] md:mx-auto"
+          role="alert"
+        >
+          {error}
+          {error.includes('Unauthorized') && (
+            <button
+              onClick={onLogout}
+              className="ml-2 text-blue-500 underline focus:outline-none focus:ring-2 focus:ring-blue-500"
+              aria-label="Log in"
             >
-              <div className="absolute top-4 left-4 z-10 flex items-center">
-                <img
-                  src={post.photo || 'https://placehold.co/40x40'}
-                  alt={`${post.username || 'Unknown'}'s profile`}
-                  className="w-10 h-10 rounded-full mr-2 border-2 border-blue-500"
-                  onError={(e) => (e.target.src = 'https://placehold.co/40x40')}
-                />
-                <div>
-                  <span id={`post-${post._id}`} className="font-bold text-white">{post.username || 'Unknown'}</span>
-                  <span className="text-xs ml-2 text-gray-400">{timeAgo(post.createdAt)}</span>
-                </div>
-              </div>
+              Log In
+            </button>
+          )}
+        </motion.div>
+      )}
 
-              {post.contentType === 'text' && (
-                <p className="text-lg p-4 bg-black bg-opacity-50 rounded-lg max-w-[80%] mx-auto text-center">
-                  {post.content || 'No content available'}
-                </p>
-              )}
-              {post.contentType === 'image' && (
-                <img
-                  src={post.content}
-                  alt="Post image"
-                  className="w-full h-full object-cover md:rounded-lg"
-                  data-post-id={post._id.toString()}
-                  ref={(el) => (mediaRefs.current[post._id.toString()] = el)}
-                  onError={(e) => (e.target.src = 'https://placehold.co/600x800')}
-                />
-              )}
+      {refreshing && (
+        <div className="fixed top-4 left-0 right-0 text-center text-gray-900 dark:text-gray-100 z-10">
+          <FaSyncAlt className="inline-block w-6 h-6 animate-spin text-blue-500" aria-label="Refreshing feed" />
+        </div>
+      )}
+
+      {loading && !refreshing && (
+        <div className="fixed bottom-20 left-0 right-0 text-center text-gray-900 dark:text-gray-100">
+          <div className="inline-block w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" aria-label="Loading more posts"></div>
+        </div>
+      )}
+
+      {posts.length === 0 && !loading && !refreshing ? (
+        <div className="h-screen flex items-center justify-center text-center text-gray-700 dark:text-gray-300" role="status">
+          <p className="text-lg">No posts available</p>
+        </div>
+      ) : posts.length === 0 && loading ? (
+        [...Array(3)].map((_, i) => <LoadingSkeleton key={i} />)
+      ) : (
+        posts.map((post, index) => (
+          <motion.div
+            key={post._id.toString()}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: index === currentIndex ? 1 : 0.5 }}
+            transition={{ duration: 0.3 }}
+            className="h-screen w-full flex flex-col items-center justify-center text-gray-900 dark:text-gray-100 relative snap-start md:max-w-[600px] md:mx-auto md:h-[800px] md:rounded-lg md:shadow-lg md:bg-gray-100 dark:md:bg-gray-900"
+            onDoubleClick={() => handleDoubleTap(post._id.toString())}
+            role="article"
+            aria-labelledby={`post-${post._id}`}
+          >
+            <div className="absolute top-4 left-4 z-10 flex items-center">
+              <img
+                src={post.photo || 'https://placehold.co/40x40'}
+                alt={`${post.username || 'Unknown'}'s profile`}
+                className="w-10 h-10 rounded-full mr-2 border-2 border-blue-500"
+                onError={(e) => (e.target.src = 'https://placehold.co/40x40')}
+              />
+              <div>
+                <span id={`post-${post._id}`} className="font-bold text-gray-900 dark:text-gray-100">{post.username || 'Guest'}</span>
+                <span className="text-xs ml-1 text-gray-500 dark:text-gray-400">{timeAgo(post.createdAt)}</span>
+              </div>
+            </div>
+
+            {post.contentType === 'text' && (
+              <p className="text-lg p-4 bg-white dark:bg-gray-800 bg-opacity-50 rounded-lg max-w-[80%] mx-auto text-center dark:text-gray-100">
+                {post.content || 'No content available.'}
+              </p>
+            )}
+            {post.contentType === 'image' && (
+              <img
+                src={post.content}
+                alt="Post image"
+                className="w-full h-full object-cover rounded-md"
+                data-post-id={post._id.toString()}
+                ref={(el) => (mediaRefs.current[post._id.toString()] = el)}
+                onError={(e) => (e.target.src = 'https://placehold.co/600x400?text=Image+Error')}
+              />
+            )}
+            {post.contentType === 'video' && (
+              <video
+                ref={(el) => (mediaRefs.current[post._id.toString()] = el)}
+                data-post-id={post._id.toString()}
+                playsInline
+                muted={muted}
+                loop
+                src={post.content}
+                className="w-full h-full object-cover rounded-md"
+                preload="metadata"
+                poster="https://placehold.co/600x400?text=Video+Loading"
+                onError={() => console.warn('Video load error')}
+              />
+            )}
+            {post.contentType === 'audio' && (
+              <audio
+                ref={(el) => (mediaRefs.current[post._id.toString()] = el)}
+                data-post-id={post._id.toString()}
+                controls
+                src={post.content}
+                className="w-full mt-2 bg-gray-300 dark:bg-gray-700 rounded-full p-2"
+                preload="metadata"
+                onError={() => console.warn('Audio load error')}
+              />
+            )}
+            {post.contentType === 'raw' && (
+              <a
+                href={post.content}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-blue-500 p-4 bg-gray-200 dark:bg-gray-800 bg-opacity-50 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-900"
+                aria-label="Open document"
+              >
+                Open Document
+              </a>
+            )}
+
+            <div className="absolute right-4 bottom-20 flex flex-col items-center space-y-6 z-10">
+              <div whileHovering={{ scale: 1.2 }} className="motion-button">
+                <button
+                  onClick={() => likePost(post._id.toString())}
+                  className="flex flex-col items-center focus:outline-none focus:ring-2 focus:ring-red-400"
+                  aria-label={post.likedBy?.map((id) => id.toString()).includes(userId) ? 'Unlike post' : 'Like post'}
+                >
+                  <FaHeart
+                    className={`text-3xl ${post.likedBy?.map((id) => id.toString()).includes(userId) ? 'text-red-500' : 'text-gray-900 dark:text-gray-100'}`}
+                  />
+                  <span className="text-sm text-gray-900 dark:text-gray-100">{post.likes || 0}</span>
+                </button>
+              </div>
+              <div whileHovering={{ scale: 1.2 }} className="motion-button">
+                <button
+                  onClick={() => setShowComments(post._id.toString())}
+                  className="flex flex-col items-center focus:outline-none focus:ring-2 focus:ring-blue-400"
+                  aria-label="View comments"
+                >
+                  <FaComment className="text-3xl text-gray-900 dark:text-gray-100 hover:text-blue-500" />
+                  <span className="text-sm text-gray-900 dark:text-gray-100">{post.comments?.length || 0}</span>
+                </button>
+              </div>
+              <div whileHovering={{ scale: 1.2 }} className="motion-button">
+                <button
+                  onClick={() =>
+                    navigator.clipboard
+                      .writeText(`${window.location.origin}/post/${post._id.toString()}`)
+                      .then(() => alert('Link copied!'))
+                      .catch(() => setError('Failed to copy link'))
+                  }
+                  className="flex flex-col items-center focus:outline-none focus:ring-2 focus:ring-blue-400"
+                  aria-label="Share post"
+                >
+                  <FaShare className="text-3xl text-gray-900 dark:text-gray-100 hover:text-blue-500" />
+                </button>
+              </div>
               {post.contentType === 'video' && (
-                <video
-                  ref={(el) => (mediaRefs.current[post._id.toString()] = el)}
-                  data-post-id={post._id.toString()}
-                  playsInline
-                  muted={muted}
-                  loop
-                  src={post.content}
-                  className="w-full h-full object-cover md:rounded-lg"
-                  preload="metadata"
-                  onError={() => console.warn('Video load error')}
-                />
-              )}
-              {post.contentType === 'audio' && (
-                <audio
-                  ref={(el) => (mediaRefs.current[post._id.toString()] = el)}
-                  data-post-id={post._id.toString()}
-                  controls
-                  src={post.content}
-                  className="w-full mt-4"
-                  preload="metadata"
-                  onError={() => console.warn('Audio load error')}
-                />
-              )}
-              {post.contentType === 'raw' && (
-                <a
-                  href={post.content}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-blue-500 p-4 bg-black bg-opacity-50 rounded-lg"
-                  aria-label="Open document"
-                >
-                  Open Document
-                </a>
-              )}
-
-              <div className="absolute right-4 bottom-20 flex flex-col items-center space-y-6 z-10">
-                <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
+                <div whileHovering={{ scale: 1.2 }} className="motion-button">
                   <button
-                    onClick={() => likePost(post._id.toString())}
-                    className="focus:outline-none focus:ring-2 focus:ring-red-500"
-                    aria-label={post.likedBy?.map((id) => id.toString()).includes(userId) ? 'Unlike post' : 'Like post'}
+                    onClick={() => setMuted((prev) => !prev)}
+                    className="flex flex-col items-center focus:outline-none focus:ring-2 focus:ring-blue-400"
+                    aria-label={muted ? 'Unmute video' : 'Mute video'}
                   >
-                    <FaHeart
-                      className={`text-3xl ${post.likedBy?.map((id) => id.toString()).includes(userId) ? 'text-red-500' : 'text-white'}`}
-                    />
-                    <span className="text-sm text-white">{post.likes || 0}</span>
-                  </button>
-                </motion.div>
-                <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
-                  <button
-                    onClick={() => setShowComments(post._id.toString())}
-                    className="focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    aria-label="View comments"
-                  >
-                    <FaComment className="text-3xl text-white hover:text-blue-500" />
-                    <span className="text-sm text-white">{post.comments?.length || 0}</span>
-                  </button>
-                </motion.div>
-                <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
-                  <button
-                    onClick={() =>
-                      navigator.clipboard
-                        .writeText(`${window.location.origin}/post/${post._id.toString()}`)
-                        .then(() => alert('Link copied!'))
-                        .catch(() => setError('Failed to copy link'))
-                    }
-                    className="focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    aria-label="Share post"
-                  >
-                    <FaShare className="text-3xl text-white hover:text-blue-500" />
-                  </button>
-                </motion.div>
-                {post.contentType === 'video' && (
-                  <motion.div whileHover={{ scale: 1.2 }} whileTap={{ scale: 0.9 }}>
-                    <button
-                      onClick={() => setMuted((prev) => !prev)}
-                      className="focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      aria-label={muted ? 'Unmute video' : 'Mute video'}
-                    >
-                      {muted ? (
-                        <FaVolumeMute className="text-3xl text-white hover:text-blue-500" />
-                      ) : (
-                        <FaVolumeUp className="text-3xl text-white hover:text-blue-500" />
-                      )}
-                    </button>
-                  </motion.div>
-                )}
-              </div>
-
-              {post.caption && (
-                <motion.div
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="absolute bottom-4 left-4 right-4 text-sm bg-black bg-opacity-50 p-3 rounded-lg max-w-[70%] md:max-w-[80%]"
-                >
-                  <span className="font-bold text-white">{post.username || 'Unknown'}</span>
-                  <span className="ml-2 text-white">{post.caption}</span>
-                </motion.div>
-              )}
-
-              <AnimatePresence>
-                {showComments === post._id.toString() && (
-                  <motion.div
-                    initial={{ opacity: 0, y: 100 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: 100 }}
-                    className="fixed bottom-0 left-0 right-0 bg-gray-900 text-white p-4 rounded-t-lg shadow-lg h-1/2 overflow-y-auto z-50 md:max-w-[600px] md:mx-auto"
-                    role="dialog"
-                    aria-modal="true"
-                    aria-labelledby={`comments-${post._id}`}
-                  >
-                    <h3 id={`comments-${post._id}`} className="text-lg font-bold text-blue-500 mb-2">Comments</h3>
-                    {post.comments?.length === 0 ? (
-                      <p className="text-gray-400">No comments yet</p>
+                    {muted ? (
+                      <FaVolumeMute className="text-3xl text-gray-900 dark:text-gray-100 hover:text-blue-500" />
                     ) : (
-                      post.comments.map((c, i) => (
-                        <div key={`${c.createdAt}-${i}`} className="flex items-center mb-3">
-                          <img
-                            src={c.photo || 'https://placehold.co/30x30'}
-                            alt={`${c.username || 'Unknown'}'s profile`}
-                            className="w-8 h-8 rounded-full mr-2 border border-gray-700"
-                            onError={(e) => (e.target.src = 'https://placehold.co/30x30')}
-                          />
-                          <p className="text-sm text-white">
-                            <span className="font-semibold">{c.username || 'Unknown'}</span> {c.comment}
-                          </p>
-                        </div>
-                      ))
+                      <FaVolumeUp className="text-3xl text-gray-900 dark:text-gray-100 hover:text-blue-500" />
                     )}
-                    <div className="flex items-center mt-3">
-                      <input
-                        value={comment}
-                        onChange={(e) => setComment(e.target.value.slice(0, 500))}
-                        className="flex-1 p-3 bg-gray-800 border border-gray-700 rounded-full text-white focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                        placeholder="Add a comment... (max 500 chars)"
-                        aria-label="Add comment"
-                      />
-                      <motion.button
-                        whileHover={{ scale: 1.1 }}
-                        whileTap={{ scale: 0.9 }}
-                        onClick={() => commentPost(post._id.toString())}
-                        className="ml-3 p-3 bg-blue-500 rounded-full focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        aria-label="Submit comment"
-                      >
-                        <FaPaperPlane className="text-xl text-white" />
-                      </motion.button>
-                    </div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </motion.div>
-          ))
-        )}
+                  </button>
+                </div>
+              )}
+            </div>
 
-        {showComments && (
-          <div
-            className="fixed inset-0 bg-black bg-opacity-50 z-40"
-            onClick={() => setShowComments(null)}
-            aria-hidden="true"
-          />
-        )}
-      </motion.div>
-    </ErrorBoundary>
+            {post.caption && (
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="absolute bottom-4 left-4 right-4 text-sm bg-white dark:bg-gray-800 bg-opacity-50 p-3 rounded-lg max-w-[70%] md:max-w-[80%]"
+              >
+                <span className="font-bold text-gray-900 dark:text-gray-100">{post.username || 'Guest'}</span>
+                <span className="ml-1 text-gray-700 dark:text-gray-300">{post.caption}</span>
+              </motion.div>
+            )}
+
+            <AnimatePresence>
+              {showComments === post._id.toString() && (
+                <motion.div
+                  initial={{ opacity: 0, y: 100 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 100 }}
+                  className="fixed bottom-0 left-0 right-0 bg-white dark:bg-gray-800 p-4 rounded-t-lg shadow-lg h-1/2 overflow-y-auto z-10 md:max-w-[600px] md:mx-auto"
+                  role="dialog"
+                  aria-modal="true"
+                  aria-labelledby={`comments-${post._id}`}
+                >
+                  <h3 id={`Comments-${post._id}`} className="text-lg font-bold text-blue-600 dark:text-blue-400 mb-2">Comments</h3>
+                  {post.comments?.length === 0 ? (
+                    <p className="text-gray-500 dark:text-gray-400">No comments yet</p>
+                  ) : (
+                    post.comments.map((c, i) => (
+                      <div key={`${c.createdAt}-${i}`} className="flex items-center mb-2">
+                        <img
+                          src={c.photo || 'https://placehold.co/30x30'}
+                          alt={`${c.username || 'Guest'}'s profile picture`}
+                          className="w-8 h-8 rounded-full mr-2 border border-gray-300 dark:border-gray-600"
+                          onError={(e) => (e.target.src = 'https://placehold.co/30x30')}
+                        />
+                        <p className="text-sm text-gray-700 dark:text-gray-300">
+                          <span className="font-semibold text-gray-900 dark:text-gray-100">{c.username || 'Guest'}</span>
+                          <span className="ms-2">{c.comment}</span>
+                        </p>
+                      </div>
+                    ))
+                  )}
+                  <div className="flex items-center mt-3">
+                    <input
+                      type="text"
+                      value={comment}
+                      onChange={(e) => setComment(e.target.value.slice(0, 255))}
+                      className="flex-1 p-2 bg-gray-100 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-full text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                      placeholder="Add a comment... (max 255 chars)"
+                      aria-label="Add comment"
+                    />
+                    <motion.button
+                      whileHover={{ scale: 1.1 }}
+                      whileTap={{ scale: 0.9 }}
+                      onClick={() => commentPost(post._id.toString())}
+                      className="ml-2 p-3 bg-blue-500 rounded-full focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      aria-label="Submit comment"
+                    >
+                      <FaPaperPlane className="text-xl text-white" />
+                    </motion.button>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </motion.div>
+        ))
+      )}
+
+      {showComments && (
+        <div
+          className="fixed inset-0 bg-black bg-opacity-50 z-0"
+          onClick={() => setShowComments(null)}
+          aria-hidden="true"
+        />
+      )}
+    </motion.div>
   );
+};
+
+FeedScreen.propTypes = {
+  token: PropTypes.string.isRequired,
+  userId: PropTypes.string.isRequired,
+  socket: PropTypes.object.isRequired,
+  onLogout: PropTypes.func.isRequired,
+  theme: PropTypes.string.isRequired,
 };
 
 export default FeedScreen;
