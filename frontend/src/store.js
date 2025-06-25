@@ -27,9 +27,6 @@ const initDB = async () => {
   });
 };
 
-
-
-
 const errorLogTimestamps = new Map(); // Map to track error messages and their timestamps
 
 const logError = async (message, error, userId = null) => {
@@ -57,8 +54,6 @@ const logError = async (message, error, userId = null) => {
     console.error('Failed to log error:', err.message);
   }
 };
-
-
 
 // Auth Slice
 const authSlice = createSlice({
@@ -235,7 +230,8 @@ const messageSlice = createSlice({
     },
     setChatList: (state, action) => {
       const now = Date.now();
-      state.chatList = action.payload
+      const payload = Array.isArray(action.payload) ? action.payload : [];
+      state.chatList = payload
         .filter((contact) => isValidObjectId(contact.id) && contact.virtualNumber)
         .map((contact) => ({
           id: contact.id,
