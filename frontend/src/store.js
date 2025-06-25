@@ -15,31 +15,42 @@ const isValidObjectId = (id) => /^[0-9a-fA-F]{24}$/.test(id);
 
 // Initialize IndexedDB
 const initDB = async () => {
-  return openDB(DB_NAME, VERSION, {
-    upgrade(db, oldVersion, newVersion) {
-      if (oldVersion < 1) {
-        db.createObjectStore(STORE_NAME, { keyPath: 'key' });
-      }
-      if (oldVersion < 3) {
-        console.log('Upgraded IndexedDB from version', oldVersion, 'to', newVersion);
-      }
-    },
-  });
+  try {
+    const db = await openDB(DB_NAME, VERSION, {
+      upgrade(db, oldVersion, newVersion) {
+        if (oldVersion < 1) {
+          db.createObjectStore(STORE_NAME, { keyPath: 'key' });
+        }
+        if (oldVersion < 3) {
+          console.log('Upgraded IndexedDB from version', oldVersion, 'to', newVersion);
+        }
+      },
+    });
+    console.log('IndexedDB initialized successfully');
+    return db;
+  } catch (error) {
+    console.error('Failed to initialize IndexedDB:', error.message);
+    logError('IndexedDB initialization failed', error);
+    throw error;
+  }
 };
 
-const errorLogTimestamps = new Map(); // Map to track error messages and their timestamps
+const errorLogTimestamps = new Map();
 
 const logError = async (message, error, userId = null) => {
   const now = Date.now();
   const errorEntry = errorLogTimestamps.get(message) || { count: 0, timestamps: [] };
   errorEntry.timestamps = errorEntry.timestamps.filter((ts) => now - ts < 60 * 1000);
-  if (errorEntry.count >= 2 || errorEntry.timestamps.length >= 2) return;
+  if (errorEntry.count >= 2 || errorEntry.timestamps.length >= 2) {
+    console.log(`Error logging skipped for "${message}": rate limit reached`);
+    return;
+  }
   errorEntry.count += 1;
   errorEntry.timestamps.push(now);
   errorLogTimestamps.set(message, errorEntry);
-  
+
   try {
-    await fetch('https://gapp-6yc3.onrender.com/social/log-error', {
+    const response = await fetch('https://gapp-6yc3.onrender.com/social/log-error', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -50,6 +61,10 @@ const logError = async (message, error, userId = null) => {
         timestamp: new Date().toISOString(),
       }),
     });
+    if (!response.ok) {
+      throw new Error(`Server responded with status ${response.status}`);
+    }
+    console.log(`Error logged successfully: ${message}`);
   } catch (err) {
     console.error('Failed to log error:', err.message);
   }
@@ -98,7 +113,10 @@ const messageSlice = createSlice({
   reducers: {
     setMessages: (state, action) => {
       const { recipientId, messages } = action.payload;
-      if (!recipientId || !isValidObjectId(recipientId) || !Array.isArray(messages)) return;
+      if (!recipientId || !isValidObjectId(recipientId) || !Array.isArray(messages)) {
+        console.warn('setMessages: Invalid payload', { recipientId, messages });
+        return;
+      }
       const existingMessages = state.chats[recipientId] || [];
       const messageMap = new Map(existingMessages.map((msg) => [msg._id || msg.clientMessageId, msg]));
       const now = Date.now();
@@ -125,6 +143,8 @@ const messageSlice = createSlice({
         };
         if (isValidObjectId(normalizedMsg.senderId) && isValidObjectId(normalizedMsg.recipientId)) {
           messageMap.set(key, normalizedMsg);
+        } else {
+          console.warn('setMessages: Invalid senderId or recipientId', normalizedMsg);
         }
       });
       state.chats[recipientId] = Array.from(messageMap.values())
@@ -133,12 +153,19 @@ const messageSlice = createSlice({
         .slice(-MAX_MESSAGES_PER_CHAT);
       state.chatMessageCount[recipientId] = state.chats[recipientId].length;
       state.messagesTimestamp[recipientId] = now;
+      console.log(`setMessages: Updated chats for recipientId ${recipientId} with ${state.chats[recipientId].length} messages`);
     },
     addMessage: (state, action) => {
       const { recipientId, message } = action.payload;
-      if (!recipientId || !isValidObjectId(recipientId) || !message || !message.clientMessageId) return;
+      if (!recipientId || !isValidObjectId(recipientId) || !message || !message.clientMessageId) {
+        console.warn('addMessage: Invalid payload', { recipientId, message });
+        return;
+      }
       state.chats[recipientId] = state.chats[recipientId] || [];
-      if (state.chats[recipientId].some((msg) => msg._id === message._id || msg.clientMessageId === message.clientMessageId)) return;
+      if (state.chats[recipientId].some((msg) => msg._id === message._id || msg.clientMessageId === message.clientMessageId)) {
+        console.log(`addMessage: Message ${message.clientMessageId} already exists for recipientId ${recipientId}`);
+        return;
+      }
       const normalizedMsg = {
         _id: message._id || message.clientMessageId,
         clientMessageId: message.clientMessageId || message._id,
@@ -162,11 +189,17 @@ const messageSlice = createSlice({
         state.chats[recipientId] = state.chats[recipientId].slice(-MAX_MESSAGES_PER_CHAT);
         state.chatMessageCount[recipientId] = (state.chatMessageCount[recipientId] || 0) + 1;
         state.messagesTimestamp[recipientId] = Date.now();
+        console.log(`addMessage: Added message ${normalizedMsg.clientMessageId} for recipientId ${recipientId}`);
+      } else {
+        console.warn('addMessage: Invalid senderId or recipientId', normalizedMsg);
       }
     },
     replaceMessage: (state, action) => {
       const { recipientId, message, replaceId } = action.payload;
-      if (!recipientId || !isValidObjectId(recipientId) || !message || !replaceId || !message.clientMessageId) return;
+      if (!recipientId || !isValidObjectId(recipientId) || !message || !replaceId || !message.clientMessageId) {
+        console.warn('replaceMessage: Invalid payload', { recipientId, message, replaceId });
+        return;
+      }
       state.chats[recipientId] = state.chats[recipientId] || [];
       const index = state.chats[recipientId].findIndex(
         (msg) => msg.clientMessageId === replaceId || msg._id === replaceId
@@ -198,34 +231,49 @@ const messageSlice = createSlice({
           state.chatMessageCount[recipientId] = (state.chatMessageCount[recipientId] || 0) + 1;
         }
         state.messagesTimestamp[recipientId] = Date.now();
+        console.log(`replaceMessage: Replaced message ${replaceId} with ${normalizedMsg._id} for recipientId ${recipientId}`);
+      } else {
+        console.warn('replaceMessage: Invalid senderId or recipientId', normalizedMsg);
       }
     },
     updateMessageStatus: (state, action) => {
       const { recipientId, messageId, status, uploadProgress } = action.payload;
-      if (!recipientId || !isValidObjectId(recipientId) || !messageId || !state.chats[recipientId] || !['pending', 'sent', 'delivered', 'read', 'failed'].includes(status)) return;
+      if (!recipientId || !isValidObjectId(recipientId) || !messageId || !state.chats[recipientId] || !['pending', 'sent', 'delivered', 'read', 'failed'].includes(status)) {
+        console.warn('updateMessageStatus: Invalid payload', { recipientId, messageId, status });
+        return;
+      }
       state.chats[recipientId] = state.chats[recipientId].map((msg) =>
         (msg._id === messageId || msg.clientMessageId === messageId)
           ? { ...msg, status, uploadProgress: uploadProgress !== undefined ? uploadProgress : msg.uploadProgress }
           : msg
       );
       state.messagesTimestamp[recipientId] = Date.now();
+      console.log(`updateMessageStatus: Updated status for message ${messageId} to ${status} in recipientId ${recipientId}`);
     },
     deleteMessage: (state, action) => {
       const { recipientId, messageId } = action.payload;
-      if (!recipientId || !isValidObjectId(recipientId) || !messageId || !state.chats[recipientId]) return;
+      if (!recipientId || !isValidObjectId(recipientId) || !messageId || !state.chats[recipientId]) {
+        console.warn('deleteMessage: Invalid payload', { recipientId, messageId });
+        return;
+      }
       state.chats[recipientId] = state.chats[recipientId].filter(
         (msg) => msg._id !== messageId && msg.clientMessageId !== messageId
       );
       state.chatMessageCount[recipientId] = (state.chatMessageCount[recipientId] || 1) - 1;
       state.messagesTimestamp[recipientId] = Date.now();
+      console.log(`deleteMessage: Deleted message ${messageId} for recipientId ${recipientId}`);
     },
     setSelectedChat: (state, action) => {
       const recipientId = action.payload;
       if (recipientId === null) {
         state.selectedChat = null;
+        console.log('setSelectedChat: Cleared selected chat');
       } else if (isValidObjectId(recipientId)) {
         state.chats[recipientId] = state.chats[recipientId] || [];
         state.selectedChat = recipientId;
+        console.log(`setSelectedChat: Set chat to ${recipientId}`);
+      } else {
+        console.warn('setSelectedChat: Invalid recipientId', recipientId);
       }
     },
     setChatList: (state, action) => {
@@ -252,14 +300,17 @@ const messageSlice = createSlice({
           unreadCount: contact.unreadCount || 0,
         }));
       state.chatListTimestamp = now;
+      console.log(`setChatList: Updated chatList with ${state.chatList.length} contacts`);
     },
     resetState: (state) => {
       Object.assign(state, messageSlice.getInitialState());
+      console.log('resetState: Reset messages state');
     },
     cleanupMessages: (state) => {
       const now = Date.now();
       Object.keys(state.chats).forEach((recipientId) => {
         if (!isValidObjectId(recipientId)) {
+          console.warn(`cleanupMessages: Invalid recipientId ${recipientId}, removing`);
           delete state.chats[recipientId];
           delete state.chatMessageCount[recipientId];
           delete state.messagesTimestamp[recipientId];
@@ -270,15 +321,14 @@ const messageSlice = createSlice({
         );
         state.chatMessageCount[recipientId] = state.chats[recipientId].length;
         if (!state.chats[recipientId].length) {
+          console.log(`cleanupMessages: Removed empty chat for recipientId ${recipientId}`);
           delete state.chats[recipientId];
           delete state.chatMessageCount[recipientId];
           delete state.messagesTimestamp[recipientId];
         }
       });
-      if (now - state.chatListTimestamp > CACHE_TIMEOUT) {
-        state.chatList = [];
-        state.chatListTimestamp = 0;
-      }
+      // Avoid clearing chatList to prevent UI flicker; let fetchChatList handle updates
+      console.log(`cleanupMessages: Retained chatList with ${state.chatList.length} contacts`);
     },
   },
 });
@@ -370,6 +420,7 @@ const persistenceMiddleware = (store) => {
         },
       };
       await db.put(STORE_NAME, { key: 'state', value: serializableState });
+      console.log(`persistenceMiddleware: Persisted state with ${serializableState.messages.chatList.length} contacts`);
     } catch (error) {
       logError('Failed to persist state', error, state.auth.userId);
     }
@@ -403,6 +454,7 @@ const persistenceMiddleware = (store) => {
               auth: authSlice.getInitialState(),
             },
           });
+          console.log('persistenceMiddleware: Cleared persisted state');
         } catch (error) {
           logError('Failed to clear persisted state', error);
         }
@@ -418,10 +470,16 @@ const loadPersistedState = async () => {
   try {
     const db = await initDB();
     const persistedState = await db.get(STORE_NAME, 'state');
-    if (!persistedState?.value) return null;
+    if (!persistedState?.value) {
+      console.log('loadPersistedState: No persisted state found');
+      return null;
+    }
 
     const { messages, auth } = persistedState.value;
-    if (!messages || !auth) return null;
+    if (!messages || !auth) {
+      console.warn('loadPersistedState: Invalid persisted state structure', persistedState);
+      return null;
+    }
 
     const now = Date.now();
     const chats = Object.keys(messages.chats).reduce((acc, recipientId) => {
@@ -449,10 +507,12 @@ const loadPersistedState = async () => {
             senderVirtualNumber: msg.senderVirtualNumber || undefined,
             senderUsername: msg.senderUsername || undefined,
             senderPhoto: msg.senderPhoto || undefined,
-            createdAt: msg.createdAt ? new Date(msg.createdAt) : new Date(),
-            updatedAt: msg.updatedAt ? new Date(msg.updatedAt) : undefined,
+            createdAt: msg.createdAt ? new Date(msg.createdAt).toISOString() : new Date().toISOString(),
+            updatedAt: msg.updatedAt ? new Date(msg.updatedAt).toISOString() : undefined,
           }))
           .slice(-MAX_MESSAGES_PER_CHAT);
+      } else {
+        console.warn(`loadPersistedState: Invalid recipientId ${recipientId} in chats`);
       }
       return acc;
     }, {});
@@ -471,26 +531,26 @@ const loadPersistedState = async () => {
             virtualNumber: contact.virtualNumber || '',
             photo: contact.photo || 'https://placehold.co/40x40',
             status: contact.status || 'offline',
-            lastSeen: contact.lastSeen ? new Date(contact.lastSeen) : null,
+            lastSeen: contact.lastSeen ? new Date(contact.lastSeen).toISOString() : null,
             latestMessage: contact.latestMessage
               ? {
                   ...contact.latestMessage,
                   senderId: contact.latestMessage.senderId,
                   recipientId: contact.latestMessage.recipientId,
-                  createdAt: contact.latestMessage.createdAt ? new Date(contact.latestMessage.createdAt) : new Date(),
-                  updatedAt: contact.latestMessage.updatedAt ? new Date(contact.latestMessage.updatedAt) : undefined,
+                  createdAt: contact.latestMessage.createdAt ? new Date(contact.latestMessage.createdAt).toISOString() : new Date().toISOString(),
+                  updatedAt: contact.latestMessage.updatedAt ? new Date(contact.latestMessage.updatedAt).toISOString() : undefined,
                 }
               : null,
             unreadCount: contact.unreadCount || 0,
           }))
       : [];
 
-    return {
+    const result = {
       messages: {
         selectedChat: isValidObjectId(messages.selectedChat) ? messages.selectedChat : null,
         chats,
-        chatList: now - messages.chatListTimestamp > CACHE_TIMEOUT ? [] : chatList,
-        chatListTimestamp: now - messages.chatListTimestamp > CACHE_TIMEOUT ? 0 : messages.chatListTimestamp,
+        chatList,
+        chatListTimestamp: messages.chatListTimestamp || 0,
         messagesTimestamp: messages.messagesTimestamp || {},
         chatMessageCount,
       },
@@ -504,6 +564,11 @@ const loadPersistedState = async () => {
         privateKey: null,
       },
     };
+    console.log('loadPersistedState: Loaded state', {
+      chatListLength: result.messages.chatList.length,
+      chatsCount: Object.keys(result.messages.chats).length,
+    });
+    return result;
   } catch (error) {
     logError('Failed to load persisted state', error);
     return null;
@@ -543,7 +608,6 @@ export const store = configureStore({
 export const initializeStore = async () => {
   try {
     const persistedState = await loadPersistedState();
-    console.log('Persisted state loaded:', persistedState); // Debug
     if (persistedState) {
       store.dispatch(setAuth(persistedState.auth));
       Object.entries(persistedState.messages.chats).forEach(([recipientId, messages]) => {
@@ -553,6 +617,12 @@ export const initializeStore = async () => {
       });
       store.dispatch(setChatList(persistedState.messages.chatList));
       store.dispatch(cleanupMessages());
+      console.log('initializeStore: Store initialized with persisted state', {
+        chatListLength: persistedState.messages.chatList.length,
+        chatsCount: Object.keys(persistedState.messages.chats).length,
+      });
+    } else {
+      console.log('initializeStore: No valid persisted state, using initial state');
     }
   } catch (error) {
     logError('Failed to initialize store with persisted state', error);

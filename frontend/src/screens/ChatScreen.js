@@ -33,7 +33,7 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
   const [unreadMessages, setUnreadMessages] = useState({});
   const [isForgeReady, setIsForgeReady] = useState(false);
   const [isLoadingAddContact, setIsLoadingAddContact] = useState(false);
-  const [isLoadingChatList, setIsLoadingChatList] = useState(false); // State for loading chat list
+  const [isLoadingChatList, setIsLoadingChatList] = useState(false);
   const [file, setFile] = useState(null);
   const [fetchStatus, setFetchStatus] = useState('idle');
   const [fetchError, setFetchError] = useState(null);
@@ -47,7 +47,7 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
   const isMountedRef = useRef(true);
   const retryCountRef = useRef({ chatList: 0, addContact: 0 });
   const retryTimeoutRef = useRef({ chatList: null, addContact: null });
-  const errorLogTimestamps = useRef(new Map()); // Map to track error logs
+  const errorLogTimestamps = useRef(new Map());
 
   const throttle = useCallback((func, limit) => {
     let lastFunc;
@@ -76,7 +76,6 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
     };
   }, []);
 
-  // Updated logClientError to cap at 2 logs per minute
   const logClientError = useCallback(async (message, error) => {
     const now = Date.now();
     const errorEntry = errorLogTimestamps.current.get(message) || { count: 0, timestamps: [] };
@@ -161,21 +160,27 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
     }
   }, [isForgeReady, logClientError]);
 
-  // Modified fetchChatList with fetchId to prevent race conditions
+  // Modified fetchChatList with improved race condition handling and debugging
   const fetchChatList = useCallback(
     debounce(async (force = false) => {
-      if (!isForgeReady || !isMountedRef.current) return;
-      if (!force && chatList.length && chatListTimestamp && Date.now() - chatListTimestamp < 5 * 60 * 1000) {
-        setFetchStatus('success');
-        setFetchError(null);
+      if (!isForgeReady || !isMountedRef.current) {
+        console.log('fetchChatList aborted: forge not ready or component unmounted');
         return;
       }
-      const fetchId = `${Date.now()}-${Math.random().toString(36).substring(2, 8)}`; // Unique fetch ID
+      if (!force && chatList.length && chatListTimestamp && Date.now() - chatListTimestamp < 5 * 60 * 1000) {
+        console.log('fetchChatList skipped: cache still valid');
+        setFetchStatus('success');
+        setFetchError(null);
+        setIsLoadingChatList(false);
+        return;
+      }
+      const fetchId = `${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+      console.log(`fetchChatList started with fetchId: ${fetchId}`);
       setIsLoadingChatList(true);
       setFetchStatus('loading');
       let retryCount = retryCountRef.current.chatList;
       const maxRetries = 3;
-      const baseDelay = 3000; // Increased base delay for better backoff
+      const baseDelay = 3000;
 
       const attemptFetch = async () => {
         try {
@@ -184,6 +189,7 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
             params: { userId },
             timeout: 10000,
           });
+          console.log('fetchChatList response:', { fetchId, data });
           if (!Array.isArray(data)) {
             throw new Error('Invalid chat list data: not an array');
           }
@@ -201,6 +207,7 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
                   }
                 : null,
             }));
+            console.log(`fetchChatList updating state with ${updatedChatList.length} chats`);
             dispatch(setChatList(updatedChatList));
             setFetchStatus('success');
             setFetchError(null);
@@ -208,8 +215,12 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
             clearTimeout(retryTimeoutRef.current.chatList);
           }
         } catch (err) {
-          if (!isMountedRef.current || fetchId !== fetchChatList.currentFetchId) return;
+          if (!isMountedRef.current || fetchId !== fetchChatList.currentFetchId) {
+            console.log(`fetchChatList aborted for fetchId: ${fetchId}`);
+            return;
+          }
           if (err.response?.status === 401) {
+            console.error('fetchChatList unauthorized:', err.message);
             logClientError('Chat list fetch failed: Unauthorized', err);
             setTimeout(() => onLogout(), 1000);
             return;
@@ -218,10 +229,11 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
             retryCount += 1;
             retryCountRef.current.chatList = retryCount;
             const delay = baseDelay * Math.pow(2, retryCount) * (1 + Math.random() * 0.1);
-            console.warn(`Chat list fetch attempt ${retryCount} failed: ${err.message}`);
+            console.warn(`fetchChatList attempt ${retryCount} failed: ${err.message}, retrying in ${delay}ms`);
             clearTimeout(retryTimeoutRef.current.chatList);
             retryTimeoutRef.current.chatList = setTimeout(attemptFetch, delay);
           } else {
+            console.error('fetchChatList failed after max retries:', err.message);
             setFetchStatus('error');
             setFetchError('Failed to load contacts, please try again');
             logClientError('Chat list fetch failed after max retries', err);
@@ -230,21 +242,21 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
           }
         } finally {
           if (isMountedRef.current && fetchId === fetchChatList.currentFetchId) {
+            console.log(`fetchChatList completed for fetchId: ${fetchId}, setting isLoadingChatList to false`);
             setIsLoadingChatList(false);
           }
         }
       };
 
-      fetchChatList.currentFetchId = fetchId; // Track current fetch ID
+      fetchChatList.currentFetchId = fetchId;
       await attemptFetch();
     }, 1000),
-    [isForgeReady, token, userId, onLogout, unreadMessages, logClientError, dispatch, chatList, chatListTimestamp]
+    [isForgeReady, token, userId, onLogout, unreadMessages, logClientError, dispatch, chatListTimestamp]
   );
 
-  // Store current fetch ID
   fetchChatList.currentFetchId = null;
 
-  // Modified useEffect for initial fetch with proper cleanup
+  // Modified useEffect for initial fetch
   useEffect(() => {
     if (!token || !userId) {
       console.error('Please log in to access chat');
@@ -252,24 +264,31 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
       return;
     }
     if (isForgeReady) {
+      console.log('Initial fetchChatList triggered');
       fetchChatList();
       socket?.emit('join', userId);
     }
     const handleOffline = () => {
+      console.log('Network offline, displaying cached contacts');
       setFetchError('You are offline. Displaying cached contacts.');
       setFetchStatus('cached');
+      setIsLoadingChatList(false);
     };
     window.addEventListener('offline', handleOffline);
     return () => {
+      console.log('Cleaning up initial fetch effect');
+      isMountedRef.current = false;
       clearTimeout(retryTimeoutRef.current.chatList);
       clearTimeout(retryTimeoutRef.current.addContact);
       sentStatusesRef.current.clear();
-      errorLogTimestamps.current.clear(); // Clear error logs
+      errorLogTimestamps.current.clear();
       window.removeEventListener('offline', handleOffline);
     };
   }, [token, userId, isForgeReady, socket, navigate, fetchChatList]);
 
+  // Modified handleAddContact with defined maxRetries
   const handleAddContact = useCallback(async () => {
+    const maxRetries = 3; // Define maxRetries
     if (!contactInput.trim()) {
       setContactError('Please enter a virtual number');
       return;
@@ -498,7 +517,7 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
 
     let statusUpdateQueue = [];
     let statusUpdateTimeout = null;
-    let lastChatListUpdate = 0; // Track last chat list update timestamp
+    let lastChatListUpdate = 0;
 
     const flushStatusUpdates = () => {
       if (statusUpdateQueue.length) {
@@ -535,15 +554,28 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
     };
 
     const handleChatListUpdated = ({ userId: emitterId, users }) => {
-      if (emitterId !== userId || !isMountedRef.current) return;
+      if (emitterId !== userId || !isMountedRef.current) {
+        console.log('chatListUpdated ignored: invalid emitter or unmounted');
+        return;
+      }
       const now = Date.now();
-      if (now - lastChatListUpdate < 1000) return; // Debounce updates within 1 second
+      if (now - lastChatListUpdate < 1000) {
+        console.log('chatListUpdated debounced');
+        return;
+      }
       lastChatListUpdate = now;
-      if (!Array.isArray(users)) return;
+      if (!Array.isArray(users)) {
+        console.warn('chatListUpdated received invalid users data:', users);
+        return;
+      }
+      console.log(`chatListUpdated processing ${users.length} users`);
       dispatch(setChatList((prev) => {
         const prevMap = new Map(prev.map((chat) => [chat.id, chat]));
         users.forEach((chat) => {
-          if (!isValidObjectId(chat.id)) return;
+          if (!isValidObjectId(chat.id)) {
+            console.warn('Invalid chat ID in chatListUpdated:', chat.id);
+            return;
+          }
           prevMap.set(chat.id, {
             ...prevMap.get(chat.id),
             ...chat,
@@ -559,7 +591,9 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
               : null,
           });
         });
-        return Array.from(prevMap.values());
+        const newChatList = Array.from(prevMap.values());
+        console.log(`chatListUpdated set ${newChatList.length} chats`);
+        return newChatList;
       }));
     };
 
@@ -840,6 +874,7 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
       </div>
       <div className="flex flex-1 overflow-hidden">
         <div className={`w-full md:w-1/3 bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 ${selectedChat ? 'hidden md:block' : 'block'}`}>
+          {console.log('Rendering contact list:', { isLoadingChatList, fetchStatus, chatListLength: chatList.length })}
           {isLoadingChatList && (
             <div className="p-4 text-center">
               <p className="text-gray-500 dark:text-gray-400">Loading contacts...</p>
@@ -861,7 +896,7 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
           )}
           {!isLoadingChatList && (fetchStatus === 'success' || fetchStatus === 'cached') && chatList.length > 0 && (
             chatList
-              .filter((chat) => isValidObjectId(chat.id)) // Ensure valid IDs
+              .filter((chat) => isValidObjectId(chat.id))
               .map((chat) => (
                 <div
                   key={chat.id}
