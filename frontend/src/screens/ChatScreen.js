@@ -33,6 +33,7 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
   const [unreadMessages, setUnreadMessages] = useState({});
   const [isForgeReady, setIsForgeReady] = useState(false);
   const [isLoadingAddContact, setIsLoadingAddContact] = useState(false);
+  const [isLoadingChatList, setIsLoadingChatList] = useState(false); // State for loading chat list
   const [file, setFile] = useState(null);
   const [fetchStatus, setFetchStatus] = useState('idle');
   const [fetchError, setFetchError] = useState(null);
@@ -46,9 +47,7 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
   const isMountedRef = useRef(true);
   const retryCountRef = useRef({ chatList: 0, addContact: 0 });
   const retryTimeoutRef = useRef({ chatList: null, addContact: null });
-  const maxRetries = 3;
-  const maxStatuses = 1000;
-  const maxLogsPerMinute = 5;
+  const errorLogTimestamps = useRef(new Map()); // Map to track error logs
 
   const throttle = useCallback((func, limit) => {
     let lastFunc;
@@ -77,8 +76,7 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
     };
   }, []);
 
-  const errorLogTimestamps = useRef(new Map()); // Map to track error messages and their timestamps
-
+  // Updated logClientError to cap at 2 logs per minute
   const logClientError = useCallback(async (message, error) => {
     const now = Date.now();
     const errorEntry = errorLogTimestamps.current.get(message) || { count: 0, timestamps: [] };
@@ -87,7 +85,7 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
     errorEntry.count += 1;
     errorEntry.timestamps.push(now);
     errorLogTimestamps.current.set(message, errorEntry);
-  
+
     try {
       await axios.post(
         `${BASE_URL}/social/log-error`,
@@ -163,114 +161,113 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
     }
   }, [isForgeReady, logClientError]);
 
+  // Modified fetchChatList with fetchId to prevent race conditions
+  const fetchChatList = useCallback(
+    debounce(async (force = false) => {
+      if (!isForgeReady || !isMountedRef.current) return;
+      if (!force && chatList.length && chatListTimestamp && Date.now() - chatListTimestamp < 5 * 60 * 1000) {
+        setFetchStatus('success');
+        setFetchError(null);
+        return;
+      }
+      const fetchId = `${Date.now()}-${Math.random().toString(36).substring(2, 8)}`; // Unique fetch ID
+      setIsLoadingChatList(true);
+      setFetchStatus('loading');
+      let retryCount = retryCountRef.current.chatList;
+      const maxRetries = 3;
+      const baseDelay = 3000; // Increased base delay for better backoff
 
+      const attemptFetch = async () => {
+        try {
+          const { data } = await axios.get(`${BASE_URL}/social/chat-list`, {
+            headers: { Authorization: `Bearer ${token}` },
+            params: { userId },
+            timeout: 10000,
+          });
+          if (!Array.isArray(data)) {
+            throw new Error('Invalid chat list data: not an array');
+          }
+          if (isMountedRef.current && fetchId === fetchChatList.currentFetchId) {
+            const updatedChatList = data.map((chat) => ({
+              ...chat,
+              _id: chat.id,
+              unreadCount: unreadMessages[chat.id] || chat.unreadCount || 0,
+              lastSeen: chat.lastSeen ? new Date(chat.lastSeen).toISOString() : null,
+              latestMessage: chat.latestMessage
+                ? {
+                    ...chat.latestMessage,
+                    createdAt: chat.latestMessage.createdAt ? new Date(chat.latestMessage.createdAt).toISOString() : new Date().toISOString(),
+                    updatedAt: chat.latestMessage.updatedAt ? new Date(chat.latestMessage.updatedAt).toISOString() : undefined,
+                  }
+                : null,
+            }));
+            dispatch(setChatList(updatedChatList));
+            setFetchStatus('success');
+            setFetchError(null);
+            retryCountRef.current.chatList = 0;
+            clearTimeout(retryTimeoutRef.current.chatList);
+          }
+        } catch (err) {
+          if (!isMountedRef.current || fetchId !== fetchChatList.currentFetchId) return;
+          if (err.response?.status === 401) {
+            logClientError('Chat list fetch failed: Unauthorized', err);
+            setTimeout(() => onLogout(), 1000);
+            return;
+          }
+          if (retryCount < maxRetries) {
+            retryCount += 1;
+            retryCountRef.current.chatList = retryCount;
+            const delay = baseDelay * Math.pow(2, retryCount) * (1 + Math.random() * 0.1);
+            console.warn(`Chat list fetch attempt ${retryCount} failed: ${err.message}`);
+            clearTimeout(retryTimeoutRef.current.chatList);
+            retryTimeoutRef.current.chatList = setTimeout(attemptFetch, delay);
+          } else {
+            setFetchStatus('error');
+            setFetchError('Failed to load contacts, please try again');
+            logClientError('Chat list fetch failed after max retries', err);
+            retryCountRef.current.chatList = 0;
+            clearTimeout(retryTimeoutRef.current.chatList);
+          }
+        } finally {
+          if (isMountedRef.current && fetchId === fetchChatList.currentFetchId) {
+            setIsLoadingChatList(false);
+          }
+        }
+      };
 
-  // Add new state for loading chat list
-const [isLoadingChatList, setIsLoadingChatList] = useState(false);
+      fetchChatList.currentFetchId = fetchId; // Track current fetch ID
+      await attemptFetch();
+    }, 1000),
+    [isForgeReady, token, userId, onLogout, unreadMessages, logClientError, dispatch, chatList, chatListTimestamp]
+  );
 
-// Modified fetchChatList
-const fetchChatList = useCallback(
-  debounce(async (force = false) => {
-    if (!isForgeReady || !isMountedRef.current) return;
-    if (!force && chatList.length && chatListTimestamp && Date.now() - chatListTimestamp < 5 * 60 * 1000) {
-      setFetchStatus('success');
-      setFetchError(null);
+  // Store current fetch ID
+  fetchChatList.currentFetchId = null;
+
+  // Modified useEffect for initial fetch with proper cleanup
+  useEffect(() => {
+    if (!token || !userId) {
+      console.error('Please log in to access chat');
+      navigate('/login', { replace: true });
       return;
     }
-    setIsLoadingChatList(true); // Set loading state
-    setFetchStatus('loading');
-    let retryCount = retryCountRef.current.chatList;
-    const maxRetries = 3;
-    const baseDelay = 2000;
-
-    const attemptFetch = async () => {
-      try {
-        const { data } = await axios.get(`${BASE_URL}/social/chat-list`, {
-          headers: { Authorization: `Bearer ${token}` },
-          params: { userId },
-          timeout: 10000,
-        });
-        if (!Array.isArray(data)) {
-          throw new Error('Invalid chat list data: not an array');
-        }
-        if (isMountedRef.current) {
-          const updatedChatList = data.map((chat) => ({
-            ...chat,
-            _id: chat.id,
-            unreadCount: unreadMessages[chat.id] || chat.unreadCount || 0,
-            lastSeen: chat.lastSeen ? new Date(chat.lastSeen).toISOString() : null,
-            latestMessage: chat.latestMessage
-              ? {
-                  ...chat.latestMessage,
-                  createdAt: chat.latestMessage.createdAt ? new Date(chat.latestMessage.createdAt).toISOString() : new Date().toISOString(),
-                  updatedAt: chat.latestMessage.updatedAt ? new Date(chat.latestMessage.updatedAt).toISOString() : undefined,
-                }
-              : null,
-          }));
-          dispatch(setChatList(updatedChatList));
-          setFetchStatus('success');
-          setFetchError(null);
-          retryCountRef.current.chatList = 0;
-          clearTimeout(retryTimeoutRef.current.chatList);
-        }
-      } catch (err) {
-        if (!isMountedRef.current) return;
-        if (err.response?.status === 401) {
-          logClientError('Chat list fetch failed: Unauthorized', err);
-          setTimeout(() => onLogout(), 1000);
-          return;
-        }
-        if (retryCount < maxRetries) {
-          retryCount += 1;
-          retryCountRef.current.chatList = retryCount;
-          const delay = baseDelay * Math.pow(2, retryCount) * (1 + Math.random() * 0.1);
-          console.warn(`Chat list fetch attempt ${retryCount} failed: ${err.message}`);
-          clearTimeout(retryTimeoutRef.current.chatList);
-          retryTimeoutRef.current.chatList = setTimeout(attemptFetch, delay);
-        } else {
-          setFetchStatus('error');
-          setFetchError('Failed to load contacts, please try again');
-          logClientError('Chat list fetch failed after max retries', err);
-          retryCountRef.current.chatList = 0;
-          clearTimeout(retryTimeoutRef.current.chatList);
-        }
-      } finally {
-        if (isMountedRef.current) setIsLoadingChatList(false); // Clear loading state
-      }
+    if (isForgeReady) {
+      fetchChatList();
+      socket?.emit('join', userId);
+    }
+    const handleOffline = () => {
+      setFetchError('You are offline. Displaying cached contacts.');
+      setFetchStatus('cached');
     };
-
-    await attemptFetch();
-  }, 1000),
-  [isForgeReady, token, userId, onLogout, unreadMessages, logClientError, dispatch, chatList, chatListTimestamp]
-);
-
-// Modified useEffect for initial fetch
-useEffect(() => {
-  if (!token || !userId) {
-    console.error('Please log in to access chat');
-    navigate('/login', { replace: true });
-    return;
-  }
-  if (isForgeReady) {
-    fetchChatList(); // Fetch chat list only once
-    socket?.emit('join', userId);
-  }
-  const handleOffline = () => {
-    setFetchError('You are offline. Displaying cached contacts.');
-    setFetchStatus('cached');
-  };
-  window.addEventListener('offline', handleOffline);
-  return () => {
-    clearTimeout(retryTimeoutRef.current.chatList);
-    clearTimeout(retryTimeoutRef.current.addContact);
-    sentStatusesRef.current.clear();
-    errorLogTimestamps.current = [];
-    window.removeEventListener('offline', handleOffline);
-  };
-}, [token, userId, isForgeReady, socket, navigate, fetchChatList]);
-
-
-
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      clearTimeout(retryTimeoutRef.current.chatList);
+      clearTimeout(retryTimeoutRef.current.addContact);
+      sentStatusesRef.current.clear();
+      errorLogTimestamps.current.clear(); // Clear error logs
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [token, userId, isForgeReady, socket, navigate, fetchChatList]);
 
   const handleAddContact = useCallback(async () => {
     if (!contactInput.trim()) {
@@ -478,9 +475,8 @@ useEffect(() => {
 
   useEffect(() => {
     const maxStatuses = 1000;
-    const lruCache = new Map(); // Use Map as a simple LRU cache
+    const lruCache = new Map();
 
-    // Function to add to cache with size limit
     const addToCache = (id) => {
       if (lruCache.size >= maxStatuses) {
         const firstKey = lruCache.keys().next().value;
@@ -489,7 +485,6 @@ useEffect(() => {
       lruCache.set(id, true);
     };
 
-    // Replace sentStatusesRef with lruCache
     sentStatusesRef.current = {
       add: (id) => addToCache(id),
       has: (id) => lruCache.has(id),
@@ -497,11 +492,13 @@ useEffect(() => {
     };
   }, []);
 
+  // Modified socket effect with debounced chatListUpdated
   useEffect(() => {
     if (!socket || !isForgeReady || !userId) return;
 
     let statusUpdateQueue = [];
     let statusUpdateTimeout = null;
+    let lastChatListUpdate = 0; // Track last chat list update timestamp
 
     const flushStatusUpdates = () => {
       if (statusUpdateQueue.length) {
@@ -539,22 +536,33 @@ useEffect(() => {
 
     const handleChatListUpdated = ({ userId: emitterId, users }) => {
       if (emitterId !== userId || !isMountedRef.current) return;
-      // Update only changed entries to avoid full list refresh
+      const now = Date.now();
+      if (now - lastChatListUpdate < 1000) return; // Debounce updates within 1 second
+      lastChatListUpdate = now;
+      if (!Array.isArray(users)) return;
       dispatch(setChatList((prev) => {
-        if (!Array.isArray(users)) return prev;
-        const updatedMap = new Map(prev.map((chat) => [chat.id, chat]));
+        const prevMap = new Map(prev.map((chat) => [chat.id, chat]));
         users.forEach((chat) => {
-          updatedMap.set(chat.id, {
+          if (!isValidObjectId(chat.id)) return;
+          prevMap.set(chat.id, {
+            ...prevMap.get(chat.id),
             ...chat,
             _id: chat.id,
             unreadCount: unreadMessages[chat.id] || chat.unreadCount || 0,
+            lastSeen: chat.lastSeen ? new Date(chat.lastSeen).toISOString() : null,
+            latestMessage: chat.latestMessage
+              ? {
+                  ...chat.latestMessage,
+                  createdAt: chat.latestMessage.createdAt ? new Date(chat.latestMessage.createdAt).toISOString() : new Date().toISOString(),
+                  updatedAt: chat.latestMessage.updatedAt ? new Date(chat.latestMessage.updatedAt).toISOString() : undefined,
+                }
+              : null,
           });
         });
-        return Array.from(updatedMap.values());
+        return Array.from(prevMap.values());
       }));
     };
 
-    // Rest of the socket event handlers remain unchanged
     const handleMessage = (msg) => {
       if (!isMountedRef.current) return;
       const senderId = typeof msg.senderId === 'object' ? msg.senderId._id.toString() : msg.senderId.toString();
@@ -626,7 +634,6 @@ useEffect(() => {
     };
   }, [socket, isForgeReady, selectedChat, userId, chats, dispatch, unreadMessages]);
 
-  
   useEffect(() => {
     if (selectedChat && !chats[selectedChat]) {
       fetchMessages(selectedChat);
@@ -763,11 +770,6 @@ useEffect(() => {
     [chats, selectedChat, userId, theme]
   );
 
-
-
-
-
-
   return (
     <div className={`min-h-screen flex flex-col bg-gray-100 dark:bg-gray-900 ${theme === 'dark' ? 'dark' : ''}`}>
       <div className="flex justify-between items-center p-4 bg-blue-500 dark:bg-gray-800 text-white dark:text-gray-200">
@@ -838,74 +840,72 @@ useEffect(() => {
       </div>
       <div className="flex flex-1 overflow-hidden">
         <div className={`w-full md:w-1/3 bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 ${selectedChat ? 'hidden md:block' : 'block'}`}>
-        
-
-        <div className={`w-full md:w-1/3 bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 ${selectedChat ? 'hidden md:block' : 'block'}`}>
-  {isLoadingChatList && (
-    <div className="p-4 text-center">
-      <p className="text-gray-500 dark:text-gray-400">Loading contacts...</p>
-    </div>
-  )}
-  {!isLoadingChatList && (fetchStatus === 'success' || fetchStatus === 'cached') && chatList.length === 0 && (
-    <div className="p-4 text-center">
-      <p className="text-gray-500 dark:text-gray-400">No contacts to display. Add a contact to start chatting!</p>
-      <button
-        className="mt-2 bg-blue-500 dark:bg-gray-700 text-white dark:text-gray-200 px-4 py-2 rounded-lg hover:bg-blue-600 dark:hover:bg-gray-600"
-        onClick={() => {
-          setShowAddContact(true);
-          setShowMenu(true);
-        }}
-      >
-        Add Contact
-      </button>
-    </div>
-  )}
-
-
-// Modified contact list rendering
-
-  {!isLoadingChatList && (fetchStatus === 'success' || fetchStatus === 'cached') && chatList.length > 0 && (
-    chatList.map((chat) => (
-      <div
-        key={chat.id}
-        className={`flex items-center p-4 border-b border-gray-200 dark:border-gray-700 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 ${
-          selectedChat === chat.id ? 'bg-blue-100 dark:bg-gray-600' : ''
-        }`}
-        onClick={() => selectChat(chat.id)}
-      >
-        <img
-          src={chat.photo || 'https://placehold.co/40x40'}
-          alt="chat-avatar"
-          className="w-10 h-10 rounded-full mr-3"
-        />
-        <div className="flex-1">
-          <div className="flex justify-between">
-            <span className="font-semibold text-gray-900 dark:text-gray-100">{chat.username}</span>
-            {chat.latestMessage && (
-              <span className="text-xs text-gray-500 dark:text-gray-400">
-                {new Date(chat.latestMessage?.createdAt || chat.lastSeen || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-              </span>
-            )}
-          </div>
-          {chat.latestMessage && (
-            <p className="text-sm text-gray-600 dark:text-gray-300 truncate">{chat.latestMessage.plaintextContent || `[${chat.latestMessage.contentType}]`}</p>
+          {isLoadingChatList && (
+            <div className="p-4 text-center">
+              <p className="text-gray-500 dark:text-gray-400">Loading contacts...</p>
+            </div>
           )}
-          {!!chat.unreadCount && (
-            <span className="absolute right-4 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
-              {chat.unreadCount}
-            </span>
+          {!isLoadingChatList && (fetchStatus === 'success' || fetchStatus === 'cached') && chatList.length === 0 && (
+            <div className="p-4 text-center">
+              <p className="text-gray-500 dark:text-gray-400">No contacts to display. Add a contact to start chatting!</p>
+              <button
+                className="mt-2 bg-blue-500 dark:bg-gray-700 text-white dark:text-gray-200 px-4 py-2 rounded-lg hover:bg-blue-600 dark:hover:bg-gray-600"
+                onClick={() => {
+                  setShowAddContact(true);
+                  setShowMenu(true);
+                }}
+              >
+                Add Contact
+              </button>
+            </div>
           )}
-        </div>
-      </div>
-    ))
-  )}
-  {!isLoadingChatList && fetchStatus === 'error' && (
-    <div className="p-4 text-center">
-      <p className="text-red-500 dark:text-red-400">{fetchError}</p>
-    </div>
-  )}
-</div>
-
+          {!isLoadingChatList && (fetchStatus === 'success' || fetchStatus === 'cached') && chatList.length > 0 && (
+            chatList
+              .filter((chat) => isValidObjectId(chat.id)) // Ensure valid IDs
+              .map((chat) => (
+                <div
+                  key={chat.id}
+                  className={`flex items-center p-4 border-b border-gray-200 dark:border-gray-700 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 ${
+                    selectedChat === chat.id ? 'bg-blue-100 dark:bg-gray-600' : ''
+                  }`}
+                  onClick={() => selectChat(chat.id)}
+                >
+                  <img
+                    src={chat.photo || 'https://placehold.co/40x40'}
+                    alt="chat-avatar"
+                    className="w-10 h-10 rounded-full mr-3"
+                  />
+                  <div className="flex-1">
+                    <div className="flex justify-between">
+                      <span className="font-semibold text-gray-900 dark:text-gray-100">{chat.username || 'Unknown'}</span>
+                      {chat.latestMessage && (
+                        <span className="text-xs text-gray-500 dark:text-gray-400">
+                          {new Date(chat.latestMessage?.createdAt || chat.lastSeen || Date.now()).toLocaleTimeString([], {
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })}
+                        </span>
+                      )}
+                    </div>
+                    {chat.latestMessage && (
+                      <p className="text-sm text-gray-600 dark:text-gray-300 truncate">
+                        {chat.latestMessage.plaintextContent || `[${chat.latestMessage.contentType}]`}
+                      </p>
+                    )}
+                    {!!chat.unreadCount && (
+                      <span className="absolute right-4 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
+                        {chat.unreadCount}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              ))
+          )}
+          {!isLoadingChatList && fetchStatus === 'error' && (
+            <div className="p-4 text-center">
+              <p className="text-red-500 dark:text-red-400">{fetchError}</p>
+            </div>
+          )}
         </div>
         <div className={`flex-1 flex flex-col ${selectedChat ? 'block' : 'hidden md:block'}`}>
           {selectedChat ? (
