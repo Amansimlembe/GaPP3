@@ -213,7 +213,6 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
       socket.off('postDeleted', handlePostDeleted);
       socket.off('connect_error', handleConnectError);
       socket.off('reconnect', handleReconnect);
-      socket.disconnect(); // Add explicit disconnect
       socket.emit('leave', userId);
     };
   }, [token, userId, socket, currentIndex, playingPostId, onLogout, fetchFeed]);

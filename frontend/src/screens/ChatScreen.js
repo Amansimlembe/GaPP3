@@ -10,6 +10,8 @@ import { VariableSizeList } from 'react-window';
 import AutoSizer from 'react-virtualized-auto-sizer';
 import { setMessages, addMessage, replaceMessage, updateMessageStatus, setSelectedChat, setChatList } from '../store';
 import PropTypes from 'prop-types';
+import './ChatScreen.css';
+
 
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
 
@@ -555,7 +557,6 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
       socket.off('typing', handleTyping);
       socket.off('stopTyping', handleStopTyping);
       socket.off('messageStatus', handleMessageStatus);
-      socket.disconnect(); // Add explicit disconnect
       clearTimeout(typingTimeoutRef.current);
       clearTimeout(typingDebounceRef.current);
       clearTimeout(retryTimeoutRef.current.chatList);

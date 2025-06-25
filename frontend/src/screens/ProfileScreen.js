@@ -1,12 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
-import { FaEdit, FaSignOutAlt, FaTrash, FaEllipsisH, FaMoon, FaSun } from 'react-icons/fa';
+import { FaEdit, FaSignOutAlt, FaTrash, FaEllipsisH } from 'react-icons/fa';
 import { useDispatch } from 'react-redux';
 import { setAuth } from '../store';
 import PropTypes from 'prop-types';
 
-const ProfileScreen = ({ token, userId, socket, username: initialUsername, virtualNumber: initialVirtualNumber, photo: initialPhoto, onLogout, toggleTheme, theme }) => {
+const ProfileScreen = ({ token, userId, socket, username: initialUsername, virtualNumber: initialVirtualNumber, photo: initialPhoto, onLogout }) => {
   const dispatch = useDispatch();
   const [cvFile, setCvFile] = useState(null);
   const [photoFile, setPhotoFile] = useState(null);
@@ -84,17 +84,14 @@ const ProfileScreen = ({ token, userId, socket, username: initialUsername, virtu
       setError('Connection lost. Trying to reconnect...');
     });
 
-    document.documentElement.classList.toggle('dark', theme === 'dark');
-    localStorage.setItem('theme', theme);
-
     return () => {
       socket.off('postDeleted');
       socket.off('onlineStatus');
       socket.off('connect_error');
-      socket.disconnect(); // Add explicit disconnect
       socket.emit('leave', userId);
+      // Remove socket.disconnect() to prevent premature disconnection
     };
-  }, [token, userId, socket, theme, onLogout]);
+  }, [token, userId, socket, onLogout]);
 
   const handlePhotoChange = (e) => {
     const file = e.target.files[0];
@@ -214,23 +211,15 @@ const ProfileScreen = ({ token, userId, socket, username: initialUsername, virtu
       initial={{ y: 50, opacity: 0 }}
       animate={{ y: 0, opacity: 1 }}
       transition={{ duration: 0.5 }}
-      className="min-h-screen bg-gray-100 dark:bg-gray-900 p-6 flex items-center justify-center"
+      className="min-h-screen bg-gray-100 p-6 flex items-center justify-center"
     >
-      <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg max-w-md w-full">
+      <div className="bg-white p-6 rounded-lg shadow-lg max-w-md w-full">
         <div className="flex justify-between items-center mb-4">
-          <h2 className="text-xl font-bold text-primary dark:text-gray-100">Profile</h2>
+          <h2 className="text-xl font-bold text-primary">Profile</h2>
           <div className="flex space-x-3">
-            <motion.button
-              whileHover={{ scale: 1.1 }}
-              onClick={toggleTheme}
-              className="text-2xl text-primary dark:text-gray-100 hover:text-secondary"
-              disabled={loading}
-            >
-              {theme === 'dark' ? <FaSun /> : <FaMoon />}
-            </motion.button>
             <FaSignOutAlt
               onClick={onLogout}
-              className="text-2xl text-primary dark:text-gray-100 cursor-pointer hover:text-red-500"
+              className="text-2xl text-primary cursor-pointer hover:text-red-500"
             />
           </div>
         </div>
@@ -247,18 +236,18 @@ const ProfileScreen = ({ token, userId, socket, username: initialUsername, virtu
 
         <div className="flex flex-col items-center mb-4">
           <img src={photoPreview || photoUrl} alt="Profile" className="w-24 h-24 rounded-full mb-4 object-cover photo-preview" />
-          <p className="text-gray-700 dark:text-gray-300 mb-2">
+          <p className="text-gray-700 mb-2">
             Virtual Number: <span className="font-semibold">{virtualNumber}</span>
           </p>
           <div className="flex items-center w-full">
-            <label className="text-gray-700 dark:text-gray-300 mr-2">Username:</label>
+            <label className="text-gray-700 mr-2">Username:</label>
             {editUsername ? (
               <>
                 <input
                   type="text"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
-                  className="flex-1 p-2 border rounded-lg dark:bg-gray-700 dark:text-white focus:ring-2 focus:ring-primary"
+                  className="flex-1 p-2 border rounded-lg focus:ring-2 focus:ring-primary"
                   placeholder="Enter unique username"
                   disabled={loading}
                 />
@@ -271,22 +260,22 @@ const ProfileScreen = ({ token, userId, socket, username: initialUsername, virtu
                 </button>
               </>
             ) : (
-              <span className="flex-1 text-gray-700 dark:text-gray-300">{username}</span>
+              <span className="flex-1 text-gray-700">{username}</span>
             )}
             <FaEdit
               onClick={() => setEditUsername(!editUsername)}
-              className="ml-2 text-xl text-primary dark:text-gray-100 cursor-pointer hover:text-secondary"
+              className="ml-2 text-xl text-primary cursor-pointer hover:text-secondary"
             />
           </div>
         </div>
 
         <div className="mb-4">
-          <label className="block text-gray-700 dark:text-gray-300 mb-2">Upload CV (PDF)</label>
+          <label className="block text-gray-700 mb-2">Upload CV (PDF)</label>
           <input
             type="file"
             accept=".pdf"
             onChange={(e) => setCvFile(e.target.files[0])}
-            className="w-full p-3 border rounded-lg dark:bg-gray-700 dark:text-white"
+            className="w-full p-3 border rounded-lg"
             disabled={loading}
           />
           <button
@@ -299,12 +288,12 @@ const ProfileScreen = ({ token, userId, socket, username: initialUsername, virtu
         </div>
 
         <div className="mb-4">
-          <label className="block text-gray-700 dark:text-gray-300 mb-2">Update Profile Photo</label>
+          <label className="block text-gray-700 mb-2">Update Profile Photo</label>
           <input
             type="file"
             accept="image/*"
             onChange={handlePhotoChange}
-            className="w-full p-3 border rounded-lg dark:bg-gray-700 dark:text-white"
+            className="w-full p-3 border rounded-lg"
             disabled={loading}
           />
           <button
@@ -333,7 +322,7 @@ const ProfileScreen = ({ token, userId, socket, username: initialUsername, virtu
               className="mt-4 overflow-y-auto max-h-96"
             >
               {myPosts.length === 0 ? (
-                <p className="text-gray-500 dark:text-gray-400 text-center">No posts yet</p>
+                <p className="text-gray-500 text-center">No posts yet</p>
               ) : (
                 <div className="grid grid-cols-3 gap-2">
                   {myPosts.map((post) => (
@@ -352,11 +341,11 @@ const ProfileScreen = ({ token, userId, socket, username: initialUsername, virtu
                         <motion.div
                           initial={{ opacity: 0, y: 10 }}
                           animate={{ opacity: 1, y: 0 }}
-                          className="absolute top-6 right-1 bg-white dark:bg-gray-800 p-2 rounded shadow-lg z-10"
+                          className="absolute top-6 right-1 bg-white p-2 rounded shadow-lg z-10"
                         >
                           <button
                             onClick={() => setShowDeleteConfirm(post._id)}
-                            className="flex items-center text-red-500 hover:text-red-700 dark:text-red-400"
+                            className="flex items-center text-red-500 hover:text-red-700"
                             disabled={loading}
                           >
                             <FaTrash className="mr-1" /> Delete
@@ -378,12 +367,12 @@ const ProfileScreen = ({ token, userId, socket, username: initialUsername, virtu
             exit={{ opacity: 0 }}
             className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 menu-overlay"
           >
-            <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg menu-content">
-              <p className="mb-4 text-black dark:text-gray-100">Are you sure you want to delete this post?</p>
+            <div className="bg-white p-6 rounded-lg shadow-lg menu-content">
+              <p className="mb-4 text-black">Are you sure you want to delete this post?</p>
               <div className="flex justify-end space-x-4">
                 <button
                   onClick={() => setShowDeleteConfirm(null)}
-                  className="bg-gray-300 dark:bg-gray-600 text-black dark:text-white p-2 rounded hover:bg-gray-400 disabled:opacity-50"
+                  className="bg-gray-300 text-black p-2 rounded hover:bg-gray-400 disabled:opacity-50"
                   disabled={loading}
                 >
                   Cancel
@@ -412,7 +401,6 @@ ProfileScreen.propTypes = {
   virtualNumber: PropTypes.string,
   photo: PropTypes.string,
   onLogout: PropTypes.func.isRequired,
-  toggleTheme: PropTypes.func.isRequired,
 };
 
 export default ProfileScreen;
