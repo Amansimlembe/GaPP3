@@ -13,6 +13,7 @@ import PropTypes from 'prop-types';
 import '../index.css';
 
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
+const CACHE_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 
 const isValidObjectId = (id) => /^[0-9a-fA-F]{24}$/.test(id);
 const isValidVirtualNumber = (number) => /^\+\d{7,15}$/.test(number.trim());
@@ -48,6 +49,8 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
   const retryCountRef = useRef({ chatList: 0, addContact: 0 });
   const retryTimeoutRef = useRef({ chatList: null, addContact: null });
   const errorLogTimestamps = useRef(new Map());
+  const forgeInitAttemptsRef = useRef(0);
+  const maxForgeInitAttempts = 3;
 
   const throttle = useCallback((func, limit) => {
     let lastFunc;
@@ -103,14 +106,26 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
   }, [userId]);
 
   useEffect(() => {
-    if (forge?.random && forge?.pki && forge.cipher) {
-      setIsForgeReady(true);
-    } else {
-      console.error('Encryption library failed to load');
-      logClientError('node-forge initialization failed', new Error('Forge not loaded'));
-    }
+    const initializeForge = async () => {
+      if (forgeInitAttemptsRef.current >= maxForgeInitAttempts) {
+        console.error('Max forge initialization attempts reached');
+        logClientError('Max forge initialization attempts reached', new Error('Forge init failed'));
+        return;
+      }
+      forgeInitAttemptsRef.current += 1;
+      if (forge?.random && forge?.pki && forge?.cipher) {
+        setIsForgeReady(true);
+        console.log('Forge initialized successfully');
+      } else {
+        console.warn('Forge not ready, retrying...');
+        await new Promise((resolve) => setTimeout(resolve, 1000 * forgeInitAttemptsRef.current));
+        initializeForge();
+      }
+    };
+    initializeForge();
     return () => {
       isMountedRef.current = false;
+      forgeInitAttemptsRef.current = maxForgeInitAttempts;
     };
   }, [logClientError]);
 
@@ -160,14 +175,19 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
     }
   }, [isForgeReady, logClientError]);
 
-  // Modified fetchChatList with improved race condition handling and debugging
   const fetchChatList = useCallback(
     debounce(async (force = false) => {
-      if (!isForgeReady || !isMountedRef.current) {
-        console.log('fetchChatList aborted: forge not ready or component unmounted');
+      if (!isMountedRef.current) {
+        console.log('fetchChatList aborted: component unmounted');
         return;
       }
-      if (!force && chatList.length && chatListTimestamp && Date.now() - chatListTimestamp < 5 * 60 * 1000) {
+      if (!isForgeReady) {
+        console.log('fetchChatList deferred: forge not ready');
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        fetchChatList(force);
+        return;
+      }
+      if (!force && chatList.length && chatListTimestamp && Date.now() - chatListTimestamp < CACHE_TIMEOUT) {
         console.log('fetchChatList skipped: cache still valid');
         setFetchStatus('success');
         setFetchError(null);
@@ -189,7 +209,7 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
             params: { userId },
             timeout: 10000,
           });
-          console.log('fetchChatList response:', { fetchId, data });
+          console.log('fetchChatList response:', { fetchId, dataLength: data.length });
           if (!Array.isArray(data)) {
             throw new Error('Invalid chat list data: not an array');
           }
@@ -242,7 +262,7 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
           }
         } finally {
           if (isMountedRef.current && fetchId === fetchChatList.currentFetchId) {
-            console.log(`fetchChatList completed for fetchId: ${fetchId}, setting isLoadingChatList to false`);
+            console.log(`fetchChatList completed for fetchId: ${fetchId}`);
             setIsLoadingChatList(false);
           }
         }
@@ -256,18 +276,15 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
 
   fetchChatList.currentFetchId = null;
 
-  // Modified useEffect for initial fetch
   useEffect(() => {
     if (!token || !userId) {
-      console.error('Please log in to access chat');
+      console.error('Missing token or userId, redirecting to login');
       navigate('/login', { replace: true });
-      return;
+      return () => {};
     }
-    if (isForgeReady) {
-      console.log('Initial fetchChatList triggered');
-      fetchChatList();
-      socket?.emit('join', userId);
-    }
+    console.log('Initial fetchChatList setup');
+    fetchChatList();
+    socket?.emit('join', userId);
     const handleOffline = () => {
       console.log('Network offline, displaying cached contacts');
       setFetchError('You are offline. Displaying cached contacts.');
@@ -286,9 +303,8 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
     };
   }, [token, userId, isForgeReady, socket, navigate, fetchChatList]);
 
-  // Modified handleAddContact with defined maxRetries
   const handleAddContact = useCallback(async () => {
-    const maxRetries = 3; // Define maxRetries
+    const maxRetries = 3;
     if (!contactInput.trim()) {
       setContactError('Please enter a virtual number');
       return;
@@ -511,9 +527,8 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
     };
   }, []);
 
-  // Modified socket effect with debounced chatListUpdated
   useEffect(() => {
-    if (!socket || !isForgeReady || !userId) return;
+    if (!socket || !isForgeReady || !userId) return () => {};
 
     let statusUpdateQueue = [];
     let statusUpdateTimeout = null;
@@ -551,11 +566,12 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
           unreadCount: 0,
         }];
       }));
+      console.log(`handleNewContact: Added contact ${contactData.id}`);
     };
 
-    const handleChatListUpdated = ({ userId: emitterId, users }) => {
-      if (emitterId !== userId || !isMountedRef.current) {
-        console.log('chatListUpdated ignored: invalid emitter or unmounted');
+    const handleChatListUpdated = ({ userId: emitterId, users, page = 0, limit = 50 }) => {
+      if (!isMountedRef.current) {
+        console.log('chatListUpdated ignored: component unmounted');
         return;
       }
       const now = Date.now();
@@ -568,7 +584,7 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
         console.warn('chatListUpdated received invalid users data:', users);
         return;
       }
-      console.log(`chatListUpdated processing ${users.length} users`);
+      console.log(`chatListUpdated processing ${users.length} users for userId ${userId}`);
       dispatch(setChatList((prev) => {
         const prevMap = new Map(prev.map((chat) => [chat.id, chat]));
         users.forEach((chat) => {
