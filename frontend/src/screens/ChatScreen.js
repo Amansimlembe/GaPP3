@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
@@ -9,9 +8,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 import Picker from 'emoji-picker-react';
 import { VariableSizeList } from 'react-window';
 import AutoSizer from 'react-virtualized-auto-sizer';
-import { setMessages, addMessage, replaceMessage, updateMessageStatus, setSelectedChat, resetState, setChatList } from '../store';
-import './ChatScreen.css';
-
+import { setMessages, addMessage, replaceMessage, updateMessageStatus, setSelectedChat, setChatList } from '../store';
+import PropTypes from 'prop-types';
 
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
 
@@ -19,11 +17,10 @@ const isValidObjectId = (id) => /^[0-9a-fA-F]{24}$/.test(id);
 const isValidVirtualNumber = (number) => /^\+\d{7,15}$/.test(number.trim());
 const generateClientMessageId = () => `${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
 
-const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber, photo }) => {
+const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber, photo, onLogout, theme }) => {
   const navigate = useNavigate();
   const dispatch = useDispatch();
   const { selectedChat, chats, chatList, chatListTimestamp } = useSelector((state) => state.messages);
-  const [localChatList, setChatList] = useState([]);
   const [message, setMessage] = useState('');
   const [showMenu, setShowMenu] = useState(false);
   const [showAddContact, setShowAddContact] = useState(false);
@@ -79,23 +76,24 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
     };
   }, []);
 
-  const errorLogMap = useRef(new Map());
+  const errorLogTimestamps = useRef([]);
   const logClientError = useCallback(async (message, error) => {
     const now = Date.now();
-    const errorEntry = errorLogMap.current.get(message) || { count: 0, timestamps: [] };
-    errorEntry.timestamps = errorEntry.timestamps.filter((ts) => now - ts < 60 * 1000);
-    if (errorEntry.count >= 2 || errorEntry.timestamps.length >= maxLogsPerMinute) return;
-    errorEntry.count += 1;
-    errorEntry.timestamps.push(now);
-    errorLogMap.current.set(message, errorEntry);
+    errorLogTimestamps.current = errorLogTimestamps.current.filter((ts) => now - ts < 60 * 1000);
+    if (errorLogTimestamps.current.length >= maxLogsPerMinute) return;
+    errorLogTimestamps.current.push(now);
     try {
-      await axios.post(`${BASE_URL}/social/log-error`, {
-        error: message,
-        stack: error?.stack || '',
-        userId,
-        route: window.location.pathname,
-        timestamp: new Date().toISOString(),
-      }, { timeout: 5000 });
+      await axios.post(
+        `${BASE_URL}/social/log-error`,
+        {
+          error: message,
+          stack: error?.stack || '',
+          userId,
+          route: window.location.pathname,
+          timestamp: new Date().toISOString(),
+        },
+        { timeout: 5000 }
+      );
     } catch (err) {
       console.error('Failed to log client error:', err.message);
     }
@@ -112,50 +110,6 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
       isMountedRef.current = false;
     };
   }, [logClientError]);
-
-
-
-  // ChatScreen.js (only the relevant handleLogout function is shown for brevity)
-const handleLogout = useCallback(async () => {
-  try {
-    if (socket) {
-      socket.emit('leave', userId);
-      socket.disconnect();
-    }
-    await axios.post(
-      `${BASE_URL}/auth/logout`, // Changed: Use /auth/logout instead of /social/logout
-      {},
-      {
-        headers: { Authorization: `Bearer ${token}` },
-        timeout: 5000,
-      }
-    );
-    sessionStorage.clear();
-    localStorage.clear();
-    dispatch(resetState());
-    setChatList([]);
-    setUnreadMessages({});
-    sentStatusesRef.current.clear();
-    dispatch(setSelectedChat(null));
-    navigate('/login'); // Changed: Explicitly navigate to login
-  } catch (err) {
-    console.error('Logout failed:', err.message);
-    logClientError('Logout failed', err);
-    if (err.response?.status === 401) {
-      sessionStorage.clear();
-      localStorage.clear();
-      dispatch(resetState());
-      setChatList([]);
-      setUnreadMessages({});
-      sentStatusesRef.current.clear();
-      dispatch(setSelectedChat(null));
-      navigate('/login');
-    }
-  }
-}, [socket, userId, token, navigate, dispatch, logClientError]);
-
-
-
 
   const getPublicKey = useCallback(async (recipientId) => {
     if (!isValidObjectId(recipientId)) throw new Error('Invalid recipientId');
@@ -174,11 +128,11 @@ const handleLogout = useCallback(async () => {
       console.error('Failed to fetch public key:', err.message);
       if (err.response?.status === 401) {
         logClientError('Public key fetch failed: Unauthorized', err);
-        setTimeout(() => handleLogout(), 1000);
+        setTimeout(() => onLogout(), 1000);
       }
       throw new Error('Failed to fetch public key');
     }
-  }, [token, handleLogout, logClientError]);
+  }, [token, onLogout, logClientError]);
 
   const encryptMessage = useCallback(async (content, recipientPublicKey, isMedia = false) => {
     if (!isForgeReady || !recipientPublicKey) {
@@ -203,159 +157,151 @@ const handleLogout = useCallback(async () => {
     }
   }, [isForgeReady, logClientError]);
 
-
   const fetchChatList = useCallback(
-  debounce(async (force = false) => {
-    if (!isForgeReady || !isMountedRef.current) return;
-    if (!force && chatListTimestamp && Date.now() - chatListTimestamp < 5 * 60 * 1000) {
-      setChatList(chatList);
-      setFetchStatus('success');
-      setFetchError(null);
+    debounce(async (force = false) => {
+      if (!isForgeReady || !isMountedRef.current) return;
+      if (!force && chatListTimestamp && Date.now() - chatListTimestamp < 5 * 60 * 1000) {
+        setFetchStatus('success');
+        setFetchError(null);
+        return;
+      }
+      setFetchStatus('loading');
+      let retryCount = retryCountRef.current.chatList;
+      if (retryCount > maxRetries) {
+        setFetchStatus('error');
+        setFetchError('Max retries exceeded for chat list fetch');
+        logClientError('Max retries exceeded for chat list fetch', new Error('Max retries exceeded'));
+        return;
+      }
+      try {
+        const { data } = await axios.get(`${BASE_URL}/social/chat-list`, {
+          headers: { Authorization: `Bearer ${token}` },
+          params: { userId },
+          timeout: 10000,
+        });
+        if (isMountedRef.current) {
+          const updatedChatList = data.map((chat) => ({
+            ...chat,
+            _id: chat.id,
+            unreadCount: unreadMessages[chat.id] || chat.unreadCount || 0,
+            lastSeen: chat.lastSeen ? new Date(chat.lastSeen).toISOString() : null,
+            latestMessage: chat.latestMessage
+              ? {
+                  ...chat.latestMessage,
+                  createdAt: chat.latestMessage.createdAt ? new Date(chat.latestMessage.createdAt).toISOString() : new Date().toISOString(),
+                  updatedAt: chat.latestMessage.updatedAt ? new Date(chat.latestMessage.updatedAt).toISOString() : undefined,
+                }
+              : null,
+          }));
+          dispatch(setChatList(updatedChatList));
+          setFetchStatus('success');
+          setFetchError(null);
+        }
+        retryCountRef.current.chatList = 0;
+        clearTimeout(retryTimeoutRef.current.chatList);
+      } catch (err) {
+        if (retryCount < maxRetries) {
+          console.warn(`Chat list fetch attempt ${retryCount + 1} failed: ${err.message}`);
+        } else {
+          console.error('Chat list fetch failed:', err.message);
+        }
+        if (!isMountedRef.current) return;
+        if (err.response?.status === 401) {
+          logClientError('Chat list fetch failed: Unauthorized', err);
+          setTimeout(() => onLogout(), 1000);
+          return;
+        }
+        let delay = 2000 * Math.pow(2, retryCount);
+        if (err.response?.status === 429) {
+          delay = 60000;
+          setFetchError('Too many requests, please wait a minute');
+        } else {
+          setFetchError('Failed to load contacts, please try again');
+        }
+        if ((err.code === 'ECONNABORTED' || err.response?.status === 429 || err.response?.status === 503) && retryCount < maxRetries) {
+          retryCount += 1;
+          retryCountRef.current.chatList = retryCount;
+          clearTimeout(retryTimeoutRef.current.chatList);
+          retryTimeoutRef.current.chatList = setTimeout(() => fetchChatList(force), delay);
+        } else {
+          retryCountRef.current.chatList = 0;
+          clearTimeout(retryTimeoutRef.current.chatList);
+          setFetchStatus('error');
+          logClientError('Chat list fetch failed', err);
+        }
+      }
+    }, 1000),
+    [isForgeReady, token, userId, onLogout, unreadMessages, logClientError, dispatch, chatListTimestamp]
+  );
+
+  const handleAddContact = useCallback(async () => {
+    if (!contactInput.trim()) {
+      setContactError('Please enter a virtual number');
       return;
     }
-    setFetchStatus('loading');
-    let retryCount = retryCountRef.current.chatList;
+    if (!isValidVirtualNumber(contactInput)) {
+      setContactError('Invalid virtual number format (e.g., +1234567890)');
+      return;
+    }
+    setIsLoadingAddContact(true);
+    let retryCount = retryCountRef.current.addContact;
     if (retryCount > maxRetries) {
-      setFetchStatus('error');
-      setFetchError('Max retries exceeded for chat list fetch');
-      logClientError('Max retries exceeded for chat list fetch', new Error('Max retries exceeded'));
+      setContactError('Max retries exceeded');
+      setIsLoadingAddContact(false);
+      retryCountRef.current.addContact = 0;
       return;
     }
     try {
-      const { data } = await axios.get(`${BASE_URL}/social/chat-list`, {
-        headers: { Authorization: `Bearer ${token}` },
-        params: { userId },
-        timeout: 10000,
-      });
-      if (isMountedRef.current) {
-        const updatedChatList = data.map((chat) => ({
-          ...chat,
-          _id: chat.id,
-          unreadCount: unreadMessages[chat.id] || chat.unreadCount || 0,
-          lastSeen: chat.lastSeen ? new Date(chat.lastSeen).toISOString() : null,
-          latestMessage: chat.latestMessage
-            ? {
-                ...chat.latestMessage,
-                createdAt: chat.latestMessage.createdAt ? new Date(chat.latestMessage.createdAt).toISOString() : new Date().toISOString(),
-                updatedAt: chat.latestMessage.updatedAt ? new Date(chat.latestMessage.updatedAt).toISOString() : undefined,
-              }
-            : null,
-        }));
-        setChatList(updatedChatList);
-        dispatch(setChatList(updatedChatList));
-        setFetchStatus('success');
-        setFetchError(null);
-      }
-      retryCountRef.current.chatList = 0;
-      clearTimeout(retryTimeoutRef.current.chatList);
-    } catch (err) {
-      if (retryCount < maxRetries) {
-        console.warn(`Chat list fetch attempt ${retryCount + 1} failed: ${err.message}`);
-      } else {
-        console.error('Chat list fetch failed:', err.message);
-      }
+      const response = await axios.post(
+        `${BASE_URL}/social/add_contact`,
+        { userId, virtualNumber: contactInput.trim() },
+        { headers: { Authorization: `Bearer ${token}` }, timeout: 5000 }
+      );
       if (!isMountedRef.current) return;
-      if (err.response?.status === 401) {
-        logClientError('Chat list fetch failed: Unauthorized', err);
-        setTimeout(() => handleLogout(), 1000);
-        return;
-      }
-      let delay = 2000 * Math.pow(2, retryCount);
-      if (err.response?.status === 429) {
-        delay = 60000;
-        setFetchError('Too many requests, please wait a minute');
-      } else {
-        setFetchError('Failed to load contacts, please try again');
-      }
-      if ((err.code === 'ECONNABORTED' || err.response?.status === 429 || err.response?.status === 503) && retryCount < maxRetries) {
-        retryCount += 1;
-        retryCountRef.current.chatList = retryCount;
-        clearTimeout(retryTimeoutRef.current.chatList);
-        retryTimeoutRef.current.chatList = setTimeout(() => fetchChatList(force), delay);
-      } else {
-        retryCountRef.current.chatList = 0;
-        clearTimeout(retryTimeoutRef.current.chatList);
-        setFetchStatus('error');
-        logClientError('Chat list fetch failed', err);
-      }
-    }
-  }, 1000),
-  [isForgeReady, token, userId, handleLogout, unreadMessages, logClientError, dispatch, chatList, chatListTimestamp]
-);
-
-const handleAddContact = useCallback(async () => {
-  if (!contactInput.trim()) {
-    setContactError('Please enter a virtual number');
-    return;
-  }
-  if (!isValidVirtualNumber(contactInput)) {
-    setContactError('Invalid virtual number format (e.g., +1234567890)');
-    return;
-  }
-  setIsLoadingAddContact(true);
-  let retryCount = retryCountRef.current.addContact;
-  if (retryCount > maxRetries) {
-    setContactError('Max retries exceeded');
-    setIsLoadingAddContact(false);
-    retryCountRef.current.addContact = 0;
-    return;
-  }
-  try {
-    const response = await axios.post(
-      `${BASE_URL}/social/add_contact`,
-      { userId, virtualNumber: contactInput.trim() },
-      { headers: { Authorization: `Bearer ${token}` }, timeout: 5000 }
-    );
-    if (!isMountedRef.current) return;
-    const newChat = {
-      id: response.data.id,
-      _id: response.data.id,
-      username: response.data.username || 'Unknown',
-      virtualNumber: response.data.virtualNumber || '',
-      photo: response.data.photo || 'https://placehold.co/40x40',
-      status: response.data.status || 'offline',
-      lastSeen: response.data.lastSeen ? new Date(response.data.lastSeen).toISOString() : null,
-      latestMessage: null,
-      unreadCount: 0,
-    };
-    setChatList((prev) => {
-      if (prev.find((chat) => chat.id === newChat.id)) return prev;
-      const updatedChatList = [...prev, newChat];
-      dispatch(setChatList(updatedChatList));
-      return updatedChatList;
-    });
-    setContactInput('');
-    setContactError('');
-    setShowAddContact(false);
-    retryCountRef.current.addContact = 0;
-    clearTimeout(retryTimeoutRef.current.addContact);
-    // Force fetch chat list to ensure consistency
-    fetchChatList(true);
-  } catch (err) {
-    console.error('Add contact failed:', err.message);
-    if (!isMountedRef.current) return;
-    const errorMsg = err.response?.data?.error || 'Failed to add contact';
-    if ((err.code === 'ECONNABORTED' || err.response?.status === 429 || err.response?.status === 503) && retryCount < maxRetries) {
-      retryCount += 1;
-      retryCountRef.current.addContact = retryCount;
-      const delay = err.response?.status === 429 ? 60000 : 1000 * Math.pow(2, retryCount);
-      clearTimeout(retryTimeoutRef.current.addContact);
-      retryTimeoutRef.current.addContact = setTimeout(handleAddContact, delay);
-    } else {
-      setContactError(errorMsg);
+      const newChat = {
+        id: response.data.id,
+        _id: response.data.id,
+        username: response.data.username || 'Unknown',
+        virtualNumber: response.data.virtualNumber || '',
+        photo: response.data.photo || 'https://placehold.co/40x40',
+        status: response.data.status || 'offline',
+        lastSeen: response.data.lastSeen ? new Date(response.data.lastSeen).toISOString() : null,
+        latestMessage: null,
+        unreadCount: 0,
+      };
+      dispatch(setChatList((prev) => {
+        if (prev.find((chat) => chat.id === newChat.id)) return prev;
+        return [...prev, newChat];
+      }));
+      setContactInput('');
+      setContactError('');
+      setShowAddContact(false);
       retryCountRef.current.addContact = 0;
       clearTimeout(retryTimeoutRef.current.addContact);
-      if (err.response?.status === 401) {
-        logClientError('Add contact failed: Unauthorized', err);
-        setTimeout(() => handleLogout(), 1000);
+      fetchChatList(true);
+    } catch (err) {
+      console.error('Add contact failed:', err.message);
+      if (!isMountedRef.current) return;
+      const errorMsg = err.response?.data?.error || 'Failed to add contact';
+      if ((err.code === 'ECONNABORTED' || err.response?.status === 429 || err.response?.status === 503) && retryCount < maxRetries) {
+        retryCount += 1;
+        retryCountRef.current.addContact = retryCount;
+        const delay = err.response?.status === 429 ? 60000 : 1000 * Math.pow(2, retryCount);
+        clearTimeout(retryTimeoutRef.current.addContact);
+        retryTimeoutRef.current.addContact = setTimeout(handleAddContact, delay);
+      } else {
+        setContactError(errorMsg);
+        retryCountRef.current.addContact = 0;
+        clearTimeout(retryTimeoutRef.current.addContact);
+        if (err.response?.status === 401) {
+          logClientError('Add contact failed: Unauthorized', err);
+          setTimeout(() => onLogout(), 1000);
+        }
       }
+    } finally {
+      if (isMountedRef.current) setIsLoadingAddContact(false);
     }
-  } finally {
-    if (isMountedRef.current) setIsLoadingAddContact(false);
-  }
-}, [contactInput, token, userId, handleLogout, logClientError, dispatch, fetchChatList]);
-
-
+  }, [contactInput, token, userId, onLogout, logClientError, dispatch, fetchChatList]);
 
   const fetchMessages = useCallback(async (chatId) => {
     if (!isForgeReady || !isValidObjectId(chatId) || !isMountedRef.current) return;
@@ -385,10 +331,10 @@ const handleAddContact = useCallback(async () => {
       console.error('Messages fetch failed:', err.message);
       if (err.response?.status === 401) {
         logClientError('Messages fetch failed: Unauthorized', err);
-        setTimeout(() => handleLogout(), 1000);
+        setTimeout(() => onLogout(), 1000);
       }
     }
-  }, [isForgeReady, token, userId, socket, dispatch, logClientError]);
+  }, [isForgeReady, token, userId, socket, dispatch, logClientError, onLogout]);
 
   const sendMessage = useCallback(async (retryCount = 0) => {
     if (!isForgeReady || !message.trim() || !selectedChat || !isValidObjectId(selectedChat)) return;
@@ -489,9 +435,6 @@ const handleAddContact = useCallback(async () => {
     }
   }, [selectedChat, userId, virtualNumber, username, photo, token, dispatch, chats]);
 
-
-
-
   useEffect(() => {
     if (sentStatusesRef.current.size > maxStatuses) {
       const iterator = sentStatusesRef.current.values();
@@ -499,9 +442,6 @@ const handleAddContact = useCallback(async () => {
         sentStatusesRef.current.delete(iterator.next().value);
       }
     }
-    return () => {
-      sentStatusesRef.current.clear();
-    };
   }, [chats]);
 
   useEffect(() => {
@@ -522,16 +462,13 @@ const handleAddContact = useCallback(async () => {
       }
     };
 
-
-    
-
     const handleNewContact = ({ userId: emitterId, contactData }) => {
       if (!contactData?.id || !isValidObjectId(contactData.id)) {
         console.error('Invalid contactData received:', contactData);
         return;
       }
       if (!isMountedRef.current) return;
-      setChatList((prev) => {
+      dispatch(setChatList((prev) => {
         if (prev.find((chat) => chat.id === contactData.id)) return prev;
         const newChat = {
           id: contactData.id,
@@ -544,10 +481,8 @@ const handleAddContact = useCallback(async () => {
           latestMessage: null,
           unreadCount: 0,
         };
-        const updatedChatList = [...prev, newChat];
-        dispatch(setChatList(updatedChatList));
-        return updatedChatList;
-      });
+        return [...prev, newChat];
+      }));
     };
 
     const handleChatListUpdated = ({ userId: emitterId, users }) => {
@@ -557,7 +492,6 @@ const handleAddContact = useCallback(async () => {
         _id: chat.id,
         unreadCount: unreadMessages[chat.id] || chat.unreadCount || 0,
       }));
-      setChatList(updatedChatList);
       dispatch(setChatList(updatedChatList));
     };
 
@@ -627,7 +561,6 @@ const handleAddContact = useCallback(async () => {
       clearTimeout(retryTimeoutRef.current.addContact);
       clearTimeout(statusUpdateTimeout);
       flushStatusUpdates();
-      setChatList([]);
       setUnreadMessages({});
       setIsTyping({});
     };
@@ -636,12 +569,11 @@ const handleAddContact = useCallback(async () => {
   useEffect(() => {
     if (!token || !userId) {
       console.error('Please log in to access chat');
-      navigate('/');
+      navigate('/login', { replace: true });
       return;
     }
     if (isForgeReady) {
       if (chatList.length && chatListTimestamp && Date.now() - chatListTimestamp < 5 * 60 * 1000) {
-        setChatList(chatList);
         setFetchStatus('success');
       } else {
         fetchChatList();
@@ -651,14 +583,13 @@ const handleAddContact = useCallback(async () => {
     const handleOffline = () => {
       setFetchError('You are offline. Displaying cached contacts.');
       setFetchStatus('cached');
-      setChatList(chatList);
     };
     window.addEventListener('offline', handleOffline);
     return () => {
       clearTimeout(retryTimeoutRef.current.chatList);
       clearTimeout(retryTimeoutRef.current.addContact);
-      sentStatusesRef.current = new Set();
-      errorLogMap.current = new Map();
+      sentStatusesRef.current.clear();
+      errorLogTimestamps.current = [];
       window.removeEventListener('offline', handleOffline);
     };
   }, [token, userId, isForgeReady, socket, navigate, fetchChatList, chatList, chatListTimestamp]);
@@ -673,7 +604,7 @@ const handleAddContact = useCallback(async () => {
     const handleClickOutside = (e) => {
       if (menuRef.current && !menuRef.current.contains(e.target)) {
         setShowMenu(false);
-        setShowAddContact(null);
+        setShowAddContact(false);
         setShowAttachmentPicker(false);
         setShowEmojiPicker(false);
       }
@@ -682,7 +613,7 @@ const handleAddContact = useCallback(async () => {
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
       setShowMenu(false);
-      setShowAddContact(null);
+      setShowAddContact(false);
       setShowAttachmentPicker(false);
       setShowEmojiPicker(false);
     };
@@ -704,7 +635,7 @@ const handleAddContact = useCallback(async () => {
 
   const selectChat = useCallback((chatId) => {
     dispatch(setSelectedChat(chatId));
-    setShowMenu('');
+    setShowMenu(false);
     if (chatId && socket) {
       const unreadMessageIds = (chats[chatId] || [])
         .filter((m) => m.status !== 'read' && m.recipientId.toString() === userId && !sentStatusesRef.current.has(m._id))
@@ -743,31 +674,50 @@ const handleAddContact = useCallback(async () => {
       return (
         <>
           {showDate && (
-            <div className="date-header">
-              <span className="timestamp">{new Date(msg.createdAt).toLocaleDateString()}</span>
+            <div className="flex justify-center my-2">
+              <span className="text-xs text-gray-500 dark:text-gray-400 bg-gray-200 dark:bg-gray-700 px-2 py-1 rounded">
+                {new Date(msg.createdAt).toLocaleDateString()}
+              </span>
             </div>
           )}
-          <div className="message-container" style={style}>
-            <div className={`message ${isMine ? 'mine' : 'other'}`}>
+          <div className={`flex ${isMine ? 'justify-end' : 'justify-start'} px-4`} style={style}>
+            <div
+              className={`max-w-[70%] rounded-lg p-3 ${
+                isMine ? 'bg-blue-500 text-white' : 'bg-gray-200 dark:bg-gray-700 text-gray-900 dark:text-gray-100'
+              }`}
+            >
               {msg.contentType === 'text' ? (
-                <p className="message-content">{msg.plaintextContent || '[Message not decrypted]'}</p>
+                <p>{msg.plaintextContent || '[Message not decrypted]'}</p>
               ) : (
                 <>
-                  {msg.contentType === 'image' && <img src={msg.content} alt="media" className="message-media" />}
-                  {msg.contentType === 'video' && <video src={msg.content} controls className="message-media" />}
-                  {msg.contentType === 'audio' && <audio src={msg.content} controls className="message-audio" />}
+                  {msg.contentType === 'image' && (
+                    <img src={msg.content} alt="media" className="max-w-full h-auto rounded" />
+                  )}
+                  {msg.contentType === 'video' && (
+                    <video src={msg.content} controls className="max-w-full h-auto rounded" />
+                  )}
+                  {msg.contentType === 'audio' && (
+                    <audio src={msg.content} controls className="w-full" />
+                  )}
                   {msg.contentType === 'document' && (
-                    <a href={msg.content} className="message-document" target="_blank" rel="noopener noreferrer">
+                    <a
+                      href={msg.content}
+                      className="text-blue-500 dark:text-blue-400 underline"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
                       {msg.originalFilename || 'Document'}
                     </a>
                   )}
-                  {msg.caption && <p className="message-caption">{msg.caption}</p>}
+                  {msg.caption && <p className="mt-1 text-sm">{msg.caption}</p>}
                 </>
               )}
-              <div className="message-meta">
-                <span className="timestamp">{new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+              <div className="flex justify-between items-center mt-1 text-xs">
+                <span className={isMine ? 'text-white' : 'text-gray-500 dark:text-gray-400'}>
+                  {new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                </span>
                 {isMine && (
-                  <span className="message-status">
+                  <span className="ml-2">
                     {msg.status === 'pending' ? 'o' : msg.status === 'sent' ? '✓' : msg.status === 'delivered' ? '✓✓' : '👀'}
                   </span>
                 )}
@@ -777,47 +727,58 @@ const handleAddContact = useCallback(async () => {
         </>
       );
     },
-    [chats, selectedChat, userId]
+    [chats, selectedChat, userId, theme]
   );
 
   if (!isForgeReady) {
     return (
-      <div className="chat-screen">
-        <div className="loading-screen">Encryption library failed to load</div>
+      <div className="min-h-screen flex items-center justify-center bg-gray-100 dark:bg-gray-900">
+        <p className="text-red-500 dark:text-red-400">Encryption library failed to load</p>
       </div>
     );
   }
 
   return (
-    <div className="chat-screen">
-      <div className="chat-header">
-        <h1 className="title">Grok Chat</h1>
-        <div className="chat-menu">
-          <FaEllipsisV className="menu-icon" onClick={() => setShowMenu(!showMenu)} />
+    <div className={`min-h-screen flex flex-col bg-gray-100 dark:bg-gray-900 ${theme === 'dark' ? 'dark' : ''}`}>
+      <div className="flex justify-between items-center p-4 bg-blue-500 dark:bg-gray-800 text-white dark:text-gray-200">
+        <h1 className="text-xl font-bold">Grok Chat</h1>
+        <div className="relative">
+          <FaEllipsisV className="cursor-pointer" onClick={() => setShowMenu(!showMenu)} />
           <AnimatePresence>
             {showMenu && (
               <motion.div
                 ref={menuRef}
-                className="menu-dropdown"
+                className="absolute right-0 mt-2 w-48 bg-white dark:bg-gray-800 rounded-lg shadow-lg z-10"
                 initial={{ opacity: 0, y: 0 }}
                 animate={{ opacity: 1, y: 10 }}
                 exit={{ opacity: 0, y: 0 }}
                 transition={{ duration: 0.2 }}
               >
-                <div className="menu-item" onClick={() => { setShowAddContact(true); setShowMenu(false); }}>
-                  <FaPlus className="menu-item-icon" />
+                <button
+                  className="flex items-center w-full px-4 py-2 text-gray-900 dark:text-gray-100 hover:bg-gray-100 dark:hover:bg-gray-700"
+                  onClick={() => {
+                    setShowAddContact(true);
+                    setShowMenu(false);
+                  }}
+                >
+                  <FaPlus className="mr-2" />
                   Add Contact
-                </div>
-                <div className="menu-item logout" onClick={handleLogout}>
-                  <FaSignOutAlt className="menu-item-icon" />
+                </button>
+                <button
+                  className="flex items-center w-full px-4 py-2 text-red-500 dark:text-red-400 hover:bg-gray-100 dark:hover:bg-gray-700"
+                  onClick={onLogout}
+                >
+                  <FaSignOutAlt className="mr-2" />
                   Logout
-                </div>
+                </button>
                 {showAddContact && (
-                  <div className="menu-add-contact">
-                    <div className="contact-input-group">
+                  <div className="p-4 bg-white dark:bg-gray-800 rounded-b-lg">
+                    <div className="relative">
                       <input
                         type="text"
-                        className={`contact-input input ${contactError ? 'error' : ''}`}
+                        className={`w-full p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-gray-300 ${
+                          contactError ? 'border-red-500' : 'border-gray-300 dark:border-gray-600'
+                        } bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100`}
                         value={contactInput}
                         onChange={(e) => setContactInput(e.target.value)}
                         placeholder="Enter virtual number (e.g., +1234567890)"
@@ -825,14 +786,14 @@ const handleAddContact = useCallback(async () => {
                       />
                       {contactInput && (
                         <FaTimes
-                          className="clear-input-icon"
+                          className="absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-500 dark:text-gray-400 cursor-pointer"
                           onClick={() => setContactInput('')}
                         />
                       )}
                     </div>
-                    {contactError && <p className="error-text">{contactError}</p>}
+                    {contactError && <p className="text-red-500 dark:text-red-400 text-sm mt-1">{contactError}</p>}
                     <button
-                      className="contact-button"
+                      className="mt-2 w-full bg-blue-500 dark:bg-gray-700 text-white dark:text-gray-200 px-4 py-2 rounded-lg hover:bg-blue-600 dark:hover:bg-gray-600 disabled:opacity-50"
                       onClick={handleAddContact}
                       disabled={!contactInput.trim() || isLoadingAddContact}
                     >
@@ -845,25 +806,25 @@ const handleAddContact = useCallback(async () => {
           </AnimatePresence>
         </div>
       </div>
-      <div className="chat-content">
-        <div className={`chat-list ${selectedChat ? 'hidden md:block' : 'block'}`}>
+      <div className="flex flex-1 overflow-hidden">
+        <div className={`w-full md:w-1/3 bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 ${selectedChat ? 'hidden md:block' : 'block'}`}>
           <button
-            className="refresh-button bg-primary text-white px-4 py-2 rounded mb-2"
+            className="m-4 bg-blue-500 dark:bg-gray-700 text-white dark:text-gray-200 px-4 py-2 rounded-lg hover:bg-blue-600 dark:hover:bg-gray-600"
             onClick={() => fetchChatList(true)}
           >
             Refresh Contacts
           </button>
           {fetchStatus === 'loading' && (
-            <div className="loading-message">
-              <p>Loading contacts...</p>
+            <div className="p-4 text-center">
+              <p className="text-gray-500 dark:text-gray-400">Loading contacts...</p>
             </div>
           )}
           {(fetchStatus === 'error' || fetchStatus === 'cached') && (
-            <div className="error-message">
-              <p>{fetchError}</p>
+            <div className="p-4 text-center">
+              <p className="text-red-500 dark:text-red-400">{fetchError}</p>
               {fetchStatus === 'error' && (
                 <button
-                  className="retry-button bg-primary text-white px-4 py-2 rounded mt-2"
+                  className="mt-2 bg-blue-500 dark:bg-gray-700 text-white dark:text-gray-200 px-4 py-2 rounded-lg hover:bg-blue-600 dark:hover:bg-gray-600"
                   onClick={() => {
                     retryCountRef.current.chatList = 0;
                     fetchChatList(true);
@@ -874,65 +835,74 @@ const handleAddContact = useCallback(async () => {
               )}
             </div>
           )}
-          {fetchStatus === 'success' && localChatList.length === 0 && (
-            <div className="no-contacts-message">
-              <p>No contacts to display. Add a contact to start chatting!</p>
+          {(fetchStatus === 'success' || fetchStatus === 'cached') && chatList.length === 0 && (
+            <div className="p-4 text-center">
+              <p className="text-gray-500 dark:text-gray-400">No contacts to display. Add a contact to start chatting!</p>
               <button
-                className="add-contact-button bg-primary text-white px-4 py-2 rounded mt-2"
-                onClick={() => { setShowAddContact(true); setShowMenu(true); }}
+                className="mt-2 bg-blue-500 dark:bg-gray-700 text-white dark:text-gray-200 px-4 py-2 rounded-lg hover:bg-blue-600 dark:hover:bg-gray-600"
+                onClick={() => {
+                  setShowAddContact(true);
+                  setShowMenu(true);
+                }}
               >
                 Add Contact
               </button>
             </div>
           )}
-          {(fetchStatus === 'success' || fetchStatus === 'cached') && localChatList.length > 0 && (
-            localChatList.map((chat) => (
+          {(fetchStatus === 'success' || fetchStatus === 'cached') && chatList.length > 0 && (
+            chatList.map((chat) => (
               <div
                 key={chat.id}
-                className={`chat-list-item ${selectedChat === chat.id ? 'selected' : ''}`}
+                className={`flex items-center p-4 border-b border-gray-200 dark:border-gray-700 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 ${
+                  selectedChat === chat.id ? 'bg-blue-100 dark:bg-gray-600' : ''
+                }`}
                 onClick={() => selectChat(chat.id)}
               >
                 <img
                   src={chat.photo || 'https://placehold.co/40x40'}
                   alt="chat-avatar"
-                  className="chat-list-img"
+                  className="w-10 h-10 rounded-full mr-3"
                 />
-                <div className="chat-list-info">
-                  <div className="chat-list-header">
-                    <span className="chat-list-username">{chat.username}</span>
+                <div className="flex-1">
+                  <div className="flex justify-between">
+                    <span className="font-semibold text-gray-900 dark:text-gray-100">{chat.username}</span>
                     {chat.latestMessage && (
-                      <span className="chat-list-time">
+                      <span className="text-xs text-gray-500 dark:text-gray-400">
                         {new Date(chat.latestMessage?.createdAt || chat.lastSeen || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                       </span>
                     )}
                   </div>
                   {chat.latestMessage && (
-                    <p className="chat-list-preview">{chat.latestMessage.plaintextContent || `[${chat.latestMessage.contentType}]`}</p>
+                    <p className="text-sm text-gray-600 dark:text-gray-300 truncate">{chat.latestMessage.plaintextContent || `[${chat.latestMessage.contentType}]`}</p>
                   )}
                   {!!chat.unreadCount && (
-                    <span className="chat-list-unread">{chat.unreadCount}</span>
+                    <span className="absolute right-4 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
+                      {chat.unreadCount}
+                    </span>
                   )}
                 </div>
               </div>
             ))
           )}
         </div>
-        <div className={`chat-conversation ${selectedChat ? 'block' : 'hidden md:block'}`}>
+        <div className={`flex-1 flex flex-col ${selectedChat ? 'block' : 'hidden md:block'}`}>
           {selectedChat ? (
             <>
-              <div className="conversation-header">
-                <FaArrowLeft className="back-icon md:hidden" onClick={() => selectChat(null)} />
+              <div className="flex items-center p-4 bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
+                <FaArrowLeft className="mr-3 cursor-pointer md:hidden text-gray-900 dark:text-gray-100" onClick={() => selectChat(null)} />
                 <img
-                  src={localChatList.find((c) => c.id === selectedChat)?.photo || 'https://placehold.co/40x40'}
+                  src={chatList.find((c) => c.id === selectedChat)?.photo || 'https://placehold.co/40x40'}
                   alt="chat-avatar-img"
-                  className="conversation-avatar-img"
+                  className="w-10 h-10 rounded-full mr-3"
                 />
-                <div className="conversation-info">
-                  <h2 className="title">{localChatList.find((c) => c.id === selectedChat)?.username || ''}</h2>
-                  {isTyping[selectedChat] && <span className="typing-indicator">Typing...</span>}
+                <div>
+                  <h2 className="font-semibold text-gray-900 dark:text-gray-100">
+                    {chatList.find((c) => c.id === selectedChat)?.username || ''}
+                  </h2>
+                  {isTyping[selectedChat] && <span className="text-sm text-gray-500 dark:text-gray-400">Typing...</span>}
                 </div>
               </div>
-              <div className="conversation-messages">
+              <div className="flex-1 overflow-hidden">
                 {chats[selectedChat]?.length ? (
                   <AutoSizer>
                     {({ height, width }) => (
@@ -949,96 +919,118 @@ const handleAddContact = useCallback(async () => {
                     )}
                   </AutoSizer>
                 ) : (
-                  <p className="no-messages">No messages yet</p>
-                )}
-              </div>
-              <div className="input-bar">
-                <FaSmile
-                  className="emoji-icon"
-                  onClick={() => setShowEmojiPicker(!showEmojiPicker)}
-                />
-                {showEmojiPicker && (
-                  <Picker
-                    onEmojiClick={(emojiObject) => {
-                      setMessage((prev) => prev + emojiObject.emoji);
-                      setShowEmojiPicker(false);
-                    }}
-                  />
-                )}
-                <FaPaperclip
-                  className="attachment-icon"
-                  onClick={() => setShowAttachmentPicker(!showAttachmentPicker)}
-                />
-                {showAttachmentPicker && (
-                  <div className="attachment-picker">
-                    <label htmlFor="attach-image" className="picker-item">
-                      <FaImage />
-                      <input
-                        id="attach-image"
-                        type="file"
-                        accept="image/*"
-                        onChange={handleAttachment}
-                        ref={fileInputRef}
-                        style={{ display: 'none' }}
-                      />
-                    </label>
-                    <label htmlFor="attach-video" className="picker-item">
-                      <FaVideo />
-                      <input
-                        id="attach-video"
-                        type="file"
-                        accept="video/*"
-                        onChange={handleAttachment}
-                        style={{ display: 'none' }}
-                      />
-                    </label>
-                    <label htmlFor="attach-audio" className="picker-item">
-                      <FaMusic />
-                      <input
-                        id="attach-audio"
-                        type="file"
-                        accept="audio/*"
-                        onChange={handleAttachment}
-                        style={{ display: 'none' }}
-                      />
-                    </label>
-                    <label htmlFor="attach-document" className="picker-item">
-                      <FaFile />
-                      <input
-                        id="attach-document"
-                        type="file"
-                        accept=".pdf,.doc,.docx,.txt"
-                        onChange={handleAttachment}
-                        style={{ display: 'none' }}
-                      />
-                    </label>
+                  <div className="flex-1 flex items-center justify-center text-gray-500 dark:text-gray-400">
+                    <p>No messages yet</p>
                   </div>
                 )}
-                <input
-                  ref={inputRef}
-                  type="text"
-                  className="message-input input"
-                  value={message}
-                  onChange={(e) => setMessage(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      sendMessage();
-                    }
-                  }}
-                  onKeyUp={handleTyping}
-                  placeholder="Type a message..."
-                />
-                <FaPaperPlane className="send-icon" onClick={sendMessage} />
+              </div>
+              <div className="p-4 bg-white dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700">
+                <div className="flex items-center space-x-2">
+                  <FaSmile
+                    className="text-gray-500 dark:text-gray-400 cursor-pointer"
+                    onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+                  />
+                  {showEmojiPicker && (
+                    <div className="absolute bottom-16">
+                      <Picker
+                        onEmojiClick={(emojiObject) => {
+                          setMessage((prev) => prev + emojiObject.emoji);
+                          setShowEmojiPicker(false);
+                        }}
+                      />
+                    </div>
+                  )}
+                  <FaPaperclip
+                    className="text-gray-500 dark:text-gray-400 cursor-pointer"
+                    onClick={() => setShowAttachmentPicker(!showAttachmentPicker)}
+                  />
+                  {showAttachmentPicker && (
+                    <div className="absolute bottom-16 flex space-x-2 bg-white dark:bg-gray-800 p-2 rounded-lg shadow-lg">
+                      <label className="cursor-pointer text-gray-500 dark:text-gray-400">
+                        <FaImage />
+                        <input
+                          id="attach-image"
+                          type="file"
+                          accept="image/*"
+                          onChange={handleAttachment}
+                          ref={fileInputRef}
+                          style={{ display: 'none' }}
+                        />
+                      </label>
+                      <label className="cursor-pointer text-gray-500 dark:text-gray-400">
+                        <FaVideo />
+                        <input
+                          id="attach-video"
+                          type="file"
+                          accept="video/*"
+                          onChange={handleAttachment}
+                          style={{ display: 'none' }}
+                        />
+                      </label>
+                      <label className="cursor-pointer text-gray-500 dark:text-gray-400">
+                        <FaMusic />
+                        <input
+                          id="attach-audio"
+                          type="file"
+                          accept="audio/*"
+                          onChange={handleAttachment}
+                          style={{ display: 'none' }}
+                        />
+                      </label>
+                      <label className="cursor-pointer text-gray-500 dark:text-gray-400">
+                        <FaFile />
+                        <input
+                          id="attach-document"
+                          type="file"
+                          accept=".pdf,.doc,.docx,.txt"
+                          onChange={handleAttachment}
+                          style={{ display: 'none' }}
+                        />
+                      </label>
+                    </div>
+                  )}
+                  <input
+                    ref={inputRef}
+                    type="text"
+                    className="flex-1 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-gray-300 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100"
+                    value={message}
+                    onChange={(e) => setMessage(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        sendMessage();
+                      }
+                    }}
+                    onKeyUp={handleTyping}
+                    placeholder="Type a message..."
+                  />
+                  <FaPaperPlane
+                    className="text-blue-500 dark:text-gray-300 cursor-pointer"
+                    onClick={sendMessage}
+                  />
+                </div>
               </div>
             </>
           ) : (
-            <p className="no-messages">Select a chat to start messaging</p>
+            <div className="flex-1 flex items-center justify-center text-gray-500 dark:text-gray-400">
+              <p>Select a chat to start messaging</p>
+            </div>
           )}
         </div>
       </div>
     </div>
   );
 });
+
+ChatScreen.propTypes = {
+  token: PropTypes.string.isRequired,
+  userId: PropTypes.string.isRequired,
+  socket: PropTypes.object.isRequired,
+  username: PropTypes.string,
+  virtualNumber: PropTypes.string,
+  photo: PropTypes.string,
+  onLogout: PropTypes.func.isRequired,
+  theme: PropTypes.string.isRequired,
+};
 
 export default ChatScreen;

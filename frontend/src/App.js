@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { BrowserRouter as Router, Route, Routes, Navigate, NavLink, useLocation } from 'react-router-dom';
+import { BrowserRouter as Router, Route, Routes, Navigate, NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { FaHome, FaBriefcase, FaComments, FaUser } from 'react-icons/fa';
 import axios from 'axios';
@@ -14,7 +14,6 @@ import ChatScreen from './screens/ChatScreen';
 import ProfileScreen from './screens/ProfileScreen';
 import CountrySelector from './components/CountrySelector';
 import { setAuth, clearAuth, setSelectedChat, resetState } from './store';
-import { useNavigate } from 'react-router-dom';
 
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
 
@@ -74,7 +73,7 @@ class ErrorBoundary extends React.Component {
             <h2 className="text-xl font-bold text-red-500">Critical Error</h2>
             <p className="my-4 text-gray-700 dark:text-gray-300">Something went wrong. Please try again later.</p>
             <button
-              className="bg-primary text-white px-4 py-2 rounded hover:bg-secondary"
+              className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
               onClick={() => window.location.reload()}
             >
               Reload
@@ -352,7 +351,7 @@ const App = () => {
       isRefreshing = true;
       try {
         const expTime = getTokenExpiration(token);
-        if (expTime && expTime - Date.now() < 5 * 60 * 1000) { // Increased to 5 minutes
+        if (expTime && expTime - Date.now() < 5 * 60 * 1000) {
           await refreshToken();
         }
       } catch (err) {
@@ -422,20 +421,18 @@ const App = () => {
   );
 };
 
-
-
-  const AuthenticatedApp = ({
+const AuthenticatedApp = ({
   token,
   userId,
   role,
-  userId, photo,
-  photoId, virtualNumber,
-  username, phone,
-  chatNotifications, number,
-  socket, contacts,
+  photo,
+  virtualNumber,
+  username,
+  chatNotifications,
+  socket,
   toggleTheme,
   handleChatNavigation,
-  handleTheme,
+  theme,
   handleLogout,
 }) => {
   const location = useLocation();
@@ -452,16 +449,16 @@ const App = () => {
     return null;
   }
 
-
-  
   return (
-    <div className={`min-h-screen flex-col h-screen ${theme} flex items-center justify-between dark ? dark' : ''} bg-gray-100 dark:bg-gray-900 dark`}>
+    <div className={`min-h-screen flex flex-col h-screen bg-gray-100 dark:bg-gray-900 ${theme === 'dark' ? 'dark' : ''}`}>
       {!virtualNumber && (
         <CountrySelector
           token={token}
           userId={userId}
           virtualNumber={virtualNumber}
-          onComplete={(newVirtualNumber) => dispatch(setAuth({ token, userId, role, photo, virtualNumber, virtualNumber:newVirtualNumber, username}))}
+          onComplete={(newVirtualNumber) =>
+            dispatch(setAuth({ token, userId, role, photo, virtualNumber: newVirtualNumber, username }))
+          }
         />
       )}
       <div className="flex-1 p-0 relative">
@@ -470,23 +467,15 @@ const App = () => {
             path="/jobs"
             element={
               role === 0 ? (
-                 <JobSeekerScreen token={token} userId={userId} onLogout={handleLogout} />
+                <JobSeekerScreen token={token} userId={userId} onLogout={handleLogout} theme={theme} />
               ) : (
-                <EmployerScreen token={token} userId={userId} onLogout={handleLogout} />
+                <EmployerScreen token={token} userId={userId} onLogout={handleLogout} theme={theme} />
               )
             }
           />
           <Route
             path="/feed"
-            element={
-              <FeedScreen
-                token={token}
-                userId={userId}
-                socket={socket}
-                onLogout={handleLogout}
-                theme={theme}
-              />
-            }
+            element={<FeedScreen token={token} userId={userId} socket={socket} onLogout={handleLogout} theme={theme} />}
           />
           <Route
             path="/chat"
@@ -499,6 +488,7 @@ const App = () => {
                 virtualNumber={virtualNumber}
                 photo={photo}
                 onLogout={handleLogout}
+                theme={theme}
               />
             }
           />
@@ -521,67 +511,70 @@ const App = () => {
           <Route path="*" element={<Navigate to="/login" replace />} />
         </Routes>
       </div>
-
-
-
       <motion.nav
         initial={{ y: 0 }}
         animate={{ y: isChatRouteWithSelectedChat ? 200 : 0 }}
         transition={{ duration: 0.3 }}
-        className="fixed bottom-0 left-0 right-0 bg-primary text-white p-2 flex justify-around items-center shadow-lg z-20"
+        className="fixed bottom-0 left-0 right-0 bg-blue-500 dark:bg-gray-800 text-white p-2 flex justify-around items-center shadow-lg z-20"
       >
         <NavLink
           to="/feed"
           className={({ isActive }) =>
-            `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'} focus:outline-none focus:ring-2 focus:ring-white`
+            `flex flex-col items-center p-2 rounded-md ${
+              isActive ? 'bg-blue-600 dark:bg-gray-700' : 'hover:bg-blue-600 dark:hover:bg-gray-700'
+            } focus:outline-none focus:ring-2 focus:ring-white dark:focus:ring-gray-300`
           }
           aria-label="Feed"
         >
-          <FaHome className="text-xl" />
-          <span className="text-xs">Feed</span>
+          <FaHome className="text-xl text-white dark:text-gray-200" />
+          <span className="text-xs text-white dark:text-gray-200">Feed</span>
         </NavLink>
         <NavLink
           to="/jobs"
           className={({ isActive }) =>
-            `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'} focus:outline-none focus:ring-2 focus:ring-white`
+            `flex flex-col items-center p-2 rounded-md ${
+              isActive ? 'bg-blue-600 dark:bg-gray-700' : 'hover:bg-blue-600 dark:hover:bg-gray-700'
+            } focus:outline-none focus:ring-2 focus:ring-white dark:focus:ring-gray-300`
           }
           aria-label="Jobs"
         >
-          <FaBriefcase className="text-xl" />
-          <span className="text-xs">Jobs</span>
+          <FaBriefcase className="text-xl text-white dark:text-gray-200" />
+          <span className="text-xs text-white dark:text-gray-200">Jobs</span>
         </NavLink>
         <NavLink
           to="/chat"
           onClick={handleChatNavigation}
           className={({ isActive }) =>
-            `flex flex-col items-center p-2 rounded relative ${isActive ? 'bg-secondary' : 'hover:bg-secondary'} focus:outline-none focus:ring-2 focus:ring-white`
+            `flex flex-col items-center p-2 rounded-md relative ${
+              isActive ? 'bg-blue-600 dark:bg-gray-700' : 'hover:bg-blue-600 dark:hover:bg-gray-700'
+            } focus:outline-none focus:ring-2 focus:ring-white dark:focus:ring-gray-300`
           }
           aria-label={`Chat ${chatNotifications > 0 ? `with ${chatNotifications} notifications` : ''}`}
         >
-          <FaComments className="text-xl" />
+          <FaComments className="text-xl text-white dark:text-gray-200" />
           {chatNotifications > 0 && (
             <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
               {chatNotifications}
             </span>
           )}
-          <span className="text-xs">Chat</span>
+          <span className="text-xs text-white dark:text-gray-200">Chat</span>
         </NavLink>
         <NavLink
           to="/profile"
           className={({ isActive }) =>
-            `flex flex-col items-center p-2 rounded ${isActive ? 'bg-secondary' : 'hover:bg-secondary'} focus:outline-none focus:ring-2 focus:ring-white`
+            `flex flex-col items-center p-2 rounded-md ${
+              isActive ? 'bg-blue-600 dark:bg-gray-700' : 'hover:bg-blue-600 dark:hover:bg-gray-700'
+            } focus:outline-none focus:ring-2 focus:ring-white dark:focus:ring-gray-300`
           }
           aria-label="Profile"
         >
-          <FaUser className="text-xl" />
-          <span className="text-xs">Profile</span>
+          <FaUser className="text-xl text-white dark:text-gray-200" />
+          <span className="text-xs text-white dark:text-gray-200">Profile</span>
         </NavLink>
       </motion.nav>
     </div>
   );
 };
-
-
 
 AuthenticatedApp.propTypes = {
   token: PropTypes.string.isRequired,
@@ -591,13 +584,11 @@ AuthenticatedApp.propTypes = {
   virtualNumber: PropTypes.string,
   username: PropTypes.string,
   chatNotifications: PropTypes.number.isRequired,
-  socket: PropTypes.object,
+  socket: PropTypes.object.isRequired,
   toggleTheme: PropTypes.func.isRequired,
   handleChatNavigation: PropTypes.func.isRequired,
   theme: PropTypes.string.isRequired,
   handleLogout: PropTypes.func.isRequired,
 };
-
-
 
 export default App;
