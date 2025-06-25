@@ -530,10 +530,10 @@ export const store = configureStore({
     }).concat(persistenceMiddleware),
 });
 
-// Initialize store with persisted state
 export const initializeStore = async () => {
   try {
     const persistedState = await loadPersistedState();
+    console.log('Persisted state loaded:', persistedState); // Debug
     if (persistedState) {
       store.dispatch(setAuth(persistedState.auth));
       Object.entries(persistedState.messages.chats).forEach(([recipientId, messages]) => {

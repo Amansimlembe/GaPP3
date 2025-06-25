@@ -71,11 +71,15 @@ try {
   logger.error(`Failed to access build directory: ${buildPath}`, { error: err.message });
 }
 
-app.get('/health', (req, res) => {
+
+
+
+app.get('/health', async (req, res) => {
   res.status(200).json({
     status: 'OK',
     uptime: process.uptime(),
     mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+    authEndpoint: await fetch(`${BASE_URL}/auth/logout`).then(res => res.status).catch(() => 'unreachable'),
   });
 });
 

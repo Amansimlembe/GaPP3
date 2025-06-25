@@ -39,7 +39,11 @@ class ErrorBoundary extends React.Component {
               route: window.location.pathname,
               timestamp: new Date().toISOString(),
               component: 'App',
-              additionalInfo: JSON.stringify({ token: !!this.props.userId, location: window.location.pathname }),
+              additionalInfo: JSON.stringify({
+                token: !!this.props.userId,
+                location: window.location.pathname,
+                errorDetails: error.stack || error.message,
+              }),
             },
             { timeout: 5000 }
           );
@@ -137,6 +141,11 @@ const logClientError = async (message, error, userId = null) => {
           userId,
           route: window.location.pathname,
           timestamp: new Date().toISOString(),
+          additionalInfo: JSON.stringify({
+            navigatorOnline: navigator.onLine,
+            currentPath: window.location.pathname,
+            errorDetails: error?.stack || error?.message,
+          }),
         },
         { timeout: 5000 }
       );
@@ -161,6 +170,7 @@ const App = () => {
   const [socket, setSocket] = useState(null);
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
   const [error, setError] = useState(null);
+  const [isNavigating, setIsNavigating] = useState(false); // New: Prevent navigation loops
 
   const handleLogout = useCallback(async () => {
     try {
@@ -182,6 +192,7 @@ const App = () => {
       dispatch(resetState());
       setChatNotifications(0);
       setSocket(null);
+      setIsNavigating(true);
       navigate('/login', { replace: true });
     } catch (err) {
       console.error('Logout failed:', err.message);
@@ -192,6 +203,7 @@ const App = () => {
       dispatch(resetState());
       setChatNotifications(0);
       setSocket(null);
+      setIsNavigating(true);
       navigate('/login', { replace: true });
     }
   }, [socket, userId, token, navigate, dispatch]);
@@ -240,15 +252,23 @@ const App = () => {
   }, [dispatch, token, userId, handleLogout]);
 
   useEffect(() => {
+    // Debug: Log navigation context
+    console.log('App useEffect triggered:', { token, userId, location: location.pathname, isNavigating });
     if (!token || !userId) {
+      if (isNavigating) {
+        console.log('Skipping navigation to /login due to ongoing navigation');
+        return;
+      }
       if (socket) {
         socket.disconnect();
         setSocket(null);
       }
       try {
+        setIsNavigating(true);
         navigate('/login', { replace: true });
+        console.log('Navigated to /login');
       } catch (err) {
-        console.error('Navigation error:', err.message);
+        console.error('Navigation error:', err.message, err.stack);
         logClientError('Navigation to login failed', err, userId);
         setError('Failed to navigate to login, please try again');
       }
@@ -330,7 +350,7 @@ const App = () => {
       setSocket(null);
       console.log('Socket cleanup completed');
     };
-  }, [token, userId, selectedChat, handleLogout, navigate]);
+  }, [token, userId, selectedChat, handleLogout, navigate, isNavigating]);
 
   useEffect(() => {
     if (!token || !userId) return;
@@ -371,6 +391,28 @@ const App = () => {
     setChatNotifications(0);
     dispatch(setSelectedChat(null));
   }, [dispatch]);
+
+  // Fallback UI for navigation failure
+  if (error && location.pathname !== '/login') {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-gray-100 dark:bg-gray-900">
+        <div className="bg-red-500 text-white p-4 rounded-lg shadow-lg max-w-md w-full">
+          <p className="text-sm">{error}</p>
+          <button
+            className="bg-white text-red-500 px-3 py-1 mt-2 rounded hover:bg-gray-200"
+            onClick={() => {
+              setError(null);
+              setIsNavigating(true);
+              navigate('/login', { replace: true });
+            }}
+            aria-label="Retry login"
+          >
+            Go to Login
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <ErrorBoundary userId={userId} location={location}>
@@ -465,7 +507,8 @@ const AuthenticatedApp = ({
           />
           <Route
             path="/feed"
-            element={<FeedScreen token={token} userId={userId} socket={socket} onLogout={handleLogout} theme={theme} />}
+            element={<FeedScreen token={token} userId={userId} socket={socket} onLogout={handleLogout} theme={theme} />
+            }
           />
           <Route
             path="/chat"
