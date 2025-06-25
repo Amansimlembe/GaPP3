@@ -251,29 +251,38 @@ const App = () => {
     }
   }, [dispatch, token, userId, handleLogout]);
 
+
+
   useEffect(() => {
-    // Debug: Log navigation context
-    console.log('App useEffect triggered:', { token, userId, location: location.pathname, isNavigating });
-    if (!token || !userId) {
-      if (isNavigating) {
-        console.log('Skipping navigation to /login due to ongoing navigation');
-        return;
-      }
-      if (socket) {
-        socket.disconnect();
-        setSocket(null);
-      }
-      try {
-        setIsNavigating(true);
-        navigate('/login', { replace: true });
-        console.log('Navigated to /login');
-      } catch (err) {
-        console.error('Navigation error:', err.message, err.stack);
-        logClientError('Navigation to login failed', err, userId);
-        setError('Failed to navigate to login, please try again');
-      }
-      return;
+  console.log('App useEffect triggered:', { token, userId, location: location.pathname, isNavigating });
+
+  // Skip if already navigating to /login
+  if (isNavigating && location.pathname === '/login') {
+    console.log('Skipping effect due to ongoing navigation to /login');
+    setIsNavigating(false);
+    return;
+  }
+
+  // Early return if no token or userId
+  if (!token || !userId) {
+    if (location.pathname !== '/login' && !isNavigating) {
+      console.log('Navigating to /login due to missing token or userId');
+      setIsNavigating(true);
+      navigate('/login', { replace: true });
     }
+    if (socket) {
+      socket.disconnect();
+      setSocket(null);
+    }
+    return;
+  }
+
+  // Use ref to prevent duplicate socket connections
+  const hasConnectedRef = useRef(false);
+
+  // Debounce socket connection
+  const debouncedConnect = debounce(() => {
+    if (hasConnectedRef.current || !navigator.onLine) return;
 
     const newSocket = io(BASE_URL, {
       auth: { token, userId },
@@ -283,7 +292,9 @@ const App = () => {
       reconnectionDelayMax: 3000,
       timeout: 10000,
     });
+
     setSocket(newSocket);
+    hasConnectedRef.current = true;
 
     const handleConnect = () => {
       newSocket.emit('join', userId);
@@ -302,6 +313,7 @@ const App = () => {
     const handleDisconnect = (reason) => {
       console.warn('Socket disconnected:', reason);
       logClientError(`Socket disconnected: ${reason}`, new Error(reason), userId);
+      hasConnectedRef.current = false;
       if (reason === 'io server disconnect' && navigator.onLine) {
         newSocket.connect();
       }
@@ -348,9 +360,33 @@ const App = () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
       setSocket(null);
+      hasConnectedRef.current = false;
       console.log('Socket cleanup completed');
     };
-  }, [token, userId, selectedChat, handleLogout, navigate, isNavigating]);
+  }, 1000);
+
+  debouncedConnect();
+
+  return () => {
+    clearTimeout(debouncedConnect);
+    if (socket) {
+      socket.emit('leave', userId);
+      socket.disconnect();
+      setSocket(null);
+    }
+    hasConnectedRef.current = false;
+    console.log('Effect cleanup');
+  };
+}, [token, userId, location.pathname, handleLogout, navigate]); // Removed selectedChat, added location.pathname
+
+// Add debounce function if not defined elsewhere
+const debounce = (func, wait) => {
+  let timeout;
+  return (...args) => {
+    clearTimeout(timeout);
+    timeout = setTimeout(() => func(...args), wait);
+  };
+};
 
   useEffect(() => {
     if (!token || !userId) return;
