@@ -18,7 +18,7 @@ import { setAuth, clearAuth, setSelectedChat, resetState } from './store';
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
 
 class ErrorBoundary extends React.Component {
-  state = { hasError: false, error: null, location: null };
+  state = { hasError: false, error: null, errorInfo: null };
 
   static getDerivedStateFromError(error) {
     return { hasError: true, error };
@@ -26,6 +26,7 @@ class ErrorBoundary extends React.Component {
 
   componentDidCatch(error, errorInfo) {
     console.error('ErrorBoundary caught:', error, errorInfo);
+    this.setState({ errorInfo });
     const retryLog = async (retries = 3, baseDelay = 1000) => {
       for (let i = 0; i < retries; i++) {
         try {
@@ -57,38 +58,21 @@ class ErrorBoundary extends React.Component {
 
   componentDidUpdate(prevProps) {
     if (this.props.location !== prevProps.location && this.state.hasError) {
-      this.setState({ hasError: false, error: null });
+      this.setState({ hasError: false, error: null, errorInfo: null });
     }
   }
 
   handleDismiss = () => {
-    this.setState({ hasError: false, error: null });
+    this.setState({ hasError: false, error: null, errorInfo: null });
   };
 
   render() {
-    if (this.state.hasError && this.state.error?.message?.includes('Critical')) {
-      return (
-        <div className="min-h-screen flex items-center justify-center bg-gray-100 dark:bg-gray-900">
-          <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg max-w-md w-full text-center">
-            <h2 className="text-xl font-bold text-red-500">Critical Error</h2>
-            <p className="my-4 text-gray-700 dark:text-gray-300">Something went wrong. Please try again later.</p>
-            <button
-              className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
-              onClick={() => window.location.reload()}
-            >
-              Reload
-            </button>
-          </div>
-        </div>
-      );
-    }
-
     return (
       <>
         {this.state.hasError && (
           <div className="fixed top-4 left-1/2 transform -translate-x-1/2 bg-red-500 text-white p-4 rounded-lg shadow-lg z-50 max-w-md w-full">
             <h2 className="text-lg font-semibold">Error</h2>
-            <p className="my-2 text-sm">{this.state.error?.message || 'Unknown error'}</p>
+            <p className="my-2 text-sm">{this.state.error?.message || 'An unexpected error occurred'}</p>
             <button
               className="bg-white text-red-500 px-3 py-1 rounded hover:bg-gray-200 focus:outline-none focus:ring-2 focus:ring-white"
               onClick={this.handleDismiss}
@@ -261,7 +245,13 @@ const App = () => {
         socket.disconnect();
         setSocket(null);
       }
-      navigate('/login', { replace: true });
+      try {
+        navigate('/login', { replace: true });
+      } catch (err) {
+        console.error('Navigation error:', err.message);
+        logClientError('Navigation to login failed', err, userId);
+        setError('Failed to navigate to login, please try again');
+      }
       return;
     }
 
