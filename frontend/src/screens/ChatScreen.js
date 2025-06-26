@@ -91,7 +91,6 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
   // Only log critical errors
   const isCritical = message.includes('Unauthorized') || message.includes('failed after max retries') || message.includes('Forge init failed');
   if (!isCritical) {
-    console.log(`Non-critical client error suppressed: ${message}`);
     return;
   }
   errorEntry.count += 1;
@@ -110,7 +109,7 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
       },
       { timeout: 5000 }
     );
-    console.log(`Critical client error logged: ${message}`);
+    
   } catch (err) {
     console.error('Failed to log client error:', err.message);
   }
@@ -124,7 +123,6 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
   useEffect(() => {
     const initializeForge = async () => {
       if (forgeInitAttemptsRef.current >= maxForgeInitAttempts) {
-        console.error('Max forge initialization attempts reached');
         logClientError('Max forge initialization attempts reached', new Error('Forge init failed'));
         setIsForgeReady(true); // Proceed to avoid blocking
         return;
@@ -132,7 +130,7 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
       forgeInitAttemptsRef.current += 1;
       if (forge?.random && forge?.pki && forge?.cipher) {
         setIsForgeReady(true);
-        console.log('Forge initialized successfully');
+        
       } else {
         console.warn('Forge not ready, retrying...');
         await new Promise((resolve) => setTimeout(resolve, 1000 * forgeInitAttemptsRef.current));
@@ -183,7 +181,6 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
       )}`;
       return encrypted;
     } catch (err) {
-      console.error('Encryption failed:', err.message);
       throw new Error('Failed to encrypt message');
     }
   }, [isForgeReady, logClientError]);
@@ -194,32 +191,31 @@ const fetchChatList = useCallback(
   debounce(
     async (force = false) => {
       if (!isMountedRef.current) {
-        console.log('fetchChatList aborted: component unmounted');
         return;
       }
       // Instantly use cached contacts if available
       if (!force && chatList.length && chatListTimestamp && Date.now() - chatListTimestamp < CACHE_TIMEOUT) {
-        console.log('fetchChatList: Using cached contacts instantly');
+        
         setFetchStatus('cached');
         setFetchError(null);
         setIsLoadingChatList(false);
         return;
       }
       if (!navigator.onLine && !force) {
-        console.log('fetchChatList: Device offline, using cached contacts');
+        
         setFetchStatus('cached');
         setFetchError('You are offline. Displaying cached contacts.');
         setIsLoadingChatList(false);
         return;
       }
       if (!isForgeReady) {
-        console.log('fetchChatList deferred: forge not ready');
+        
         setFetchStatus('loading');
         setIsLoadingChatList(true);
         return;
       }
       const fetchId = `${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
-      console.log(`fetchChatList started with fetchId: ${fetchId}`);
+    
       setIsLoadingChatList(true);
       setFetchStatus('loading');
       let retryCount = retryCountRef.current.chatList;
@@ -233,7 +229,7 @@ const fetchChatList = useCallback(
             params: { userId },
             timeout: 10000,
           });
-          console.log('fetchChatList response:', { fetchId, dataLength: data.length });
+        
           if (!Array.isArray(data)) {
             throw new Error('Invalid chat list data: not an array');
           }
@@ -262,7 +258,7 @@ const fetchChatList = useCallback(
               setFetchStatus('success');
               setFetchError(null);
             } else {
-              console.warn('fetchChatList: No valid chats in response, retaining existing chatList');
+             
               setFetchStatus('success');
               setFetchError(null);
             }
@@ -271,11 +267,11 @@ const fetchChatList = useCallback(
           }
         } catch (err) {
           if (!isMountedRef.current || fetchId !== fetchChatList.currentFetchId) {
-            console.log(`fetchChatList aborted for fetchId: ${fetchId}`);
+            
             return;
           }
           if (err.response?.status === 401) {
-            console.error('fetchChatList unauthorized:', err.message);
+           
             logClientError('Chat list fetch failed: Unauthorized', err);
             setTimeout(() => onLogout(), 1000);
             return;
@@ -288,7 +284,6 @@ const fetchChatList = useCallback(
             clearTimeout(retryTimeoutRef.current.chatList);
             retryTimeoutRef.current.chatList = setTimeout(attemptFetch, delay);
           } else {
-            console.error('fetchChatList failed after max retries:', err.message);
             setFetchStatus('error');
             setFetchError('Failed to load contacts, please try again');
             logClientError('Chat list fetch failed after max retries', err);
@@ -317,14 +312,14 @@ fetchChatList.cancel = () => debounce.cancel();
 useEffect(() => {
   isMountedRef.current = true;
   if (!token || !userId) {
-    console.error('Missing token or userId, redirecting to login');
+    
     navigate('/login', { replace: true });
     return () => {};
   }
-  console.log('Initial fetchChatList setup');
+  
   // Instantly populate cached contacts if available
   if (chatList.length && chatListTimestamp && Date.now() - chatListTimestamp < CACHE_TIMEOUT) {
-    console.log('Initial setup: Using cached contacts instantly');
+    
     setFetchStatus('cached');
     setFetchError(null);
     setIsLoadingChatList(false);
@@ -343,14 +338,14 @@ useEffect(() => {
     }
   }
   const handleOffline = () => {
-    console.log('Network offline, displaying cached contacts');
+   
     setFetchError('You are offline. Displaying cached contacts.');
     setFetchStatus('cached');
     setIsLoadingChatList(false);
   };
   window.addEventListener('offline', handleOffline);
   return () => {
-    console.log('Cleaning up initial fetch effect');
+  
     isMountedRef.current = false;
     clearTimeout(retryTimeoutRef.current.chatList);
     clearTimeout(retryTimeoutRef.current.addContact);
@@ -363,75 +358,101 @@ useEffect(() => {
   };
 }, [token, userId, socket, navigate, fetchChatList, chatList, chatListTimestamp]);
 
-  const handleAddContact = useCallback(async () => {
-    const maxRetries = 3;
-    if (!contactInput.trim()) {
-      setContactError('Please enter a virtual number');
-      return;
-    }
-    if (!isValidVirtualNumber(contactInput)) {
-      setContactError('Invalid virtual number format (e.g., +1234567890)');
-      return;
-    }
-    setIsLoadingAddContact(true);
-    let retryCount = retryCountRef.current.addContact;
-    if (retryCount > maxRetries) {
-      setContactError('Max retries exceeded');
-      setIsLoadingAddContact(false);
-      retryCountRef.current.addContact = 0;
-      return;
-    }
-    try {
-      const response = await axios.post(
-        `${BASE_URL}/social/add_contact`,
-        { userId, virtualNumber: contactInput.trim() },
-        { headers: { Authorization: `Bearer ${token}` }, timeout: 5000 }
-      );
-      if (!isMountedRef.current) return;
-      const newChat = {
-        id: response.data.id,
-        _id: response.data.id,
-        username: response.data.username || 'Unknown',
-        virtualNumber: response.data.virtualNumber || '',
-        photo: response.data.photo || 'https://placehold.co/40x40',
-        status: response.data.status || 'offline',
-        lastSeen: response.data.lastSeen ? new Date(response.data.lastSeen).toISOString() : null,
-        latestMessage: null,
-        unreadCount: 0,
+
+
+const handleAddContact = useCallback(async () => {
+  const maxRetries = 3;
+  if (!contactInput.trim()) {
+    setContactError('Please enter a virtual number');
+    return;
+  }
+  if (!isValidVirtualNumber(contactInput)) {
+    setContactError('Invalid virtual number format (e.g., +1234567890)');
+    return;
+  }
+  setIsLoadingAddContact(true);
+  let retryCount = retryCountRef.current.addContact;
+  if (retryCount > maxRetries) {
+    setContactError('Max retries exceeded');
+    setIsLoadingAddContact(false);
+    retryCountRef.current.addContact = 0;
+    return;
+  }
+  try {
+    const response = await axios.post(
+      `${BASE_URL}/social/add_contact`,
+      { userId, virtualNumber: contactInput.trim() },
+      { headers: { Authorization: `Bearer ${token}` }, timeout: 5000 }
+    );
+    if (!isMountedRef.current) return;
+    const newChat = {
+      id: response.data.id,
+      _id: response.data.id,
+      username: response.data.username || 'Unknown',
+      virtualNumber: response.data.virtualNumber || '',
+      photo: response.data.photo || 'https://placehold.co/40x40',
+      status: response.data.status || 'offline',
+      lastSeen: response.data.lastSeen ? new Date(response.data.lastSeen).toISOString() : null,
+      latestMessage: null,
+      unreadCount: 0,
+    };
+    // Update chatList instantly and persist
+    dispatch(setChatList((prev) => {
+      if (prev.find((chat) => chat.id === newChat.id)) return prev;
+      const updatedChatList = [...prev, newChat];
+      // Persist updated chatList immediately
+      const state = store.getState();
+      const serializableState = {
+        messages: {
+          selectedChat: state.messages.selectedChat,
+          chats: state.messages.chats,
+          chatList: updatedChatList,
+          chatListTimestamp: Date.now(),
+          messagesTimestamp: state.messages.messagesTimestamp,
+          chatMessageCount: state.messages.chatMessageCount,
+        },
+        auth: state.auth,
       };
-      dispatch(setChatList((prev) => {
-        if (prev.find((chat) => chat.id === newChat.id)) return prev;
-        return [...prev, newChat];
-      }));
-      setContactInput('');
-      setContactError('');
-      setShowAddContact(false);
+      initDB().then((db) => {
+        db.put(STORE_NAME, { key: 'state', value: serializableState })
+          .then(() => console.log(`handleAddContact: Persisted updated chatList with ${updatedChatList.length} contacts`))
+          .catch((error) => logClientError('Failed to persist chatList after adding contact', error));
+      });
+      return updatedChatList;
+    }));
+    setContactInput('');
+    setContactError('');
+    setShowAddContact(false);
+    retryCountRef.current.addContact = 0;
+    clearTimeout(retryTimeoutRef.current.addContact);
+    // No need to call fetchChatList since chatList is updated instantly
+  } catch (err) {
+    
+    if (!isMountedRef.current) return;
+    const errorMsg = err.response?.data?.error || 'Failed to add contact';
+    if ((err.code === 'ECONNABORTED' || err.response?.status === 429 || err.response?.status === 503) && retryCount < maxRetries) {
+      retryCount += 1;
+      retryCountRef.current.addContact = retryCount;
+      const delay = err.response?.status === 429 ? 60000 : 1000 * Math.pow(2, retryCount);
+      clearTimeout(retryTimeoutRef.current.addContact);
+      retryTimeoutRef.current.addContact = setTimeout(handleAddContact, delay);
+    } else {
+      setContactError(errorMsg);
       retryCountRef.current.addContact = 0;
       clearTimeout(retryTimeoutRef.current.addContact);
-      fetchChatList(true);
-    } catch (err) {
-      console.error('Add contact failed:', err.message);
-      if (!isMountedRef.current) return;
-      const errorMsg = err.response?.data?.error || 'Failed to add contact';
-      if ((err.code === 'ECONNABORTED' || err.response?.status === 429 || err.response?.status === 503) && retryCount < maxRetries) {
-        retryCount += 1;
-        retryCountRef.current.addContact = retryCount;
-        const delay = err.response?.status === 429 ? 60000 : 1000 * Math.pow(2, retryCount);
-        clearTimeout(retryTimeoutRef.current.addContact);
-        retryTimeoutRef.current.addContact = setTimeout(handleAddContact, delay);
-      } else {
-        setContactError(errorMsg);
-        retryCountRef.current.addContact = 0;
-        clearTimeout(retryTimeoutRef.current.addContact);
-        if (err.response?.status === 401) {
-          logClientError('Add contact failed: Unauthorized', err);
-          setTimeout(() => onLogout(), 1000);
-        }
+      if (err.response?.status === 401) {
+        logClientError('Add contact failed: Unauthorized', err);
+        setTimeout(() => onLogout(), 1000);
       }
-    } finally {
-      if (isMountedRef.current) setIsLoadingAddContact(false);
     }
-  }, [contactInput, token, userId, onLogout, logClientError, dispatch, fetchChatList]);
+  } finally {
+    if (isMountedRef.current) setIsLoadingAddContact(false);
+  }
+}, [contactInput, token, userId, onLogout, logClientError, dispatch]);
+
+
+
+
 
   const fetchMessages = useCallback(async (chatId) => {
     if (!isForgeReady || !isValidObjectId(chatId) || !isMountedRef.current) return;
@@ -461,7 +482,7 @@ useEffect(() => {
       }
       listRef.current?.scrollToItem(data.messages.length, 'end');
     } catch (err) {
-      console.error('Messages fetch failed:', err.message);
+      
       if (err.response?.status === 401) {
         logClientError('Messages fetch failed: Unauthorized', err);
         setTimeout(() => onLogout(), 1000);
@@ -608,7 +629,6 @@ useEffect(() => {
 
     const handleNewContact = ({ contactData }) => {
       if (!contactData?.id || !isValidObjectId(contactData.id)) {
-        console.error('Invalid contactData received:', contactData);
         return;
       }
       dispatch(setChatList((prev) => {
@@ -625,7 +645,7 @@ useEffect(() => {
           unreadCount: 0,
         }];
       }));
-      console.log(`handleNewContact: Added contact ${contactData.id}`);
+      
     };
 
 
@@ -633,7 +653,7 @@ useEffect(() => {
 const handleChatListUpdated = ({ users, page = 0, limit = 50 }) => {
   const now = Date.now();
   if (now - lastChatListUpdate < 500) {
-    console.log('chatListUpdated debounced');
+
     return;
   }
   lastChatListUpdate = now;
