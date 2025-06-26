@@ -72,7 +72,11 @@ const logClientError = async (message, error, userId = null) => {
   }
 };
 
-// Auth Slice
+
+
+// In store.js
+
+// Update authSlice to ensure privateKey is cleared
 const authSlice = createSlice({
   name: 'auth',
   initialState: {
@@ -93,13 +97,126 @@ const authSlice = createSlice({
       state.photo = typeof photo === 'string' ? photo : null;
       state.virtualNumber = typeof virtualNumber === 'string' ? virtualNumber : null;
       state.username = typeof username === 'string' ? username : null;
-      state.privateKey = typeof privateKey === 'string' && privateKey ? privateKey : state.privateKey;
+      state.privateKey = typeof privateKey === 'string' && privateKey ? privateKey : null;
     },
     clearAuth: (state) => {
-      Object.assign(state, authSlice.getInitialState());
+      state.token = null;
+      state.userId = null;
+      state.role = null;
+      state.photo = null;
+      state.virtualNumber = null;
+      state.username = null;
+      state.privateKey = null;
     },
   },
 });
+
+// Update loadPersistedState to validate privateKey
+const loadPersistedState = async () => {
+  try {
+    const db = await initDB();
+    const persistedState = await db.get(STORE_NAME, 'state');
+    if (!persistedState?.value) {
+      console.log('No persisted state found');
+      return null;
+    }
+
+    const { messages, auth } = persistedState.value;
+    if (!messages || !auth) {
+      console.warn('loadPersistedState: Invalid persisted state structure', persistedState);
+      return null;
+    }
+
+    const now = Date.now();
+    const chats = Object.keys(messages.chats).reduce((acc, recipientId) => {
+      if (isValidObjectId(recipientId)) {
+        acc[recipientId] = messages.chats[recipientId]
+          .filter(
+            (msg) =>
+              isValidObjectId(msg.senderId) &&
+              isValidObjectId(msg.recipientId) &&
+              ['sent', 'delivered', 'read', 'pending', 'failed'].includes(msg.status) &&
+              now - new Date(msg.createdAt).getTime() <= MESSAGE_TTL
+          )
+          .map((msg) => ({
+            _id: msg._id || msg.clientMessageId,
+            clientMessageId: msg.clientMessageId || msg._id || `temp-${now}-${Math.random()}`,
+            content: msg.content || '',
+            contentType: msg.contentType || 'text',
+            plaintextContent: msg.plaintextContent || '[Message not decrypted]',
+            status: msg.status || 'pending',
+            senderId: msg.senderId,
+            recipientId: msg.recipientId,
+            caption: msg.caption || undefined,
+            replyTo: msg.replyTo && isValidObjectId(msg.replyTo) ? msg.replyTo : null,
+            originalFilename: msg.originalFilename || undefined,
+            senderVirtualNumber: msg.senderVirtualNumber || undefined,
+            senderUsername: msg.senderUsername || undefined,
+            senderPhoto: msg.senderPhoto || undefined,
+            createdAt: msg.createdAt ? new Date(msg.createdAt).toISOString() : new Date().toISOString(),
+            updatedAt: msg.updatedAt ? new Date(msg.updatedAt).toISOString() : undefined,
+          }))
+          .slice(-MAX_MESSAGES_PER_CHAT);
+      }
+      return acc;
+    }, {});
+
+    const chatMessageCount = Object.keys(chats).reduce((acc, recipientId) => {
+      acc[recipientId] = chats[recipientId].length;
+      return acc;
+    }, {});
+
+    const chatList = Array.isArray(messages.chatList)
+      ? messages.chatList
+          .filter((contact) => isValidObjectId(contact.id) && contact.virtualNumber)
+          .map((contact) => ({
+            id: contact.id,
+            username: contact.username || 'Unknown',
+            virtualNumber: contact.virtualNumber || '',
+            photo: contact.photo || 'https://placehold.co/40x40',
+            status: contact.status || 'offline',
+            lastSeen: contact.lastSeen ? new Date(contact.lastSeen).toISOString() : null,
+            latestMessage: contact.latestMessage
+              ? {
+                  ...contact.latestMessage,
+                  senderId: contact.latestMessage.senderId,
+                  recipientId: contact.latestMessage.recipientId,
+                  createdAt: contact.latestMessage.createdAt ? new Date(contact.latestMessage.createdAt).toISOString() : new Date().toISOString(),
+                  updatedAt: contact.latestMessage.updatedAt ? new Date(contact.latestMessage.updatedAt).toISOString() : undefined,
+                }
+              : null,
+            unreadCount: contact.unreadCount || 0,
+          }))
+      : [];
+
+    const result = {
+      messages: {
+        selectedChat: isValidObjectId(messages.selectedChat) ? messages.selectedChat : null,
+        chats,
+        chatList,
+        chatListTimestamp: messages.chatListTimestamp || 0,
+        messagesTimestamp: messages.messagesTimestamp || {},
+        chatMessageCount,
+      },
+      auth: {
+        token: typeof auth.token === 'string' && auth.token ? auth.token : null,
+        userId: isValidObjectId(auth.userId) ? auth.userId : null,
+        role: typeof auth.role === 'string' ? auth.role : null,
+        photo: typeof auth.photo === 'string' ? auth.photo : null,
+        virtualNumber: typeof auth.virtualNumber === 'string' ? auth.virtualNumber : null,
+        username: typeof auth.username === 'string' ? auth.username : null,
+        privateKey: typeof auth.privateKey === 'string' && auth.privateKey ? auth.privateKey : null,
+      },
+    };
+    return result;
+  } catch (error) {
+    await logClientError('Failed to load persisted state', error);
+    return null;
+  }
+};
+
+
+
 
 // Messages Slice
 const messageSlice = createSlice({
@@ -469,108 +586,6 @@ const persistenceMiddleware = (store) => {
   };
 };
 
-const loadPersistedState = async () => {
-  try {
-    const db = await initDB();
-    const persistedState = await db.get(STORE_NAME, 'state');
-    if (!persistedState?.value) {
-      console.log('No persisted state found');
-      return null;
-    }
-
-    const { messages, auth } = persistedState.value;
-    if (!messages || !auth) {
-      //console.warn('loadPersistedState: Invalid persisted state structure', persistedState);
-      return null;
-    }
-
-    const now = Date.now();
-    const chats = Object.keys(messages.chats).reduce((acc, recipientId) => {
-      if (isValidObjectId(recipientId)) {
-        acc[recipientId] = messages.chats[recipientId]
-          .filter(
-            (msg) =>
-              isValidObjectId(msg.senderId) &&
-              isValidObjectId(msg.recipientId) &&
-              ['sent', 'delivered', 'read', 'pending', 'failed'].includes(msg.status) &&
-              now - new Date(msg.createdAt).getTime() <= MESSAGE_TTL
-          )
-          .map((msg) => ({
-            _id: msg._id || msg.clientMessageId,
-            clientMessageId: msg.clientMessageId || msg._id || `temp-${now}-${Math.random()}`,
-            content: msg.content || '',
-            contentType: msg.contentType || 'text',
-            plaintextContent: msg.plaintextContent || '[Message not decrypted]',
-            status: msg.status || 'pending',
-            senderId: msg.senderId,
-            recipientId: msg.recipientId,
-            caption: msg.caption || undefined,
-            replyTo: msg.replyTo && isValidObjectId(msg.replyTo) ? msg.replyTo : null,
-            originalFilename: msg.originalFilename || undefined,
-            senderVirtualNumber: msg.senderVirtualNumber || undefined,
-            senderUsername: msg.senderUsername || undefined,
-            senderPhoto: msg.senderPhoto || undefined,
-            createdAt: msg.createdAt ? new Date(msg.createdAt).toISOString() : new Date().toISOString(),
-            updatedAt: msg.updatedAt ? new Date(msg.updatedAt).toISOString() : undefined,
-          }))
-          .slice(-MAX_MESSAGES_PER_CHAT);
-      }
-      return acc;
-    }, {});
-
-    const chatMessageCount = Object.keys(chats).reduce((acc, recipientId) => {
-      acc[recipientId] = chats[recipientId].length;
-      return acc;
-    }, {});
-
-    const chatList = Array.isArray(messages.chatList)
-      ? messages.chatList
-          .filter((contact) => isValidObjectId(contact.id) && contact.virtualNumber)
-          .map((contact) => ({
-            id: contact.id,
-            username: contact.username || 'Unknown',
-            virtualNumber: contact.virtualNumber || '',
-            photo: contact.photo || 'https://placehold.co/40x40',
-            status: contact.status || 'offline',
-            lastSeen: contact.lastSeen ? new Date(contact.lastSeen).toISOString() : null,
-            latestMessage: contact.latestMessage
-              ? {
-                  ...contact.latestMessage,
-                  senderId: contact.latestMessage.senderId,
-                  recipientId: contact.latestMessage.recipientId,
-                  createdAt: contact.latestMessage.createdAt ? new Date(contact.latestMessage.createdAt).toISOString() : new Date().toISOString(),
-                  updatedAt: contact.latestMessage.updatedAt ? new Date(contact.latestMessage.updatedAt).toISOString() : undefined,
-                }
-              : null,
-            unreadCount: contact.unreadCount || 0,
-          }))
-      : [];
-
-    const result = {
-      messages: {
-        selectedChat: isValidObjectId(messages.selectedChat) ? messages.selectedChat : null,
-        chats,
-        chatList,
-        chatListTimestamp: messages.chatListTimestamp || 0,
-        messagesTimestamp: messages.messagesTimestamp || {},
-        chatMessageCount,
-      },
-      auth: {
-        token: typeof auth.token === 'string' && auth.token ? auth.token : null,
-        userId: isValidObjectId(auth.userId) ? auth.userId : null,
-        role: typeof auth.role === 'string' ? auth.role : null,
-        photo: typeof auth.photo === 'string' ? auth.photo : null,
-        virtualNumber: typeof auth.virtualNumber === 'string' ? auth.virtualNumber : null,
-        username: typeof auth.username === 'string' ? auth.username : null,
-        privateKey: typeof auth.privateKey === 'string' && auth.privateKey ? auth.privateKey : null,
-      },
-    };
-    return result;
-  } catch (error) {
-    await logClientError('Failed to load persisted state', error);
-    return null;
-  }
-};
 
 // Create store
 export const store = configureStore({

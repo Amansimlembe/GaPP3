@@ -186,51 +186,83 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
     [isForgeReady, logClientError]
   );
 
-  const getPublicKey = useCallback(
-    async (recipientId) => {
-      if (!isValidObjectId(recipientId)) throw new Error('Invalid recipientId');
-      const cacheKey = `publicKey:${recipientId}`;
+  
+
+
+
+
+  // In ChatScreen.js
+
+const getPublicKey = useCallback(
+  async (recipientId) => {
+    if (!isValidObjectId(recipientId)) throw new Error('Invalid recipientId');
+    const cacheKey = `publicKey:${recipientId}`;
+    const cachedData = localStorage.getItem(cacheKey);
+    if (cachedData) {
+      const { publicKey, timestamp } = JSON.parse(cachedData);
+      if (Date.now() - timestamp < PUBLIC_KEY_CACHE_TTL) {
+        return publicKey;
+      }
+      localStorage.removeItem(cacheKey); // Remove expired key
+    }
+
+    try {
+      const { data } = await axios.get(`${BASE_URL}/auth/public_key/${recipientId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 5000,
+      });
+      if (!data.publicKey) throw new Error('No public key returned');
+      localStorage.setItem(cacheKey, JSON.stringify({ publicKey: data.publicKey, timestamp: Date.now() }));
+      return data.publicKey;
+    } catch (err) {
+      console.error(`Public key fetch failed: ${err.message}`);
+      logClientError(`Public key fetch failed for recipient ${recipientId}`, err);
+      if (err.response?.status === 401) {
+        setTimeout(() => onLogout(), 1000);
+        throw err;
+      }
+      throw new Error('Failed to fetch public key');
+    }
+  },
+  [token, onLogout, logClientError]
+);
+
+// New function to fetch public keys for all contacts after login
+const fetchContactPublicKeys = useCallback(async () => {
+  if (!chatList.length || !isForgeReady) return;
+  try {
+    const promises = chatList.map(async (chat) => {
+      if (!isValidObjectId(chat.id)) return;
+      const cacheKey = `publicKey:${chat.id}`;
       const cachedData = localStorage.getItem(cacheKey);
       if (cachedData) {
-        const { publicKey, timestamp } = JSON.parse(cachedData);
-        if (Date.now() - timestamp < PUBLIC_KEY_CACHE_TTL) {
-          return publicKey;
-        }
-        localStorage.removeItem(cacheKey); // Remove expired key
+        const { timestamp } = JSON.parse(cachedData);
+        if (Date.now() - timestamp < PUBLIC_KEY_CACHE_TTL) return;
+        localStorage.removeItem(cacheKey);
       }
-
-      const maxRetries = 3;
-      let retryCount = 0;
-      const baseDelay = 2000;
-
-      while (retryCount < maxRetries) {
-        try {
-          const { data } = await axios.get(`${BASE_URL}/auth/public_key/${recipientId}`, {
-            headers: { Authorization: `Bearer ${token}` },
-            timeout: 5000,
-          });
-          if (!data.publicKey) throw new Error('No public key returned');
+      try {
+        const { data } = await axios.get(`${BASE_URL}/auth/public_key/${chat.id}`, {
+          headers: { Authorization: `Bearer ${token}` },
+          timeout: 5000,
+        });
+        if (data.publicKey) {
           localStorage.setItem(cacheKey, JSON.stringify({ publicKey: data.publicKey, timestamp: Date.now() }));
-          return data.publicKey;
-        } catch (err) {
-          console.error(`Public key fetch attempt ${retryCount + 1} failed: ${err.message}`);
-          if (err.response?.status === 401) {
-            logClientError('Public key fetch failed: Unauthorized', err);
-            setTimeout(() => onLogout(), 1000);
-            throw err;
-          }
-          if (retryCount === maxRetries - 1) {
-            logClientError(`Public key fetch failed after ${maxRetries} retries`, err);
-            throw new Error('Failed to fetch public key');
-          }
-          retryCount++;
-          const delay = baseDelay * Math.pow(2, retryCount) * (1 + Math.random() * 0.1);
-          await new Promise((resolve) => setTimeout(resolve, delay));
         }
+      } catch (err) {
+        console.warn(`Failed to fetch public key for contact ${chat.id}: ${err.message}`);
+        logClientError(`Failed to fetch public key for contact ${chat.id}`, err);
       }
-    },
-    [token, onLogout, logClientError]
-  );
+    });
+    await Promise.all(promises);
+  } catch (err) {
+    logClientError('Failed to fetch contact public keys', err);
+  }
+}, [chatList, isForgeReady, token, logClientError]);
+
+
+
+
+
 
   const fetchChatList = useCallback(
     debounce(
@@ -346,65 +378,72 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
   );
   fetchChatList.cancel = () => debounce.cancel();
 
-  useEffect(() => {
-    isMountedRef.current = true;
-    if (!token || !userId) {
-      console.error('Missing token or userId, redirecting to login');
-      navigate('/login', { replace: true });
-      return () => {};
-    }
+// Update useEffect for initialization
+useEffect(() => {
+  isMountedRef.current = true;
+  if (!token || !userId) {
+    console.error('Missing token or userId, redirecting to login');
+    navigate('/login', { replace: true });
+    return () => {};
+  }
 
-    if (chatList.length && chatListTimestamp && Date.now() - chatListTimestamp < CACHE_TIMEOUT) {
-      setFetchStatus('cached');
-      setFetchError(null);
-      setIsLoadingChatList(false);
-    } else {
-      fetchChatList();
-    }
+  if (chatList.length && chatListTimestamp && Date.now() - chatListTimestamp < CACHE_TIMEOUT) {
+    setFetchStatus('cached');
+    setFetchError(null);
+    setIsLoadingChatList(false);
+  } else {
+    fetchChatList();
+  }
 
-    const handleSocketConnect = () => {
-      if (socket && isMountedRef.current) {
-        socket.emit('join', userId);
+  // Fetch public keys for all contacts after login
+  fetchContactPublicKeys();
+
+  const handleSocketConnect = () => {
+    if (socket && isMountedRef.current) {
+      socket.emit('join', userId);
+    }
+  };
+
+  const handleSocketDisconnect = (reason) => {
+    console.warn('Socket disconnected:', reason);
+    setTimeout(() => {
+      if (isMountedRef.current && socket && !socket.connected) {
+        socket.connect();
       }
-    };
+    }, 1000);
+  };
 
-    const handleSocketDisconnect = (reason) => {
-      console.warn('Socket disconnected:', reason);
-      setTimeout(() => {
-        if (isMountedRef.current && socket && !socket.connected) {
-          socket.connect();
-        }
-      }, 1000);
-    };
+  if (socket) {
+    socket.on('connect', handleSocketConnect);
+    socket.on('disconnect', handleSocketDisconnect);
+    if (socket.connected) {
+      socket.emit('join', userId);
+    }
+  }
 
+  const handleOffline = () => {
+    setFetchError('You are offline. Displaying cached contacts.');
+    setFetchStatus('cached');
+    setIsLoadingChatList(false);
+  };
+
+  window.addEventListener('offline', handleOffline);
+  return () => {
+    isMountedRef.current = false;
+    clearTimeout(retryTimeoutRef.current.chatList);
+    clearTimeout(retryTimeoutRef.current.addContact);
+    sentStatusesRef.current.clear();
+    errorLogTimestamps.current.clear();
     if (socket) {
-      socket.on('connect', handleSocketConnect);
-      socket.on('disconnect', handleSocketDisconnect);
-      if (socket.connected) {
-        socket.emit('join', userId);
-      }
+      socket.off('connect', handleSocketConnect);
+      socket.off('disconnect', handleSocketDisconnect);
     }
+    window.removeEventListener('offline', handleOffline);
+  };
+}, [token, userId, socket, navigate, fetchChatList, chatList, chatListTimestamp, fetchContactPublicKeys]);
 
-    const handleOffline = () => {
-      setFetchError('You are offline. Displaying cached contacts.');
-      setFetchStatus('cached');
-      setIsLoadingChatList(false);
-    };
 
-    window.addEventListener('offline', handleOffline);
-    return () => {
-      isMountedRef.current = false;
-      clearTimeout(retryTimeoutRef.current.chatList);
-      clearTimeout(retryTimeoutRef.current.addContact);
-      sentStatusesRef.current.clear();
-      errorLogTimestamps.current.clear();
-      if (socket) {
-        socket.off('connect', handleSocketConnect);
-        socket.off('disconnect', handleSocketDisconnect);
-      }
-      window.removeEventListener('offline', handleOffline);
-    };
-  }, [token, userId, socket, navigate, fetchChatList, chatList, chatListTimestamp]);
+
 
   const handleAddContact = useCallback(
     async () => {

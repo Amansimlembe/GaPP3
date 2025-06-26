@@ -225,14 +225,19 @@ const App = () => {
           timeout: 5000,
         }
       );
+      // Clear all cached public keys
+      Object.keys(localStorage).forEach((key) => {
+        if (key.startsWith('publicKey:')) {
+          localStorage.removeItem(key);
+        }
+      });
       localStorage.removeItem('token');
       localStorage.removeItem('userId');
       localStorage.removeItem('role');
       localStorage.removeItem('photo');
       localStorage.removeItem('virtualNumber');
       localStorage.removeItem('username');
-      dispatch(clearAuth());
-      dispatch(resetState());
+      dispatch(clearAuth()); // Clears privateKey in Redux store
       setChatNotifications(0);
       setSocket(null);
       setIsNavigating(true);
@@ -240,21 +245,26 @@ const App = () => {
     } catch (err) {
       console.error('Logout failed:', err.message);
       logClientError('Logout failed', err, userId);
+      // Clear all cached public keys
+      Object.keys(localStorage).forEach((key) => {
+        if (key.startsWith('publicKey:')) {
+          localStorage.removeItem(key);
+        }
+      });
       localStorage.removeItem('token');
       localStorage.removeItem('userId');
       localStorage.removeItem('role');
       localStorage.removeItem('photo');
       localStorage.removeItem('virtualNumber');
       localStorage.removeItem('username');
-      dispatch(clearAuth());
-      dispatch(resetState());
+      dispatch(clearAuth()); // Clears privateKey in Redux store
       setChatNotifications(0);
       setSocket(null);
       setIsNavigating(true);
       navigate('/login', { replace: true });
     }
-  }, [userId, token, navigate, dispatch]);
-
+  }, [userId, token, navigate, dispatch, logClientError]);
+  
   const refreshToken = useCallback(async () => {
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
