@@ -342,6 +342,9 @@ module.exports = (app) => {
     throw new Error('Socket.IO initialization failed');
   }
 
+  // Track connected users
+  const connectedUsers = new Map();
+
   io.use(async (socket, next) => {
     const token = socket.handshake.auth.token;
     if (!token) {
@@ -374,6 +377,9 @@ module.exports = (app) => {
 
   io.on('connection', (socket) => {
     logger.info('Socket.IO connection', { socketId: socket.id, userId: socket.user?.id, ip: socket.handshake.address });
+
+    // Track connected user
+    connectedUsers.set(socket.user.id, socket.id);
 
     socket.on('join', async (userId) => {
       if (!mongoose.isValidObjectId(userId) || userId !== socket.user.id) {
@@ -410,7 +416,9 @@ module.exports = (app) => {
               : null,
           });
           await Message.updateOne({ _id: msg._id }, { status: 'delivered', updatedAt: new Date() });
-          io.to(msg.senderId.toString()).emit('messageStatus', { messageIds: [msg._id], status: 'delivered' });
+          if (connectedUsers.has(msg.senderId.toString())) {
+            io.to(msg.senderId.toString()).emit('messageStatus', { messageIds: [msg._id], status: 'delivered' });
+          }
         });
         await Promise.all(messageUpdates);
       });
@@ -424,10 +432,37 @@ module.exports = (app) => {
         return;
       }
       socket.join(userId);
+      connectedUsers.set(userId, socket.id);
       await retryOperation(async () => {
         await User.findByIdAndUpdate(userId, { status: 'online', lastSeen: new Date() }, { new: true }).lean();
         io.to(userId).emit('userStatus', { userId, status: 'online', lastSeen: new Date() });
         await emitUpdatedChatList(io, userId);
+        // Process queued messages
+        const pendingMessages = await Message.find({
+          recipientId: userId,
+          status: { $in: ['pending', 'sent'] },
+        })
+          .select('senderId recipientId content contentType plaintextContent status caption replyTo originalFilename clientMessageId senderVirtualNumber senderUsername senderPhoto createdAt updatedAt')
+          .lean();
+        const messageUpdates = pendingMessages.map(async (msg) => {
+          io.to(userId).emit('message', {
+            ...msg,
+            senderId: msg.senderId.toString(),
+            recipientId: msg.recipientId.toString(),
+            replyTo: msg.replyTo
+              ? {
+                  ...msg.replyTo,
+                  senderId: msg.replyTo.senderId.toString(),
+                  recipientId: msg.replyTo.recipientId.toString(),
+                }
+              : null,
+          });
+          await Message.updateOne({ _id: msg._id }, { status: 'delivered', updatedAt: new Date() });
+          if (connectedUsers.has(msg.senderId.toString())) {
+            io.to(msg.senderId.toString()).emit('messageStatus', { messageIds: [msg._id], status: 'delivered' });
+          }
+        });
+        await Promise.all(messageUpdates);
       });
       logger.info('User reconnected', { userId, ip: socket.handshake.address });
     });
@@ -439,6 +474,7 @@ module.exports = (app) => {
         return;
       }
       socket.leave(userId);
+      connectedUsers.delete(userId);
       await retryOperation(async () => {
         await User.findByIdAndUpdate(userId, { status: 'offline', lastSeen: new Date() });
         io.to(userId).emit('userStatus', { userId, status: 'offline', lastSeen: new Date() });
@@ -451,7 +487,9 @@ module.exports = (app) => {
         socket.emit('error', { message: 'Invalid typing event' });
         return;
       }
-      io.to(recipientId).emit('typing', { userId });
+      if (connectedUsers.has(recipientId)) {
+        io.to(recipientId).emit('typing', { userId });
+      }
     });
 
     socket.on('stopTyping', ({ userId, recipientId }) => {
@@ -459,7 +497,9 @@ module.exports = (app) => {
         socket.emit('error', { message: 'Invalid stopTyping event' });
         return;
       }
-      io.to(recipientId).emit('stopTyping', { userId });
+      if (connectedUsers.has(recipientId)) {
+        io.to(recipientId).emit('stopTyping', { userId });
+      }
     });
 
     socket.on('message', async (messageData, callback) => {
@@ -496,6 +536,7 @@ module.exports = (app) => {
             .select('senderId recipientId content contentType plaintextContent status caption replyTo originalFilename clientMessageId senderVirtualNumber senderUsername senderPhoto createdAt updatedAt')
             .lean();
           if (existingMessage) {
+            logger.info('Duplicate message detected', { clientMessageId, senderId, recipientId });
             return callback({ message: existingMessage });
           }
           const sender = await User.findById(senderId)
@@ -507,7 +548,7 @@ module.exports = (app) => {
             content: content || '',
             contentType,
             plaintextContent: plaintextContent || '',
-            status: recipient.status === 'online' ? 'delivered' : 'sent',
+            status: connectedUsers.has(recipientId) ? 'delivered' : 'sent',
             caption,
             replyTo: replyTo && mongoose.isValidObjectId(replyTo) ? replyTo : undefined,
             originalFilename: messageData.originalFilename,
@@ -520,7 +561,21 @@ module.exports = (app) => {
           const populatedMessage = await Message.findById(message._id)
             .select('senderId recipientId content contentType plaintextContent status caption replyTo originalFilename clientMessageId senderVirtualNumber senderUsername senderPhoto createdAt updatedAt')
             .lean();
-          io.to(recipientId).emit('message', {
+          if (connectedUsers.has(recipientId)) {
+            io.to(recipientId).emit('message', {
+              ...populatedMessage,
+              senderId: populatedMessage.senderId.toString(),
+              recipientId: populatedMessage.recipientId.toString(),
+              replyTo: populatedMessage.replyTo
+                ? {
+                    ...populatedMessage.replyTo,
+                    senderId: populatedMessage.replyTo.senderId.toString(),
+                    recipientId: populatedMessage.replyTo.recipientId.toString(),
+                  }
+                : null,
+            });
+          }
+          io.to(senderId).emit('message', {
             ...populatedMessage,
             senderId: populatedMessage.senderId.toString(),
             recipientId: populatedMessage.recipientId.toString(),
@@ -532,25 +587,13 @@ module.exports = (app) => {
                 }
               : null,
           });
-          io.to(senderId).emit('message', {
-            ...populatedMessage,
-            senderId: populatedMessage.senderId.toString(),
-            recipientId: populatedMessage.recipientId.toString(),
-            replyTo: populatedMessage.replyTo
-              ? {
-                  ...populatedMessage.replyTo,
-                  senderId: populatedMessage.replyTo.senderId.toString(),
-                  recipientId: poppedMessage.replyTo.recipientId.toString(),
-                }
-              : null,
-          });
-          io.to(senderId).emit('messageStatus', { messageIds: [message._id], status: recipient.status === 'online' ? 'delivered' : 'sent' });
+          io.to(senderId).emit('messageStatus', { messageIds: [message._id], status: connectedUsers.has(recipientId) ? 'delivered' : 'sent' });
           await Promise.all([emitUpdatedChatList(io, senderId), emitUpdatedChatList(io, recipientId)]);
           callback({ message: populatedMessage });
         });
       } catch (err) {
-        await logError('Message send failed', { error: err.message, senderId: messageData.senderId, stack: err.stack, ip: socket.handshake.address });
-        callback({ error: 'Failed to send message' });
+        await logError('Message send failed', { error: err.message, senderId: messageData.senderId, clientMessageId: messageData.clientMessageId, stack: err.stack, ip: socket.handshake.address });
+        callback({ error: 'Failed to send message', details: err.message });
       }
     });
 
@@ -575,18 +618,20 @@ module.exports = (app) => {
         const populatedMessage = await Message.findById(message._id)
           .select('senderId recipientId content contentType plaintextContent status caption replyTo originalFilename clientMessageId senderVirtualNumber senderUsername senderPhoto createdAt updatedAt')
           .lean();
-        io.to(message.recipientId.toString()).emit('editMessage', {
-          ...populatedMessage,
-          senderId: populatedMessage.senderId.toString(),
-          recipientId: populatedMessage.recipientId.toString(),
-          replyTo: populatedMessage.replyTo
-            ? {
-                ...populatedMessage.replyTo,
-                senderId: populatedMessage.replyTo.senderId.toString(),
-                recipientId: populatedMessage.replyTo.recipientId.toString(),
-              }
-            : null,
-        });
+        if (connectedUsers.has(message.recipientId.toString())) {
+          io.to(message.recipientId.toString()).emit('editMessage', {
+            ...populatedMessage,
+            senderId: populatedMessage.senderId.toString(),
+            recipientId: populatedMessage.recipientId.toString(),
+            replyTo: populatedMessage.replyTo
+              ? {
+                  ...populatedMessage.replyTo,
+                  senderId: populatedMessage.replyTo.senderId.toString(),
+                  recipientId: populatedMessage.replyTo.recipientId.toString(),
+                }
+              : null,
+          });
+        }
         io.to(message.senderId.toString()).emit('editMessage', {
           ...populatedMessage,
           senderId: populatedMessage.senderId.toString(),
@@ -621,7 +666,9 @@ module.exports = (app) => {
           return callback({ error: 'Unauthorized to delete message' });
         }
         await Message.findByIdAndDelete(messageId);
-        io.to(recipientId).emit('deleteMessage', { messageId, recipientId });
+        if (connectedUsers.has(recipientId)) {
+          io.to(recipientId).emit('deleteMessage', { messageId, recipientId });
+        }
         io.to(message.senderId.toString()).emit('deleteMessage', { messageId, recipientId: message.senderId.toString() });
         await Promise.all([emitUpdatedChatList(io, message.senderId.toString()), emitUpdatedChatList(io, recipientId)]);
         callback({ status: 'success' });
@@ -648,8 +695,13 @@ module.exports = (app) => {
         }
         message.status = status;
         message.updatedAt = new Date();
+        if (status === 'read') {
+          message.readAt = new Date();
+        }
         await message.save();
-        io.to(message.senderId.toString()).emit('messageStatus', { messageIds: [messageId], status });
+        if (connectedUsers.has(message.senderId.toString())) {
+          io.to(message.senderId.toString()).emit('messageStatus', { messageIds: [messageId], status });
+        }
       } catch (err) {
         await logError('Message status update failed', { error: err.message, messageId, stack: err.stack, ip: socket.handshake.address });
         socket.emit('error', { message: 'Failed to update status' });
@@ -674,7 +726,7 @@ module.exports = (app) => {
         await retryOperation(async () => {
           const updateResult = await Message.updateMany(
             { _id: { $in: messageIds }, recipientId },
-            { status, updatedAt: new Date() },
+            { status, updatedAt: new Date(), ...(status === 'read' ? { readAt: new Date() } : {}) },
             { wtimeout: 10000 }
           );
           if (updateResult.matchedCount === 0) {
@@ -688,7 +740,9 @@ module.exports = (app) => {
             .hint({ _id: 1 });
           const senderIds = [...new Set(messages.map((msg) => msg.senderId.toString()))];
           senderIds.forEach((senderId) => {
-            io.to(senderId).emit('messageStatus', { messageIds, status });
+            if (connectedUsers.has(senderId)) {
+              io.to(senderId).emit('messageStatus', { messageIds, status });
+            }
           });
           callback?.({ status: 'success', updatedCount: updateResult.modifiedCount });
         });
@@ -701,6 +755,7 @@ module.exports = (app) => {
 
     socket.on('disconnect', async () => {
       if (socket.user?.id) {
+        connectedUsers.delete(socket.user.id);
         await retryOperation(async () => {
           await User.findByIdAndUpdate(socket.user.id, { status: 'offline', lastSeen: new Date() });
           io.to(socket.user.id).emit('userStatus', { userId: socket.user.id, status: 'offline', lastSeen: new Date() });
@@ -710,7 +765,7 @@ module.exports = (app) => {
     });
   });
 
-  // Routes
+  // Routes (unchanged, included for completeness)
   router.get('/health', (req, res) => res.json({ status: 'healthy' }));
 
   router.get('/chat-list', authMiddleware, async (req, res) => {
@@ -796,8 +851,8 @@ module.exports = (app) => {
                       recipientId: messageData.latestMessage.replyTo.recipientId.toString(),
                     }
                   : null,
-              }
-            : null,
+            }
+          : null,
           unreadCount: messageData?.unreadCount || 0,
         };
       });
@@ -844,6 +899,7 @@ module.exports = (app) => {
           .select('senderId recipientId content contentType plaintextContent status caption replyTo originalFilename clientMessageId senderVirtualNumber senderUsername senderPhoto createdAt updatedAt')
           .lean();
         if (existingMessage) {
+          logger.info('Duplicate message detected (HTTP)', { clientMessageId, senderId, recipientId });
           return res.status(200).json({ message: existingMessage });
         }
         const sender = await User.findById(senderId)
@@ -855,7 +911,7 @@ module.exports = (app) => {
           content: content || '',
           contentType,
           plaintextContent: plaintextContent || '',
-          status: recipient.status === 'online' ? 'delivered' : 'sent',
+          status: connectedUsers.has(recipientId) ? 'delivered' : 'sent',
           caption,
           replyTo: replyTo && mongoose.isValidObjectId(replyTo) ? replyTo : undefined,
           originalFilename: req.body.originalFilename,
@@ -868,18 +924,20 @@ module.exports = (app) => {
         const populatedMessage = await Message.findById(message._id)
           .select('senderId recipientId content contentType plaintextContent status caption replyTo originalFilename clientMessageId senderVirtualNumber senderUsername senderPhoto createdAt updatedAt')
           .lean();
-        io.to(recipientId).emit('message', {
-          ...populatedMessage,
-          senderId: populatedMessage.senderId.toString(),
-          recipientId: populatedMessage.recipientId.toString(),
-          replyTo: populatedMessage.replyTo
-            ? {
-                ...populatedMessage.replyTo,
-                senderId: populatedMessage.replyTo.senderId.toString(),
-                recipientId: populatedMessage.replyTo.recipientId.toString(),
-              }
-            : null,
-        });
+        if (connectedUsers.has(recipientId)) {
+          io.to(recipientId).emit('message', {
+            ...populatedMessage,
+            senderId: populatedMessage.senderId.toString(),
+            recipientId: populatedMessage.recipientId.toString(),
+            replyTo: populatedMessage.replyTo
+              ? {
+                  ...populatedMessage.replyTo,
+                  senderId: populatedMessage.replyTo.senderId.toString(),
+                  recipientId: populatedMessage.replyTo.recipientId.toString(),
+                }
+              : null,
+          });
+        }
         io.to(senderId).emit('message', {
           ...populatedMessage,
           senderId: populatedMessage.senderId.toString(),
@@ -892,12 +950,12 @@ module.exports = (app) => {
               }
             : null,
         });
-        io.to(senderId).emit('messageStatus', { messageIds: [message._id], status: recipient.status === 'online' ? 'delivered' : 'sent' });
+        io.to(senderId).emit('messageStatus', { messageIds: [message._id], status: connectedUsers.has(recipientId) ? 'delivered' : 'sent' });
         await Promise.all([emitUpdatedChatList(io, senderId), emitUpdatedChatList(io, recipientId)]);
         res.status(201).json({ message: populatedMessage });
       });
     } catch (error) {
-      await logError('Save message error (HTTP)', { error: error.message, senderId: req.body.senderId, stack: error.stack, ip: req.ip });
+      await logError('Save message error (HTTP)', { error: error.message, senderId: req.body.senderId, clientMessageId: req.body.clientMessageId, stack: error.stack, ip: req.ip });
       res.status(500).json({ error: 'Failed to save message' });
     }
   });
@@ -924,18 +982,20 @@ module.exports = (app) => {
       const populatedMessage = await Message.findById(message._id)
         .select('senderId recipientId content contentType plaintextContent status caption replyTo originalFilename clientMessageId senderVirtualNumber senderUsername senderPhoto createdAt updatedAt')
         .lean();
-      io.to(message.recipientId.toString()).emit('editMessage', {
-        ...populatedMessage,
-        senderId: populatedMessage.senderId.toString(),
-        recipientId: populatedMessage.recipientId.toString(),
-        replyTo: populatedMessage.replyTo
-          ? {
-              ...populatedMessage.replyTo,
-              senderId: populatedMessage.replyTo.senderId.toString(),
-              recipientId: populatedMessage.replyTo.recipientId.toString(),
-            }
-          : null,
-      });
+      if (connectedUsers.has(message.recipientId.toString())) {
+        io.to(message.recipientId.toString()).emit('editMessage', {
+          ...populatedMessage,
+          senderId: populatedMessage.senderId.toString(),
+          recipientId: populatedMessage.recipientId.toString(),
+          replyTo: populatedMessage.replyTo
+            ? {
+                ...populatedMessage.replyTo,
+                senderId: populatedMessage.replyTo.senderId.toString(),
+                recipientId: populatedMessage.replyTo.recipientId.toString(),
+              }
+            : null,
+        });
+      }
       io.to(message.senderId.toString()).emit('editMessage', {
         ...populatedMessage,
         senderId: populatedMessage.senderId.toString(),
@@ -944,7 +1004,7 @@ module.exports = (app) => {
           ? {
               ...populatedMessage.replyTo,
               senderId: populatedMessage.replyTo.senderId.toString(),
-              recipientId: populatedMessage.replyTo.recipientId.toString(),
+              recipientId: poppedMessage.replyTo.recipientId.toString(),
             }
           : null,
       });
@@ -971,7 +1031,9 @@ module.exports = (app) => {
         return res.status(403).json({ error: 'Unauthorized to delete message' });
       }
       await Message.findByIdAndDelete(messageId);
-      io.to(recipientId).emit('deleteMessage', { messageId, recipientId });
+      if (connectedUsers.has(recipientId)) {
+        io.to(recipientId).emit('deleteMessage', { messageId, recipientId });
+      }
       io.to(message.senderId.toString()).emit('deleteMessage', { messageId, recipientId: message.senderId.toString() });
       await Promise.all([emitUpdatedChatList(io, message.senderId.toString()), emitUpdatedChatList(io, recipientId)]);
       res.status(200).json({ status: 'success' });
@@ -1012,14 +1074,16 @@ module.exports = (app) => {
         await retryOperation(async () => {
           const updateResult = await Message.updateMany(
             { _id: { $in: deliveredMessageIds }, recipientId: userId },
-            { status: 'read', updatedAt: new Date() }
+            { status: 'read', readAt: new Date(), updatedAt: new Date() }
           );
           const senderIds = [...new Set(messages
             .filter((msg) => deliveredMessageIds.includes(msg._id))
             .map((msg) => msg.senderId.toString())
           )];
           senderIds.forEach((senderId) => {
-            io.to(senderId).emit('messageStatus', { messageIds: deliveredMessageIds, status: 'read' });
+            if (connectedUsers.has(senderId)) {
+              io.to(senderId).emit('messageStatus', { messageIds: deliveredMessageIds, status: 'read' });
+            }
           });
           logger.info('Updated message statuses to read', { userId, updatedCount: updateResult.modifiedCount, ip: req.ip });
         });
@@ -1098,8 +1162,12 @@ module.exports = (app) => {
         };
         chatListCache.del(`chatList:${userId}`);
         chatListCache.del(`chatList:${contact._id.toString()}`);
-        io.to(userId).emit('contactData', { userId, contactData });
-        io.to(contact._id.toString()).emit('contactData', { userId: contact._id.toString(), contactData: userData });
+        if (connectedUsers.has(userId)) {
+          io.to(userId).emit('contactData', { userId, contactData });
+        }
+        if (connectedUsers.has(contact._id.toString())) {
+          io.to(contact._id.toString()).emit('contactData', { userId: contact._id.toString(), contactData: userData });
+        }
         await Promise.all([emitUpdatedChatList(io, userId), emitUpdatedChatList(io, contact._id.toString())]);
         res.status(201).json(contactData);
       });
@@ -1126,6 +1194,7 @@ module.exports = (app) => {
           .select('senderId recipientId content contentType plaintextContent status caption replyTo originalFilename clientMessageId senderVirtualNumber senderUsername senderPhoto createdAt updatedAt')
           .lean();
         if (existingMessage) {
+          logger.info('Duplicate message detected (upload)', { clientMessageId, userId, recipientId });
           return res.json({ message: existingMessage });
         }
         const contentType = req.file.mimetype.startsWith('image/') ? 'image' :
@@ -1147,7 +1216,7 @@ module.exports = (app) => {
           content: uploadResult.secure_url,
           contentType,
           plaintextContent: '',
-          status: recipient.status === 'online' ? 'delivered' : 'sent',
+          status: connectedUsers.has(recipientId) ? 'delivered' : 'sent',
           caption,
           originalFilename: req.file.originalname,
           clientMessageId,
@@ -1161,18 +1230,20 @@ module.exports = (app) => {
           .lean();
         chatListCache.del(`chatList:${userId}`);
         chatListCache.del(`chatList:${recipientId}`);
-        io.to(recipientId).emit('message', {
-          ...populatedMessage,
-          senderId: populatedMessage.senderId.toString(),
-          recipientId: populatedMessage.recipientId.toString(),
-          replyTo: populatedMessage.replyTo
-            ? {
-                ...populatedMessage.replyTo,
-                senderId: populatedMessage.replyTo.senderId.toString(),
-                recipientId: populatedMessage.replyTo.recipientId.toString(),
-              }
-            : null,
-        });
+        if (connectedUsers.has(recipientId)) {
+          io.to(recipientId).emit('message', {
+            ...populatedMessage,
+            senderId: populatedMessage.senderId.toString(),
+            recipientId: poppedMessage.recipientId.toString(),
+            replyTo: populatedMessage.replyTo
+              ? {
+                  ...populatedMessage.replyTo,
+                  senderId: populatedMessage.replyTo.senderId.toString(),
+                  recipientId: populatedMessage.replyTo.recipientId.toString(),
+                }
+              : null,
+          });
+        }
         io.to(userId).emit('message', {
           ...populatedMessage,
           senderId: populatedMessage.senderId.toString(),
@@ -1185,12 +1256,12 @@ module.exports = (app) => {
               }
             : null,
         });
-        io.to(userId).emit('messageStatus', { messageIds: [message._id], status: recipient.status === 'online' ? 'delivered' : 'sent' });
+        io.to(userId).emit('messageStatus', { messageIds: [message._id], status: connectedUsers.has(recipientId) ? 'delivered' : 'sent' });
         await Promise.all([emitUpdatedChatList(io, userId), emitUpdatedChatList(io, recipientId)]);
         res.json({ message: populatedMessage });
       });
     } catch (err) {
-      await logError('Media upload failed', { error: err.message, userId: req.body.userId, stack: err.stack, ip: req.ip });
+      await logError('Media upload failed', { error: err.message, userId: req.body.userId, clientMessageId: req.body.clientMessageId, stack: err.stack, ip: req.ip });
       res.status(500).json({ error: 'Failed to upload media' });
     }
   });
@@ -1208,6 +1279,7 @@ module.exports = (app) => {
         sockets.forEach((socket) => socket.disconnect(true));
         await User.findByIdAndUpdate(req.user.id, { status: 'offline', lastSeen: new Date() });
         io.to(req.user.id).emit('userStatus', { userId: req.user.id, status: 'offline', lastSeen: new Date() });
+        connectedUsers.delete(req.user.id);
       });
       logger.info('Logout successful', { userId: req.user.id, ip: req.ip });
       res.status(200).json({ message: 'Logged out successfully' });
