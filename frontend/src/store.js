@@ -38,12 +38,20 @@ const initDB = async () => {
 const errorLogTimestamps = new Map();
 
 
+
+
 const logError = async (message, error, userId = null) => {
   const now = Date.now();
   const errorEntry = errorLogTimestamps.get(message) || { count: 0, timestamps: [] };
   errorEntry.timestamps = errorEntry.timestamps.filter((ts) => now - ts < 60 * 1000);
-  if (errorEntry.count >= 2 || errorEntry.timestamps.length >= 2) {
+  if (errorEntry.count >= 1 || errorEntry.timestamps.length >= 1) {
     console.log(`Error logging skipped for "${message}": rate limit reached`);
+    return;
+  }
+  // Only log critical errors
+  const isCritical = message.includes('Unauthorized') || message.includes('failed after max retries') || message.includes('IndexedDB initialization failed');
+  if (!isCritical) {
+    console.log(`Non-critical error suppressed: ${message}`);
     return;
   }
   errorEntry.count += 1;
@@ -65,9 +73,9 @@ const logError = async (message, error, userId = null) => {
     if (!response.ok) {
       throw new Error(`Server responded with status ${response.status}`);
     }
-    console.log(`Error logged successfully: ${message}`);
+    console.log(`Critical error logged: ${message}`);
   } catch (err) {
-    console.error('Failed to log error:', err.message);
+    console.error('Failed to log critical error:', err.message);
   }
 };
 
@@ -487,7 +495,8 @@ const persistenceMiddleware = (store) => {
   };
 };
 
-// Load persisted state
+
+
 const loadPersistedState = async () => {
   try {
     const db = await initDB();
@@ -533,8 +542,6 @@ const loadPersistedState = async () => {
             updatedAt: msg.updatedAt ? new Date(msg.updatedAt).toISOString() : undefined,
           }))
           .slice(-MAX_MESSAGES_PER_CHAT);
-      } else {
-        console.warn(`loadPersistedState: Invalid recipientId ${recipientId} in chats`);
       }
       return acc;
     }, {});
@@ -596,6 +603,10 @@ const loadPersistedState = async () => {
     return null;
   }
 };
+
+
+
+
 
 // Create store
 export const store = configureStore({

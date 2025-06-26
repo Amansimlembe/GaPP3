@@ -79,13 +79,24 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
     };
   }, []);
 
+
   const logClientError = useCallback(async (message, error) => {
   const now = Date.now();
   const errorEntry = errorLogTimestamps.current.get(message) || { count: 0, timestamps: [] };
-  
-  // Clear previous logs for this message to prevent accumulation
-  errorLogTimestamps.current.delete(message);
-  errorLogTimestamps.current.set(message, { count: 1, timestamps: [now] });
+  errorEntry.timestamps = errorEntry.timestamps.filter((ts) => now - ts < 60 * 1000);
+  if (errorEntry.count >= 1 || errorEntry.timestamps.length >= 1) {
+    console.log(`Client error logging skipped for "${message}": rate limit reached`);
+    return;
+  }
+  // Only log critical errors
+  const isCritical = message.includes('Unauthorized') || message.includes('failed after max retries') || message.includes('Forge init failed');
+  if (!isCritical) {
+    console.log(`Non-critical client error suppressed: ${message}`);
+    return;
+  }
+  errorEntry.count += 1;
+  errorEntry.timestamps.push(now);
+  errorLogTimestamps.current.set(message, errorEntry);
 
   try {
     await axios.post(
@@ -99,11 +110,13 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
       },
       { timeout: 5000 }
     );
-    console.log(`Logged error: ${message}`);
+    console.log(`Critical client error logged: ${message}`);
   } catch (err) {
     console.error('Failed to log client error:', err.message);
   }
 }, [userId]);
+
+
 
 
 
@@ -177,17 +190,23 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
 
 
 
-
-
-  const fetchChatList = useCallback(
+const fetchChatList = useCallback(
   debounce(
     async (force = false) => {
       if (!isMountedRef.current) {
         console.log('fetchChatList aborted: component unmounted');
         return;
       }
+      // Instantly use cached contacts if available
+      if (!force && chatList.length && chatListTimestamp && Date.now() - chatListTimestamp < CACHE_TIMEOUT) {
+        console.log('fetchChatList: Using cached contacts instantly');
+        setFetchStatus('cached');
+        setFetchError(null);
+        setIsLoadingChatList(false);
+        return;
+      }
       if (!navigator.onLine && !force) {
-        console.log('fetchChatList skipped: device offline');
+        console.log('fetchChatList: Device offline, using cached contacts');
         setFetchStatus('cached');
         setFetchError('You are offline. Displaying cached contacts.');
         setIsLoadingChatList(false);
@@ -197,13 +216,6 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
         console.log('fetchChatList deferred: forge not ready');
         setFetchStatus('loading');
         setIsLoadingChatList(true);
-        return; // Defer until forge is ready, handled by forge useEffect
-      }
-      if (!force && chatList.length && chatListTimestamp && Date.now() - chatListTimestamp < CACHE_TIMEOUT) {
-        console.log('fetchChatList skipped: cache still valid');
-        setFetchStatus('success');
-        setFetchError(null);
-        setIsLoadingChatList(false);
         return;
       }
       const fetchId = `${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
@@ -299,55 +311,57 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
   ),
   [isForgeReady, token, userId, onLogout, unreadMessages, logClientError, dispatch, chatList, chatListTimestamp]
 );
-fetchChatList.cancel = () => debounce.cancel(); // Allow cancellation of debounced calls
+fetchChatList.cancel = () => debounce.cancel();
 
 
-
-  
-
-
-
-
-  useEffect(() => {
-    isMountedRef.current = true;
-    if (!token || !userId) {
-      console.error('Missing token or userId, redirecting to login');
-      navigate('/login', { replace: true });
-      return () => {};
-    }
-    console.log('Initial fetchChatList setup');
+useEffect(() => {
+  isMountedRef.current = true;
+  if (!token || !userId) {
+    console.error('Missing token or userId, redirecting to login');
+    navigate('/login', { replace: true });
+    return () => {};
+  }
+  console.log('Initial fetchChatList setup');
+  // Instantly populate cached contacts if available
+  if (chatList.length && chatListTimestamp && Date.now() - chatListTimestamp < CACHE_TIMEOUT) {
+    console.log('Initial setup: Using cached contacts instantly');
+    setFetchStatus('cached');
+    setFetchError(null);
+    setIsLoadingChatList(false);
+  } else {
     fetchChatList();
-    const handleSocketConnect = () => {
-      if (socket && isMountedRef.current) {
-        socket.emit('join', userId);
-      }
-    };
-    if (socket) {
-      socket.on('connect', handleSocketConnect);
-      if (socket.connected) {
-        socket.emit('join', userId);
-      }
+  }
+  const handleSocketConnect = () => {
+    if (socket && isMountedRef.current) {
+      socket.emit('join', userId);
     }
-    const handleOffline = () => {
-      console.log('Network offline, displaying cached contacts');
-      setFetchError('You are offline. Displaying cached contacts.');
-      setFetchStatus('cached');
-      setIsLoadingChatList(false);
-    };
-    window.addEventListener('offline', handleOffline);
-    return () => {
-      console.log('Cleaning up initial fetch effect');
-      isMountedRef.current = false;
-      clearTimeout(retryTimeoutRef.current.chatList);
-      clearTimeout(retryTimeoutRef.current.addContact);
-      sentStatusesRef.current.clear();
-      errorLogTimestamps.current.clear();
-      if (socket) {
-        socket.off('connect', handleSocketConnect);
-      }
-      window.removeEventListener('offline', handleOffline);
-    };
-  }, [token, userId, socket, navigate, fetchChatList]);
+  };
+  if (socket) {
+    socket.on('connect', handleSocketConnect);
+    if (socket.connected) {
+      socket.emit('join', userId);
+    }
+  }
+  const handleOffline = () => {
+    console.log('Network offline, displaying cached contacts');
+    setFetchError('You are offline. Displaying cached contacts.');
+    setFetchStatus('cached');
+    setIsLoadingChatList(false);
+  };
+  window.addEventListener('offline', handleOffline);
+  return () => {
+    console.log('Cleaning up initial fetch effect');
+    isMountedRef.current = false;
+    clearTimeout(retryTimeoutRef.current.chatList);
+    clearTimeout(retryTimeoutRef.current.addContact);
+    sentStatusesRef.current.clear();
+    errorLogTimestamps.current.clear();
+    if (socket) {
+      socket.off('connect', handleSocketConnect);
+    }
+    window.removeEventListener('offline', handleOffline);
+  };
+}, [token, userId, socket, navigate, fetchChatList, chatList, chatListTimestamp]);
 
   const handleAddContact = useCallback(async () => {
     const maxRetries = 3;
