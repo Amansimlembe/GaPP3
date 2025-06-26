@@ -163,7 +163,7 @@ messageSchema.pre('save', async function (next) {
 // Static method to clean up orphaned messages
 messageSchema.statics.cleanupOrphanedMessages = async function () {
   try {
-    logger.info('Starting orphaned messages cleanup');
+   // logger.info('Starting orphaned messages cleanup');
     const batchSize = 1000;
     let totalDeleted = 0;
 
@@ -174,7 +174,7 @@ messageSchema.statics.cleanupOrphanedMessages = async function () {
     const messageUsers = [...new Set([...senderIds, ...recipientIds].map(id => id.toString()))];
 
     if (!messageUsers.length) {
-      logger.info('No messages found for cleanup');
+     // logger.info('No messages found for cleanup');
       return { deletedCount: 0 };
     }
 
@@ -187,7 +187,7 @@ messageSchema.statics.cleanupOrphanedMessages = async function () {
 
     const orphanedUserIds = messageUsers.filter(id => !existingUserIds.has(id));
     if (!orphanedUserIds.length) {
-      logger.info('No orphaned messages found');
+    // logger.info('No orphaned messages found');
       return { deletedCount: 0 };
     }
 
@@ -206,7 +206,7 @@ messageSchema.statics.cleanupOrphanedMessages = async function () {
       logger.debug('Deleted orphaned messages batch', { deleted: result.deletedCount, batchSize: batch.length });
     }
 
-    logger.info('Orphaned messages cleanup completed', { deletedCount: totalDeleted });
+    //logger.info('Orphaned messages cleanup completed', { deletedCount: totalDeleted });
     return { deletedCount: totalDeleted };
   } catch (error) {
     logger.error('Orphaned messages cleanup failed', { error: error.message, stack: error.stack });

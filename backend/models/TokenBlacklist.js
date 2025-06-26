@@ -101,10 +101,10 @@ tokenBlacklistSchema.statics.isBlacklisted = async function (token) {
     const cacheKey = `blacklist:${token}`;
     const cached = tokenCache.get(cacheKey);
     if (cached && cached.timestamp > Date.now() - TOKEN_CACHE_TTL) {
-      logger.info('Served blacklisted token check from cache', {
+      /*logger.info('Served blacklisted token check from cache', {
         token: token.slice(0, 20) + '...',
         isBlacklisted: cached.isBlacklisted,
-      });
+      });*/
       return cached.isBlacklisted;
     }
 
@@ -119,10 +119,10 @@ tokenBlacklistSchema.statics.isBlacklisted = async function (token) {
       tokenCache.delete(oldestKey);
     }
 
-    logger.info('Checked token blacklist status', {
+    /*logger.info('Checked token blacklist status', {
       token: token.slice(0, 20) + '...',
       isBlacklisted,
-    });
+    });*/
     return isBlacklisted;
   } catch (error) {
     logger.error('Token blacklist check failed', {
@@ -140,7 +140,7 @@ tokenBlacklistSchema.statics.cleanupExpiredTokens = async function () {
     const result = await retryOperation(() =>
       this.deleteMany({ createdAt: { $lt: new Date(Date.now() - 24 * 60 * 60 * 1000) } })
     );
-    logger.info('Expired tokens cleanup completed', { deletedCount: result.deletedCount });
+    //logger.info('Expired tokens cleanup completed', { deletedCount: result.deletedCount });
     tokenCache.clear(); // Clear cache after cleanup
     return result;
   } catch (error) {

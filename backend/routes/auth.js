@@ -54,10 +54,6 @@ const logger = winston.createLogger({
   ],
 });
 
-logger.info('Cloudinary configuration loaded', {
-  cloud_name: cloudinaryConfig.cloud_name,
-  api_key: cloudinaryConfig.api_key,
-});
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -164,7 +160,7 @@ const loginSchema = Joi.object({
 
 const generateVirtualNumber = async (countryCode, userId) => {
   try {
-    logger.info('Generating virtual number', { countryCode, userId });
+    //logger.info('Generating virtual number', { countryCode, userId });
     const countryCallingCode = getCountryCallingCode(countryCode.toUpperCase());
     let virtualNumber;
     let attempts = 0;
@@ -184,7 +180,7 @@ const generateVirtualNumber = async (countryCode, userId) => {
 
     const phoneNumber = parsePhoneNumberFromString(virtualNumber, countryCode.toUpperCase());
     const formattedNumber = phoneNumber ? phoneNumber.formatInternational().replace(/\s/g, '') : virtualNumber;
-    logger.info('Virtual number generated', { virtualNumber: formattedNumber, attempts });
+    //logger.info('Virtual number generated', { virtualNumber: formattedNumber, attempts });
     return formattedNumber;
   } catch (error) {
     logger.error('Virtual number generation failed', { error: error.message, countryCode, userId });
@@ -259,7 +255,7 @@ router.post('/register', authLimiter, upload.single('photo'), async (req, res) =
       { expiresIn: '24h', algorithm: 'HS256' }
     );
 
-    logger.info('User registered successfully', { userId: user._id, email });
+    //logger.info('User registered successfully', { userId: user._id, email });
     res.status(201).json({
       token,
       userId: user._id.toString(), // Changed: Stringify _id
@@ -329,7 +325,7 @@ router.post('/login', authLimiter, async (req, res) => {
       );
     });
 
-    logger.info('Login successful', { userId: user._id, email });
+    //logger.info('Login successful', { userId: user._id, email });
     res.json({
       token,
       userId: user._id.toString(), // Changed: Stringify _id
@@ -364,7 +360,7 @@ router.post('/logout', authMiddleware, async (req, res) => {
       );
     });
 
-    logger.info('Logout successful', { userId: req.user.id });
+    //logger.info('Logout successful', { userId: req.user.id });
     res.status(200).json({ message: 'Logged out successfully' });
   } catch (error) {
     logger.error('Logout error', { error: error.message, userId: req.user?.id, stack: error.stack });
@@ -458,7 +454,7 @@ router.post('/update_photo', authMiddleware, upload.single('photo'), async (req,
       await user.save();
     });
 
-    logger.info('Photo updated', { userId, photo: user.photo });
+    //logger.info('Photo updated', { userId, photo: user.photo });
     res.json({ photo: user.photo });
   } catch (error) {
     logger.error('Update photo error', { error: error.message, stack: error.stack, userId: req.body.userId });
@@ -510,7 +506,7 @@ router.post('/update_username', authMiddleware, async (req, res) => {
       await user.save();
     });
 
-    logger.info('Username updated', { userId, username });
+    //logger.info('Username updated', { userId, username });
     res.json({ username: user.username });
   } catch (error) {
     logger.error('Update username error', { error: error.message, stack: error.stack, userId: req.body.userId });
@@ -561,33 +557,60 @@ router.get('/contacts', authMiddleware, async (req, res) => {
   }
 });
 
+
+
+// In auth.js
+
+const logError = (message, metadata = {}) => {
+  const now = Date.now();
+  const errorLogMap = new Map();
+  const errorEntry = errorLogMap.get(message) || { count: 0, timestamps: [] };
+  errorEntry.timestamps = errorEntry.timestamps.filter((ts) => now - ts < 60 * 1000);
+  if (errorEntry.count >= 1 || errorEntry.timestamps.length >= 5) {
+    return;
+  }
+  errorEntry.count += 1;
+  errorEntry.timestamps.push(now);
+  errorLogMap.set(message, errorEntry);
+  logger.error(message, metadata);
+};
+
 router.get('/public_key/:userId', authMiddleware, async (req, res) => {
   try {
     const { userId } = req.params;
     if (!mongoose.isValidObjectId(userId)) {
-      logger.warn('Invalid user ID', { userId });
+      logError('Invalid user ID', { userId });
       return res.status(400).json({ error: 'Invalid user ID' });
+    }
+
+    const cacheKey = `publicKey:${userId}`;
+    const cachedKey = chatListCache.get(cacheKey);
+    if (cachedKey) {
+      return res.json({ publicKey: cachedKey });
     }
 
     const user = await retryOperation(async () => {
       return await User.findById(userId).select('publicKey').lean();
     });
     if (!user) {
-      logger.warn('User not found', { userId });
+      logError('User not found', { userId });
       return res.status(404).json({ error: 'User not found' });
     }
 
+    chatListCache.set(cacheKey, user.publicKey);
     res.json({ publicKey: user.publicKey });
   } catch (error) {
-    logger.error('Fetch public key error', { error: error.message, stack: error.stack, userId: req.params.userId });
+    logError('Fetch public key error', { error: error.message, userId: req.params.userId });
     res.status(500).json({ error: 'Failed to fetch public key', details: error.message });
   }
 });
 
+
+
 router.post('/refresh', authLimiter, authMiddleware, async (req, res) => {
   try {
     const { userId } = req.body;
-    logger.info('Refresh token request', { userId, ip: req.ip });
+    //logger.info('Refresh token request', { userId, ip: req.ip });
     if (userId && userId !== req.user.id) {
       logger.warn('Unauthorized refresh attempt', { userId, reqUserId: req.user.id });
       return res.status(403).json({ error: 'Not authorized' });
@@ -611,7 +634,7 @@ router.post('/refresh', authLimiter, authMiddleware, async (req, res) => {
       await retryOperation(async () => {
         await TokenBlacklist.create({ token: oldToken });
       });
-      logger.info('Old token blacklisted during refresh', { userId: req.user.id });
+      //logger.info('Old token blacklisted during refresh', { userId: req.user.id });
     }
 
     const newToken = jwt.sign(
@@ -620,7 +643,7 @@ router.post('/refresh', authLimiter, authMiddleware, async (req, res) => {
       { expiresIn: '24h', algorithm: 'HS256' }
     );
 
-    logger.info('Token refreshed successfully', { userId: user._id });
+    //logger.info('Token refreshed successfully', { userId: user._id });
     res.json({
       token: newToken,
       userId: user._id.toString(), // Changed: Stringify _id

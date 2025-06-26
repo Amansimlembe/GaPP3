@@ -58,7 +58,7 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 const buildPath = path.join(__dirname, '..', 'frontend', 'build');
-logger.info(`Attempting to serve static files from: ${buildPath}`);
+//logger.info(`Attempting to serve static files from: ${buildPath}`);
 try {
   if (fs.existsSync(buildPath)) {
     const buildFiles = fs.readdirSync(buildPath);
@@ -112,7 +112,7 @@ const connectDB = async (retries = 5, baseDelay = 1000) => {
         serverSelectionTimeoutMS: 5000,
         maxPoolSize: 10,
       });
-      logger.info('MongoDB connected');
+      //logger.info('MongoDB connected');
       return;
     } catch (err) {
       logger.error(`MongoDB connection attempt ${attempt} failed`, { error: err.message });
@@ -130,10 +130,10 @@ const startPeriodicCleanup = () => {
   setInterval(async () => {
     try {
       const result = await retryOperation(() => Message.cleanupOrphanedMessages());
-      logger.info('Periodic orphaned messages cleanup completed', {
+      /*logger.info('Periodic orphaned messages cleanup completed', {
         deletedCount: result.deletedCount,
         orphanedUserIds: result.orphanedUserIds,
-      });
+      });*/
     } catch (err) {
       logger.error('Periodic orphaned messages cleanup failed', { error: err.message });
     }
@@ -144,10 +144,10 @@ const initializeDB = async () => {
   await connectDB();
   try {
     const result = await retryOperation(() => Message.cleanupOrphanedMessages());
-    logger.info('Initial orphaned messages cleanup completed', {
+    /*logger.info('Initial orphaned messages cleanup completed', {
       deletedCount: result.deletedCount,
       orphanedUserIds: result.orphanedUserIds,
-    });
+    });*/
   } catch (err) {
     logger.error('Initial orphaned messages cleanup failed', { error: err.message });
   }
@@ -220,7 +220,7 @@ io.use(async (socket, next) => {
   try {
     await authMiddleware(req, res, () => {
       socket.user = req.user;
-      logger.info('Socket authenticated', { socketId: socket.id, userId: req.user.id });
+      //logger.info('Socket authenticated', { socketId: socket.id, userId: req.user.id });
       next();
     });
   } catch (err) {
@@ -230,7 +230,7 @@ io.use(async (socket, next) => {
 });
 
 io.on('connection', (socket) => {
-  logger.info('User connected', { socketId: socket.id, userId: socket.user.id });
+  //logger.info('User connected', { socketId: socket.id, userId: socket.user.id });
 
   socket.on('join', (data) => {
     const userId = typeof data === 'object' ? data.userId : data; // Changed: Handle object or string
@@ -239,7 +239,7 @@ io.on('connection', (socket) => {
       return;
     }
     socket.join(userId);
-    logger.info('User joined room', { userId, socketId: socket.id });
+   // logger.info('User joined room', { userId, socketId: socket.id });
   });
 
   socket.on('message', async (msg, callback) => {
@@ -304,11 +304,11 @@ io.on('connection', (socket) => {
       return;
     }
     socket.leave(userId);
-    logger.info('User left room', { userId, socketId: socket.id });
+   // logger.info('User left room', { userId, socketId: socket.id });
   });
 
   socket.on('disconnect', () => {
-    logger.info('User disconnected', { socketId: socket.id, userId: socket.user.id });
+    //logger.info('User disconnected', { socketId: socket.id, userId: socket.user.id });
   });
 });
 
@@ -316,21 +316,21 @@ const PORT = process.env.PORT || 8000;
 server.listen(PORT, '0.0.0.0', () => logger.info(`Server running on port ${PORT}`));
 
 const shutdown = async () => {
-  logger.info('Shutting down server');
+ // logger.info('Shutting down server');
   try {
     await Promise.race([
       mongoose.connection.close(),
       new Promise((_, reject) => setTimeout(() => reject(new Error('MongoDB close timeout')), 5000)),
     ]);
-    logger.info('MongoDB connection closed');
+    //logger.info('MongoDB connection closed');
   } catch (err) {
     logger.error('Error closing MongoDB connection during shutdown', { error: err.message });
   }
   io.close(() => {
-    logger.info('Socket.IO connections closed');
+    //logger.info('Socket.IO connections closed');
   });
   server.close(() => {
-    logger.info('Server closed');
+    //logger.info('Server closed');
     process.exit(0);
   });
   setTimeout(() => {

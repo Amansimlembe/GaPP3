@@ -155,7 +155,7 @@ const logClientError = async (message, error, userId = null) => {
         await new Promise((resolve) => setTimeout(resolve, Math.pow(2, i) * 1000));
         continue;
       }
-      console.warn('Failed to log error:', err.message);
+     
     }
   }
 };

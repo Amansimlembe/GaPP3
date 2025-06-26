@@ -142,7 +142,7 @@ userSchema.pre('save', async function (next) {
         this.contacts = validContacts;
       }
     });
-    logger.info('User pre-save validation completed', { userId: this._id?.toString() });
+    //logger.info('User pre-save validation completed', { userId: this._id?.toString() });
     next();
   } catch (error) {
     logger.error('User pre-save failed', {
@@ -157,7 +157,7 @@ userSchema.pre('save', async function (next) {
 // Static method to clean up invalid contacts
 userSchema.statics.cleanupInvalidContacts = async function () {
   try {
-    logger.info('Starting invalid contacts cleanup');
+   // logger.info('Starting invalid contacts cleanup');
     const batchSize = 1000;
     let totalUpdated = 0;
 
@@ -206,7 +206,7 @@ userSchema.statics.cleanupInvalidContacts = async function () {
       });
     }
 
-    logger.info('Invalid contacts cleanup completed', { updatedCount: totalUpdated });
+   // logger.info('Invalid contacts cleanup completed', { updatedCount: totalUpdated });
     return { updatedCount: totalUpdated };
   } catch (error) {
     logger.error('Invalid contacts cleanup failed', { error: error.message, stack: error.stack });
@@ -217,7 +217,7 @@ userSchema.statics.cleanupInvalidContacts = async function () {
 // Static method to reset stale online statuses
 userSchema.statics.resetStaleStatuses = async function (thresholdMinutes = 30) {
   try {
-    logger.info('Starting stale status cleanup');
+   // logger.info('Starting stale status cleanup');
     const threshold = new Date(Date.now() - thresholdMinutes * 60 * 1000);
     const result = await retryOperation(async () => {
       return await this.updateMany(
@@ -225,7 +225,7 @@ userSchema.statics.resetStaleStatuses = async function (thresholdMinutes = 30) {
         { $set: { status: 'offline', lastSeen: new Date() } }
       );
     });
-    logger.info('Stale status cleanup completed', { updatedCount: result.modifiedCount });
+   // logger.info('Stale status cleanup completed', { updatedCount: result.modifiedCount });
     return { updatedCount: result.modifiedCount };
   } catch (error) {
     logger.error('Stale status cleanup failed', { error: error.message, stack: error.stack });
