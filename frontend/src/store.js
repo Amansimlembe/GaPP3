@@ -290,6 +290,7 @@ const messageSlice = createSlice({
     },
 
 
+
     setChatList: (state, action) => {
   const now = Date.now();
   const payload = Array.isArray(action.payload) ? action.payload : [];
@@ -299,13 +300,14 @@ const messageSlice = createSlice({
   if (validContacts.length > 0) {
     const existingChatMap = new Map(state.chatList.map((chat) => [chat.id, chat]));
     validContacts.forEach((contact) => {
+      // Only update or add if the contact doesn't exist or has new data
       existingChatMap.set(contact.id, {
         id: contact.id,
-        username: contact.username || 'Unknown',
-        virtualNumber: contact.virtualNumber || '',
-        photo: contact.photo || 'https://placehold.co/40x40',
-        status: contact.status || 'offline',
-        lastSeen: contact.lastSeen ? new Date(contact.lastSeen).toISOString() : null,
+        username: contact.username || existingChatMap.get(contact.id)?.username || 'Unknown',
+        virtualNumber: contact.virtualNumber || existingChatMap.get(contact.id)?.virtualNumber || '',
+        photo: contact.photo || existingChatMap.get(contact.id)?.photo || 'https://placehold.co/40x40',
+        status: contact.status || existingChatMap.get(contact.id)?.status || 'offline',
+        lastSeen: contact.lastSeen ? new Date(contact.lastSeen).toISOString() : existingChatMap.get(contact.id)?.lastSeen || null,
         latestMessage: contact.latestMessage
           ? {
               ...contact.latestMessage,
@@ -318,7 +320,7 @@ const messageSlice = createSlice({
                 ? new Date(contact.latestMessage.updatedAt).toISOString()
                 : undefined,
             }
-          : null,
+          : existingChatMap.get(contact.id)?.latestMessage || null,
         unreadCount: contact.unreadCount || existingChatMap.get(contact.id)?.unreadCount || 0,
       });
     });

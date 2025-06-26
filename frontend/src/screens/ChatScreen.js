@@ -632,27 +632,35 @@ const handleAddContact = useCallback(async () => {
       }
     };
 
+
+
     const handleNewContact = ({ contactData }) => {
-      if (!contactData?.id || !isValidObjectId(contactData.id)) {
-        console.error('Invalid contactData received:', contactData);
-        return;
-      }
-      dispatch(setChatList((prev) => {
-        if (prev.find((chat) => chat.id === contactData.id)) return prev;
-        return [...prev, {
-          id: contactData.id,
-          _id: contactData.id,
-          username: contactData.username || 'Unknown',
-          virtualNumber: contactData.virtualNumber || '',
-          photo: contactData.photo || 'https://placehold.co/40x40',
-          status: contactData.status || 'offline',
-          lastSeen: contactData.lastSeen || null,
-          latestMessage: null,
-          unreadCount: 0,
-        }];
-      }));
-      console.log(`handleNewContact: Added contact ${contactData.id}`);
+  if (!contactData?.id || !isValidObjectId(contactData.id) || !contactData.virtualNumber) {
+    console.error('Invalid contactData received:', contactData);
+    return;
+  }
+  dispatch(setChatList((prev) => {
+    if (prev.find((chat) => chat.id === contactData.id)) {
+      console.log(`handleNewContact: Contact ${contactData.id} already exists in chatList`);
+      return prev;
+    }
+    const newContact = {
+      id: contactData.id,
+      _id: contactData.id,
+      username: contactData.username || 'Unknown',
+      virtualNumber: contactData.virtualNumber || '',
+      photo: contactData.photo || 'https://placehold.co/40x40',
+      status: contactData.status || 'offline',
+      lastSeen: contactData.lastSeen ? new Date(contactData.lastSeen).toISOString() : null,
+      latestMessage: null,
+      unreadCount: 0,
     };
+    const updatedChatList = [...prev, newContact];
+    console.log(`handleNewContact: Added contact ${contactData.id} to chatList, new length: ${updatedChatList.length}`);
+    return updatedChatList;
+  }));
+};
+
 
 
 
@@ -675,6 +683,7 @@ const handleChatListUpdated = ({ users, page = 0, limit = 50 }) => {
     console.warn('chatListUpdated: No valid users to update');
   }
 };
+
 
 
     const handleMessage = (msg) => {
