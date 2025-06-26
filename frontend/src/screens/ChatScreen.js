@@ -105,27 +105,26 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
     }
   }, [userId]);
 
-useEffect(() => {
-  const initializeForge = async () => {
-    if (forgeInitAttemptsRef.current >= maxForgeInitAttempts) {
-      console.error('Max forge initialization attempts reached');
-      logClientError('Max forge initialization attempts reached', new Error('Forge init failed'));
-      setIsForgeReady(true); // Proceed to avoid blocking
-      return;
-    }
-    forgeInitAttemptsRef.current += 1;
-    if (forge?.random && forge?.pki && forge?.cipher) {
-      setIsForgeReady(true);
-      console.log('Forge initialized successfully');
-      fetchChatList(); // Trigger fetchChatList when forge is ready
-    } else {
-      console.warn('Forge not ready, retrying...');
-      await new Promise((resolve) => setTimeout(resolve, 1000 * forgeInitAttemptsRef.current));
-      initializeForge();
-    }
-  };
-  initializeForge();
-}, [logClientError, fetchChatList]);
+  useEffect(() => {
+    const initializeForge = async () => {
+      if (forgeInitAttemptsRef.current >= maxForgeInitAttempts) {
+        console.error('Max forge initialization attempts reached');
+        logClientError('Max forge initialization attempts reached', new Error('Forge init failed'));
+        setIsForgeReady(true); // Proceed to avoid blocking
+        return;
+      }
+      forgeInitAttemptsRef.current += 1;
+      if (forge?.random && forge?.pki && forge?.cipher) {
+        setIsForgeReady(true);
+        console.log('Forge initialized successfully');
+      } else {
+        console.warn('Forge not ready, retrying...');
+        await new Promise((resolve) => setTimeout(resolve, 1000 * forgeInitAttemptsRef.current));
+        initializeForge();
+      }
+    };
+    initializeForge();
+  }, [logClientError]);
 
   const getPublicKey = useCallback(async (recipientId) => {
     if (!isValidObjectId(recipientId)) throw new Error('Invalid recipientId');
