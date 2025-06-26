@@ -218,7 +218,9 @@ const loadPersistedState = async () => {
 
 
 
-// Messages Slice
+
+
+
 const messageSlice = createSlice({
   name: 'messages',
   initialState: {
@@ -274,6 +276,9 @@ const messageSlice = createSlice({
       state.messagesTimestamp[recipientId] = now;
       console.log(`setMessages: Updated chats for recipientId ${recipientId} with ${state.chats[recipientId].length} messages`);
     },
+
+
+
     addMessage: (state, action) => {
       const { recipientId, message } = action.payload;
       if (!recipientId || !isValidObjectId(recipientId) || !message || !message.clientMessageId) {
@@ -281,7 +286,8 @@ const messageSlice = createSlice({
         return;
       }
       state.chats[recipientId] = state.chats[recipientId] || [];
-      if (state.chats[recipientId].some((msg) => msg._id === message._id || msg.clientMessageId === message.clientMessageId)) {
+      // Prevent duplicates based on clientMessageId or _id
+      if (state.chats[recipientId].some((msg) => msg.clientMessageId === message.clientMessageId || msg._id === message.clientMessageId)) {
         console.log(`addMessage: Message ${message.clientMessageId} already exists for recipientId ${recipientId}`);
         return;
       }
@@ -312,6 +318,7 @@ const messageSlice = createSlice({
         console.warn('addMessage: Invalid senderId or recipientId', normalizedMsg);
       }
     },
+
     replaceMessage: (state, action) => {
       const { recipientId, message, replaceId } = action.payload;
       if (!recipientId || !isValidObjectId(recipientId) || !message || !replaceId || !message.clientMessageId) {
@@ -342,17 +349,27 @@ const messageSlice = createSlice({
       };
       if (isValidObjectId(normalizedMsg.senderId) && isValidObjectId(normalizedMsg.recipientId)) {
         if (index !== -1) {
-          state.chats[recipientId][index] = normalizedMsg;
+          // Only replace if the message isn't already updated with a server _id
+          if (!state.chats[recipientId][index]._id || state.chats[recipientId][index]._id === replaceId) {
+            state.chats[recipientId][index] = normalizedMsg;
+          } else {
+            console.log(`replaceMessage: Message ${replaceId} already updated with server ID, skipping`);
+          }
         } else {
-          state.chats[recipientId].push(normalizedMsg);
-          state.chats[recipientId] = state.chats[recipientId].slice(-MAX_MESSAGES_PER_CHAT);
-          state.chatMessageCount[recipientId] = (state.chatMessageCount[recipientId] || 0) + 1;
+          // Prevent duplicates if message was re-sent
+          if (!state.chats[recipientId].some((msg) => msg.clientMessageId === normalizedMsg.clientMessageId || msg._id === normalizedMsg._id)) {
+            state.chats[recipientId].push(normalizedMsg);
+            state.chats[recipientId] = state.chats[recipientId].slice(-MAX_MESSAGES_PER_CHAT);
+            state.chatMessageCount[recipientId] = (state.chatMessageCount[recipientId] || 0) + 1;
+          }
         }
         state.messagesTimestamp[recipientId] = Date.now();
       } else {
         console.warn('replaceMessage: Invalid senderId or recipientId', normalizedMsg);
       }
     },
+
+
     updateMessageStatus: (state, action) => {
       const { recipientId, messageId, status, uploadProgress } = action.payload;
       if (!recipientId || !isValidObjectId(recipientId) || !messageId || !state.chats[recipientId] || !['pending', 'sent', 'delivered', 'read', 'failed'].includes(status)) {

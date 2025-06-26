@@ -37,23 +37,27 @@ const app = express();
 app.set('trust proxy', 1);
 
 const server = http.createServer(app);
+
 const io = new Server(server, {
   cors: {
     origin: ['https://gapp-6yc3.onrender.com', 'http://localhost:5173'],
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     credentials: true,
   },
-  pingTimeout: 60000, // Increased to handle slow networks
+  pingTimeout: 60000,
   pingInterval: 25000,
   maxHttpBufferSize: 1e6,
-  transports: ['websocket'], // Prefer WebSocket for reliability
-  allowEIO3: false, // Explicitly disable Engine.IO v3 for consistency
+  transports: ['websocket'],
+  allowEIO3: false,
   connectionStateRecovery: {
-    maxDisconnectionDuration: 2 * 60 * 1000, // 2 minutes
+    maxDisconnectionDuration: 5 * 60 * 1000, // 5 minutes
     skipMiddlewares: true,
   },
 });
 app.set('io', io);
+
+
+
 
 app.use(cors({
   origin: ['https://gapp-6yc3.onrender.com', 'http://localhost:5173'],
@@ -241,8 +245,17 @@ io.use(async (socket, next) => {
   }
 });
 
+
+
+
+
+
 io.on('connection', (socket) => {
   logger.info('User connected', { socketId: socket.id, userId: socket.user.id });
+
+  // Store connected users
+  const connectedUsers = new Map();
+  connectedUsers.set(socket.user.id, socket.id);
 
   socket.on('join', (data) => {
     const userId = typeof data === 'object' ? data.userId : data;
@@ -266,21 +279,26 @@ io.on('connection', (socket) => {
         return callback({ error: 'Unauthorized' });
       }
 
-      // Explicitly select fields to avoid including unexpected fields like _id
-      const messageData = {
-        senderId: msg.senderId,
-        recipientId: msg.recipientId,
-        content: msg.content,
-        contentType: msg.contentType || 'text',
-        clientMessageId: msg.clientMessageId,
-        senderVirtualNumber: msg.senderVirtualNumber,
-        senderUsername: msg.senderUsername,
-        senderPhoto: msg.senderPhoto,
-        timestamp: new Date(),
-      };
+      // Check for duplicate message
+      const existingMessage = await Message.findOne({ clientMessageId: msg.clientMessageId });
+      if (existingMessage) {
+        logger.warn('Duplicate message detected', { socketId: socket.id, clientMessageId: msg.clientMessageId });
+        return callback({ status: 'ok', message: existingMessage });
+      }
 
       const savedMessage = await retryOperation(async () => {
-        const message = new Message(messageData);
+        const message = new Message({
+          senderId: msg.senderId,
+          recipientId: msg.recipientId,
+          content: msg.content,
+          contentType: msg.contentType || 'text',
+          clientMessageId: msg.clientMessageId,
+          senderVirtualNumber: msg.senderVirtualNumber,
+          senderUsername: msg.senderUsername,
+          senderPhoto: msg.senderPhoto,
+          timestamp: new Date(),
+          status: 'sent',
+        });
         return await message.save();
       });
 
@@ -340,12 +358,21 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', (reason) => {
     logger.info('User disconnected', { socketId: socket.id, userId: socket.user.id, reason });
+    connectedUsers.delete(socket.user.id);
   });
 
   socket.on('error', (err) => {
     logger.error('Socket error', { socketId: socket.id, userId: socket.user.id, error: err.message });
   });
 });
+
+
+
+
+
+
+
+
 
 const PORT = process.env.PORT || 8000;
 server.listen(PORT, '0.0.0.0', () => logger.info(`Server running on port ${PORT}`));

@@ -319,7 +319,7 @@ const App = () => {
   
 
 
-
+// In App.js, replace the useEffect for socket connection (lines ~300-400) with:
 
 useEffect(() => {
   // Skip if already navigating to /login
@@ -341,7 +341,7 @@ useEffect(() => {
     return;
   }
 
-  // Initialize socket with backoff
+  // Initialize socket with robust reconnection
   const connectSocket = (attempt = 0) => {
     if (socketRef.current || !navigator.onLine || attempt > maxReconnectAttempts) {
       if (attempt > maxReconnectAttempts) {
@@ -353,10 +353,14 @@ useEffect(() => {
 
     const newSocket = io(BASE_URL, {
       auth: { token, userId },
-      transports: ['websocket'], // Prefer WebSocket, avoid polling
-      reconnection: false, // Handle reconnection manually
+      transports: ['websocket'],
+      reconnection: true, // Enable automatic reconnection
+      reconnectionAttempts: maxReconnectAttempts,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: maxDelay,
+      randomizationFactor: 0.5,
       timeout: 10000,
-      query: { EIO: 4 }, // Ensure correct Engine.IO version
+      query: { EIO: 4 },
     });
 
     socketRef.current = newSocket;
@@ -364,8 +368,9 @@ useEffect(() => {
     const handleConnect = () => {
       console.log('Socket connected successfully');
       newSocket.emit('join', userId);
-      attemptRef.current = 0; // Reset attempt count
-      setError(null); // Clear any previous errors
+      attemptRef.current = 0;
+      setError(null);
+      setSocket(newSocket); // Update socket state
     };
 
     const handleConnectError = async (error) => {
@@ -374,12 +379,8 @@ useEffect(() => {
       if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
         setError('Authentication error, logging out');
         await handleLogout();
-      } else if (error.message.includes('websocket error') || error.message.includes('timeout')) {
-        const delay = Math.min(Math.pow(2, attempt) * 1000 * (1 + Math.random() * 0.1), maxDelay);
-        console.warn(`Retrying socket connection in ${delay}ms (attempt ${attempt + 1})`);
-        setTimeout(() => connectSocket(attempt + 1), delay);
       } else {
-        setError('Failed to connect to server');
+        setError('Connecting to server...');
       }
     };
 
@@ -387,10 +388,10 @@ useEffect(() => {
       console.warn('Socket disconnected:', reason);
       logClientError(`Socket disconnected: ${reason}`, new Error(reason), userId);
       if (reason === 'io server disconnect' || reason === 'transport close' || reason === 'ping timeout') {
-        if (navigator.onLine && attemptRef.current <= maxReconnectAttempts) {
-          const delay = Math.min(Math.pow(2, attemptRef.current) * 1000 * (1 + Math.random() * 0.1), maxDelay);
-          console.warn(`Retrying socket connection in ${delay}ms (attempt ${attemptRef.current + 1})`);
-          setTimeout(() => connectSocket(attemptRef.current + 1), delay);
+        if (navigator.onLine) {
+          console.log(`Attempting to reconnect (attempt ${attemptRef.current + 1}/${maxReconnectAttempts})`);
+        } else {
+          setError('Offline: Messages will be sent when reconnected');
         }
       }
     };
@@ -421,11 +422,13 @@ useEffect(() => {
     const handleOnline = () => {
       if (!socketRef.current || !socketRef.current.connected) {
         console.log('Network online, attempting to reconnect socket');
-        connectSocket(0);
+        newSocket.connect();
       }
     };
+
     const handleOffline = () => {
       console.warn('Offline: Socket disconnected');
+      setError('Offline: Messages will be sent when reconnected');
       if (socketRef.current) {
         socketRef.current.disconnect();
         socketRef.current = null;
@@ -434,8 +437,6 @@ useEffect(() => {
 
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
-
-    setSocket(newSocket);
 
     return () => {
       newSocket.emit('leave', userId);
@@ -457,6 +458,8 @@ useEffect(() => {
     if (cleanup) cleanup();
   };
 }, [token, userId, location.pathname, handleLogout, navigate, logClientError, selectedChat, maxReconnectAttempts, maxDelay]);
+
+
 
   useEffect(() => {
     if (!token || !userId) return;
