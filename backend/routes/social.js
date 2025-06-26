@@ -6,12 +6,15 @@ const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
 const Joi = require('joi');
 const rateLimit = require('express-rate-limit');
+const NodeCache = require('node-cache');
 const User = require('../models/User');
 const { authMiddleware } = require('./auth');
 const Message = require('../models/Message');
 const TokenBlacklist = require('../models/TokenBlacklist');
+
 const router = express.Router();
 
+// Logger configuration
 const logger = winston.createLogger({
   level: 'info',
   format: winston.format.combine(
@@ -27,23 +30,28 @@ const logger = winston.createLogger({
 });
 
 // Error deduplication
-const errorLogMap = new Map();
+const errorLogTimestamps = new Map();
 const maxLogsPerMinute = 5;
-const logError = (message, metadata = {}) => {
+
+const logError = async (message, metadata = {}) => {
   const now = Date.now();
-  const errorEntry = errorLogMap.get(message) || { count: 0, timestamps: [] };
+  const errorEntry = errorLogTimestamps.get(message) || { count: 0, timestamps: [] };
   errorEntry.timestamps = errorEntry.timestamps.filter((ts) => now - ts < 60 * 1000);
   if (errorEntry.count >= 1 || errorEntry.timestamps.length >= maxLogsPerMinute) {
-    logger.warn(`Error logging skipped for "${message}": rate limit reached`);
+    logger.info(`Error logging skipped for "${message}": rate limit reached`, metadata);
+    return;
+  }
+  const isCritical = message.includes('Unauthorized') || message.includes('failed after max retries') || message.includes('Invalid');
+  if (!isCritical) {
     return;
   }
   errorEntry.count += 1;
   errorEntry.timestamps.push(now);
-  errorLogMap.set(message, errorEntry);
-  logger.error(message, metadata);
+  errorLogTimestamps.set(message, errorEntry);
+  logger.error(message, { ...metadata, timestamp: new Date().toISOString() });
 };
 
-// Configure Cloudinary with retry logic
+// Configure Cloudinary
 const configureCloudinary = () => {
   let cloudinaryConfig = {};
   if (process.env.CLOUDINARY_URL) {
@@ -77,42 +85,60 @@ const configureCloudinary = () => {
 };
 configureCloudinary();
 
-// Multer with optimized memory storage
+// Multer configuration
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 50 * 1024 * 1024, files: 1 },
   fileFilter: (req, file, cb) => {
     const allowedTypes = ['image/', 'video/', 'audio/', 'application/'];
-    if (allowedTypes.some((type) => file.mimetype.startsWith(type))) {
+    if (!file || allowedTypes.some((type) => file.mimetype.startsWith(type))) {
       cb(null, true);
     } else {
-      cb(new Error('Invalid file type'), false);
+      logError('Invalid file type', { mimetype: file?.mimetype, userId: req.user?._id, ip: req.ip });
+      cb(new Error('Invalid file type. Allowed: image, video, audio, document'), false);
     }
   },
 });
 
-// Global rate limiter
+// Rate limiters
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 150,
-  message: 'Too many requests, please try again later',
+  message: { error: 'Too many requests, please try again later' },
+  handler: (req, res, next, options) => {
+    logError('Rate limit exceeded', { ip: req.ip, method: req.method, url: req.url });
+    res.status(options.statusCode).json(options.message);
+  },
 });
 
-// Stricter rate limiters
 const addContactLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 5,
-  message: 'Too many contact addition requests, please try again later',
+  message: { error: 'Too many contact addition requests, please try again later' },
+  handler: (req, res, next, options) => {
+    logError('Contact addition rate limit exceeded', { ip: req.ip, userId: req.user?._id });
+    res.status(options.statusCode).json(options.message);
+  },
 });
+
 const uploadLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
-  message: 'Too many upload requests, please try again later',
+  message: { error: 'Too many upload requests, please try again later' },
+  handler: (req, res, next, options) => {
+    logError('Upload rate limit exceeded', { ip: req.ip, userId: req.user?._id });
+    res.status(options.statusCode).json(options.message);
+  },
 });
+
 const messageLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 50,
-  message: 'Too many message requests, please try again later',
+  message: { error: 'Too many message requests, please try again later' },
+  handler: (req, res, next, options) => {
+    logError('Message rate limit exceeded', { ip: req.ip, userId: req.user?._id });
+    res.status(options.statusCode).json(options.message);
+  },
 });
 
 const validContentTypes = ['text', 'image', 'video', 'audio', 'document'];
@@ -170,36 +196,8 @@ const deleteMessageSchema = Joi.object({
   }).required(),
 });
 
-// Bounded LRU cache
-class LRUCache {
-  constructor(maxSize, ttl) {
-    this.maxSize = maxSize;
-    this.ttl = ttl;
-    this.cache = new Map();
-  }
-  get(key) {
-    const item = this.cache.get(key);
-    if (item && item.timestamp > Date.now() - this.ttl) {
-      this.cache.delete(key);
-      this.cache.set(key, item);
-      return item.data;
-    }
-    this.cache.delete(key);
-    return null;
-  }
-  set(key, data) {
-    if (this.cache.size >= this.maxSize) {
-      const firstKey = this.cache.keys().next().value;
-      this.cache.delete(firstKey);
-    }
-    this.cache.set(key, { data, timestamp: Date.now() });
-  }
-  delete(key) {
-    this.cache.delete(key);
-  }
-}
-
-const chatListCache = new LRUCache(1000, 5 * 60 * 1000);
+// Cache configuration
+const chatListCache = new NodeCache({ stdTTL: 5 * 60, checkperiod: 60 }); // 5-minute TTL
 
 // Retry with exponential backoff
 const retryOperation = async (operation, maxRetries = 3) => {
@@ -208,76 +206,80 @@ const retryOperation = async (operation, maxRetries = 3) => {
       return await operation();
     } catch (err) {
       if (attempt === maxRetries) {
-        logError('Operation failed after max retries', { error: err.message, attempt });
+        await logError('Operation failed after max retries', { error: err.message, attempt, operation: operation.name || 'anonymous' });
         throw err;
       }
       const delay = Math.pow(2, attempt) * 1000 * (1 + Math.random() * 0.1);
-      logger.warn('Retrying operation', { attempt, error: err.message });
+      logger.warn('Retrying operation', { attempt, error: err.message, operation: operation.name || 'anonymous' });
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
 };
 
-// Optimized emitUpdatedChatList with pagination and debouncing
+// Optimized emitUpdatedChatList
 const emitUpdatedChatList = async (io, userId, page = 0, limit = 50) => {
   try {
     if (!mongoose.isValidObjectId(userId)) {
-      logError('Invalid userId for chat list emission', { userId });
+      await logError('Invalid userId for chat list emission', { userId, ip: 'socket' });
       return;
     }
     const cacheKey = `chatList:${userId}:${page}:${limit}`;
     const cached = chatListCache.get(cacheKey);
     if (cached) {
       io.to(userId).emit('chatListUpdated', { userId, users: cached, page, limit });
-      logger.info('Served cached chat list', { userId, page, count: cached.length });
+      logger.info('Served cached chat list', { userId, page, count: cached.length, ip: 'socket' });
       return;
     }
-    const user = await User.findById(userId)
-      .select('contacts')
-      .populate({
-        path: 'contacts',
-        select: 'username virtualNumber photo status lastSeen',
-        options: { skip: page * limit, limit, sort: { lastSeen: -1 } },
-      })
-      .lean();
+    const user = await retryOperation(async () => {
+      return await User.findById(userId)
+        .select('contacts')
+        .populate({
+          path: 'contacts',
+          select: 'username virtualNumber photo status lastSeen publicKey',
+          options: { skip: page * limit, limit, sort: { lastSeen: -1 } },
+        })
+        .lean();
+    });
     if (!user?.contacts?.length) {
-      io.to(userId).emit('chatListUpdated', { userId, users: [], page, limit });
       chatListCache.set(cacheKey, []);
+      io.to(userId).emit('chatListUpdated', { userId, users: [], page, limit });
       return;
     }
     const contactIds = user.contacts.map((c) => c._id);
-    const latestMessages = await Message.aggregate([
-      {
-        $match: {
-          $or: [
-            { senderId: new mongoose.Types.ObjectId(userId), recipientId: { $in: contactIds } },
-            { recipientId: new mongoose.Types.ObjectId(userId), senderId: { $in: contactIds } },
-          ],
-        },
-      },
-      { $sort: { createdAt: -1 } },
-      {
-        $group: {
-          _id: {
-            $cond: [
-              { $eq: ['$senderId', new mongoose.Types.ObjectId(userId)] },
-              '$recipientId',
-              '$senderId',
+    const latestMessages = await retryOperation(async () => {
+      return await Message.aggregate([
+        {
+          $match: {
+            $or: [
+              { senderId: new mongoose.Types.ObjectId(userId), recipientId: { $in: contactIds } },
+              { recipientId: new mongoose.Types.ObjectId(userId), senderId: { $in: contactIds } },
             ],
           },
-          latestMessage: { $first: '$$ROOT' },
-          unreadCount: {
-            $sum: {
+        },
+        { $sort: { createdAt: -1 } },
+        {
+          $group: {
+            _id: {
               $cond: [
-                { $and: [{ $eq: ['$recipientId', new mongoose.Types.ObjectId(userId)] }, { $eq: ['$status', 'delivered'] }] },
-                1,
-                0,
+                { $eq: ['$senderId', new mongoose.Types.ObjectId(userId)] },
+                '$recipientId',
+                '$senderId',
               ],
+            },
+            latestMessage: { $first: '$$ROOT' },
+            unreadCount: {
+              $sum: {
+                $cond: [
+                  { $and: [{ $eq: ['$recipientId', new mongoose.Types.ObjectId(userId)] }, { $eq: ['$status', 'delivered'] }] },
+                  1,
+                  0,
+                ],
+              },
             },
           },
         },
-      },
-    ]);
+      ]);
+    });
     const chatList = user.contacts.map((contact) => {
       const messageData = latestMessages.find((m) => m._id.toString() === contact._id.toString());
       return {
@@ -292,6 +294,13 @@ const emitUpdatedChatList = async (io, userId, page = 0, limit = 50) => {
               ...messageData.latestMessage,
               senderId: messageData.latestMessage.senderId.toString(),
               recipientId: messageData.latestMessage.recipientId.toString(),
+              replyTo: messageData.latestMessage.replyTo
+                ? {
+                    ...messageData.latestMessage.replyTo,
+                    senderId: messageData.latestMessage.replyTo.senderId.toString(),
+                    recipientId: messageData.latestMessage.replyTo.recipientId.toString(),
+                  }
+                : null,
             }
           : null,
         unreadCount: messageData?.unreadCount || 0,
@@ -299,9 +308,9 @@ const emitUpdatedChatList = async (io, userId, page = 0, limit = 50) => {
     });
     chatListCache.set(cacheKey, chatList);
     io.to(userId).emit('chatListUpdated', { userId, users: chatList, page, limit });
-    logger.info('Emitted updated chat list', { userId, page, count: chatList.length });
+    logger.info('Emitted updated chat list', { userId, page, count: chatList.length, ip: 'socket' });
   } catch (error) {
-    logError('Failed to emit chat list', { error: error.message, userId });
+    await logError('Failed to emit chat list', { error: error.message, userId, stack: error.stack, ip: 'socket' });
   }
 };
 
@@ -316,6 +325,7 @@ router.use((req, res, next) => {
       status: res.statusCode,
       duration,
       userId: req.user?._id?.toString() || 'unauthenticated',
+      ip: req.ip,
     });
   });
   next();
@@ -328,32 +338,46 @@ router.use(globalLimiter);
 module.exports = (app) => {
   const io = app.get('io');
   if (!io || typeof io.use !== 'function') {
-    logError('Invalid Socket.IO instance');
+    logError('Invalid Socket.IO instance', { ip: 'server' });
     throw new Error('Socket.IO initialization failed');
   }
 
   io.use(async (socket, next) => {
     const token = socket.handshake.auth.token;
-    if (!token) return next(new Error('No token provided'));
+    if (!token) {
+      await logError('No token provided for Socket.IO', { ip: socket.handshake.address });
+      return next(new Error('No token provided'));
+    }
     try {
       const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
-      const user = await User.findById(decoded.userId || decoded.id).select('_id').lean();
-      if (!user) return next(new Error('User not found'));
-      const blacklisted = await TokenBlacklist.findOne({ token }).lean();
-      if (blacklisted) return next(new Error('Token invalidated'));
+      const user = await retryOperation(async () => {
+        return await User.findById(decoded.id).select('_id').lean();
+      });
+      if (!user) {
+        await logError('User not found for Socket.IO', { userId: decoded.id, ip: socket.handshake.address });
+        return next(new Error('User not found'));
+      }
+      const blacklisted = await retryOperation(async () => {
+        return await TokenBlacklist.findOne({ token }).lean();
+      });
+      if (blacklisted) {
+        await logError('Blacklisted token used for Socket.IO', { token: token.substring(0, 10) + '...', ip: socket.handshake.address });
+        return next(new Error('Token invalidated'));
+      }
       socket.user = decoded;
       next();
     } catch (error) {
-      logError('Socket.IO auth error', { error: error.message });
+      await logError('Socket.IO auth error', { error: error.message, stack: error.stack, ip: socket.handshake.address });
       next(new Error('Invalid token'));
     }
   });
 
   io.on('connection', (socket) => {
-    logger.info('Socket.IO connection', { socketId: socket.id, userId: socket.user?.id });
+    logger.info('Socket.IO connection', { socketId: socket.id, userId: socket.user?.id, ip: socket.handshake.address });
 
     socket.on('join', async (userId) => {
       if (!mongoose.isValidObjectId(userId) || userId !== socket.user.id) {
+        await logError('Invalid join attempt', { userId, socketUserId: socket.user.id, ip: socket.handshake.address });
         socket.emit('error', { message: 'Invalid join attempt' });
         return;
       }
@@ -377,17 +401,25 @@ module.exports = (app) => {
             ...msg,
             senderId: msg.senderId.toString(),
             recipientId: msg.recipientId.toString(),
+            replyTo: msg.replyTo
+              ? {
+                  ...msg.replyTo,
+                  senderId: msg.replyTo.senderId.toString(),
+                  recipientId: msg.replyTo.recipientId.toString(),
+                }
+              : null,
           });
           await Message.updateOne({ _id: msg._id }, { status: 'delivered', updatedAt: new Date() });
           io.to(msg.senderId.toString()).emit('messageStatus', { messageIds: [msg._id], status: 'delivered' });
         });
         await Promise.all(messageUpdates);
       });
-      logger.info('User joined', { userId });
+      logger.info('User joined', { userId, ip: socket.handshake.address });
     });
 
     socket.on('reconnect', async (userId) => {
       if (!mongoose.isValidObjectId(userId) || userId !== socket.user.id) {
+        await logError('Invalid reconnect attempt', { userId, socketUserId: socket.user.id, ip: socket.handshake.address });
         socket.emit('error', { message: 'Invalid reconnect attempt' });
         return;
       }
@@ -397,18 +429,21 @@ module.exports = (app) => {
         io.to(userId).emit('userStatus', { userId, status: 'online', lastSeen: new Date() });
         await emitUpdatedChatList(io, userId);
       });
-      logger.info('User reconnected', { userId });
+      logger.info('User reconnected', { userId, ip: socket.handshake.address });
     });
 
     socket.on('leave', async (userId) => {
       if (!mongoose.isValidObjectId(userId) || userId !== socket.user.id) {
+        await logError('Invalid leave attempt', { userId, socketUserId: socket.user.id, ip: socket.handshake.address });
         socket.emit('error', { message: 'Invalid leave attempt' });
         return;
       }
       socket.leave(userId);
-      await User.findByIdAndUpdate(userId, { status: 'offline', lastSeen: new Date() });
-      io.to(userId).emit('userStatus', { userId, status: 'offline', lastSeen: new Date() });
-      logger.info('User left', { userId });
+      await retryOperation(async () => {
+        await User.findByIdAndUpdate(userId, { status: 'offline', lastSeen: new Date() });
+        io.to(userId).emit('userStatus', { userId, status: 'offline', lastSeen: new Date() });
+      });
+      logger.info('User left', { userId, ip: socket.handshake.address });
     });
 
     socket.on('typing', ({ userId, recipientId }) => {
@@ -430,7 +465,10 @@ module.exports = (app) => {
     socket.on('message', async (messageData, callback) => {
       try {
         const { error } = messageSchema.validate(messageData);
-        if (error) return callback({ error: error.details[0].message });
+        if (error) {
+          await logError('Invalid message data', { error: error.details[0].message, senderId: messageData.senderId, ip: socket.handshake.address });
+          return callback({ error: error.details[0].message });
+        }
         const {
           senderId,
           recipientId,
@@ -444,14 +482,22 @@ module.exports = (app) => {
           senderUsername,
           senderPhoto,
         } = messageData;
-        if (senderId !== socket.user.id) return callback({ error: 'Unauthorized sender' });
+        if (senderId !== socket.user.id) {
+          await logError('Unauthorized sender', { senderId, socketUserId: socket.user.id, ip: socket.handshake.address });
+          return callback({ error: 'Unauthorized sender' });
+        }
         await retryOperation(async () => {
           const recipient = await User.findById(recipientId).select('status').lean();
-          if (!recipient) return callback({ error: 'Recipient not found' });
+          if (!recipient) {
+            await logError('Recipient not found', { recipientId, senderId, ip: socket.handshake.address });
+            return callback({ error: 'Recipient not found' });
+          }
           const existingMessage = await Message.findOne({ clientMessageId })
             .select('senderId recipientId content contentType plaintextContent status caption replyTo originalFilename clientMessageId senderVirtualNumber senderUsername senderPhoto createdAt updatedAt')
             .lean();
-          if (existingMessage) return callback({ message: existingMessage });
+          if (existingMessage) {
+            return callback({ message: existingMessage });
+          }
           const sender = await User.findById(senderId)
             .select('virtualNumber username photo')
             .lean();
@@ -461,7 +507,7 @@ module.exports = (app) => {
             content: content || '',
             contentType,
             plaintextContent: plaintextContent || '',
-            status: recipient?.status === 'online' ? 'delivered' : 'sent',
+            status: recipient.status === 'online' ? 'delivered' : 'sent',
             caption,
             replyTo: replyTo && mongoose.isValidObjectId(replyTo) ? replyTo : undefined,
             originalFilename: messageData.originalFilename,
@@ -494,16 +540,16 @@ module.exports = (app) => {
               ? {
                   ...populatedMessage.replyTo,
                   senderId: populatedMessage.replyTo.senderId.toString(),
-                  recipientId: populatedMessage.replyTo.recipientId.toString(),
+                  recipientId: poppedMessage.replyTo.recipientId.toString(),
                 }
               : null,
           });
-          io.to(senderId).emit('messageStatus', { messageIds: [message._id], status: recipient?.status === 'online' ? 'delivered' : 'sent' });
+          io.to(senderId).emit('messageStatus', { messageIds: [message._id], status: recipient.status === 'online' ? 'delivered' : 'sent' });
           await Promise.all([emitUpdatedChatList(io, senderId), emitUpdatedChatList(io, recipientId)]);
           callback({ message: populatedMessage });
         });
       } catch (err) {
-        logError('Message send failed', { error: err.message, senderId: messageData.senderId });
+        await logError('Message send failed', { error: err.message, senderId: messageData.senderId, stack: err.stack, ip: socket.handshake.address });
         callback({ error: 'Failed to send message' });
       }
     });
@@ -511,9 +557,15 @@ module.exports = (app) => {
     socket.on('editMessage', async ({ messageId, newContent, plaintextContent }, callback) => {
       try {
         const { error } = editMessageSchema.validate({ messageId, newContent, plaintextContent });
-        if (error) return callback({ error: error.details[0].message });
-        const message = await Message.findById(messageId);
+        if (error) {
+          await logError('Invalid edit message data', { error: error.details[0].message, messageId, ip: socket.handshake.address });
+          return callback({ error: error.details[0].message });
+        }
+        const message = await retryOperation(async () => {
+          return await Message.findById(messageId);
+        });
         if (!message || message.senderId.toString() !== socket.user.id || message.contentType !== 'text') {
+          await logError('Unauthorized or invalid edit', { messageId, socketUserId: socket.user.id, ip: socket.handshake.address });
           return callback({ error: 'Unauthorized or invalid edit' });
         }
         message.content = newContent;
@@ -527,15 +579,29 @@ module.exports = (app) => {
           ...populatedMessage,
           senderId: populatedMessage.senderId.toString(),
           recipientId: populatedMessage.recipientId.toString(),
+          replyTo: populatedMessage.replyTo
+            ? {
+                ...populatedMessage.replyTo,
+                senderId: populatedMessage.replyTo.senderId.toString(),
+                recipientId: populatedMessage.replyTo.recipientId.toString(),
+              }
+            : null,
         });
         io.to(message.senderId.toString()).emit('editMessage', {
           ...populatedMessage,
           senderId: populatedMessage.senderId.toString(),
           recipientId: populatedMessage.recipientId.toString(),
+          replyTo: populatedMessage.replyTo
+            ? {
+                ...populatedMessage.replyTo,
+                senderId: populatedMessage.replyTo.senderId.toString(),
+                recipientId: populatedMessage.replyTo.recipientId.toString(),
+              }
+            : null,
         });
         callback({ message: populatedMessage });
       } catch (err) {
-        logError('Edit message failed', { error: err.message, messageId });
+        await logError('Edit message failed', { error: err.message, messageId, stack: err.stack, ip: socket.handshake.address });
         callback({ error: 'Failed to edit message' });
       }
     });
@@ -543,9 +609,15 @@ module.exports = (app) => {
     socket.on('deleteMessage', async ({ messageId, recipientId }, callback) => {
       try {
         const { error } = deleteMessageSchema.validate({ messageId, recipientId });
-        if (error) return callback({ error: error.details[0].message });
-        const message = await Message.findById(messageId);
+        if (error) {
+          await logError('Invalid delete message data', { error: error.details[0].message, messageId, ip: socket.handshake.address });
+          return callback({ error: error.details[0].message });
+        }
+        const message = await retryOperation(async () => {
+          return await Message.findById(messageId);
+        });
         if (!message || message.senderId.toString() !== socket.user.id) {
+          await logError('Unauthorized to delete message', { messageId, socketUserId: socket.user.id, ip: socket.handshake.address });
           return callback({ error: 'Unauthorized to delete message' });
         }
         await Message.findByIdAndDelete(messageId);
@@ -554,7 +626,7 @@ module.exports = (app) => {
         await Promise.all([emitUpdatedChatList(io, message.senderId.toString()), emitUpdatedChatList(io, recipientId)]);
         callback({ status: 'success' });
       } catch (err) {
-        logError('Delete message failed', { error: err.message, messageId });
+        await logError('Delete message failed', { error: err.message, messageId, stack: err.stack, ip: socket.handshake.address });
         callback({ error: 'Failed to delete message' });
       }
     });
@@ -562,11 +634,15 @@ module.exports = (app) => {
     socket.on('messageStatus', async ({ messageId, status }) => {
       try {
         if (!mongoose.isValidObjectId(messageId) || !['sent', 'delivered', 'read'].includes(status)) {
+          await logError('Invalid messageId or status', { messageId, status, ip: socket.handshake.address });
           socket.emit('error', { message: 'Invalid messageId or status' });
           return;
         }
-        const message = await Message.findById(messageId);
+        const message = await retryOperation(async () => {
+          return await Message.findById(messageId);
+        });
         if (!message || message.recipientId.toString() !== socket.user.id) {
+          await logError('Unauthorized status update', { messageId, socketUserId: socket.user.id, ip: socket.handshake.address });
           socket.emit('error', { message: 'Unauthorized status update' });
           return;
         }
@@ -575,7 +651,7 @@ module.exports = (app) => {
         await message.save();
         io.to(message.senderId.toString()).emit('messageStatus', { messageIds: [messageId], status });
       } catch (err) {
-        logError('Message status update failed', { error: err.message, messageId });
+        await logError('Message status update failed', { error: err.message, messageId, stack: err.stack, ip: socket.handshake.address });
         socket.emit('error', { message: 'Failed to update status' });
       }
     });
@@ -591,6 +667,7 @@ module.exports = (app) => {
           recipientId !== socket.user.id ||
           !['sent', 'delivered', 'read'].includes(status)
         ) {
+          await logError('Invalid messageIds, recipientId, or status', { messageIdsCount: messageIds?.length, recipientId, status, ip: socket.handshake.address });
           socket.emit('error', { message: 'Invalid messageIds, recipientId, or status' });
           return callback?.({ error: 'Invalid messageIds, recipientId, or status' });
         }
@@ -601,6 +678,7 @@ module.exports = (app) => {
             { wtimeout: 10000 }
           );
           if (updateResult.matchedCount === 0) {
+            await logError('No matching messages found for batch update', { messageIdsCount: messageIds.length, recipientId, ip: socket.handshake.address });
             socket.emit('error', { message: 'No matching messages found' });
             return callback?.({ error: 'No matching messages found' });
           }
@@ -615,7 +693,7 @@ module.exports = (app) => {
           callback?.({ status: 'success', updatedCount: updateResult.modifiedCount });
         });
       } catch (err) {
-        logError('Batch status update failed', { error: err.message, recipientId, messageIdsCount: messageIds.length });
+        await logError('Batch status update failed', { error: err.message, messageIdsCount: messageIds.length, recipientId, stack: err.stack, ip: socket.handshake.address });
         socket.emit('error', { message: 'Failed to update batch status' });
         callback?.({ error: 'Failed to update batch status' });
       }
@@ -623,10 +701,12 @@ module.exports = (app) => {
 
     socket.on('disconnect', async () => {
       if (socket.user?.id) {
-        await User.findByIdAndUpdate(socket.user.id, { status: 'offline', lastSeen: new Date() });
-        io.to(socket.user.id).emit('userStatus', { userId: socket.user.id, status: 'offline', lastSeen: new Date() });
+        await retryOperation(async () => {
+          await User.findByIdAndUpdate(socket.user.id, { status: 'offline', lastSeen: new Date() });
+          io.to(socket.user.id).emit('userStatus', { userId: socket.user.id, status: 'offline', lastSeen: new Date() });
+        });
       }
-      logger.info('Socket.IO disconnected', { userId: socket.user?.id });
+      logger.info('Socket.IO disconnected', { userId: socket.user?.id, ip: socket.handshake.address });
     });
   });
 
@@ -636,60 +716,65 @@ module.exports = (app) => {
   router.get('/chat-list', authMiddleware, async (req, res) => {
     const { userId, page = 0, limit = 50 } = req.query;
     try {
-      if (!mongoose.isValidObjectId(userId)) {
-        return res.status(400).json({ error: 'Invalid userId' });
+      if (!mongoose.isValidObjectId(userId) || userId !== req.user._id.toString()) {
+        await logError('Invalid or unauthorized chat list request', { userId, reqUserId: req.user._id, ip: req.ip });
+        return res.status(400).json({ error: 'Invalid or unauthorized userId' });
       }
       const cacheKey = `chatList:${userId}:${page}:${limit}`;
       const cached = chatListCache.get(cacheKey);
       if (cached) {
-        logger.info('Served cached chat list (HTTP)', { userId, page, count: cached.length });
+        logger.info('Served cached chat list (HTTP)', { userId, page, count: cached.length, ip: req.ip });
         return res.status(200).json(cached);
       }
-      const user = await User.findById(userId)
-        .select('contacts')
-        .populate({
-          path: 'contacts',
-          select: 'username virtualNumber photo status lastSeen',
-          options: { skip: parseInt(page) * parseInt(limit), limit: parseInt(limit), sort: { lastSeen: -1 } },
-        })
-        .lean();
+      const user = await retryOperation(async () => {
+        return await User.findById(userId)
+          .select('contacts')
+          .populate({
+            path: 'contacts',
+            select: 'username virtualNumber photo status lastSeen publicKey',
+            options: { skip: parseInt(page) * parseInt(limit), limit: parseInt(limit), sort: { lastSeen: -1 } },
+          })
+          .lean();
+      });
       if (!user?.contacts?.length) {
         chatListCache.set(cacheKey, []);
         return res.status(200).json([]);
       }
       const contactIds = user.contacts.map((c) => c._id);
-      const latestMessages = await Message.aggregate([
-        {
-          $match: {
-            $or: [
-              { senderId: new mongoose.Types.ObjectId(userId), recipientId: { $in: contactIds } },
-              { recipientId: new mongoose.Types.ObjectId(userId), senderId: { $in: contactIds } },
-            ],
-          },
-        },
-        { $sort: { createdAt: -1 } },
-        {
-          $group: {
-            _id: {
-              $cond: [
-                { $eq: ['$senderId', new mongoose.Types.ObjectId(userId)] },
-                '$recipientId',
-                '$senderId',
+      const latestMessages = await retryOperation(async () => {
+        return await Message.aggregate([
+          {
+            $match: {
+              $or: [
+                { senderId: new mongoose.Types.ObjectId(userId), recipientId: { $in: contactIds } },
+                { recipientId: new mongoose.Types.ObjectId(userId), senderId: { $in: contactIds } },
               ],
             },
-            latestMessage: { $first: '$$ROOT' },
-            unreadCount: {
-              $sum: {
+          },
+          { $sort: { createdAt: -1 } },
+          {
+            $group: {
+              _id: {
                 $cond: [
-                  { $and: [{ $eq: ['$recipientId', new mongoose.Types.ObjectId(userId)] }, { $eq: ['$status', 'delivered'] }] },
-                  1,
-                  0,
+                  { $eq: ['$senderId', new mongoose.Types.ObjectId(userId)] },
+                  '$recipientId',
+                  '$senderId',
                 ],
+              },
+              latestMessage: { $first: '$$ROOT' },
+              unreadCount: {
+                $sum: {
+                  $cond: [
+                    { $and: [{ $eq: ['$recipientId', new mongoose.Types.ObjectId(userId)] }, { $eq: ['$status', 'delivered'] }] },
+                    1,
+                    0,
+                  ],
+                },
               },
             },
           },
-        },
-      ]);
+        ]);
+      });
       const chatList = user.contacts.map((contact) => {
         const messageData = latestMessages.find((m) => m._id.toString() === contact._id.toString());
         return {
@@ -704,15 +789,23 @@ module.exports = (app) => {
                 ...messageData.latestMessage,
                 senderId: messageData.latestMessage.senderId.toString(),
                 recipientId: messageData.latestMessage.recipientId.toString(),
+                replyTo: messageData.latestMessage.replyTo
+                  ? {
+                      ...messageData.latestMessage.replyTo,
+                      senderId: messageData.latestMessage.replyTo.senderId.toString(),
+                      recipientId: messageData.latestMessage.replyTo.recipientId.toString(),
+                    }
+                  : null,
               }
             : null,
           unreadCount: messageData?.unreadCount || 0,
         };
       });
       chatListCache.set(cacheKey, chatList);
+      logger.info('Fetched chat list (HTTP)', { userId, page, count: chatList.length, ip: req.ip });
       res.status(200).json(chatList);
     } catch (error) {
-      logError('Chat list fetch failed', { userId, error: error.message });
+      await logError('Chat list fetch failed', { userId, error: error.message, stack: error.stack, ip: req.ip });
       res.status(500).json({ error: 'Failed to fetch chat list' });
     }
   });
@@ -720,7 +813,10 @@ module.exports = (app) => {
   router.post('/messages', authMiddleware, messageLimiter, async (req, res) => {
     try {
       const { error } = messageSchema.validate(req.body);
-      if (error) return res.status(400).json({ error: error.details[0].message });
+      if (error) {
+        await logError('Invalid message data (HTTP)', { error: error.details[0].message, senderId: req.body.senderId, ip: req.ip });
+        return res.status(400).json({ error: error.details[0].message });
+      }
       const {
         senderId,
         recipientId,
@@ -734,14 +830,22 @@ module.exports = (app) => {
         senderUsername,
         senderPhoto,
       } = req.body;
-      if (senderId !== req.user._id.toString()) return res.status(403).json({ error: 'Unauthorized sender' });
+      if (senderId !== req.user._id.toString()) {
+        await logError('Unauthorized sender (HTTP)', { senderId, reqUserId: req.user._id, ip: req.ip });
+        return res.status(403).json({ error: 'Unauthorized sender' });
+      }
       await retryOperation(async () => {
         const recipient = await User.findById(recipientId).select('status').lean();
-        if (!recipient) return res.status(404).json({ error: 'Recipient not found' });
+        if (!recipient) {
+          await logError('Recipient not found (HTTP)', { recipientId, senderId, ip: req.ip });
+          return res.status(404).json({ error: 'Recipient not found' });
+        }
         const existingMessage = await Message.findOne({ clientMessageId })
           .select('senderId recipientId content contentType plaintextContent status caption replyTo originalFilename clientMessageId senderVirtualNumber senderUsername senderPhoto createdAt updatedAt')
           .lean();
-        if (existingMessage) return res.status(200).json({ message: existingMessage });
+        if (existingMessage) {
+          return res.status(200).json({ message: existingMessage });
+        }
         const sender = await User.findById(senderId)
           .select('virtualNumber username photo')
           .lean();
@@ -793,7 +897,7 @@ module.exports = (app) => {
         res.status(201).json({ message: populatedMessage });
       });
     } catch (error) {
-      logError('Save message error', { error: error.message, senderId: req.body.senderId });
+      await logError('Save message error (HTTP)', { error: error.message, senderId: req.body.senderId, stack: error.stack, ip: req.ip });
       res.status(500).json({ error: 'Failed to save message' });
     }
   });
@@ -801,10 +905,16 @@ module.exports = (app) => {
   router.post('/edit_message', authMiddleware, async (req, res) => {
     try {
       const { error } = editMessageSchema.validate(req.body);
-      if (error) return res.status(400).json({ error: error.details[0].message });
+      if (error) {
+        await logError('Invalid edit message data (HTTP)', { error: error.details[0].message, messageId: req.body.messageId, ip: req.ip });
+        return res.status(400).json({ error: error.details[0].message });
+      }
       const { messageId, newContent, plaintextContent } = req.body;
-      const message = await Message.findById(messageId);
+      const message = await retryOperation(async () => {
+        return await Message.findById(messageId);
+      });
       if (!message || message.senderId.toString() !== req.user._id.toString() || message.contentType !== 'text') {
+        await logError('Unauthorized or invalid edit (HTTP)', { messageId, reqUserId: req.user._id, ip: req.ip });
         return res.status(403).json({ error: 'Unauthorized or invalid edit' });
       }
       message.content = newContent;
@@ -818,15 +928,29 @@ module.exports = (app) => {
         ...populatedMessage,
         senderId: populatedMessage.senderId.toString(),
         recipientId: populatedMessage.recipientId.toString(),
+        replyTo: populatedMessage.replyTo
+          ? {
+              ...populatedMessage.replyTo,
+              senderId: populatedMessage.replyTo.senderId.toString(),
+              recipientId: populatedMessage.replyTo.recipientId.toString(),
+            }
+          : null,
       });
       io.to(message.senderId.toString()).emit('editMessage', {
         ...populatedMessage,
-        senderId: poppedMessage.senderId.toString(),
+        senderId: populatedMessage.senderId.toString(),
         recipientId: populatedMessage.recipientId.toString(),
+        replyTo: populatedMessage.replyTo
+          ? {
+              ...populatedMessage.replyTo,
+              senderId: populatedMessage.replyTo.senderId.toString(),
+              recipientId: populatedMessage.replyTo.recipientId.toString(),
+            }
+          : null,
       });
       res.status(200).json({ message: populatedMessage });
     } catch (err) {
-      logError('Edit message failed', { error: err.message, messageId: req.body.messageId });
+      await logError('Edit message failed (HTTP)', { error: err.message, messageId: req.body.messageId, stack: err.stack, ip: req.ip });
       res.status(500).json({ error: 'Failed to edit message' });
     }
   });
@@ -834,10 +958,16 @@ module.exports = (app) => {
   router.post('/delete_message', authMiddleware, async (req, res) => {
     try {
       const { error } = deleteMessageSchema.validate(req.body);
-      if (error) return res.status(400).json({ error: error.details[0].message });
+      if (error) {
+        await logError('Invalid delete message data (HTTP)', { error: error.details[0].message, messageId: req.body.messageId, ip: req.ip });
+        return res.status(400).json({ error: error.details[0].message });
+      }
       const { messageId, recipientId } = req.body;
-      const message = await Message.findById(messageId);
+      const message = await retryOperation(async () => {
+        return await Message.findById(messageId);
+      });
       if (!message || message.senderId.toString() !== req.user._id.toString()) {
+        await logError('Unauthorized to delete message (HTTP)', { messageId, reqUserId: req.user._id, ip: req.ip });
         return res.status(403).json({ error: 'Unauthorized to delete message' });
       }
       await Message.findByIdAndDelete(messageId);
@@ -846,7 +976,7 @@ module.exports = (app) => {
       await Promise.all([emitUpdatedChatList(io, message.senderId.toString()), emitUpdatedChatList(io, recipientId)]);
       res.status(200).json({ status: 'success' });
     } catch (err) {
-      logError('Delete message failed', { error: err.message, messageId: req.body.messageId });
+      await logError('Delete message failed (HTTP)', { error: err.message, messageId: req.body.messageId, stack: err.stack, ip: req.ip });
       res.status(500).json({ error: 'Failed to delete message' });
     }
   });
@@ -855,6 +985,7 @@ module.exports = (app) => {
     const { userId, recipientId, limit = 50, skip = 0, since } = req.query;
     try {
       if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId) || userId !== req.user._id.toString()) {
+        await logError('Invalid or unauthorized messages request', { userId, recipientId, reqUserId: req.user._id, ip: req.ip });
         return res.status(400).json({ error: 'Invalid or unauthorized request' });
       }
       let query = {
@@ -866,32 +997,37 @@ module.exports = (app) => {
       if (since && !isNaN(Date.parse(since))) {
         query.createdAt = { $gt: new Date(since) };
       }
-      const messages = await Message.find(query)
-        .sort({ createdAt: 1 })
-        .skip(parseInt(skip))
-        .limit(parseInt(limit))
-        .select('senderId recipientId content contentType plaintextContent status caption replyTo originalFilename clientMessageId senderVirtualNumber senderUsername senderPhoto createdAt updatedAt')
-        .lean();
+      const messages = await retryOperation(async () => {
+        return await Message.find(query)
+          .sort({ createdAt: 1 })
+          .skip(parseInt(skip))
+          .limit(parseInt(limit))
+          .select('senderId recipientId content contentType plaintextContent status caption replyTo originalFilename clientMessageId senderVirtualNumber senderUsername senderPhoto createdAt updatedAt')
+          .lean();
+      });
       const deliveredMessageIds = messages
         .filter((msg) => msg.recipientId.toString() === userId && msg.status === 'delivered')
         .map((msg) => msg._id);
       if (deliveredMessageIds.length) {
-        await Message.updateMany(
-          { _id: { $in: deliveredMessageIds }, recipientId: userId },
-          { status: 'read', updatedAt: new Date() }
-        );
-        const senderIds = [...new Set(messages
-          .filter((msg) => deliveredMessageIds.includes(msg._id))
-          .map((msg) => msg.senderId.toString())
-        )];
-        senderIds.forEach((senderId) => {
-          io.to(senderId).emit('messageStatus', { messageIds: deliveredMessageIds, status: 'read' });
+        await retryOperation(async () => {
+          const updateResult = await Message.updateMany(
+            { _id: { $in: deliveredMessageIds }, recipientId: userId },
+            { status: 'read', updatedAt: new Date() }
+          );
+          const senderIds = [...new Set(messages
+            .filter((msg) => deliveredMessageIds.includes(msg._id))
+            .map((msg) => msg.senderId.toString())
+          )];
+          senderIds.forEach((senderId) => {
+            io.to(senderId).emit('messageStatus', { messageIds: deliveredMessageIds, status: 'read' });
+          });
+          logger.info('Updated message statuses to read', { userId, updatedCount: updateResult.modifiedCount, ip: req.ip });
         });
       }
       const total = await Message.countDocuments(query);
       res.status(200).json({ messages, total });
     } catch (error) {
-      logError('Messages fetch failed', { userId, recipientId, error: error.message });
+      await logError('Messages fetch failed', { userId, recipientId, error: error.message, stack: error.stack, ip: req.ip });
       res.status(500).json({ error: 'Failed to fetch messages' });
     }
   });
@@ -899,16 +1035,28 @@ module.exports = (app) => {
   router.post('/add_contact', authMiddleware, addContactLimiter, async (req, res) => {
     try {
       const { error } = addContactSchema.validate(req.body);
-      if (error) return res.status(400).json({ error: error.details[0].message });
+      if (error) {
+        await logError('Invalid add contact data', { error: error.details[0].message, userId: req.body.userId, ip: req.ip });
+        return res.status(400).json({ error: error.details[0].message });
+      }
       const { userId, virtualNumber } = req.body;
-      if (userId !== req.user._id.toString()) return res.status(403).json({ error: 'Unauthorized' });
+      if (userId !== req.user._id.toString()) {
+        await logError('Unauthorized add contact', { userId, reqUserId: req.user._id, ip: req.ip });
+        return res.status(403).json({ error: 'Unauthorized' });
+      }
       await retryOperation(async () => {
         const contact = await User.findOne({ virtualNumber })
-          .select('_id username virtualNumber photo status lastSeen contacts')
+          .select('_id username virtualNumber photo status lastSeen publicKey')
           .lean();
-        if (!contact) return res.status(404).json({ error: 'Contact not registered' });
-        if (contact._id.toString() === userId) return res.status(400).json({ error: 'Cannot add self as contact' });
-        const user = await User.findById(userId).select('contacts username virtualNumber photo status lastSeen');
+        if (!contact) {
+          await logError('Contact not registered', { virtualNumber, userId, ip: req.ip });
+          return res.status(404).json({ error: 'Contact not registered' });
+        }
+        if (contact._id.toString() === userId) {
+          await logError('Cannot add self as contact', { userId, ip: req.ip });
+          return res.status(400).json({ error: 'Cannot add self as contact' });
+        }
+        const user = await User.findById(userId).select('contacts username virtualNumber photo status lastSeen publicKey');
         const userHasContact = user.contacts.some((id) => id.toString() === contact._id.toString());
         const contactHasUser = contact.contacts.some((id) => id.toString() === userId);
         if (userHasContact && contactHasUser) {
@@ -948,15 +1096,15 @@ module.exports = (app) => {
           latestMessage: null,
           unreadCount: 0,
         };
-        chatListCache.delete(`chatList:${userId}`);
-        chatListCache.delete(`chatList:${contact._id.toString()}`);
+        chatListCache.del(`chatList:${userId}`);
+        chatListCache.del(`chatList:${contact._id.toString()}`);
         io.to(userId).emit('contactData', { userId, contactData });
         io.to(contact._id.toString()).emit('contactData', { userId: contact._id.toString(), contactData: userData });
         await Promise.all([emitUpdatedChatList(io, userId), emitUpdatedChatList(io, contact._id.toString())]);
         res.status(201).json(contactData);
       });
     } catch (error) {
-      logError('Add contact failed', { userId: req.body.userId, virtualNumber: req.body.virtualNumber, error: error.message });
+      await logError('Add contact failed', { userId: req.body.userId, virtualNumber: req.body.virtualNumber, error: error.message, stack: error.stack, ip: req.ip });
       res.status(500).json({ error: 'Failed to add contact' });
     }
   });
@@ -965,14 +1113,21 @@ module.exports = (app) => {
     try {
       const { userId, recipientId, clientMessageId, senderVirtualNumber, senderUsername, senderPhoto, caption } = req.body;
       if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId) || !clientMessageId || !req.file || userId !== req.user._id.toString()) {
+        await logError('Invalid or unauthorized upload parameters', { userId, recipientId, clientMessageId, hasFile: !!req.file, reqUserId: req.user._id, ip: req.ip });
         return res.status(400).json({ error: 'Invalid or unauthorized parameters' });
       }
       await retryOperation(async () => {
         const recipient = await User.findById(recipientId).select('status').lean();
+        if (!recipient) {
+          await logError('Recipient not found for upload', { recipientId, userId, ip: req.ip });
+          return res.status(404).json({ error: 'Recipient not found' });
+        }
         const existingMessage = await Message.findOne({ clientMessageId })
           .select('senderId recipientId content contentType plaintextContent status caption replyTo originalFilename clientMessageId senderVirtualNumber senderUsername senderPhoto createdAt updatedAt')
           .lean();
-        if (existingMessage) return res.json({ message: existingMessage });
+        if (existingMessage) {
+          return res.json({ message: existingMessage });
+        }
         const contentType = req.file.mimetype.startsWith('image/') ? 'image' :
                             req.file.mimetype.startsWith('video/') ? 'video' :
                             req.file.mimetype.startsWith('audio/') ? 'audio' : 'document';
@@ -992,7 +1147,7 @@ module.exports = (app) => {
           content: uploadResult.secure_url,
           contentType,
           plaintextContent: '',
-          status: recipient?.status === 'online' ? 'delivered' : 'sent',
+          status: recipient.status === 'online' ? 'delivered' : 'sent',
           caption,
           originalFilename: req.file.originalname,
           clientMessageId,
@@ -1004,24 +1159,38 @@ module.exports = (app) => {
         const populatedMessage = await Message.findById(message._id)
           .select('senderId recipientId content contentType plaintextContent status caption replyTo originalFilename clientMessageId senderVirtualNumber senderUsername senderPhoto createdAt updatedAt')
           .lean();
-        chatListCache.delete(`chatList:${userId}`);
-        chatListCache.delete(`chatList:${recipientId}`);
+        chatListCache.del(`chatList:${userId}`);
+        chatListCache.del(`chatList:${recipientId}`);
         io.to(recipientId).emit('message', {
           ...populatedMessage,
           senderId: populatedMessage.senderId.toString(),
           recipientId: populatedMessage.recipientId.toString(),
+          replyTo: populatedMessage.replyTo
+            ? {
+                ...populatedMessage.replyTo,
+                senderId: populatedMessage.replyTo.senderId.toString(),
+                recipientId: populatedMessage.replyTo.recipientId.toString(),
+              }
+            : null,
         });
         io.to(userId).emit('message', {
           ...populatedMessage,
           senderId: populatedMessage.senderId.toString(),
           recipientId: populatedMessage.recipientId.toString(),
+          replyTo: populatedMessage.replyTo
+            ? {
+                ...populatedMessage.replyTo,
+                senderId: populatedMessage.replyTo.senderId.toString(),
+                recipientId: populatedMessage.replyTo.recipientId.toString(),
+              }
+            : null,
         });
-        io.to(userId).emit('messageStatus', { messageIds: [message._id], status: recipient?.status === 'online' ? 'delivered' : 'sent' });
+        io.to(userId).emit('messageStatus', { messageIds: [message._id], status: recipient.status === 'online' ? 'delivered' : 'sent' });
         await Promise.all([emitUpdatedChatList(io, userId), emitUpdatedChatList(io, recipientId)]);
         res.json({ message: populatedMessage });
       });
     } catch (err) {
-      logError('Media upload failed', { error: err.message, userId: req.body.userId });
+      await logError('Media upload failed', { error: err.message, userId: req.body.userId, stack: err.stack, ip: req.ip });
       res.status(500).json({ error: 'Failed to upload media' });
     }
   });
@@ -1029,7 +1198,10 @@ module.exports = (app) => {
   router.post('/logout', authMiddleware, async (req, res) => {
     try {
       const token = req.token;
-      if (!token) return res.status(400).json({ error: 'No token provided' });
+      if (!token) {
+        await logError('No token provided for logout', { userId: req.user._id, ip: req.ip });
+        return res.status(400).json({ error: 'No token provided' });
+      }
       await retryOperation(async () => {
         await TokenBlacklist.create({ token });
         const sockets = await io.in(req.user.id).fetchSockets();
@@ -1037,13 +1209,14 @@ module.exports = (app) => {
         await User.findByIdAndUpdate(req.user.id, { status: 'offline', lastSeen: new Date() });
         io.to(req.user.id).emit('userStatus', { userId: req.user.id, status: 'offline', lastSeen: new Date() });
       });
+      logger.info('Logout successful', { userId: req.user.id, ip: req.ip });
       res.status(200).json({ message: 'Logged out successfully' });
     } catch (error) {
-      logError('Logout error', { error: error.message, userId: req.user?.id });
+      await logError('Logout error', { error: error.message, userId: req.user?.id, stack: error.stack, ip: req.ip });
       try {
         await TokenBlacklist.create({ token: req.token });
       } catch (blacklistErr) {
-        logError('Failed to blacklist token during logout', { error: blacklistErr.message });
+        await logError('Failed to blacklist token during logout', { error: blacklistErr.message, userId: req.user?.id, ip: req.ip });
       }
       res.status(500).json({ error: 'Failed to logout, please try again' });
     }
@@ -1052,10 +1225,10 @@ module.exports = (app) => {
   router.post('/log-error', async (req, res) => {
     try {
       const { error, stack, userId, route, timestamp } = req.body;
-      logError('Client-side error', { error, stack, userId, route, timestamp });
+      await logError('Client-side error', { error, stack, userId, route, timestamp, ip: req.ip });
       res.status(200).json({ message: 'Error logged successfully' });
     } catch (err) {
-      logError('Failed to log client error', { error: err.message });
+      await logError('Failed to log client error', { error: err.message, stack: err.stack, ip: req.ip });
       res.status(500).json({ error: 'Failed to log error' });
     }
   });

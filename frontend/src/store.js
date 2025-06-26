@@ -1,5 +1,6 @@
 import { configureStore, createSlice } from '@reduxjs/toolkit';
 import { openDB } from 'idb';
+import axios from 'axios';
 
 // Constants
 const DB_NAME = 'chatApp';
@@ -9,6 +10,7 @@ const MAX_MESSAGES_PER_CHAT = 100;
 const MESSAGE_TTL = 30 * 24 * 60 * 60 * 1000; // 30 days
 const PERSISTENCE_DEBOUNCE_MS = 300;
 const CACHE_TIMEOUT = 5 * 60 * 1000; // 5 minutes
+const BASE_URL = 'https://gapp-6yc3.onrender.com';
 
 // ObjectId validation
 const isValidObjectId = (id) => /^[0-9a-fA-F]{24}$/.test(id);
@@ -26,32 +28,26 @@ const initDB = async () => {
         }
       },
     });
-    
     return db;
   } catch (error) {
     console.error('Failed to initialize IndexedDB:', error.message);
-    logError('IndexedDB initialization failed', error);
+    await logClientError('IndexedDB initialization failed', error);
     throw error;
   }
 };
 
 const errorLogTimestamps = new Map();
 
-
-
-
-const logError = async (message, error, userId = null) => {
+const logClientError = async (message, error, userId = null) => {
   const now = Date.now();
   const errorEntry = errorLogTimestamps.get(message) || { count: 0, timestamps: [] };
   errorEntry.timestamps = errorEntry.timestamps.filter((ts) => now - ts < 60 * 1000);
   if (errorEntry.count >= 1 || errorEntry.timestamps.length >= 1) {
-    
+    console.log(`Client error logging skipped for "${message}": rate limit reached`);
     return;
   }
-  // Only log critical errors
   const isCritical = message.includes('Unauthorized') || message.includes('failed after max retries') || message.includes('IndexedDB initialization failed');
   if (!isCritical) {
-    
     return;
   }
   errorEntry.count += 1;
@@ -59,28 +55,22 @@ const logError = async (message, error, userId = null) => {
   errorLogTimestamps.set(message, errorEntry);
 
   try {
-    const response = await fetch('https://gapp-6yc3.onrender.com/social/log-error', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    await axios.post(
+      `${BASE_URL}/social/log-error`,
+      {
         error: message,
         stack: error?.stack || '',
         userId,
         route: window.location.pathname,
         timestamp: new Date().toISOString(),
-      }),
-    });
-    if (!response.ok) {
-      throw new Error(`Server responded with status ${response.status}`);
-    }
+      },
+      { timeout: 5000 }
+    );
     console.log(`Critical error logged: ${message}`);
   } catch (err) {
     console.error('Failed to log critical error:', err.message);
   }
 };
-
-
-
 
 // Auth Slice
 const authSlice = createSlice({
@@ -103,7 +93,7 @@ const authSlice = createSlice({
       state.photo = typeof photo === 'string' ? photo : null;
       state.virtualNumber = typeof virtualNumber === 'string' ? virtualNumber : null;
       state.username = typeof username === 'string' ? username : null;
-      state.privateKey = privateKey || null;
+      state.privateKey = typeof privateKey === 'string' && privateKey ? privateKey : state.privateKey;
     },
     clearAuth: (state) => {
       Object.assign(state, authSlice.getInitialState());
@@ -201,7 +191,6 @@ const messageSlice = createSlice({
         state.chats[recipientId] = state.chats[recipientId].slice(-MAX_MESSAGES_PER_CHAT);
         state.chatMessageCount[recipientId] = (state.chatMessageCount[recipientId] || 0) + 1;
         state.messagesTimestamp[recipientId] = Date.now();
-
       } else {
         console.warn('addMessage: Invalid senderId or recipientId', normalizedMsg);
       }
@@ -243,7 +232,6 @@ const messageSlice = createSlice({
           state.chatMessageCount[recipientId] = (state.chatMessageCount[recipientId] || 0) + 1;
         }
         state.messagesTimestamp[recipientId] = Date.now();
-
       } else {
         console.warn('replaceMessage: Invalid senderId or recipientId', normalizedMsg);
       }
@@ -272,70 +260,58 @@ const messageSlice = createSlice({
       );
       state.chatMessageCount[recipientId] = (state.chatMessageCount[recipientId] || 1) - 1;
       state.messagesTimestamp[recipientId] = Date.now();
-    
     },
     setSelectedChat: (state, action) => {
       const recipientId = action.payload;
       if (recipientId === null) {
         state.selectedChat = null;
-       
       } else if (isValidObjectId(recipientId)) {
         state.chats[recipientId] = state.chats[recipientId] || [];
         state.selectedChat = recipientId;
-      
       } else {
         console.warn('setSelectedChat: Invalid recipientId', recipientId);
       }
     },
-
-
-
     setChatList: (state, action) => {
-  const now = Date.now();
-  const payload = Array.isArray(action.payload) ? action.payload : [];
-  const validContacts = payload.filter(
-    (contact) => isValidObjectId(contact.id) && contact.virtualNumber
-  );
-  if (validContacts.length > 0) {
-    const existingChatMap = new Map(state.chatList.map((chat) => [chat.id, chat]));
-    validContacts.forEach((contact) => {
-      // Only update or add if the contact doesn't exist or has new data
-      existingChatMap.set(contact.id, {
-        id: contact.id,
-        username: contact.username || existingChatMap.get(contact.id)?.username || 'Unknown',
-        virtualNumber: contact.virtualNumber || existingChatMap.get(contact.id)?.virtualNumber || '',
-        photo: contact.photo || existingChatMap.get(contact.id)?.photo || 'https://placehold.co/40x40',
-        status: contact.status || existingChatMap.get(contact.id)?.status || 'offline',
-        lastSeen: contact.lastSeen ? new Date(contact.lastSeen).toISOString() : existingChatMap.get(contact.id)?.lastSeen || null,
-        latestMessage: contact.latestMessage
-          ? {
-              ...contact.latestMessage,
-              senderId: contact.latestMessage.senderId,
-              recipientId: contact.latestMessage.recipientId,
-              createdAt: contact.latestMessage.createdAt
-                ? new Date(contact.latestMessage.createdAt).toISOString()
-                : new Date().toISOString(),
-              updatedAt: contact.latestMessage.updatedAt
-                ? new Date(contact.latestMessage.updatedAt).toISOString()
-                : undefined,
-            }
-          : existingChatMap.get(contact.id)?.latestMessage || null,
-        unreadCount: contact.unreadCount || existingChatMap.get(contact.id)?.unreadCount || 0,
-      });
-    });
-    state.chatList = Array.from(existingChatMap.values());
-    state.chatListTimestamp = now;
-
-  } else {
-    console.warn('setChatList: No valid contacts in payload, retaining existing chatList', payload);
-  }
-},
-
-
-
+      const now = Date.now();
+      const payload = Array.isArray(action.payload) ? action.payload : [];
+      const validContacts = payload.filter(
+        (contact) => isValidObjectId(contact.id) && contact.virtualNumber
+      );
+      if (validContacts.length > 0) {
+        const existingChatMap = new Map(state.chatList.map((chat) => [chat.id, chat]));
+        validContacts.forEach((contact) => {
+          existingChatMap.set(contact.id, {
+            id: contact.id,
+            username: contact.username || existingChatMap.get(contact.id)?.username || 'Unknown',
+            virtualNumber: contact.virtualNumber || existingChatMap.get(contact.id)?.virtualNumber || '',
+            photo: contact.photo || existingChatMap.get(contact.id)?.photo || 'https://placehold.co/40x40',
+            status: contact.status || existingChatMap.get(contact.id)?.status || 'offline',
+            lastSeen: contact.lastSeen ? new Date(contact.lastSeen).toISOString() : existingChatMap.get(contact.id)?.lastSeen || null,
+            latestMessage: contact.latestMessage
+              ? {
+                  ...contact.latestMessage,
+                  senderId: contact.latestMessage.senderId,
+                  recipientId: contact.latestMessage.recipientId,
+                  createdAt: contact.latestMessage.createdAt
+                    ? new Date(contact.latestMessage.createdAt).toISOString()
+                    : new Date().toISOString(),
+                  updatedAt: contact.latestMessage.updatedAt
+                    ? new Date(contact.latestMessage.updatedAt).toISOString()
+                    : undefined,
+                }
+              : existingChatMap.get(contact.id)?.latestMessage || null,
+            unreadCount: contact.unreadCount || existingChatMap.get(contact.id)?.unreadCount || 0,
+          });
+        });
+        state.chatList = Array.from(existingChatMap.values());
+        state.chatListTimestamp = now;
+      } else {
+        console.warn('setChatList: No valid contacts in payload, retaining existing chatList', payload);
+      }
+    },
     resetState: (state) => {
       Object.assign(state, messageSlice.getInitialState());
-      
     },
     cleanupMessages: (state) => {
       const now = Date.now();
@@ -352,13 +328,11 @@ const messageSlice = createSlice({
         );
         state.chatMessageCount[recipientId] = state.chats[recipientId].length;
         if (!state.chats[recipientId].length) {
-        
           delete state.chats[recipientId];
           delete state.chatMessageCount[recipientId];
           delete state.messagesTimestamp[recipientId];
         }
       });
-
     },
   },
 });
@@ -446,13 +420,13 @@ const persistenceMiddleware = (store) => {
           photo: state.auth.photo,
           virtualNumber: state.auth.virtualNumber,
           username: state.auth.username,
-          privateKey: null,
+          privateKey: state.auth.privateKey, // Persist privateKey
         },
       };
       await db.put(STORE_NAME, { key: 'state', value: serializableState });
-
+      console.log('State persisted successfully');
     } catch (error) {
-      logError('Failed to persist state', error, state.auth.userId);
+      await logClientError('Failed to persist state', error, state.auth.userId);
     }
   }, PERSISTENCE_DEBOUNCE_MS);
 
@@ -484,9 +458,9 @@ const persistenceMiddleware = (store) => {
               auth: authSlice.getInitialState(),
             },
           });
- 
+          console.log('Persisted state cleared');
         } catch (error) {
-          logError('Failed to clear persisted state', error);
+          await logClientError('Failed to clear persisted state', error);
         }
       });
     }
@@ -495,20 +469,18 @@ const persistenceMiddleware = (store) => {
   };
 };
 
-
-
 const loadPersistedState = async () => {
   try {
     const db = await initDB();
     const persistedState = await db.get(STORE_NAME, 'state');
     if (!persistedState?.value) {
-    
+      console.log('No persisted state found');
       return null;
     }
 
     const { messages, auth } = persistedState.value;
     if (!messages || !auth) {
-      console.warn('loadPersistedState: Invalid persisted state structure', persistedState);
+      //console.warn('loadPersistedState: Invalid persisted state structure', persistedState);
       return null;
     }
 
@@ -590,20 +562,15 @@ const loadPersistedState = async () => {
         photo: typeof auth.photo === 'string' ? auth.photo : null,
         virtualNumber: typeof auth.virtualNumber === 'string' ? auth.virtualNumber : null,
         username: typeof auth.username === 'string' ? auth.username : null,
-        privateKey: null,
+        privateKey: typeof auth.privateKey === 'string' && auth.privateKey ? auth.privateKey : null,
       },
     };
-  
     return result;
   } catch (error) {
-    logError('Failed to load persisted state', error);
+    await logClientError('Failed to load persisted state', error);
     return null;
   }
 };
-
-
-
-
 
 // Create store
 export const store = configureStore({
@@ -647,12 +614,12 @@ export const initializeStore = async () => {
       });
       store.dispatch(setChatList(persistedState.messages.chatList));
       store.dispatch(cleanupMessages());
-     
+      console.log('Store initialized with persisted state');
     } else {
-     
+      //console.log('No valid persisted state, using initial state');
     }
   } catch (error) {
-    logError('Failed to initialize store with persisted state', error);
+    await logClientError('Failed to initialize store with persisted state', error);
   }
 };
 

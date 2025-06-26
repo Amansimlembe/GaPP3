@@ -29,7 +29,7 @@ try {
   jobseekerRoutes = require('./routes/jobseeker');
   employerRoutes = require('./routes/employer');
 } catch (err) {
-  logger.error('Failed to load route modules', { error: err.message, stack: err.stack });
+
   process.exit(1);
 }
 
@@ -62,7 +62,7 @@ const buildPath = path.join(__dirname, '..', 'frontend', 'build');
 try {
   if (fs.existsSync(buildPath)) {
     const buildFiles = fs.readdirSync(buildPath);
-    logger.info(`Build directory contents: ${buildFiles.join(', ')}`);
+    
     app.use(express.static(buildPath, { maxAge: '1h' })); // Changed: Cache static files for 1 hour
   } else {
     logger.warn(`Build directory not found: ${buildPath}. Static files will not be served.`);
@@ -99,7 +99,7 @@ const retryOperation = async (operation, maxRetries = 3, baseDelay = 1000) => {
     } catch (err) {
       if (attempt === maxRetries) throw err;
       const delay = Math.pow(2, attempt) * baseDelay;
-      logger.warn('Retrying operation', { attempt, error: err.message });
+     
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
@@ -115,10 +115,9 @@ const connectDB = async (retries = 5, baseDelay = 1000) => {
       //logger.info('MongoDB connected');
       return;
     } catch (err) {
-      logger.error(`MongoDB connection attempt ${attempt} failed`, { error: err.message });
+
       if (attempt === retries) {
-        logger.error('MongoDB connection failed after max retries', { error: err.message, stack: err.stack });
-        process.exit(1);
+     process.exit(1);
       }
       await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * baseDelay));
     }
@@ -135,7 +134,7 @@ const startPeriodicCleanup = () => {
         orphanedUserIds: result.orphanedUserIds,
       });*/
     } catch (err) {
-      logger.error('Periodic orphaned messages cleanup failed', { error: err.message });
+      
     }
   }, interval);
 };
@@ -165,13 +164,9 @@ const routes = [
 
 routes.forEach(({ path, handler, name }) => {
   if (handler && (typeof handler === 'function' || (typeof handler === 'object' && handler.handle))) {
-    logger.info(`Registering route: ${path}`);
+   
     app.use(path, handler);
   } else {
-    logger.error(`Skipping invalid route handler for ${path} (${name})`, {
-      handlerType: typeof handler,
-      handler: handler,
-    });
   }
 });
 
@@ -180,12 +175,12 @@ app.get('*', (req, res) => {
   if (fs.existsSync(indexPath)) {
     res.sendFile(indexPath, { maxAge: 3600000 }, (err) => {
       if (err) {
-        logger.error('Failed to serve index.html', { path: indexPath, error: err.message });
+        
         res.status(500).json({ error: 'Server Error - Static files may not be available' });
       }
     });
   } else {
-    logger.error('index.html not found', { path: indexPath });
+  
     res.status(500).json({ error: 'Server Error - Frontend not built' });
   }
 });
@@ -211,7 +206,7 @@ io.use(async (socket, next) => {
   const res = {
     status: (code) => ({
       json: (data) => {
-        logger.warn('Socket auth error response', { code, data, socketId: socket.id });
+       
         next(new Error(data.error || 'Authentication error'));
       },
     }),
@@ -224,7 +219,7 @@ io.use(async (socket, next) => {
       next();
     });
   } catch (err) {
-    logger.error('Socket auth middleware error', { error: err.message, socketId: socket.id });
+ 
     next(new Error('Authentication error'));
   }
 });
@@ -235,7 +230,7 @@ io.on('connection', (socket) => {
   socket.on('join', (data) => {
     const userId = typeof data === 'object' ? data.userId : data; // Changed: Handle object or string
     if (!userId || userId !== socket.user.id) {
-      logger.warn('Unauthorized join attempt', { socketId: socket.id, userId, authUserId: socket.user.id });
+
       return;
     }
     socket.join(userId);
@@ -245,12 +240,11 @@ io.on('connection', (socket) => {
   socket.on('message', async (msg, callback) => {
     try {
       if (!msg.recipientId || !msg.senderId || !mongoose.isValidObjectId(msg.recipientId) || !mongoose.isValidObjectId(msg.senderId)) {
-        logger.warn('Invalid message data', { socketId: socket.id, msg });
+     
         return callback({ error: 'Invalid message data' });
       }
       if (msg.senderId !== socket.user.id) {
-        logger.warn('Unauthorized message attempt', { socketId: socket.id, senderId: msg.senderId, authUserId: socket.user.id });
-        return callback({ error: 'Unauthorized' });
+       return callback({ error: 'Unauthorized' });
       }
 
       const savedMessage = await retryOperation(async () => {
@@ -267,14 +261,13 @@ io.on('connection', (socket) => {
       io.to(msg.recipientId).emit('message', savedMessage);
       callback({ status: 'ok', message: savedMessage });
     } catch (err) {
-      logger.error('Socket message error', { error: err.message, socketId: socket.id, msg });
-      callback({ error: err.message });
+      
     }
   });
 
   socket.on('readMessages', async ({ chatId, userId }) => {
     if (!mongoose.isValidObjectId(chatId) || userId !== socket.user.id) {
-      logger.warn('Invalid readMessages data', { socketId: socket.id, chatId, userId });
+   
       return;
     }
     try {
@@ -286,13 +279,13 @@ io.on('connection', (socket) => {
       });
       io.to(chatId).emit('readMessages', { chatId, userId });
     } catch (err) {
-      logger.error('Socket readMessages error', { error: err.message, socketId: socket.id });
+      
     }
   });
 
   socket.on('typing', ({ chatId, userId }) => {
     if (!mongoose.isValidObjectId(chatId) || userId !== socket.user.id) {
-      logger.warn('Invalid typing data', { socketId: socket.id, chatId, userId });
+   
       return;
     }
     socket.to(chatId).emit('typing', { chatId, userId });
@@ -300,8 +293,7 @@ io.on('connection', (socket) => {
 
   socket.on('leave', (userId) => {
     if (!userId || userId !== socket.user.id) {
-      logger.warn('Unauthorized leave attempt', { socketId: socket.id, userId, authUserId: socket.user.id });
-      return;
+   return;
     }
     socket.leave(userId);
    // logger.info('User left room', { userId, socketId: socket.id });
@@ -324,7 +316,6 @@ const shutdown = async () => {
     ]);
     //logger.info('MongoDB connection closed');
   } catch (err) {
-    logger.error('Error closing MongoDB connection during shutdown', { error: err.message });
   }
   io.close(() => {
     //logger.info('Socket.IO connections closed');
@@ -334,7 +325,6 @@ const shutdown = async () => {
     process.exit(0);
   });
   setTimeout(() => {
-    logger.error('Shutdown timed out, forcing exit');
     process.exit(1);
   }, 10000);
 };
