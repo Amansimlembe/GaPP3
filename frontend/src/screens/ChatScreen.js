@@ -80,30 +80,33 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
   }, []);
 
   const logClientError = useCallback(async (message, error) => {
-    const now = Date.now();
-    const errorEntry = errorLogTimestamps.current.get(message) || { count: 0, timestamps: [] };
-    errorEntry.timestamps = errorEntry.timestamps.filter((ts) => now - ts < 60 * 1000);
-    if (errorEntry.count >= 2 || errorEntry.timestamps.length >= 2) return;
-    errorEntry.count += 1;
-    errorEntry.timestamps.push(now);
-    errorLogTimestamps.current.set(message, errorEntry);
+  const now = Date.now();
+  const errorEntry = errorLogTimestamps.current.get(message) || { count: 0, timestamps: [] };
+  
+  // Clear previous logs for this message to prevent accumulation
+  errorLogTimestamps.current.delete(message);
+  errorLogTimestamps.current.set(message, { count: 1, timestamps: [now] });
 
-    try {
-      await axios.post(
-        `${BASE_URL}/social/log-error`,
-        {
-          error: message,
-          stack: error?.stack || '',
-          userId,
-          route: window.location.pathname,
-          timestamp: new Date().toISOString(),
-        },
-        { timeout: 5000 }
-      );
-    } catch (err) {
-      console.error('Failed to log client error:', err.message);
-    }
-  }, [userId]);
+  try {
+    await axios.post(
+      `${BASE_URL}/social/log-error`,
+      {
+        error: message,
+        stack: error?.stack || '',
+        userId,
+        route: window.location.pathname,
+        timestamp: new Date().toISOString(),
+      },
+      { timeout: 5000 }
+    );
+    console.log(`Logged error: ${message}`);
+  } catch (err) {
+    console.error('Failed to log client error:', err.message);
+  }
+}, [userId]);
+
+
+
 
   useEffect(() => {
     const initializeForge = async () => {
@@ -174,12 +177,20 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
 
 
 
-  
+
+
   const fetchChatList = useCallback(
   debounce(
     async (force = false) => {
       if (!isMountedRef.current) {
         console.log('fetchChatList aborted: component unmounted');
+        return;
+      }
+      if (!navigator.onLine && !force) {
+        console.log('fetchChatList skipped: device offline');
+        setFetchStatus('cached');
+        setFetchError('You are offline. Displaying cached contacts.');
+        setIsLoadingChatList(false);
         return;
       }
       if (!isForgeReady) {
@@ -289,6 +300,10 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
   [isForgeReady, token, userId, onLogout, unreadMessages, logClientError, dispatch, chatList, chatListTimestamp]
 );
 fetchChatList.cancel = () => debounce.cancel(); // Allow cancellation of debounced calls
+
+
+
+  
 
 
 
@@ -898,75 +913,73 @@ const handleChatListUpdated = ({ users, page = 0, limit = 50 }) => {
         </div>
       </div>
       <div className="flex flex-1 overflow-hidden">
+
+
+
         <div className={`w-full md:w-1/3 bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 ${selectedChat ? 'hidden md:block' : 'block'}`}>
-          {console.log('Rendering contact list:', { isLoadingChatList, fetchStatus, chatListLength: chatList.length })}
-          {isLoadingChatList && (
-            <div className="p-4 text-center">
-              <p className="text-gray-500 dark:text-gray-400">Loading contacts...</p>
+  {console.log('Rendering contact list:', { isLoadingChatList, fetchStatus, chatListLength: chatList.length })}
+  {!isLoadingChatList && (fetchStatus === 'success' || fetchStatus === 'cached') && chatList.length === 0 && (
+    <div className="p-4 text-center">
+      <p className="text-gray-500 dark:text-gray-400">No contacts to display. Add a contact to start chatting!</p>
+      <button
+        className="mt-2 bg-blue-500 dark:bg-gray-700 text-white dark:text-gray-200 px-4 py-2 rounded-lg hover:bg-blue-600 dark:hover:bg-gray-600"
+        onClick={() => {
+          setShowAddContact(true);
+          setShowMenu(true);
+        }}
+      >
+        Add Contact
+      </button>
+    </div>
+  )}
+  {!isLoadingChatList && (fetchStatus === 'success' || fetchStatus === 'cached') && chatList.length > 0 && (
+    chatList
+      .filter((chat) => isValidObjectId(chat.id))
+      .map((chat) => (
+        <div
+          key={chat.id}
+          className={`flex items-center p-4 border-b border-gray-200 dark:border-gray-700 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 ${
+            selectedChat === chat.id ? 'bg-blue-100 dark:bg-gray-600' : ''
+          }`}
+          onClick={() => selectChat(chat.id)}
+        >
+          <img
+            src={chat.photo || 'https://placehold.co/40x40'}
+            alt="chat-avatar"
+            className="w-10 h-10 rounded-full mr-3"
+          />
+          <div className="flex-1">
+            <div className="flex justify-between">
+              <span className="font-semibold text-gray-900 dark:text-gray-100">{chat.username || 'Unknown'}</span>
+              {chat.latestMessage && (
+                <span className="text-xs text-gray-500 dark:text-gray-400">
+                  {new Date(chat.latestMessage?.createdAt || chat.lastSeen || Date.now()).toLocaleTimeString([], {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })}
+                </span>
+              )}
             </div>
-          )}
-          {!isLoadingChatList && (fetchStatus === 'success' || fetchStatus === 'cached') && chatList.length === 0 && (
-            <div className="p-4 text-center">
-              <p className="text-gray-500 dark:text-gray-400">No contacts to display. Add a contact to start chatting!</p>
-              <button
-                className="mt-2 bg-blue-500 dark:bg-gray-700 text-white dark:text-gray-200 px-4 py-2 rounded-lg hover:bg-blue-600 dark:hover:bg-gray-600"
-                onClick={() => {
-                  setShowAddContact(true);
-                  setShowMenu(true);
-                }}
-              >
-                Add Contact
-              </button>
-            </div>
-          )}
-          {!isLoadingChatList && (fetchStatus === 'success' || fetchStatus === 'cached') && chatList.length > 0 && (
-            chatList
-              .filter((chat) => isValidObjectId(chat.id))
-              .map((chat) => (
-                <div
-                  key={chat.id}
-                  className={`flex items-center p-4 border-b border-gray-200 dark:border-gray-700 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 ${
-                    selectedChat === chat.id ? 'bg-blue-100 dark:bg-gray-600' : ''
-                  }`}
-                  onClick={() => selectChat(chat.id)}
-                >
-                  <img
-                    src={chat.photo || 'https://placehold.co/40x40'}
-                    alt="chat-avatar"
-                    className="w-10 h-10 rounded-full mr-3"
-                  />
-                  <div className="flex-1">
-                    <div className="flex justify-between">
-                      <span className="font-semibold text-gray-900 dark:text-gray-100">{chat.username || 'Unknown'}</span>
-                      {chat.latestMessage && (
-                        <span className="text-xs text-gray-500 dark:text-gray-400">
-                          {new Date(chat.latestMessage?.createdAt || chat.lastSeen || Date.now()).toLocaleTimeString([], {
-                            hour: '2-digit',
-                            minute: '2-digit',
-                          })}
-                        </span>
-                      )}
-                    </div>
-                    {chat.latestMessage && (
-                      <p className="text-sm text-gray-600 dark:text-gray-300 truncate">
-                        {chat.latestMessage.plaintextContent || `[${chat.latestMessage.contentType}]`}
-                      </p>
-                    )}
-                    {!!chat.unreadCount && (
-                      <span className="absolute right-4 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
-                        {chat.unreadCount}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              ))
-          )}
-          {!isLoadingChatList && fetchStatus === 'error' && (
-            <div className="p-4 text-center">
-              <p className="text-red-500 dark:text-red-400">{fetchError}</p>
-            </div>
-          )}
+            {chat.latestMessage && (
+              <p className="text-sm text-gray-600 dark:text-gray-300 truncate">
+                {chat.latestMessage.plaintextContent || `[${chat.latestMessage.contentType}]`}
+              </p>
+            )}
+            {!!chat.unreadCount && (
+              <span className="absolute right-4 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
+                {chat.unreadCount}
+              </span>
+            )}
+          </div>
         </div>
+      ))
+  )}
+  {!isLoadingChatList && fetchStatus === 'error' && (
+    <div className="p-4 text-center">
+      <p className="text-red-500 dark:text-red-400">{fetchError}</p>
+    </div>
+  )}
+</div>
         <div className={`flex-1 flex flex-col ${selectedChat ? 'block' : 'hidden md:block'}`}>
           {selectedChat ? (
             <>
