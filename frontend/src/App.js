@@ -318,17 +318,12 @@ const App = () => {
 
   
 
-
-// In App.js, replace the useEffect for socket connection (lines ~300-400) with:
-
-useEffect(() => {
-  // Skip if already navigating to /login
+  useEffect(() => {
   if (isNavigating && location.pathname === '/login') {
     setIsNavigating(false);
     return;
   }
 
-  // Early return if no token or userId
   if (!token || !userId) {
     if (location.pathname !== '/login' && !isNavigating) {
       setIsNavigating(true);
@@ -337,11 +332,11 @@ useEffect(() => {
     if (socketRef.current) {
       socketRef.current.disconnect();
       socketRef.current = null;
+      setSocket(null);
     }
     return;
   }
 
-  // Initialize socket with robust reconnection
   const connectSocket = (attempt = 0) => {
     if (socketRef.current || !navigator.onLine || attempt > maxReconnectAttempts) {
       if (attempt > maxReconnectAttempts) {
@@ -354,13 +349,12 @@ useEffect(() => {
     const newSocket = io(BASE_URL, {
       auth: { token, userId },
       transports: ['websocket'],
-      reconnection: true, // Enable automatic reconnection
+      reconnection: true,
       reconnectionAttempts: maxReconnectAttempts,
       reconnectionDelay: 1000,
       reconnectionDelayMax: maxDelay,
       randomizationFactor: 0.5,
       timeout: 10000,
-      query: { EIO: 4 },
     });
 
     socketRef.current = newSocket;
@@ -394,6 +388,7 @@ useEffect(() => {
           setError('Offline: Messages will be sent when reconnected');
         }
       }
+      setSocket(null); // Ensure socket is null during disconnection
     };
 
     const handleMessage = (msg) => {
@@ -432,6 +427,7 @@ useEffect(() => {
       if (socketRef.current) {
         socketRef.current.disconnect();
         socketRef.current = null;
+        setSocket(null);
       }
     };
 
@@ -449,6 +445,7 @@ useEffect(() => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
       socketRef.current = null;
+      setSocket(null);
     };
   };
 
@@ -457,7 +454,10 @@ useEffect(() => {
   return () => {
     if (cleanup) cleanup();
   };
-}, [token, userId, location.pathname, handleLogout, navigate, logClientError, selectedChat, maxReconnectAttempts, maxDelay]);
+}, [token, userId, location.pathname, handleLogout, navigate, logClientError, selectedChat]);
+
+
+
 
 
 
@@ -494,27 +494,6 @@ useEffect(() => {
     dispatch(setSelectedChat(null));
   }, [dispatch]);
 
-  // Fallback UI for navigation failure
-  if (error && location.pathname !== '/login') {
-    return (
-      <div className="min-h-screen flex flex-col items-center justify-center bg-gray-100">
-        <div className="bg-red-500 text-white p-4 rounded-lg shadow-lg max-w-md w-full">
-          <p className="text-sm">{error}</p>
-          <button
-            className="bg-white text-red-500 px-3 py-1 mt-2 rounded hover:bg-gray-200"
-            onClick={() => {
-              setError(null);
-              setIsNavigating(true);
-              navigate('/login', { replace: true });
-            }}
-            aria-label="Retry login"
-          >
-            Go to Login
-          </button>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <ErrorBoundary userId={userId} location={location}>
@@ -711,7 +690,7 @@ AuthenticatedApp.propTypes = {
   virtualNumber: PropTypes.string,
   username: PropTypes.string,
   chatNotifications: PropTypes.number.isRequired,
-  socket: PropTypes.object.isRequired,
+  socket: PropTypes.object, // Remove .isRequired
   handleChatNavigation: PropTypes.func.isRequired,
   handleLogout: PropTypes.func.isRequired,
 };

@@ -40,58 +40,69 @@ const ProfileScreen = ({ token, userId, socket, username: initialUsername, virtu
     }
   };
 
+
   useEffect(() => {
-    if (!token || !userId) {
-      setError('Authentication required. Please log in again.');
-      onLogout();
-      return;
+  if (!token || !userId) {
+    setError('Authentication required. Please log in again.');
+    onLogout();
+    return;
+  }
+
+  if (!socket) {
+    setError('Socket connection not available. Some features may be limited.');
+    return;
+  }
+
+  socket.emit('join', userId);
+
+  const fetchMyPosts = async () => {
+    setLoading(true);
+    try {
+      const data = await retryRequest('get', `https://gapp-6yc3.onrender.com/social/my-posts/${userId}`, null, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setMyPosts(data || []);
+      setError('');
+    } catch (error) {
+      setError(`Failed to load posts: ${error.response?.data?.error || error.message}`);
+      if (error.response?.status === 401) {
+        onLogout();
+      }
+    } finally {
+      setLoading(false);
     }
+  };
 
-    socket.emit('join', userId);
+  fetchMyPosts();
 
-    const fetchMyPosts = async () => {
-      setLoading(true);
-      try {
-        const data = await retryRequest('get', `https://gapp-6yc3.onrender.com/social/my-posts/${userId}`, null, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        setMyPosts(data || []);
-        setError('');
-      } catch (error) {
-        setError(`Failed to load posts: ${error.response?.data?.error || error.message}`);
-        if (error.response?.status === 401) {
-          onLogout();
-        }
-      } finally {
-        setLoading(false);
-      }
-    };
+  socket.on('postDeleted', (postId) => {
+    setMyPosts((prev) => prev.filter((p) => p._id !== postId));
+  });
 
-    fetchMyPosts();
+  socket.on('onlineStatus', ({ userId: updatedUserId, status, lastSeen }) => {
+    if (updatedUserId === userId) {
+      console.log(`User ${userId} is now ${status}, last seen: ${lastSeen}`);
+    }
+  });
 
-    socket.on('postDeleted', (postId) => {
-      setMyPosts((prev) => prev.filter((p) => p._id !== postId));
-    });
+  socket.on('connect_error', (err) => {
+    console.error('Socket connection error:', err.message);
+    setError('Connection lost. Trying to reconnect...');
+  });
 
-    socket.on('onlineStatus', ({ userId: updatedUserId, status, lastSeen }) => {
-      if (updatedUserId === userId) {
-        console.log(`User ${userId} is now ${status}, last seen: ${lastSeen}`);
-      }
-    });
+  return () => {
+    socket.off('postDeleted');
+    socket.off('onlineStatus');
+    socket.off('connect_error');
+    socket.emit('leave', userId);
+  };
+}, [token, userId, socket, onLogout]);
 
-    socket.on('connect_error', (err) => {
-      console.error('Socket connection error:', err.message);
-      setError('Connection lost. Trying to reconnect...');
-    });
 
-    return () => {
-      socket.off('postDeleted');
-      socket.off('onlineStatus');
-      socket.off('connect_error');
-      socket.emit('leave', userId);
-      // Remove socket.disconnect() to prevent premature disconnection
-    };
-  }, [token, userId, socket, onLogout]);
+
+
+
+  
 
   const handlePhotoChange = (e) => {
     const file = e.target.files[0];
@@ -396,7 +407,7 @@ const ProfileScreen = ({ token, userId, socket, username: initialUsername, virtu
 ProfileScreen.propTypes = {
   token: PropTypes.string.isRequired,
   userId: PropTypes.string.isRequired,
-  socket: PropTypes.object.isRequired,
+  socket: PropTypes.object, // Remove .isRequired
   username: PropTypes.string,
   virtualNumber: PropTypes.string,
   photo: PropTypes.string,
