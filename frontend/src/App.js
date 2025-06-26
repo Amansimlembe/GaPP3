@@ -169,66 +169,46 @@ const App = () => {
   const [chatNotifications, setChatNotifications] = useState(0);
   const [socket, setSocket] = useState(null);
   const [error, setError] = useState(null);
-  const [isNavigating, setIsNavigating] = useState(true); // Start as true to prevent premature renders
-  const [isAuthVerified, setIsAuthVerified] = useState(false);
+  const [isNavigating, setIsNavigating] = useState(false);
 
+  // Refs for socket management
   const socketRef = useRef(null);
   const attemptRef = useRef(0);
   const maxReconnectAttempts = 5;
-  const maxDelay = 30000;
+  const maxDelay = 30000; // 30 seconds
 
-  const verifyAuth = useCallback(async () => {
-    try {
-      const storedToken = localStorage.getItem('token');
-      const storedUserId = localStorage.getItem('userId');
-      const storedRole = localStorage.getItem('role');
-      const storedPhoto = localStorage.getItem('photo');
-      const storedVirtualNumber = localStorage.getItem('virtualNumber');
-      const storedUsername = localStorage.getItem('username');
-
-      if (!storedToken || !storedUserId) {
-        throw new Error('No token or userId in localStorage');
-      }
-
-      const expTime = getTokenExpiration(storedToken);
-      if (expTime && expTime <= Date.now()) {
-        throw new Error('Token expired');
-      }
-
-      // Verify token with server
-      await axios.get(`${BASE_URL}/auth/verify`, {
-        headers: { Authorization: `Bearer ${storedToken}` },
-        timeout: 5000,
-      });
-
-      dispatch(setAuth({
-        token: storedToken,
-        userId: storedUserId,
-        role: Number(storedRole) || 0,
-        photo: storedPhoto || 'https://via.placeholder.com/64',
-        virtualNumber: storedVirtualNumber || null,
-        username: storedUsername || null,
-      }));
-      setIsAuthVerified(true);
-      setIsNavigating(false);
-    } catch (err) {
-      console.error('Auth verification failed:', err.message);
-      localStorage.removeItem('token');
-      localStorage.removeItem('userId');
-      localStorage.removeItem('role');
-      localStorage.removeItem('photo');
-      localStorage.removeItem('virtualNumber');
-      localStorage.removeItem('username');
-      dispatch(clearAuth());
-      setIsNavigating(false);
-      navigate('/login', { replace: true });
-    }
-  }, [dispatch, navigate]);
-
+  // Restore auth state from localStorage on mount
   useEffect(() => {
-    console.log('App useEffect triggered: auth verification', { token, userId, location: location.pathname, isNavigating });
-    verifyAuth();
-  }, [verifyAuth]);
+    const storedToken = localStorage.getItem('token');
+    const storedUserId = localStorage.getItem('userId');
+    const storedRole = localStorage.getItem('role');
+    const storedPhoto = localStorage.getItem('photo');
+    const storedVirtualNumber = localStorage.getItem('virtualNumber');
+    const storedUsername = localStorage.getItem('username');
+
+    if (storedToken && storedUserId && location.pathname !== '/login') {
+      const expTime = getTokenExpiration(storedToken);
+      if (expTime && expTime > Date.now()) {
+        dispatch(setAuth({
+          token: storedToken,
+          userId: storedUserId,
+          role: Number(storedRole) || 0,
+          photo: storedPhoto || 'https://via.placeholder.com/64',
+          virtualNumber: storedVirtualNumber || null,
+          username: storedUsername || null,
+        }));
+      } else {
+        localStorage.removeItem('token');
+        localStorage.removeItem('userId');
+        localStorage.removeItem('role');
+        localStorage.removeItem('photo');
+        localStorage.removeItem('virtualNumber');
+        localStorage.removeItem('username');
+        setIsNavigating(true);
+        navigate('/login', { replace: true });
+      }
+    }
+  }, [dispatch, navigate, location.pathname]);
 
   const handleLogout = useCallback(async () => {
     try {
@@ -303,6 +283,7 @@ const App = () => {
           username: username || null,
           privateKey: privateKey || null,
         }));
+        // Persist new auth state to localStorage
         localStorage.setItem('token', newToken);
         localStorage.setItem('userId', newUserId);
         localStorage.setItem('role', newRole || '0');
@@ -325,10 +306,30 @@ const App = () => {
   }, [dispatch, token, userId, handleLogout]);
 
   useEffect(() => {
-    if (!isAuthVerified || !token || !userId) return;
+    console.log('App useEffect triggered:', { token, userId, location: location.pathname, isNavigating });
 
-    console.log('App useEffect triggered: socket initialization', { token, userId, location: location.pathname });
+    // Skip if already navigating to /login
+    if (isNavigating && location.pathname === '/login') {
+      console.log('Skipping effect due to ongoing navigation to /login');
+      setIsNavigating(false);
+      return;
+    }
 
+    // Early return if no token or userId
+    if (!token || !userId) {
+      if (location.pathname !== '/login' && !isNavigating) {
+        console.log('Navigating to /login due to missing token or userId');
+        setIsNavigating(true);
+        navigate('/login', { replace: true });
+      }
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+        socketRef.current = null;
+      }
+      return;
+    }
+
+    // Initialize socket with backoff
     const connectSocket = (attempt = 0) => {
       if (socketRef.current || !navigator.onLine || attempt > maxReconnectAttempts) {
         if (attempt > maxReconnectAttempts) {
@@ -340,15 +341,16 @@ const App = () => {
       const newSocket = io(BASE_URL, {
         auth: { token, userId },
         transports: ['websocket', 'polling'],
-        reconnection: false,
+        reconnection: false, // Handle reconnection manually
         timeout: 10000,
       });
 
       socketRef.current = newSocket;
 
       const handleConnect = () => {
+        newSocket.emit('join', userId);
         console.log('Socket connected:', newSocket.id);
-        attemptRef.current = 0;
+        attemptRef.current = 0; // Reset attempt count
       };
 
       const handleConnectError = async (error) => {
@@ -358,6 +360,7 @@ const App = () => {
           setError('Authentication error, logging out');
           await handleLogout();
         } else {
+          // Exponential backoff
           const delay = Math.min(Math.pow(2, attempt) * 1000, maxDelay);
           console.warn(`Retrying connection in ${delay}ms (attempt ${attempt + 1})`);
           setTimeout(() => connectSocket(attempt + 1), delay);
@@ -405,6 +408,7 @@ const App = () => {
       setSocket(newSocket);
 
       return () => {
+        newSocket.emit('leave', userId);
         newSocket.off('connect', handleConnect);
         newSocket.off('connect_error', handleConnectError);
         newSocket.off('disconnect', handleDisconnect);
@@ -423,10 +427,10 @@ const App = () => {
     return () => {
       if (cleanup) cleanup();
     };
-  }, [isAuthVerified, token, userId, location.pathname, handleLogout]);
+  }, [token, userId, location.pathname, handleLogout, navigate]);
 
   useEffect(() => {
-    if (!isAuthVerified || !token || !userId) return;
+    if (!token || !userId) return;
 
     let isRefreshing = false;
     const checkTokenExpiration = async () => {
@@ -450,7 +454,7 @@ const App = () => {
     checkTokenExpiration();
     const interval = setInterval(checkTokenExpiration, 1 * 60 * 1000);
     return () => clearInterval(interval);
-  }, [isAuthVerified, token, userId, refreshToken, handleLogout]);
+  }, [token, userId, refreshToken, handleLogout]);
 
   const handleChatNavigation = useCallback(() => {
     console.log('Navigating to ChatScreen');
@@ -458,10 +462,7 @@ const App = () => {
     dispatch(setSelectedChat(null));
   }, [dispatch]);
 
-  if (isNavigating || !isAuthVerified) {
-    return <div className="min-h-screen flex items-center justify-center bg-gray-100">Loading...</div>;
-  }
-
+  // Fallback UI for navigation failure
   if (error && location.pathname !== '/login') {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center bg-gray-100">
@@ -585,7 +586,6 @@ const AuthenticatedApp = ({
                 virtualNumber={virtualNumber}
                 photo={photo}
                 onLogout={handleLogout}
-                theme="light" // Added theme prop as required
               />
             }
           />
@@ -603,7 +603,7 @@ const AuthenticatedApp = ({
               />
             }
           />
-          <Route path="*" element={<Navigate to="/feed" replace />} /> {/* Default to /feed */}
+          <Route path="*" element={<Navigate to="/login" replace />} />
         </Routes>
       </div>
       <motion.nav
