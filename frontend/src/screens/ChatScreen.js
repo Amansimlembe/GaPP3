@@ -132,7 +132,7 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
       forgeInitAttemptsRef.current += 1;
       if (forge?.random && forge?.pki && forge?.cipher) {
         setIsForgeReady(true);
-        console.log('Forge initialized successfully');
+        
       } else {
         console.warn('Forge not ready, retrying...');
         await new Promise((resolve) => setTimeout(resolve, 1000 * forgeInitAttemptsRef.current));
@@ -194,26 +194,25 @@ const fetchChatList = useCallback(
   debounce(
     async (force = false) => {
       if (!isMountedRef.current) {
-        console.log('fetchChatList aborted: component unmounted');
         return;
       }
       // Instantly use cached contacts if available
       if (!force && chatList.length && chatListTimestamp && Date.now() - chatListTimestamp < CACHE_TIMEOUT) {
-        console.log('fetchChatList: Using cached contacts instantly');
+        
         setFetchStatus('cached');
         setFetchError(null);
         setIsLoadingChatList(false);
         return;
       }
       if (!navigator.onLine && !force) {
-        console.log('fetchChatList: Device offline, using cached contacts');
+        
         setFetchStatus('cached');
         setFetchError('You are offline. Displaying cached contacts.');
         setIsLoadingChatList(false);
         return;
       }
       if (!isForgeReady) {
-        console.log('fetchChatList deferred: forge not ready');
+      
         setFetchStatus('loading');
         setIsLoadingChatList(true);
         return;
@@ -321,10 +320,10 @@ useEffect(() => {
     navigate('/login', { replace: true });
     return () => {};
   }
-  console.log('Initial fetchChatList setup');
+ 
   // Instantly populate cached contacts if available
   if (chatList.length && chatListTimestamp && Date.now() - chatListTimestamp < CACHE_TIMEOUT) {
-    console.log('Initial setup: Using cached contacts instantly');
+  
     setFetchStatus('cached');
     setFetchError(null);
     setIsLoadingChatList(false);
@@ -343,14 +342,14 @@ useEffect(() => {
     }
   }
   const handleOffline = () => {
-    console.log('Network offline, displaying cached contacts');
+    
     setFetchError('You are offline. Displaying cached contacts.');
     setFetchStatus('cached');
     setIsLoadingChatList(false);
   };
   window.addEventListener('offline', handleOffline);
   return () => {
-    console.log('Cleaning up initial fetch effect');
+   
     isMountedRef.current = false;
     clearTimeout(retryTimeoutRef.current.chatList);
     clearTimeout(retryTimeoutRef.current.addContact);
@@ -667,7 +666,7 @@ const handleAddContact = useCallback(async () => {
 const handleChatListUpdated = ({ users, page = 0, limit = 50 }) => {
   const now = Date.now();
   if (now - lastChatListUpdate < 500) {
-    console.log('chatListUpdated debounced');
+  
     return;
   }
   lastChatListUpdate = now;

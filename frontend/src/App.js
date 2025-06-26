@@ -290,7 +290,7 @@ const App = () => {
         localStorage.setItem('photo', photo || 'https://via.placeholder.com/64');
         localStorage.setItem('virtualNumber', virtualNumber || '');
         localStorage.setItem('username', username || '');
-        console.log('Token refreshed successfully');
+        
         return newToken;
       } catch (error) {
         console.error(`Token refresh attempt ${attempt} failed: ${error.message}`);
@@ -310,7 +310,7 @@ const App = () => {
 
     // Skip if already navigating to /login
     if (isNavigating && location.pathname === '/login') {
-      console.log('Skipping effect due to ongoing navigation to /login');
+     
       setIsNavigating(false);
       return;
     }
@@ -318,7 +318,7 @@ const App = () => {
     // Early return if no token or userId
     if (!token || !userId) {
       if (location.pathname !== '/login' && !isNavigating) {
-        console.log('Navigating to /login due to missing token or userId');
+       
         setIsNavigating(true);
         navigate('/login', { replace: true });
       }
@@ -418,7 +418,7 @@ const App = () => {
         window.removeEventListener('online', handleOnline);
         window.removeEventListener('offline', handleOffline);
         socketRef.current = null;
-        console.log('Socket cleanup completed');
+        
       };
     };
 
@@ -457,7 +457,7 @@ const App = () => {
   }, [token, userId, refreshToken, handleLogout]);
 
   const handleChatNavigation = useCallback(() => {
-    console.log('Navigating to ChatScreen');
+    
     setChatNotifications(0);
     dispatch(setSelectedChat(null));
   }, [dispatch]);

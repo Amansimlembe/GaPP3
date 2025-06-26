@@ -26,7 +26,7 @@ const initDB = async () => {
         }
       },
     });
-    console.log('IndexedDB initialized successfully');
+    
     return db;
   } catch (error) {
     console.error('Failed to initialize IndexedDB:', error.message);
@@ -279,7 +279,7 @@ const messageSlice = createSlice({
       const recipientId = action.payload;
       if (recipientId === null) {
         state.selectedChat = null;
-        console.log('setSelectedChat: Cleared selected chat');
+       
       } else if (isValidObjectId(recipientId)) {
         state.chats[recipientId] = state.chats[recipientId] || [];
         state.selectedChat = recipientId;
@@ -336,7 +336,7 @@ const messageSlice = createSlice({
 
     resetState: (state) => {
       Object.assign(state, messageSlice.getInitialState());
-      console.log('resetState: Reset messages state');
+      
     },
     cleanupMessages: (state) => {
       const now = Date.now();
@@ -504,7 +504,7 @@ const loadPersistedState = async () => {
     const db = await initDB();
     const persistedState = await db.get(STORE_NAME, 'state');
     if (!persistedState?.value) {
-      console.log('loadPersistedState: No persisted state found');
+    
       return null;
     }
 
