@@ -276,32 +276,50 @@ const messageSlice = createSlice({
         console.warn('setSelectedChat: Invalid recipientId', recipientId);
       }
     },
+
+
     setChatList: (state, action) => {
-      const now = Date.now();
-      const payload = Array.isArray(action.payload) ? action.payload : [];
-      state.chatList = payload
-        .filter((contact) => isValidObjectId(contact.id) && contact.virtualNumber)
-        .map((contact) => ({
-          id: contact.id,
-          username: contact.username || 'Unknown',
-          virtualNumber: contact.virtualNumber || '',
-          photo: contact.photo || 'https://placehold.co/40x40',
-          status: contact.status || 'offline',
-          lastSeen: contact.lastSeen ? new Date(contact.lastSeen).toISOString() : null,
-          latestMessage: contact.latestMessage
-            ? {
-                ...contact.latestMessage,
-                senderId: contact.latestMessage.senderId,
-                recipientId: contact.latestMessage.recipientId,
-                createdAt: contact.latestMessage.createdAt ? new Date(contact.latestMessage.createdAt).toISOString() : new Date().toISOString(),
-                updatedAt: contact.latestMessage.updatedAt ? new Date(contact.latestMessage.updatedAt).toISOString() : undefined,
-              }
-            : null,
-          unreadCount: contact.unreadCount || 0,
-        }));
-      state.chatListTimestamp = now;
-      console.log(`setChatList: Updated chatList with ${state.chatList.length} contacts`);
-    },
+  const now = Date.now();
+  const payload = Array.isArray(action.payload) ? action.payload : [];
+  const validContacts = payload.filter(
+    (contact) => isValidObjectId(contact.id) && contact.virtualNumber
+  );
+  if (validContacts.length > 0) {
+    const existingChatMap = new Map(state.chatList.map((chat) => [chat.id, chat]));
+    validContacts.forEach((contact) => {
+      existingChatMap.set(contact.id, {
+        id: contact.id,
+        username: contact.username || 'Unknown',
+        virtualNumber: contact.virtualNumber || '',
+        photo: contact.photo || 'https://placehold.co/40x40',
+        status: contact.status || 'offline',
+        lastSeen: contact.lastSeen ? new Date(contact.lastSeen).toISOString() : null,
+        latestMessage: contact.latestMessage
+          ? {
+              ...contact.latestMessage,
+              senderId: contact.latestMessage.senderId,
+              recipientId: contact.latestMessage.recipientId,
+              createdAt: contact.latestMessage.createdAt
+                ? new Date(contact.latestMessage.createdAt).toISOString()
+                : new Date().toISOString(),
+              updatedAt: contact.latestMessage.updatedAt
+                ? new Date(contact.latestMessage.updatedAt).toISOString()
+                : undefined,
+            }
+          : null,
+        unreadCount: contact.unreadCount || existingChatMap.get(contact.id)?.unreadCount || 0,
+      });
+    });
+    state.chatList = Array.from(existingChatMap.values());
+    state.chatListTimestamp = now;
+    console.log(`setChatList: Updated chatList with ${state.chatList.length} contacts`);
+  } else {
+    console.warn('setChatList: No valid contacts in payload, retaining existing chatList', payload);
+  }
+},
+
+
+
     resetState: (state) => {
       Object.assign(state, messageSlice.getInitialState());
       console.log('resetState: Reset messages state');
