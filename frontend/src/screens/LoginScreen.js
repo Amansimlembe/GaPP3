@@ -5,8 +5,7 @@ import { getCountries } from 'libphonenumber-js';
 import { FaEye, FaEyeSlash } from 'react-icons/fa';
 import { useDispatch } from 'react-redux';
 import { setAuth } from '../store';
-import { useNavigate } from 'react-router-dom';
-import { logClientError } from '../utils/errorHandler';
+import { useNavigate } from 'react-router-dom'; // Changed: Add navigation
 
 const LoginScreen = () => {
   const [email, setEmail] = useState('');
@@ -18,13 +17,12 @@ const LoginScreen = () => {
   const [selectedCountry, setSelectedCountry] = useState('');
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(false);
-  const [countryLoading, setCountryLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [isCountryInputFocused, setIsCountryInputFocused] = useState(false);
   const countryInputRef = useRef(null);
   const dispatch = useDispatch();
-  const navigate = useNavigate();
+  const navigate = useNavigate(); // Changed: Initialize navigation
 
   const countries = useMemo(() => {
     try {
@@ -33,7 +31,7 @@ const LoginScreen = () => {
         name: new Intl.DisplayNames(['en'], { type: 'region' }).of(code) || code,
       }));
     } catch (err) {
-      logClientError('Error loading countries', err, { component: 'LoginScreen', action: 'loadCountries' });
+      console.error('Error loading countries:', err);
       setError('Failed to load countries, please try again');
       return [];
     }
@@ -43,30 +41,23 @@ const LoginScreen = () => {
     () =>
       countries.filter(
         (c) =>
-          c.name.toLowerCase().includes(search.toLowerCase().trim()) ||
-          c.code.toLowerCase().includes(search.toLowerCase().trim())
+          c.name.toLowerCase().includes(search.toLowerCase()) ||
+          c.code.toLowerCase().includes(search.toLowerCase())
       ),
     [countries, search]
   );
 
-  const sanitizeInput = useCallback((value) => {
-    return value.replace(/[<>{}]/g, '').trim(); // Remove potential XSS characters
-  }, []);
-
   const validateForm = useCallback(() => {
-    const sanitizedEmail = sanitizeInput(email);
-    const sanitizedUsername = sanitizeInput(username);
-
-    if (!sanitizedEmail || !/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(sanitizedEmail)) {
+    if (!email || !/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(email)) {
       setError('Please enter a valid email');
       return false;
     }
-    if (!password || password.length < 8 || !/[A-Z]/.test(password) || !/[0-9]/.test(password)) {
-      setError('Password must be at least 8 characters with one uppercase letter and one number');
+    if (!password || password.length < 8) {
+      setError('Password must be at least 8 characters');
       return false;
     }
     if (!isLogin) {
-      if (!sanitizedUsername || sanitizedUsername.length < 3 || sanitizedUsername.length > 20) {
+      if (!username || username.length < 3 || username.length > 20) {
         setError('Username must be between 3 and 20 characters');
         return false;
       }
@@ -80,11 +71,10 @@ const LoginScreen = () => {
       }
     }
     return true;
-  }, [email, password, username, selectedCountry, confirmPassword, isLogin, sanitizeInput]);
+  }, [email, password, username, selectedCountry, confirmPassword, isLogin]);
 
   const checkLocation = useCallback(async (selectedCountry) => {
     if (isLogin) return true;
-    setCountryLoading(true);
     try {
       const position = await new Promise((resolve, reject) =>
         navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 10000 })
@@ -96,19 +86,14 @@ const LoginScreen = () => {
       );
       const currentCountryCode = response.data.countryCode;
       if (currentCountryCode !== selectedCountry) {
-        const error = 'Selected country does not match your current location';
-        logClientError(error, null, { component: 'LoginScreen', action: 'checkLocation', selectedCountry, currentCountryCode });
-        setError(error);
+        setError('Selected country does not match your current location.');
         return false;
       }
       return true;
     } catch (err) {
-      const error = 'Unable to detect location. Please ensure you are in the selected country.';
-      logClientError(error, err, { component: 'LoginScreen', action: 'checkLocation', selectedCountry });
-      setError(error);
+      console.error('Geolocation error:', err);
+      setError('Unable to detect location. Please ensure you are in the selected country.');
       return false;
-    } finally {
-      setCountryLoading(false);
     }
   }, [isLogin]);
 
@@ -125,10 +110,11 @@ const LoginScreen = () => {
         );
         return response.data;
       } catch (err) {
-        logClientError(`${isLogin ? 'Login' : 'Register'} attempt ${i + 1} failed`, err, {
-          component: 'LoginScreen',
-          action: 'retryRequest',
+        console.error(`Attempt ${i + 1} failed:`, {
           status: err.response?.status,
+          data: err.response?.data,
+          message: err.message,
+          stack: err.stack,
           requestData: isLogin ? data : 'FormData (multipart)',
         });
         if (
@@ -146,7 +132,7 @@ const LoginScreen = () => {
             err.code === 'ECONNABORTED' ||
             !navigator.onLine)
         ) {
-          await new Promise((resolve) => setTimeout(resolve, Math.pow(2, i) * baseDelay * (1 + Math.random() * 0.1)));
+          await new Promise((resolve) => setTimeout(resolve, Math.pow(2, i) * baseDelay));
           continue;
         }
         throw err;
@@ -166,18 +152,15 @@ const LoginScreen = () => {
 
     setLoading(true);
     try {
-      const sanitizedEmail = sanitizeInput(email);
-      const sanitizedUsername = sanitizeInput(username);
-
       const data = isLogin
-        ? { email: sanitizedEmail, password }
+        ? { email, password }
         : (() => {
             const formData = new FormData();
-            formData.append('email', sanitizedEmail);
+            formData.append('email', email);
             formData.append('password', password);
-            formData.append('username', sanitizedUsername);
+            formData.append('username', username);
             formData.append('country', selectedCountry);
-            formData.append('role', '0');
+            formData.append('role', '0'); // Changed: Add default role
             return formData;
           })();
 
@@ -187,6 +170,7 @@ const LoginScreen = () => {
 
       const response = await retryRequest(data, config);
 
+      // Changed: Dispatch auth state and navigate
       await dispatch(setAuth({
         token: response.token,
         userId: response.userId,
@@ -197,22 +181,23 @@ const LoginScreen = () => {
         privateKey: response.privateKey || '',
       }));
 
-      navigate('/feed');
+      navigate('/feed'); // Changed: Navigate to main app
     } catch (error) {
+      console.error(`${isLogin ? 'Login' : 'Register'} error:`, {
+        status: error.response?.status,
+        data: error.response?.data,
+        message: error.message,
+        stack: error.stack,
+      });
       const errorMessage =
         error.message === 'You are offline. Please check your internet connection.'
           ? 'You are offline. Please check your internet connection.'
           : error.response?.status === 429
           ? 'Too many requests, please try again later'
-          : error.response?.data?.error ||
+          : error.response?.data?.error || // Changed: Prioritize backend error
             error.response?.data?.details ||
             error.message ||
             (isLogin ? 'Login failed' : 'Registration failed. Please try again.');
-      logClientError(errorMessage, error, {
-        component: 'LoginScreen',
-        action: 'handleSubmit',
-        status: error.response?.status,
-      });
       setError(errorMessage);
     } finally {
       setLoading(false);
@@ -250,12 +235,12 @@ const LoginScreen = () => {
 
   const handleCountryChange = useCallback(
     (e) => {
-      setSearch(sanitizeInput(e.target.value));
+      setSearch(e.target.value);
       if (selectedCountry) {
         setSelectedCountry('');
       }
     },
-    [selectedCountry, sanitizeInput]
+    [selectedCountry]
   );
 
   useEffect(() => {
@@ -286,60 +271,40 @@ const LoginScreen = () => {
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.5 }}
       className="min-h-screen flex items-center justify-center bg-gray-100 dark:bg-gray-900"
-      role="main"
-      aria-label={isLogin ? 'Login Page' : 'Registration Page'}
     >
       <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg w-full max-w-md">
-        <h2 className="text-2xl font-bold mb-4 text-primary dark:text-white text-center">
+        <h2 className="text-2xl font-bold mb-4 text-primary dark:text-white">
           {isLogin ? 'Login' : 'Register'}
         </h2>
-        {error && (
-          <p className="text-red-500 mb-4 text-center text-sm" role="alert">
-            {error}
-          </p>
-        )}
-        <form onSubmit={handleSubmit} className="space-y-4" noValidate>
+        {error && <p className="text-red-500 mb-4 text-center">{error}</p>}
+        <form onSubmit={handleSubmit} className="space-y-4">
           {!isLogin && (
             <>
-              <div>
-                <label htmlFor="username" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                  Username
-                </label>
-                <input
-                  id="username"
-                  type="text"
-                  value={username}
-                  onChange={(e) => setUsername(sanitizeInput(e.target.value))}
-                  className="w-full p-2 mt-1 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-primary"
-                  placeholder="Username (3-20 characters)"
-                  disabled={loading}
-                  aria-required="true"
-                  aria-describedby="username-error"
-                />
-              </div>
+              <input
+                type="text"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                className="w-full p-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-primary"
+                placeholder="Username (3-20 characters)"
+                disabled={loading}
+                aria-label="Username"
+              />
               <div className="relative" ref={countryInputRef}>
-                <label htmlFor="country" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                  Country
-                </label>
                 <input
-                  id="country"
                   type="text"
                   value={getCountryInputValue()}
                   onChange={handleCountryChange}
                   onFocus={() => setIsCountryInputFocused(true)}
                   onKeyDown={handleCountryKeyDown}
-                  className="w-full p-2 mt-1 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-primary"
+                  className="w-full p-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-primary"
                   placeholder="Select a country"
-                  disabled={loading || countryLoading}
-                  aria-required="true"
-                  aria-describedby="country-error"
+                  disabled={loading}
+                  aria-label="Country"
                 />
                 {isCountryInputFocused && (
                   <div className="absolute z-10 w-full mt-1 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg shadow-lg max-h-40 overflow-y-auto">
-                    <ul role="listbox" aria-label="Country selection">
-                      {countryLoading ? (
-                        <li className="p-2 text-gray-500 dark:text-gray-400">Loading countries...</li>
-                      ) : filteredCountries.length > 0 ? (
+                    <ul role="listbox">
+                      {filteredCountries.length > 0 ? (
                         filteredCountries.map((c, index) => (
                           <li
                             key={c.code}
@@ -349,8 +314,6 @@ const LoginScreen = () => {
                             }`}
                             role="option"
                             aria-selected={index === 0}
-                            tabIndex={0}
-                            onKeyDown={(e) => e.key === 'Enter' && handleCountrySelect(c)}
                           >
                             {c.name}
                           </li>
@@ -364,43 +327,31 @@ const LoginScreen = () => {
               </div>
             </>
           )}
-          <div>
-            <label htmlFor="email" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
-              Email
-            </label>
-            <input
-              id="email"
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(sanitizeInput(e.target.value))}
-              className="w-full p-2 mt-1 border rounded-md dark:bg-gray-700 dark:text-white dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-primary"
-              placeholder="Email"
-              required
-              disabled={loading}
-              aria-required="true"
-              aria-describedby="email-error"
-            />
-          </div>
+          <input
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            className="w-full p-2 border rounded-md dark:bg-gray-700 dark:text-white dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-primary"
+            placeholder="Email"
+            required
+            disabled={loading}
+            aria-label="Email"
+          />
           <div className="relative">
-            <label htmlFor="password" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
-              Password
-            </label>
             <input
-              id="password"
               type={showPassword ? 'text' : 'password'}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className="w-full p-2 mt-1 border rounded-md dark:bg-gray-700 dark:text-white dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-primary"
+              className="w-full p-2 border rounded-md dark:bg-gray-700 dark:text-white dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-primary"
               placeholder="Password (min 8 characters)"
               required
               disabled={loading}
-              aria-required="true"
-              aria-describedby="password-error"
+              aria-label="Password"
             />
             <button
               type="button"
               onClick={() => setShowPassword(!showPassword)}
-              className="absolute right-2 top-1/2 transform translate-y-1/4 text-gray-500 dark:text-gray-300 focus:outline-none"
+              className="absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-500 dark:text-gray-300 focus:outline-none"
               disabled={loading}
               aria-label={showPassword ? 'Hide password' : 'Show password'}
             >
@@ -409,25 +360,20 @@ const LoginScreen = () => {
           </div>
           {!isLogin && (
             <div className="relative">
-              <label htmlFor="confirm-password" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                Confirm Password
-              </label>
               <input
-                id="confirm-password"
                 type={showConfirmPassword ? 'text' : 'password'}
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
-                className="w-full p-2 mt-1 border rounded-md dark:bg-gray-700 dark:text-white dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-primary"
+                className="w-full p-2 border rounded-md dark:bg-gray-700 dark:text-white dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-primary"
                 placeholder="Confirm Password"
                 required
                 disabled={loading}
-                aria-required="true"
-                aria-describedby="confirm-password-error"
+                aria-label="Confirm Password"
               />
               <button
                 type="button"
                 onClick={() => setShowConfirmPassword(!showConfirmPassword)}
-                className="absolute right-2 top-1/2 transform translate-y-1/4 text-gray-500 dark:text-gray-300 focus:outline-none"
+                className="absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-500 dark:text-gray-300 focus:outline-none"
                 disabled={loading}
                 aria-label={showConfirmPassword ? 'Hide confirm password' : 'Show confirm password'}
               >
@@ -438,29 +384,29 @@ const LoginScreen = () => {
           <button
             type="submit"
             className={`w-full bg-primary text-white p-2 rounded-lg hover:bg-secondary focus:outline-none focus:ring-2 focus:ring-primary ${
-              loading || countryLoading ? 'opacity-50 cursor-not-allowed' : ''
+              loading ? 'opacity-50 cursor-not-allowed' : ''
             }`}
-            disabled={loading || countryLoading}
+            disabled={loading}
             aria-label={isLogin ? 'Login' : 'Register'}
           >
-            {loading || countryLoading ? 'Processing...' : isLogin ? 'Login' : 'Register'}
+            {loading ? 'Processing...' : isLogin ? 'Login' : 'Register'}
           </button>
         </form>
-        <p className="mt-4 text-center text-gray-600 dark:text-gray-300 text-sm">
+        <p className="mt-4 text-center text-gray-600 dark:text-gray-300">
           {isLogin ? "Don't have an account?" : 'Already have an account?'}{' '}
           <span
             onClick={() => {
-              if (!loading && !countryLoading) {
+              if (!loading) {
                 setIsLogin(!isLogin);
                 resetInputs();
               }
             }}
             className={`text-primary cursor-pointer hover:underline focus:outline-none ${
-              loading || countryLoading ? 'opacity-50 cursor-not-allowed' : ''
+              loading ? 'opacity-50 cursor-not-allowed' : ''
             }`}
             role="button"
             tabIndex={0}
-            onKeyDown={(e) => e.key === 'Enter' && !loading && !countryLoading && (setIsLogin(!isLogin), resetInputs())}
+            onKeyDown={(e) => e.key === 'Enter' && !loading && (setIsLogin(!isLogin), resetInputs())}
             aria-label={isLogin ? 'Switch to Register' : 'Switch to Login'}
           >
             {isLogin ? 'Register' : 'Login'}
