@@ -218,7 +218,7 @@ const fetchChatList = useCallback(
         return;
       }
       const fetchId = `${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
-      console.log(`fetchChatList started with fetchId: ${fetchId}`);
+
       setIsLoadingChatList(true);
       setFetchStatus('loading');
       let retryCount = retryCountRef.current.chatList;
@@ -232,7 +232,7 @@ const fetchChatList = useCallback(
             params: { userId },
             timeout: 10000,
           });
-          console.log('fetchChatList response:', { fetchId, dataLength: data.length });
+         
           if (!Array.isArray(data)) {
             throw new Error('Invalid chat list data: not an array');
           }
@@ -256,7 +256,7 @@ const fetchChatList = useCallback(
                     }
                   : null,
               }));
-              console.log(`fetchChatList updating state with ${updatedChatList.length} chats`);
+            
               dispatch(setChatList(updatedChatList));
               setFetchStatus('success');
               setFetchError(null);
@@ -270,7 +270,7 @@ const fetchChatList = useCallback(
           }
         } catch (err) {
           if (!isMountedRef.current || fetchId !== fetchChatList.currentFetchId) {
-            console.log(`fetchChatList aborted for fetchId: ${fetchId}`);
+            
             return;
           }
           if (err.response?.status === 401) {
@@ -296,7 +296,7 @@ const fetchChatList = useCallback(
           }
         } finally {
           if (isMountedRef.current && fetchId === fetchChatList.currentFetchId) {
-            console.log(`fetchChatList completed for fetchId: ${fetchId}`);
+         
             setIsLoadingChatList(false);
           }
         }
@@ -640,7 +640,7 @@ const handleAddContact = useCallback(async () => {
   }
   dispatch(setChatList((prev) => {
     if (prev.find((chat) => chat.id === contactData.id)) {
-      console.log(`handleNewContact: Contact ${contactData.id} already exists in chatList`);
+      
       return prev;
     }
     const newContact = {
@@ -655,7 +655,7 @@ const handleAddContact = useCallback(async () => {
       unreadCount: 0,
     };
     const updatedChatList = [...prev, newContact];
-    console.log(`handleNewContact: Added contact ${contactData.id} to chatList, new length: ${updatedChatList.length}`);
+
     return updatedChatList;
   }));
 };
@@ -965,7 +965,7 @@ const handleChatListUpdated = ({ users, page = 0, limit = 50 }) => {
 
 
         <div className={`w-full md:w-1/3 bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 ${selectedChat ? 'hidden md:block' : 'block'}`}>
-  {console.log('Rendering contact list:', { isLoadingChatList, fetchStatus, chatListLength: chatList.length })}
+
   {!isLoadingChatList && (fetchStatus === 'success' || fetchStatus === 'cached') && chatList.length === 0 && (
     <div className="p-4 text-center">
       <p className="text-gray-500 dark:text-gray-400">No contacts to display. Add a contact to start chatting!</p>

@@ -306,7 +306,6 @@ const App = () => {
   }, [dispatch, token, userId, handleLogout]);
 
   useEffect(() => {
-    console.log('App useEffect triggered:', { token, userId, location: location.pathname, isNavigating });
 
     // Skip if already navigating to /login
     if (isNavigating && location.pathname === '/login') {
@@ -349,7 +348,6 @@ const App = () => {
 
       const handleConnect = () => {
         newSocket.emit('join', userId);
-        console.log('Socket connected:', newSocket.id);
         attemptRef.current = 0; // Reset attempt count
       };
 
@@ -390,7 +388,7 @@ const App = () => {
           console.warn('Invalid contact data:', contactData);
           return;
         }
-        console.log('New contact:', contactData);
+        
       };
 
       newSocket.on('connect', handleConnect);
@@ -539,7 +537,7 @@ const AuthenticatedApp = ({
   const isChatRouteWithSelectedChat = location.pathname === '/chat' && selectedChat;
 
   useEffect(() => {
-    console.log('Current route:', location.pathname);
+   
   }, [location.pathname]);
 
   if (!location || !dispatch) {

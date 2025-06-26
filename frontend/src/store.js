@@ -45,13 +45,13 @@ const logError = async (message, error, userId = null) => {
   const errorEntry = errorLogTimestamps.get(message) || { count: 0, timestamps: [] };
   errorEntry.timestamps = errorEntry.timestamps.filter((ts) => now - ts < 60 * 1000);
   if (errorEntry.count >= 1 || errorEntry.timestamps.length >= 1) {
-    console.log(`Error logging skipped for "${message}": rate limit reached`);
+    
     return;
   }
   // Only log critical errors
   const isCritical = message.includes('Unauthorized') || message.includes('failed after max retries') || message.includes('IndexedDB initialization failed');
   if (!isCritical) {
-    console.log(`Non-critical error suppressed: ${message}`);
+    
     return;
   }
   errorEntry.count += 1;
@@ -201,7 +201,7 @@ const messageSlice = createSlice({
         state.chats[recipientId] = state.chats[recipientId].slice(-MAX_MESSAGES_PER_CHAT);
         state.chatMessageCount[recipientId] = (state.chatMessageCount[recipientId] || 0) + 1;
         state.messagesTimestamp[recipientId] = Date.now();
-        console.log(`addMessage: Added message ${normalizedMsg.clientMessageId} for recipientId ${recipientId}`);
+
       } else {
         console.warn('addMessage: Invalid senderId or recipientId', normalizedMsg);
       }
@@ -243,7 +243,7 @@ const messageSlice = createSlice({
           state.chatMessageCount[recipientId] = (state.chatMessageCount[recipientId] || 0) + 1;
         }
         state.messagesTimestamp[recipientId] = Date.now();
-        console.log(`replaceMessage: Replaced message ${replaceId} with ${normalizedMsg._id} for recipientId ${recipientId}`);
+
       } else {
         console.warn('replaceMessage: Invalid senderId or recipientId', normalizedMsg);
       }
@@ -260,7 +260,6 @@ const messageSlice = createSlice({
           : msg
       );
       state.messagesTimestamp[recipientId] = Date.now();
-      console.log(`updateMessageStatus: Updated status for message ${messageId} to ${status} in recipientId ${recipientId}`);
     },
     deleteMessage: (state, action) => {
       const { recipientId, messageId } = action.payload;
@@ -273,7 +272,7 @@ const messageSlice = createSlice({
       );
       state.chatMessageCount[recipientId] = (state.chatMessageCount[recipientId] || 1) - 1;
       state.messagesTimestamp[recipientId] = Date.now();
-      console.log(`deleteMessage: Deleted message ${messageId} for recipientId ${recipientId}`);
+    
     },
     setSelectedChat: (state, action) => {
       const recipientId = action.payload;
@@ -283,7 +282,7 @@ const messageSlice = createSlice({
       } else if (isValidObjectId(recipientId)) {
         state.chats[recipientId] = state.chats[recipientId] || [];
         state.selectedChat = recipientId;
-        console.log(`setSelectedChat: Set chat to ${recipientId}`);
+      
       } else {
         console.warn('setSelectedChat: Invalid recipientId', recipientId);
       }
@@ -326,7 +325,7 @@ const messageSlice = createSlice({
     });
     state.chatList = Array.from(existingChatMap.values());
     state.chatListTimestamp = now;
-    console.log(`setChatList: Updated chatList with ${state.chatList.length} contacts`);
+
   } else {
     console.warn('setChatList: No valid contacts in payload, retaining existing chatList', payload);
   }
@@ -353,14 +352,13 @@ const messageSlice = createSlice({
         );
         state.chatMessageCount[recipientId] = state.chats[recipientId].length;
         if (!state.chats[recipientId].length) {
-          console.log(`cleanupMessages: Removed empty chat for recipientId ${recipientId}`);
+        
           delete state.chats[recipientId];
           delete state.chatMessageCount[recipientId];
           delete state.messagesTimestamp[recipientId];
         }
       });
-      // Avoid clearing chatList to prevent UI flicker; let fetchChatList handle updates
-      console.log(`cleanupMessages: Retained chatList with ${state.chatList.length} contacts`);
+
     },
   },
 });
@@ -452,7 +450,7 @@ const persistenceMiddleware = (store) => {
         },
       };
       await db.put(STORE_NAME, { key: 'state', value: serializableState });
-      console.log(`persistenceMiddleware: Persisted state with ${serializableState.messages.chatList.length} contacts`);
+
     } catch (error) {
       logError('Failed to persist state', error, state.auth.userId);
     }
@@ -486,7 +484,7 @@ const persistenceMiddleware = (store) => {
               auth: authSlice.getInitialState(),
             },
           });
-          console.log('persistenceMiddleware: Cleared persisted state');
+ 
         } catch (error) {
           logError('Failed to clear persisted state', error);
         }
@@ -595,10 +593,7 @@ const loadPersistedState = async () => {
         privateKey: null,
       },
     };
-    console.log('loadPersistedState: Loaded state', {
-      chatListLength: result.messages.chatList.length,
-      chatsCount: Object.keys(result.messages.chats).length,
-    });
+  
     return result;
   } catch (error) {
     logError('Failed to load persisted state', error);
@@ -652,12 +647,9 @@ export const initializeStore = async () => {
       });
       store.dispatch(setChatList(persistedState.messages.chatList));
       store.dispatch(cleanupMessages());
-      console.log('initializeStore: Store initialized with persisted state', {
-        chatListLength: persistedState.messages.chatList.length,
-        chatsCount: Object.keys(persistedState.messages.chats).length,
-      });
+     
     } else {
-      console.log('initializeStore: No valid persisted state, using initial state');
+     
     }
   } catch (error) {
     logError('Failed to initialize store with persisted state', error);
