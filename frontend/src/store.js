@@ -37,6 +37,7 @@ const initDB = async () => {
 
 const errorLogTimestamps = new Map();
 
+
 const logError = async (message, error, userId = null) => {
   const now = Date.now();
   const errorEntry = errorLogTimestamps.get(message) || { count: 0, timestamps: [] };
@@ -69,6 +70,9 @@ const logError = async (message, error, userId = null) => {
     console.error('Failed to log error:', err.message);
   }
 };
+
+
+
 
 // Auth Slice
 const authSlice = createSlice({

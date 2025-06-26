@@ -105,26 +105,27 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
     }
   }, [userId]);
 
-  useEffect(() => {
-    const initializeForge = async () => {
-      if (forgeInitAttemptsRef.current >= maxForgeInitAttempts) {
-        console.error('Max forge initialization attempts reached');
-        logClientError('Max forge initialization attempts reached', new Error('Forge init failed'));
-        setIsForgeReady(true); // Proceed to avoid blocking
-        return;
-      }
-      forgeInitAttemptsRef.current += 1;
-      if (forge?.random && forge?.pki && forge?.cipher) {
-        setIsForgeReady(true);
-        console.log('Forge initialized successfully');
-      } else {
-        console.warn('Forge not ready, retrying...');
-        await new Promise((resolve) => setTimeout(resolve, 1000 * forgeInitAttemptsRef.current));
-        initializeForge();
-      }
-    };
-    initializeForge();
-  }, [logClientError]);
+useEffect(() => {
+  const initializeForge = async () => {
+    if (forgeInitAttemptsRef.current >= maxForgeInitAttempts) {
+      console.error('Max forge initialization attempts reached');
+      logClientError('Max forge initialization attempts reached', new Error('Forge init failed'));
+      setIsForgeReady(true); // Proceed to avoid blocking
+      return;
+    }
+    forgeInitAttemptsRef.current += 1;
+    if (forge?.random && forge?.pki && forge?.cipher) {
+      setIsForgeReady(true);
+      console.log('Forge initialized successfully');
+      fetchChatList(); // Trigger fetchChatList when forge is ready
+    } else {
+      console.warn('Forge not ready, retrying...');
+      await new Promise((resolve) => setTimeout(resolve, 1000 * forgeInitAttemptsRef.current));
+      initializeForge();
+    }
+  };
+  initializeForge();
+}, [logClientError, fetchChatList]);
 
   const getPublicKey = useCallback(async (recipientId) => {
     if (!isValidObjectId(recipientId)) throw new Error('Invalid recipientId');
@@ -174,124 +175,122 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
 
 
 
-
-
+  
   const fetchChatList = useCallback(
-  debounce(async (force = false) => {
-    if (!isMountedRef.current) {
-      console.log('fetchChatList aborted: component unmounted');
-      return;
-    }
-    if (!isForgeReady) {
-      console.log('fetchChatList deferred: forge not ready');
-      setFetchStatus('loading');
-      setIsLoadingChatList(true);
-      // Retry after forge is ready
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-      if (isMountedRef.current && !isForgeReady) {
-        console.log('fetchChatList retrying after forge delay');
-        fetchChatList(force);
+  debounce(
+    async (force = false) => {
+      if (!isMountedRef.current) {
+        console.log('fetchChatList aborted: component unmounted');
         return;
       }
-    }
-    if (!force && chatList.length && chatListTimestamp && Date.now() - chatListTimestamp < CACHE_TIMEOUT) {
-      console.log('fetchChatList skipped: cache still valid');
-      setFetchStatus('success');
-      setFetchError(null);
-      setIsLoadingChatList(false);
-      return;
-    }
-    const fetchId = `${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
-    console.log(`fetchChatList started with fetchId: ${fetchId}`);
-    setIsLoadingChatList(true);
-    setFetchStatus('loading');
-    let retryCount = retryCountRef.current.chatList;
-    const maxRetries = 3;
-    const baseDelay = 3000;
+      if (!isForgeReady) {
+        console.log('fetchChatList deferred: forge not ready');
+        setFetchStatus('loading');
+        setIsLoadingChatList(true);
+        return; // Defer until forge is ready, handled by forge useEffect
+      }
+      if (!force && chatList.length && chatListTimestamp && Date.now() - chatListTimestamp < CACHE_TIMEOUT) {
+        console.log('fetchChatList skipped: cache still valid');
+        setFetchStatus('success');
+        setFetchError(null);
+        setIsLoadingChatList(false);
+        return;
+      }
+      const fetchId = `${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+      console.log(`fetchChatList started with fetchId: ${fetchId}`);
+      setIsLoadingChatList(true);
+      setFetchStatus('loading');
+      let retryCount = retryCountRef.current.chatList;
+      const maxRetries = 3;
+      const baseDelay = 3000;
 
-    const attemptFetch = async () => {
-      try {
-        const { data } = await axios.get(`${BASE_URL}/social/chat-list`, {
-          headers: { Authorization: `Bearer ${token}` },
-          params: { userId },
-          timeout: 10000,
-        });
-        console.log('fetchChatList response:', { fetchId, dataLength: data.length });
-        if (!Array.isArray(data) || data.length === 0) {
-          console.warn('fetchChatList: Empty or invalid chat list data');
+      const attemptFetch = async () => {
+        try {
+          const { data } = await axios.get(`${BASE_URL}/social/chat-list`, {
+            headers: { Authorization: `Bearer ${token}` },
+            params: { userId },
+            timeout: 10000,
+          });
+          console.log('fetchChatList response:', { fetchId, dataLength: data.length });
+          if (!Array.isArray(data)) {
+            throw new Error('Invalid chat list data: not an array');
+          }
           if (isMountedRef.current && fetchId === fetchChatList.currentFetchId) {
-            setFetchStatus('success');
-            setFetchError(null);
+            const validChats = data.filter((chat) => isValidObjectId(chat.id));
+            if (validChats.length > 0) {
+              const updatedChatList = validChats.map((chat) => ({
+                ...chat,
+                _id: chat.id,
+                unreadCount: unreadMessages[chat.id] || chat.unreadCount || 0,
+                lastSeen: chat.lastSeen ? new Date(chat.lastSeen).toISOString() : null,
+                latestMessage: chat.latestMessage
+                  ? {
+                      ...chat.latestMessage,
+                      createdAt: chat.latestMessage.createdAt
+                        ? new Date(chat.latestMessage.createdAt).toISOString()
+                        : new Date().toISOString(),
+                      updatedAt: chat.latestMessage.updatedAt
+                        ? new Date(chat.latestMessage.updatedAt).toISOString()
+                        : undefined,
+                    }
+                  : null,
+              }));
+              console.log(`fetchChatList updating state with ${updatedChatList.length} chats`);
+              dispatch(setChatList(updatedChatList));
+              setFetchStatus('success');
+              setFetchError(null);
+            } else {
+              console.warn('fetchChatList: No valid chats in response, retaining existing chatList');
+              setFetchStatus('success');
+              setFetchError(null);
+            }
+            retryCountRef.current.chatList = 0;
+            clearTimeout(retryTimeoutRef.current.chatList);
+          }
+        } catch (err) {
+          if (!isMountedRef.current || fetchId !== fetchChatList.currentFetchId) {
+            console.log(`fetchChatList aborted for fetchId: ${fetchId}`);
+            return;
+          }
+          if (err.response?.status === 401) {
+            console.error('fetchChatList unauthorized:', err.message);
+            logClientError('Chat list fetch failed: Unauthorized', err);
+            setTimeout(() => onLogout(), 1000);
+            return;
+          }
+          if (retryCount < maxRetries) {
+            retryCount += 1;
+            retryCountRef.current.chatList = retryCount;
+            const delay = baseDelay * Math.pow(2, retryCount) * (1 + Math.random() * 0.1);
+            console.warn(`fetchChatList attempt ${retryCount} failed: ${err.message}, retrying in ${delay}ms`);
+            clearTimeout(retryTimeoutRef.current.chatList);
+            retryTimeoutRef.current.chatList = setTimeout(attemptFetch, delay);
+          } else {
+            console.error('fetchChatList failed after max retries:', err.message);
+            setFetchStatus('error');
+            setFetchError('Failed to load contacts, please try again');
+            logClientError('Chat list fetch failed after max retries', err);
+            retryCountRef.current.chatList = 0;
+            clearTimeout(retryTimeoutRef.current.chatList);
+          }
+        } finally {
+          if (isMountedRef.current && fetchId === fetchChatList.currentFetchId) {
+            console.log(`fetchChatList completed for fetchId: ${fetchId}`);
             setIsLoadingChatList(false);
           }
-          return;
         }
-        if (isMountedRef.current && fetchId === fetchChatList.currentFetchId) {
-          const updatedChatList = data
-            .filter((chat) => isValidObjectId(chat.id))
-            .map((chat) => ({
-              ...chat,
-              _id: chat.id,
-              unreadCount: unreadMessages[chat.id] || chat.unreadCount || 0,
-              lastSeen: chat.lastSeen ? new Date(chat.lastSeen).toISOString() : null,
-              latestMessage: chat.latestMessage
-                ? {
-                    ...chat.latestMessage,
-                    createdAt: chat.latestMessage.createdAt
-                      ? new Date(chat.latestMessage.createdAt).toISOString()
-                      : new Date().toISOString(),
-                    updatedAt: chat.latestMessage.updatedAt
-                      ? new Date(chat.latestMessage.updatedAt).toISOString()
-                      : undefined,
-                  }
-                : null,
-            }));
-          console.log(`fetchChatList updating state with ${updatedChatList.length} chats`);
-          dispatch(setChatList(updatedChatList));
-          setFetchStatus('success');
-          setFetchError(null);
-          retryCountRef.current.chatList = 0;
-          clearTimeout(retryTimeoutRef.current.chatList);
-        }
-      } catch (err) {
-        if (!isMountedRef.current || fetchId !== fetchChatList.currentFetchId) {
-          console.log(`fetchChatList aborted for fetchId: ${fetchId}`);
-          return;
-        }
-        if (err.response?.status === 401) {
-          console.error('fetchChatList unauthorized:', err.message);
-          logClientError('Chat list fetch failed: Unauthorized', err);
-          setTimeout(() => onLogout(), 1000);
-          return;
-        }
-        if (retryCount < maxRetries) {
-          retryCount += 1;
-          retryCountRef.current.chatList = retryCount;
-          const delay = baseDelay * Math.pow(2, retryCount) * (1 + Math.random() * 0.1);
-          console.warn(`fetchChatList attempt ${retryCount} failed: ${err.message}, retrying in ${delay}ms`);
-          clearTimeout(retryTimeoutRef.current.chatList);
-          retryTimeoutRef.current.chatList = setTimeout(attemptFetch, delay);
-        } else {
-          console.error('fetchChatList failed after max retries:', err.message);
-          setFetchStatus('error');
-          setFetchError('Failed to load contacts, please try again');
-          logClientError('Chat list fetch failed after max retries', err);
-          retryCountRef.current.chatList = 0;
-          clearTimeout(retryTimeoutRef.current.chatList);
-        }
-      } finally {
-        if (isMountedRef.current && fetchId === fetchChatList.currentFetchId) {
-          console.log(`fetchChatList completed for fetchId: ${fetchId}`);
-          setIsLoadingChatList(false);
-        }
-      }
-    };
+      };
 
-    fetchChatList.currentFetchId = fetchId;
-    await attemptFetch();
-  }, 1000),
+      fetchChatList.currentFetchId = fetchId;
+      await attemptFetch();
+    },
+    1000,
+    { leading: false, trailing: true }
+  ),
   [isForgeReady, token, userId, onLogout, unreadMessages, logClientError, dispatch, chatList, chatListTimestamp]
 );
+fetchChatList.cancel = () => debounce.cancel(); // Allow cancellation of debounced calls
+
 
 
 
@@ -602,9 +601,10 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
     };
 
 
-    const handleChatListUpdated = ({ users, page = 0, limit = 50 }) => {
+
+const handleChatListUpdated = ({ users, page = 0, limit = 50 }) => {
   const now = Date.now();
-  if (now - lastChatListUpdate < 1000) {
+  if (now - lastChatListUpdate < 500) {
     console.log('chatListUpdated debounced');
     return;
   }
@@ -614,8 +614,15 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
     return;
   }
   console.log(`chatListUpdated processing ${users.length} users for userId ${userId}`);
-  dispatch(setChatList(users.filter((chat) => isValidObjectId(chat.id))));
+  const validUsers = users.filter((chat) => isValidObjectId(chat.id));
+  if (validUsers.length > 0) {
+    dispatch(setChatList(validUsers));
+  } else {
+    console.warn('chatListUpdated: No valid users to update');
+  }
 };
+
+
     const handleMessage = (msg) => {
       if (!isMountedRef.current) return;
       const senderId = typeof msg.senderId === 'object' ? msg.senderId._id.toString() : msg.senderId.toString();
