@@ -570,65 +570,76 @@ useEffect(() => {
     [isForgeReady, token, userId, socket, dispatch, logClientError, onLogout, auth.privateKey, decryptMessage]
   );
 
-  const sendMessage = useCallback(
-    async (retryCount = 0) => {
-      if (!isForgeReady || !message.trim() || !selectedChat || !isValidObjectId(selectedChat)) return;
-      const clientMessageId = generateClientMessageId();
-      const plaintextContent = message.trim();
-      const maxMessageRetries = 3;
 
-      const attemptSend = async () => {
-        try {
-          const recipientPublicKey = await getPublicKey(selectedChat);
-          const encryptedContent = await encryptMessage(plaintextContent, recipientPublicKey);
-          const messageData = {
-            senderId: userId,
-            recipientId: selectedChat,
-            content: encryptedContent,
-            contentType: 'text',
-            plaintextContent,
-            clientMessageId,
-            senderVirtualNumber: virtualNumber,
-            senderUsername: username,
-            senderPhoto: photo,
-            _id: clientMessageId,
-            status: 'pending',
-            createdAt: new Date(),
-          };
-          dispatch(addMessage({ recipientId: selectedChat, message: messageData }));
-          if (!socket?.connected) {
-            throw new Error('Socket not connected');
-          }
-          socket.emit('message', messageData, (ack) => {
-            if (!isMountedRef.current) return;
-            if (ack?.error) {
-              console.error('Socket message failed:', ack.error);
-              dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: clientMessageId, status: 'failed' }));
-              return;
-            }
-            dispatch(replaceMessage({ recipientId: selectedChat, message: { ...ack.message, plaintextContent }, replaceId: clientMessageId }));
-            dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: ack.message._id, status: 'sent' }));
-          });
-          setMessage('');
-          inputRef.current?.focus();
-          listRef.current?.scrollToItem((chats[selectedChat]?.length || 0) + 1, 'end');
-        } catch (err) {
-          console.error('Send message failed:', err.message);
-          const isNonTransient = err.response?.status >= 400 && err.response?.status < 500 && err.response?.status !== 429;
-          if (isNonTransient || retryCount >= maxMessageRetries) {
+
+
+  // In ChatScreen.js, replace the sendMessage function (lines ~500-550) with:
+
+const sendMessage = useCallback(
+  async (retryCount = 0) => {
+    if (!isForgeReady || !message.trim() || !selectedChat || !isValidObjectId(selectedChat)) return;
+    const clientMessageId = generateClientMessageId();
+    const plaintextContent = message.trim();
+    const maxMessageRetries = 3;
+
+    const attemptSend = async () => {
+      try {
+        const recipientPublicKey = await getPublicKey(selectedChat);
+        const encryptedContent = await encryptMessage(plaintextContent, recipientPublicKey);
+        const messageData = {
+          senderId: userId,
+          recipientId: selectedChat,
+          content: encryptedContent,
+          contentType: 'text',
+          plaintextContent,
+          clientMessageId,
+          senderVirtualNumber: virtualNumber,
+          senderUsername: username,
+          senderPhoto: photo,
+          status: 'pending',
+          createdAt: new Date().toISOString(), // Use ISO string for consistency
+        };
+        dispatch(addMessage({ recipientId: selectedChat, message: { ...messageData, _id: clientMessageId } }));
+        if (!socket?.connected) {
+          throw new Error('Socket not connected');
+        }
+        // Exclude _id from the payload sent to the server
+        const { _id, ...messagePayload } = messageData;
+        socket.emit('message', messagePayload, (ack) => {
+          if (!isMountedRef.current) return;
+          if (ack?.error) {
+            console.error('Socket message failed:', ack.error);
             dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: clientMessageId, status: 'failed' }));
-            logClientError(`Send message failed after ${retryCount} retries`, err);
+            logClientError(`Socket message failed: ${ack.error}`, new Error(ack.error));
             return;
           }
-          const delay = Math.pow(2, retryCount) * 1000;
-          setTimeout(() => sendMessage(retryCount + 1), delay);
+          dispatch(replaceMessage({ recipientId: selectedChat, message: { ...ack.message, plaintextContent }, replaceId: clientMessageId }));
+          dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: ack.message._id, status: 'sent' }));
+        });
+        setMessage('');
+        inputRef.current?.focus();
+        listRef.current?.scrollToItem((chats[selectedChat]?.length || 0) + 1, 'end');
+      } catch (err) {
+        console.error('Send message failed:', err.message);
+        const isNonTransient = err.response?.status >= 400 && err.response?.status < 500 && err.response?.status !== 429;
+        if (isNonTransient || retryCount >= maxMessageRetries) {
+          dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: clientMessageId, status: 'failed' }));
+          logClientError(`Send message failed after ${retryCount} retries`, err);
+          return;
         }
-      };
+        const delay = Math.pow(2, retryCount) * 1000 * (1 + Math.random() * 0.1);
+        console.warn(`Retrying message send in ${delay}ms (attempt ${retryCount + 1})`);
+        setTimeout(() => sendMessage(retryCount + 1), delay);
+      }
+    };
 
-      await attemptSend();
-    },
-    [isForgeReady, message, selectedChat, userId, virtualNumber, username, photo, socket, getPublicKey, encryptMessage, dispatch, chats, logClientError]
-  );
+    await attemptSend();
+  },
+  [isForgeReady, message, selectedChat, userId, virtualNumber, username, photo, socket, getPublicKey, encryptMessage, dispatch, chats, logClientError]
+);
+
+
+
 
   const handleAttachment = useCallback(
     async (e) => {

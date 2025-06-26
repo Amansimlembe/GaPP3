@@ -315,127 +315,148 @@ const App = () => {
     }
   }, [dispatch, token, userId, handleLogout]);
 
-  useEffect(() => {
 
-    // Skip if already navigating to /login
-    if (isNavigating && location.pathname === '/login') {
-     
-      setIsNavigating(false);
+  
+
+
+
+
+useEffect(() => {
+  // Skip if already navigating to /login
+  if (isNavigating && location.pathname === '/login') {
+    setIsNavigating(false);
+    return;
+  }
+
+  // Early return if no token or userId
+  if (!token || !userId) {
+    if (location.pathname !== '/login' && !isNavigating) {
+      setIsNavigating(true);
+      navigate('/login', { replace: true });
+    }
+    if (socketRef.current) {
+      socketRef.current.disconnect();
+      socketRef.current = null;
+    }
+    return;
+  }
+
+  // Initialize socket with backoff
+  const connectSocket = (attempt = 0) => {
+    if (socketRef.current || !navigator.onLine || attempt > maxReconnectAttempts) {
+      if (attempt > maxReconnectAttempts) {
+        setError('Failed to connect to server after retries');
+        logClientError('Max socket reconnect attempts reached', new Error('Socket connection failed'), userId);
+      }
       return;
     }
 
-    // Early return if no token or userId
-    if (!token || !userId) {
-      if (location.pathname !== '/login' && !isNavigating) {
-       
-        setIsNavigating(true);
-        navigate('/login', { replace: true });
+    const newSocket = io(BASE_URL, {
+      auth: { token, userId },
+      transports: ['websocket'], // Prefer WebSocket, avoid polling
+      reconnection: false, // Handle reconnection manually
+      timeout: 10000,
+      query: { EIO: 4 }, // Ensure correct Engine.IO version
+    });
+
+    socketRef.current = newSocket;
+
+    const handleConnect = () => {
+      console.log('Socket connected successfully');
+      newSocket.emit('join', userId);
+      attemptRef.current = 0; // Reset attempt count
+      setError(null); // Clear any previous errors
+    };
+
+    const handleConnectError = async (error) => {
+      console.error('Socket connect error:', error.message);
+      logClientError('Socket connect error', error, userId);
+      if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
+        setError('Authentication error, logging out');
+        await handleLogout();
+      } else if (error.message.includes('websocket error') || error.message.includes('timeout')) {
+        const delay = Math.min(Math.pow(2, attempt) * 1000 * (1 + Math.random() * 0.1), maxDelay);
+        console.warn(`Retrying socket connection in ${delay}ms (attempt ${attempt + 1})`);
+        setTimeout(() => connectSocket(attempt + 1), delay);
+      } else {
+        setError('Failed to connect to server');
       }
+    };
+
+    const handleDisconnect = (reason) => {
+      console.warn('Socket disconnected:', reason);
+      logClientError(`Socket disconnected: ${reason}`, new Error(reason), userId);
+      if (reason === 'io server disconnect' || reason === 'transport close' || reason === 'ping timeout') {
+        if (navigator.onLine && attemptRef.current <= maxReconnectAttempts) {
+          const delay = Math.min(Math.pow(2, attemptRef.current) * 1000 * (1 + Math.random() * 0.1), maxDelay);
+          console.warn(`Retrying socket connection in ${delay}ms (attempt ${attemptRef.current + 1})`);
+          setTimeout(() => connectSocket(attemptRef.current + 1), delay);
+        }
+      }
+    };
+
+    const handleMessage = (msg) => {
+      if (!msg.senderId || !msg.recipientId) {
+        console.warn('Invalid message payload:', msg);
+        return;
+      }
+      if (msg.recipientId === userId && (!selectedChat || selectedChat !== msg.senderId)) {
+        setChatNotifications((prev) => prev + 1);
+      }
+    };
+
+    const handleNewContact = (contactData) => {
+      if (!contactData?.id) {
+        console.warn('Invalid contact data:', contactData);
+        return;
+      }
+    };
+
+    newSocket.on('connect', handleConnect);
+    newSocket.on('connect_error', handleConnectError);
+    newSocket.on('disconnect', handleDisconnect);
+    newSocket.on('message', handleMessage);
+    newSocket.on('newContact', handleNewContact);
+
+    const handleOnline = () => {
+      if (!socketRef.current || !socketRef.current.connected) {
+        console.log('Network online, attempting to reconnect socket');
+        connectSocket(0);
+      }
+    };
+    const handleOffline = () => {
+      console.warn('Offline: Socket disconnected');
       if (socketRef.current) {
         socketRef.current.disconnect();
         socketRef.current = null;
       }
-      return;
-    }
-
-    // Initialize socket with backoff
-    const connectSocket = (attempt = 0) => {
-      if (socketRef.current || !navigator.onLine || attempt > maxReconnectAttempts) {
-        if (attempt > maxReconnectAttempts) {
-          setError('Failed to connect to server after retries');
-        }
-        return;
-      }
-
-      const newSocket = io(BASE_URL, {
-        auth: { token, userId },
-        transports: ['websocket', 'polling'],
-        reconnection: false, // Handle reconnection manually
-        timeout: 10000,
-      });
-
-      socketRef.current = newSocket;
-
-      const handleConnect = () => {
-        newSocket.emit('join', userId);
-        attemptRef.current = 0; // Reset attempt count
-      };
-
-      const handleConnectError = async (error) => {
-        console.error('Socket connect error:', error.message);
-        logClientError('Socket connect error', error, userId);
-        if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
-          setError('Authentication error, logging out');
-          await handleLogout();
-        } else {
-          // Exponential backoff
-          const delay = Math.min(Math.pow(2, attempt) * 1000, maxDelay);
-          console.warn(`Retrying connection in ${delay}ms (attempt ${attempt + 1})`);
-          setTimeout(() => connectSocket(attempt + 1), delay);
-        }
-      };
-
-      const handleDisconnect = (reason) => {
-        console.warn('Socket disconnected:', reason);
-        logClientError(`Socket disconnected: ${reason}`, new Error(reason), userId);
-        if (reason === 'io server disconnect' && navigator.onLine) {
-          connectSocket(attemptRef.current + 1);
-        }
-      };
-
-      const handleMessage = (msg) => {
-        if (!msg.senderId || !msg.recipientId) {
-          console.warn('Invalid message payload:', msg);
-          return;
-        }
-        if (msg.recipientId === userId && (!selectedChat || selectedChat !== msg.senderId)) {
-          setChatNotifications((prev) => prev + 1);
-        }
-      };
-
-      const handleNewContact = (contactData) => {
-        if (!contactData?.id) {
-          console.warn('Invalid contact data:', contactData);
-          return;
-        }
-        
-      };
-
-      newSocket.on('connect', handleConnect);
-      newSocket.on('connect_error', handleConnectError);
-      newSocket.on('disconnect', handleDisconnect);
-      newSocket.on('message', handleMessage);
-      newSocket.on('newContact', handleNewContact);
-
-      const handleOnline = () => connectSocket(0);
-      const handleOffline = () => console.warn('Offline: Socket disconnected');
-
-      window.addEventListener('online', handleOnline);
-      window.addEventListener('offline', handleOffline);
-
-      setSocket(newSocket);
-
-      return () => {
-        newSocket.emit('leave', userId);
-        newSocket.off('connect', handleConnect);
-        newSocket.off('connect_error', handleConnectError);
-        newSocket.off('disconnect', handleDisconnect);
-        newSocket.off('message', handleMessage);
-        newSocket.off('newContact', handleNewContact);
-        newSocket.disconnect();
-        window.removeEventListener('online', handleOnline);
-        window.removeEventListener('offline', handleOffline);
-        socketRef.current = null;
-        
-      };
     };
 
-    const cleanup = connectSocket(0);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    setSocket(newSocket);
 
     return () => {
-      if (cleanup) cleanup();
+      newSocket.emit('leave', userId);
+      newSocket.off('connect', handleConnect);
+      newSocket.off('connect_error', handleConnectError);
+      newSocket.off('disconnect', handleDisconnect);
+      newSocket.off('message', handleMessage);
+      newSocket.off('newContact', handleNewContact);
+      newSocket.disconnect();
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+      socketRef.current = null;
     };
-  }, [token, userId, location.pathname, handleLogout, navigate]);
+  };
+
+  const cleanup = connectSocket(0);
+
+  return () => {
+    if (cleanup) cleanup();
+  };
+}, [token, userId, location.pathname, handleLogout, navigate, logClientError, selectedChat, maxReconnectAttempts, maxDelay]);
 
   useEffect(() => {
     if (!token || !userId) return;
