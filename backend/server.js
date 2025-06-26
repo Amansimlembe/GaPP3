@@ -29,7 +29,7 @@ try {
   jobseekerRoutes = require('./routes/jobseeker');
   employerRoutes = require('./routes/employer');
 } catch (err) {
-
+  logger.error('Failed to load routes', { error: err.message });
   process.exit(1);
 }
 
@@ -43,9 +43,15 @@ const io = new Server(server, {
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     credentials: true,
   },
-  pingTimeout: 60000,
+  pingTimeout: 60000, // Increased to handle slow networks
   pingInterval: 25000,
   maxHttpBufferSize: 1e6,
+  transports: ['websocket'], // Prefer WebSocket for reliability
+  allowEIO3: false, // Explicitly disable Engine.IO v3 for consistency
+  connectionStateRecovery: {
+    maxDisconnectionDuration: 2 * 60 * 1000, // 2 minutes
+    skipMiddlewares: true,
+  },
 });
 app.set('io', io);
 
@@ -58,12 +64,11 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 const buildPath = path.join(__dirname, '..', 'frontend', 'build');
-//logger.info(`Attempting to serve static files from: ${buildPath}`);
 try {
   if (fs.existsSync(buildPath)) {
     const buildFiles = fs.readdirSync(buildPath);
-    
-    app.use(express.static(buildPath, { maxAge: '1h' })); // Changed: Cache static files for 1 hour
+    logger.info(`Serving static files from: ${buildPath}`, { files: buildFiles });
+    app.use(express.static(buildPath, { maxAge: '1h' }));
   } else {
     logger.warn(`Build directory not found: ${buildPath}. Static files will not be served.`);
   }
@@ -71,16 +76,27 @@ try {
   logger.error(`Failed to access build directory: ${buildPath}`, { error: err.message });
 }
 
-
-
-
 app.get('/health', async (req, res) => {
-  res.status(200).json({
-    status: 'OK',
-    uptime: process.uptime(),
-    mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-    authEndpoint: await fetch(`${BASE_URL}/auth/logout`).then(res => res.status).catch(() => 'unreachable'),
-  });
+  try {
+    const authResponse = await fetch(`${process.env.BASE_URL || 'https://gapp-6yc3.onrender.com'}/auth/logout`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    res.status(200).json({
+      status: 'OK',
+      uptime: process.uptime(),
+      mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+      authEndpoint: authResponse.status,
+    });
+  } catch (err) {
+    logger.error('Health check failed', { error: err.message });
+    res.status(200).json({
+      status: 'OK',
+      uptime: process.uptime(),
+      mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+      authEndpoint: 'unreachable',
+    });
+  }
 });
 
 app.use((err, req, res, next) => {
@@ -91,15 +107,14 @@ app.use((err, req, res, next) => {
   next(err);
 });
 
-// Changed: Retry operation utility
 const retryOperation = async (operation, maxRetries = 3, baseDelay = 1000) => {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       return await operation();
     } catch (err) {
+      logger.warn(`Operation failed, attempt ${attempt}/${maxRetries}`, { error: err.message });
       if (attempt === maxRetries) throw err;
-      const delay = Math.pow(2, attempt) * baseDelay;
-     
+      const delay = Math.pow(2, attempt) * baseDelay * (1 + Math.random() * 0.1); // Add jitter
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
@@ -111,15 +126,18 @@ const connectDB = async (retries = 5, baseDelay = 1000) => {
       await mongoose.connect(process.env.MONGO_URI, {
         serverSelectionTimeoutMS: 5000,
         maxPoolSize: 10,
+        socketTimeoutMS: 45000, // Added for better connection stability
       });
-      //logger.info('MongoDB connected');
+      logger.info('MongoDB connected');
       return;
     } catch (err) {
-
+      logger.warn(`MongoDB connection attempt ${attempt}/${retries} failed`, { error: err.message });
       if (attempt === retries) {
-     process.exit(1);
+        logger.error('MongoDB connection failed after max retries', { error: err.message });
+        process.exit(1);
       }
-      await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * baseDelay));
+      const delay = Math.pow(2, attempt) * baseDelay * (1 + Math.random() * 0.1);
+      await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
 };
@@ -129,12 +147,12 @@ const startPeriodicCleanup = () => {
   setInterval(async () => {
     try {
       const result = await retryOperation(() => Message.cleanupOrphanedMessages());
-      /*logger.info('Periodic orphaned messages cleanup completed', {
+      logger.info('Periodic orphaned messages cleanup completed', {
         deletedCount: result.deletedCount,
         orphanedUserIds: result.orphanedUserIds,
-      });*/
+      });
     } catch (err) {
-      
+      logger.error('Periodic orphaned messages cleanup failed', { error: err.message });
     }
   }, interval);
 };
@@ -143,10 +161,10 @@ const initializeDB = async () => {
   await connectDB();
   try {
     const result = await retryOperation(() => Message.cleanupOrphanedMessages());
-    /*logger.info('Initial orphaned messages cleanup completed', {
+    logger.info('Initial orphaned messages cleanup completed', {
       deletedCount: result.deletedCount,
       orphanedUserIds: result.orphanedUserIds,
-    });*/
+    });
   } catch (err) {
     logger.error('Initial orphaned messages cleanup failed', { error: err.message });
   }
@@ -164,9 +182,9 @@ const routes = [
 
 routes.forEach(({ path, handler, name }) => {
   if (handler && (typeof handler === 'function' || (typeof handler === 'object' && handler.handle))) {
-   
     app.use(path, handler);
   } else {
+    logger.warn(`Invalid route handler for ${name}`, { path });
   }
 });
 
@@ -175,12 +193,12 @@ app.get('*', (req, res) => {
   if (fs.existsSync(indexPath)) {
     res.sendFile(indexPath, { maxAge: 3600000 }, (err) => {
       if (err) {
-        
+        logger.error('Failed to serve index.html', { error: err.message });
         res.status(500).json({ error: 'Server Error - Static files may not be available' });
       }
     });
   } else {
-  
+    logger.warn('index.html not found', { path: indexPath });
     res.status(500).json({ error: 'Server Error - Frontend not built' });
   }
 });
@@ -196,7 +214,6 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal Server Error', details: err.message });
 });
 
-// Changed: Socket.IO authentication using authMiddleware
 io.use(async (socket, next) => {
   const req = {
     headers: { authorization: `Bearer ${socket.handshake.auth.token}` },
@@ -206,7 +223,7 @@ io.use(async (socket, next) => {
   const res = {
     status: (code) => ({
       json: (data) => {
-       
+        logger.warn('Socket authentication failed', { socketId: socket.id, error: data.error || 'Authentication error' });
         next(new Error(data.error || 'Authentication error'));
       },
     }),
@@ -215,92 +232,118 @@ io.use(async (socket, next) => {
   try {
     await authMiddleware(req, res, () => {
       socket.user = req.user;
-      //logger.info('Socket authenticated', { socketId: socket.id, userId: req.user.id });
+      logger.info('Socket authenticated', { socketId: socket.id, userId: req.user.id });
       next();
     });
   } catch (err) {
- 
+    logger.error('Socket authentication error', { socketId: socket.id, error: err.message });
     next(new Error('Authentication error'));
   }
 });
 
 io.on('connection', (socket) => {
-  //logger.info('User connected', { socketId: socket.id, userId: socket.user.id });
+  logger.info('User connected', { socketId: socket.id, userId: socket.user.id });
 
   socket.on('join', (data) => {
-    const userId = typeof data === 'object' ? data.userId : data; // Changed: Handle object or string
+    const userId = typeof data === 'object' ? data.userId : data;
     if (!userId || userId !== socket.user.id) {
-
+      logger.warn('Invalid join attempt', { socketId: socket.id, userId, expectedUserId: socket.user.id });
+      socket.emit('error', { message: 'Invalid user ID' });
       return;
     }
     socket.join(userId);
-   // logger.info('User joined room', { userId, socketId: socket.id });
+    logger.info('User joined room', { userId, socketId: socket.id });
   });
 
   socket.on('message', async (msg, callback) => {
     try {
       if (!msg.recipientId || !msg.senderId || !mongoose.isValidObjectId(msg.recipientId) || !mongoose.isValidObjectId(msg.senderId)) {
-     
+        logger.warn('Invalid message data', { socketId: socket.id, msg });
         return callback({ error: 'Invalid message data' });
       }
       if (msg.senderId !== socket.user.id) {
-       return callback({ error: 'Unauthorized' });
+        logger.warn('Unauthorized message send attempt', { socketId: socket.id, senderId: msg.senderId, userId: socket.user.id });
+        return callback({ error: 'Unauthorized' });
       }
 
+      // Explicitly select fields to avoid including unexpected fields like _id
+      const messageData = {
+        senderId: msg.senderId,
+        recipientId: msg.recipientId,
+        content: msg.content,
+        contentType: msg.contentType || 'text',
+        clientMessageId: msg.clientMessageId,
+        senderVirtualNumber: msg.senderVirtualNumber,
+        senderUsername: msg.senderUsername,
+        senderPhoto: msg.senderPhoto,
+        timestamp: new Date(),
+      };
+
       const savedMessage = await retryOperation(async () => {
-        const message = new Message({
-          senderId: msg.senderId,
-          recipientId: msg.recipientId,
-          content: msg.content,
-          clientMessageId: msg.clientMessageId,
-          timestamp: new Date(),
-        });
+        const message = new Message(messageData);
         return await message.save();
       });
 
       io.to(msg.recipientId).emit('message', savedMessage);
       callback({ status: 'ok', message: savedMessage });
     } catch (err) {
-      
+      logger.error('Message save failed', { socketId: socket.id, error: err.message, msg });
+      callback({ error: 'Failed to save message', details: err.message });
     }
   });
 
-  socket.on('readMessages', async ({ chatId, userId }) => {
-    if (!mongoose.isValidObjectId(chatId) || userId !== socket.user.id) {
-   
+  socket.on('batchMessageStatus', async ({ messageIds, status, recipientId }) => {
+    if (!Array.isArray(messageIds) || !messageIds.every(mongoose.isValidObjectId) || !['sent', 'delivered', 'read'].includes(status) || recipientId !== socket.user.id) {
+      logger.warn('Invalid batchMessageStatus data', { socketId: socket.id, messageIds, status, recipientId });
+      socket.emit('error', { message: 'Invalid batch message status data' });
       return;
     }
     try {
       await retryOperation(async () => {
         await Message.updateMany(
-          { recipientId: userId, senderId: chatId, read: false },
-          { $set: { read: true, readAt: new Date() } }
+          { _id: { $in: messageIds }, recipientId },
+          { $set: { status, readAt: status === 'read' ? new Date() : undefined } }
         );
       });
-      io.to(chatId).emit('readMessages', { chatId, userId });
+      io.to(recipientId).emit('messageStatus', { messageIds, status });
     } catch (err) {
-      
+      logger.error('Batch message status update failed', { socketId: socket.id, error: err.message });
+      socket.emit('error', { message: 'Failed to update message status' });
     }
   });
 
   socket.on('typing', ({ chatId, userId }) => {
     if (!mongoose.isValidObjectId(chatId) || userId !== socket.user.id) {
-   
+      logger.warn('Invalid typing event', { socketId: socket.id, chatId, userId });
       return;
     }
     socket.to(chatId).emit('typing', { chatId, userId });
   });
 
-  socket.on('leave', (userId) => {
-    if (!userId || userId !== socket.user.id) {
-   return;
+  socket.on('stopTyping', ({ chatId, userId }) => {
+    if (!mongoose.isValidObjectId(chatId) || userId !== socket.user.id) {
+      logger.warn('Invalid stopTyping event', { socketId: socket.id, chatId, userId });
+      return;
     }
-    socket.leave(userId);
-   // logger.info('User left room', { userId, socketId: socket.id });
+    socket.to(chatId).emit('stopTyping', { chatId, userId });
   });
 
-  socket.on('disconnect', () => {
-    //logger.info('User disconnected', { socketId: socket.id, userId: socket.user.id });
+  socket.on('leave', (userId) => {
+    if (!userId || userId !== socket.user.id) {
+      logger.warn('Invalid leave attempt', { socketId: socket.id, userId, expectedUserId: socket.user.id });
+      socket.emit('error', { message: 'Invalid user ID' });
+      return;
+    }
+    socket.leave(userId);
+    logger.info('User left room', { userId, socketId: socket.id });
+  });
+
+  socket.on('disconnect', (reason) => {
+    logger.info('User disconnected', { socketId: socket.id, userId: socket.user.id, reason });
+  });
+
+  socket.on('error', (err) => {
+    logger.error('Socket error', { socketId: socket.id, userId: socket.user.id, error: err.message });
   });
 });
 
@@ -308,23 +351,25 @@ const PORT = process.env.PORT || 8000;
 server.listen(PORT, '0.0.0.0', () => logger.info(`Server running on port ${PORT}`));
 
 const shutdown = async () => {
- // logger.info('Shutting down server');
+  logger.info('Shutting down server');
   try {
     await Promise.race([
       mongoose.connection.close(),
       new Promise((_, reject) => setTimeout(() => reject(new Error('MongoDB close timeout')), 5000)),
     ]);
-    //logger.info('MongoDB connection closed');
+    logger.info('MongoDB connection closed');
   } catch (err) {
+    logger.error('Failed to close MongoDB connection', { error: err.message });
   }
   io.close(() => {
-    //logger.info('Socket.IO connections closed');
+    logger.info('Socket.IO connections closed');
   });
   server.close(() => {
-    //logger.info('Server closed');
+    logger.info('Server closed');
     process.exit(0);
   });
   setTimeout(() => {
+    logger.error('Server shutdown timed out');
     process.exit(1);
   }, 10000);
 };
