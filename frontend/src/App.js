@@ -182,7 +182,7 @@ const App = () => {
   // Refs for socket management
   const socketRef = useRef(null);
   const attemptRef = useRef(0);
-  const pingIntervalRef = useRef(null); // Added to manage pingInterval
+  const pingIntervalRef = useRef(null);
   const maxReconnectAttempts = 5;
   const maxDelay = 30000; // 30 seconds
 
@@ -273,7 +273,7 @@ const App = () => {
           throw new Error('Missing token or userId');
         }
         const response = await axios.post(
-          `${BASE_URL}/auth/token`,
+          `${BASE_URL}/auth/refresh`, // Changed to /auth/refresh
           { userId },
           {
             headers: { Authorization: `Bearer ${token}` },
@@ -302,6 +302,12 @@ const App = () => {
       } catch (error) {
         console.error(`Token refresh attempt ${attempt} failed: ${error.message}`, error.response?.data);
         logClientError(`Token refresh failed: ${attempt}`, error, userId);
+        if (error.response?.status === 404) {
+          console.error('Token refresh endpoint not found. Please check server configuration.');
+          setError('Authentication service unavailable. Please log in again.');
+          await handleLogout();
+          return null;
+        }
         if (attempt < 3 && (error.response?.status === 429 || error.response?.status >= 500 || error.code === 'ECONNABORTED' || !navigator.onLine)) {
           await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * 1000));
           continue;
@@ -336,154 +342,136 @@ const App = () => {
       return;
     }
 
+    const connectSocket = (attempt = 0) => {
+      if (socketRef.current || !navigator.onLine || attempt > maxReconnectAttempts) {
+        if (attempt > maxReconnectAttempts) {
+          setError('Failed to connect to server after retries');
+          logClientError('Max socket reconnect attempts reached', new Error('Socket connection failed'), userId);
+        }
+        return () => {};
+      }
 
+      const connect = async () => {
+        const expTime = getTokenExpiration(token);
+        if (expTime && expTime < Date.now() + 60 * 1000) {
+          const newToken = await refreshToken();
+          if (!newToken) {
+            setError('Authentication error, logging out');
+            await handleLogout();
+            return () => {};
+          }
+        }
 
-    const connectSocket = async (attempt = 0) => {
-  if (socketRef.current || !navigator.onLine || attempt > maxReconnectAttempts) {
-    if (attempt > maxReconnectAttempts) {
-      setError('Failed to connect to server after retries');
-      logClientError('Max socket reconnect attempts reached', new Error('Socket connection failed'), userId);
-    }
-    return;
-  }
+        const newSocket = io(BASE_URL, {
+          auth: { token, userId },
+          transports: ['websocket', 'polling'],
+          reconnection: true,
+          reconnectionAttempts: maxReconnectAttempts,
+          reconnectionDelay: 1000,
+          reconnectionDelayMax: maxDelay,
+          randomizationFactor: 0.5,
+          timeout: 10000,
+        });
 
-  // Validate token before connecting
-  const expTime = getTokenExpiration(token);
-  if (expTime && expTime < Date.now() + 60 * 1000) {
-    const newToken = await refreshToken();
-    if (!newToken) {
-      setError('Authentication error, logging out');
-      await handleLogout();
-      return;
-    }
-  }
+        socketRef.current = newSocket;
 
-  setTimeout(() => {
-    const newSocket = io(BASE_URL, {
-      auth: { token, userId },
-      transports: ['websocket', 'polling'],
-      reconnection: true,
-      reconnectionAttempts: maxReconnectAttempts,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: maxDelay,
-      randomizationFactor: 0.5,
-      timeout: 10000,
-    });
+        const handleConnect = () => {
+          console.log('Socket connected successfully');
+          newSocket.emit('join', userId);
+          attemptRef.current = 0;
+          setError(null);
+          setSocket(newSocket);
 
-    socketRef.current = newSocket;
+          const queuedMessages = Object.keys(localStorage)
+            .filter((key) => key.startsWith('queuedMessage:'))
+            .map((key) => JSON.parse(localStorage.getItem(key)));
+          if (queuedMessages.length > 0) {
+            console.log('Replaying queued messages:', queuedMessages.length);
+            let retryCount = 0;
+            const maxMessageRetries = 3;
 
-    const handleConnect = () => {
-      console.log('Socket connected successfully');
-      newSocket.emit('join', userId);
-      attemptRef.current = 0;
-      setError(null);
-      setSocket(newSocket);
-
-      // Replay queued messages from localStorage
-      const queuedMessages = Object.keys(localStorage)
-        .filter((key) => key.startsWith('queuedMessage:'))
-        .map((key) => JSON.parse(localStorage.getItem(key)));
-      if (queuedMessages.length > 0) {
-        console.log('Replaying queued messages:', queuedMessages.length);
-        queuedMessages.forEach((messageData) => {
-          newSocket.emit('message', {
-            senderId: messageData.senderId,
-            recipientId: messageData.recipientId,
-            content: messageData.content || '',
-            contentType: messageData.contentType || 'text',
-            clientMessageId: messageData.clientMessageId,
-            senderVirtualNumber: messageData.senderVirtualNumber,
-            senderUsername: messageData.senderUsername,
-            senderPhoto: messageData.senderPhoto,
-          }, async (ack) => {
-            if (ack?.error) {
-              console.error('Failed to send queued message:', ack.error);
-              if (ack.error.includes('Unauthorized')) {
-                const newToken = await refreshToken();
-                if (!newToken) {
-                  setError('Authentication error, logging out');
-                  await handleLogout();
-                  return;
-                }
-                // Retry sending the message with the new token
-                newSocket.emit('message', messageData, (retryAck) => {
-                  if (retryAck?.error) {
+            const sendMessageWithRetry = async (messageData, attempt = 1) => {
+              newSocket.emit('message', {
+                senderId: messageData.senderId,
+                recipientId: messageData.recipientId,
+                content: messageData.content || '',
+                contentType: messageData.contentType || 'text',
+                clientMessageId: messageData.clientMessageId,
+                senderVirtualNumber: messageData.senderVirtualNumber,
+                senderUsername: messageData.senderUsername,
+                senderPhoto: messageData.senderPhoto,
+              }, async (ack) => {
+                if (ack?.error) {
+                  console.error(`Failed to send queued message (attempt ${attempt}): ${ack.error}`);
+                  if (ack.error.includes('Unauthorized') && attempt < maxMessageRetries) {
+                    const newToken = await refreshToken();
+                    if (!newToken) {
+                      setError('Authentication error, logging out');
+                      await handleLogout();
+                      return;
+                    }
+                    setTimeout(() => sendMessageWithRetry(messageData, attempt + 1), 1000 * attempt);
+                  } else {
                     dispatch(updateMessageStatus({ 
                       recipientId: messageData.recipientId, 
                       messageId: messageData.clientMessageId, 
                       status: 'failed' 
                     }));
-                  } else {
-                    dispatch(replaceMessage({ 
-                      recipientId: messageData.recipientId, 
-                      message: { ...retryAck.message, plaintextContent: messageData.plaintextContent }, 
-                      replaceId: messageData.clientMessageId 
-                    }));
-                    dispatch(updateMessageStatus({ 
-                      recipientId: messageData.recipientId, 
-                      messageId: retryAck.message._id, 
-                      status: 'sent' 
-                    }));
-                    localStorage.removeItem(`queuedMessage:${messageData.clientMessageId}`);
                   }
-                });
-              } else {
-                dispatch(updateMessageStatus({ 
-                  recipientId: messageData.recipientId, 
-                  messageId: messageData.clientMessageId, 
-                  status: 'failed' 
-                }));
-              }
-            } else {
-              dispatch(replaceMessage({ 
-                recipientId: messageData.recipientId, 
-                message: { ...ack.message, plaintextContent: messageData.plaintextContent }, 
-                replaceId: messageData.clientMessageId 
-              }));
-              dispatch(updateMessageStatus({ 
-                recipientId: messageData.recipientId, 
-                messageId: ack.message._id, 
-                status: 'sent' 
-              }));
-              localStorage.removeItem(`queuedMessage:${messageData.clientMessageId}`);
+                } else {
+                  dispatch(replaceMessage({ 
+                    recipientId: messageData.recipientId, 
+                    message: { ...ack.message, plaintextContent: messageData.plaintextContent }, 
+                    replaceId: messageData.clientMessageId 
+                  }));
+                  dispatch(updateMessageStatus({ 
+                    recipientId: messageData.recipientId, 
+                    messageId: ack.message._id, 
+                    status: 'sent' 
+                  }));
+                  localStorage.removeItem(`queuedMessage:${messageData.clientMessageId}`);
+                }
+              });
+            };
+
+            queuedMessages.forEach((messageData, index) => {
+              setTimeout(() => sendMessageWithRetry(messageData), index * 500);
+            });
+          }
+
+          pingIntervalRef.current = setInterval(() => {
+            if (newSocket.connected) {
+              newSocket.emit('ping', { userId });
+              console.log('Ping sent to server');
             }
-          });
-        });
-      }
+          }, 30000);
+        };
 
-      // Start client-side ping
-      pingIntervalRef.current = setInterval(() => {
-        if (newSocket.connected) {
-          newSocket.emit('ping', { userId });
-          console.log('Ping sent to server');
-        }
-      }, 30000);
-    };
+        const handleConnectError = async (error) => {
+          console.error('Socket connect error:', error.message);
+          logClientError('Socket connect error', error, userId);
+          if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
+            setError('Session expired. Attempting to reconnect...');
+            const newToken = await refreshToken();
+            if (newToken) {
+              connectSocket(attempt + 1);
+            } else {
+              setError('Authentication error, logging out');
+              await handleLogout();
+            }
+          } else if (error.message.includes('xhr poll error') || error.message.includes('timeout')) {
+            setError('Server is temporarily unavailable. Retrying...');
+            attemptRef.current = attempt + 1;
+            const delay = Math.min(Math.pow(2, attempt) * 1000 * (1 + Math.random() * 0.2), maxDelay);
+            setTimeout(() => connectSocket(attempt + 1), delay);
+          } else {
+            setError('Failed to connect to server. Please check your connection.');
+            attemptRef.current = attempt + 1;
+            const delay = Math.min(Math.pow(2, attempt) * 1000 * (1 + Math.random() * 0.2), maxDelay);
+            setTimeout(() => connectSocket(attempt + 1), delay);
+          }
+        };
 
-    const handleConnectError = async (error) => {
-      console.error('Socket connect error:', error.message);
-      logClientError('Socket connect error', error, userId);
-      if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
-        setError('Session expired. Attempting to reconnect...');
-        const newToken = await refreshToken();
-        if (newToken) {
-          connectSocket(attempt + 1);
-        } else {
-          setError('Authentication error, logging out');
-          await handleLogout();
-        }
-      } else if (error.message.includes('xhr poll error') || error.message.includes('timeout')) {
-        setError('Server is temporarily unavailable. Retrying...');
-        attemptRef.current = attempt + 1;
-        const delay = Math.min(Math.pow(2, attempt) * 1000 * (1 + Math.random() * 0.2), maxDelay);
-        setTimeout(() => connectSocket(attempt + 1), delay);
-      } else {
-        setError('Failed to connect to server. Please check your connection.');
-        attemptRef.current = attempt + 1;
-        const delay = Math.min(Math.pow(2, attempt) * 1000 * (1 + Math.random() * 0.2), maxDelay);
-        setTimeout(() => connectSocket(attempt + 1), delay);
-      }
-    };
         const handleDisconnect = (reason) => {
           console.warn('Socket disconnected:', reason);
           logClientError(`Socket disconnected: ${reason}`, new Error(reason), userId);
@@ -553,17 +541,25 @@ const App = () => {
           socketRef.current = null;
           setSocket(null);
           if (pingIntervalRef.current) {
-            clearInterval(pingIntervalRef.current); // Clean up ping interval
+            clearInterval(pingIntervalRef.current);
             pingIntervalRef.current = null;
           }
         };
-      }, attempt * 1000); // Delay increases with each attempt
+      };
+
+      const timeoutId = setTimeout(() => {
+        connect();
+      }, attempt * 1000);
+
+      return () => {
+        clearTimeout(timeoutId);
+      };
     };
 
     const cleanup = connectSocket(0);
 
     return () => {
-      if (cleanup) cleanup();
+      cleanup();
     };
   }, [token, userId, location.pathname, handleLogout, navigate, selectedChat, refreshToken]);
 
@@ -593,7 +589,7 @@ const App = () => {
     };
 
     checkTokenExpiration();
-    const interval = setInterval(checkTokenExpiration, 2 * 60 * 1000); // Check every 2 minutes
+    const interval = setInterval(checkTokenExpiration, 2 * 60 * 1000);
     return () => clearInterval(interval);
   }, [token, userId, refreshToken, handleLogout]);
 
