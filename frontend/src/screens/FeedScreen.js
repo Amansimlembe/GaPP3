@@ -232,6 +232,10 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
 
 
 
+
+
+
+
   useEffect(() => {
   if (!token || !userId) {
     console.error('Missing token or userId');
@@ -252,7 +256,6 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
     return;
   }
 
-  // Rest of the socket setup code
   const socketTimeout = setTimeout(() => {
     if (!socket.connected) {
       console.warn('Socket not connected after delay');
@@ -264,105 +267,104 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
     }
   }, 2000);
 
+  fetchFeed(1);
 
-    // Periodic ping every 30 seconds
-    const pingInterval = setInterval(socketPing, 30000);
+  const handleNewPost = (post) => {
+    if (!post?.isStory && post?._id) {
+      setPosts((prev) => {
+        const newPosts = [post, ...prev];
+        const uniquePosts = Array.from(new Map(newPosts.map((p) => [p._id.toString(), p])).values());
+        saveToCache(uniquePosts, 1);
+        return uniquePosts;
+      });
+      setCurrentIndex(0);
+    }
+  };
 
-    fetchFeed(1);
+  const handlePostUpdate = (updatedPost) => {
+    if (updatedPost?._id) {
+      setPosts((prev) => {
+        const newPosts = prev.map((p) => (p._id.toString() === updatedPost._id.toString() ? { ...p, ...updatedPost } : p));
+        saveToCache(newPosts, page);
+        return newPosts;
+      });
+    }
+  };
 
-    const handleNewPost = (post) => {
-      if (!post?.isStory && post?._id) {
-        setPosts((prev) => {
-          const newPosts = [post, ...prev];
-          const uniquePosts = Array.from(new Map(newPosts.map((p) => [p._id.toString(), p])).values());
-          saveToCache(uniquePosts, 1);
-          return uniquePosts;
-        });
-        setCurrentIndex(0);
-      }
-    };
-
-    const handlePostUpdate = (updatedPost) => {
-      if (updatedPost?._id) {
-        setPosts((prev) => {
-          const newPosts = prev.map((p) => (p._id.toString() === updatedPost._id.toString() ? { ...p, ...updatedPost } : p));
-          saveToCache(newPosts, page);
-          return newPosts;
-        });
-      }
-    };
-
-    const handlePostDeleted = (postId) => {
-      if (postId) {
-        setPosts((prev) => {
-          const newPosts = prev.filter((p) => p._id.toString() !== postId.toString());
-          if (newPosts.length === 0) {
-            setCurrentIndex(0);
-            setPlayingPostId(null);
-          } else if (currentIndex >= newPosts.length) {
-            setCurrentIndex(newPosts.length - 1);
-            setPlayingPostId(newPosts[newPosts.length - 1]?._id?.toString() || null);
-          } else if (playingPostId === postId.toString()) {
-            setPlayingPostId(newPosts[currentIndex]?._id?.toString() || null);
-          }
-          saveToCache(newPosts, page);
-          return newPosts;
-        });
-      }
-    };
-
-    const handleConnectError = (error) => {
-      console.error('Socket connect error:', error.message);
-      setSocketConnected(false);
-      setError('Connection lost. Trying to reconnect...');
-      if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
-        const expTime = getTokenExpiration(token);
-        if (expTime && expTime > Date.now() + 60 * 1000) {
-          console.warn('Token still valid, delaying action');
-          return;
+  const handlePostDeleted = (postId) => {
+    if (postId) {
+      setPosts((prev) => {
+        const newPosts = prev.filter((p) => p._id.toString() !== postId.toString());
+        if (newPosts.length === 0) {
+          setCurrentIndex(0);
+          setPlayingPostId(null);
+        } else if (currentIndex >= newPosts.length) {
+          setCurrentIndex(newPosts.length - 1);
+          setPlayingPostId(newPosts[newPosts.length - 1]?._id?.toString() || null);
+        } else if (playingPostId === postId.toString()) {
+          setPlayingPostId(newPosts[currentIndex]?._id?.toString() || null);
         }
-        console.error('Invalid or missing token');
-        setError('Session expired. Please log in again.');
-      }
-    };
+        saveToCache(newPosts, page);
+        return newPosts;
+      });
+    }
+  };
 
-    const handleReconnect = () => {
-      console.log('Socket reconnected');
-      setSocketConnected(true);
-      setError('');
-      if (socket.connected) {
-        socket.emit('join', userId);
-        socketPing();
+  const handleConnectError = async (error) => {
+    console.error('Socket connect error:', error.message);
+    setSocketConnected(false);
+    setError('Connection lost. Trying to reconnect...');
+    if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
+      const expTime = getTokenExpiration(token);
+      if (expTime && expTime > Date.now() + 60 * 1000) {
+        console.warn('Token still valid, delaying action');
+        return;
       }
-    };
+      console.error('Invalid or missing token');
+      setError('Session expired. Please log in again.');
+     
+    }
+  };
 
-    socket.on('connect', () => {
-      setSocketConnected(true);
-      setError('');
+  const handleReconnect = () => {
+    console.log('Socket reconnected');
+    setSocketConnected(true);
+    setError('');
+    if (socket.connected) {
       socket.emit('join', userId);
       socketPing();
-    });
-    socket.on('newPost', handleNewPost);
-    socket.on('postUpdate', handlePostUpdate);
-    socket.on('postDeleted', handlePostDeleted);
-    socket.on('connect_error', handleConnectError);
-    socket.on('reconnect', handleReconnect);
+    }
+  };
 
-    return () => {
-      clearTimeout(socketTimeout);
-      clearInterval(pingInterval);
-      socket.off('connect');
-      socket.off('newPost', handleNewPost);
-      socket.off('postUpdate', handlePostUpdate);
-      socket.off('postDeleted', handlePostDeleted);
-      socket.off('connect_error', handleConnectError);
-      socket.off('reconnect', handleReconnect);
-      socket.off('pong');
-      if (socket.connected) {
-        socket.emit('leave', userId);
-      }
-    };
-  }, [token, userId, socket, fetchFeed, getTokenExpiration, socketPing, page, saveToCache]);
+  socket.on('connect', () => {
+    setSocketConnected(true);
+    setError('');
+    socket.emit('join', userId);
+    socketPing();
+  });
+  socket.on('newPost', handleNewPost);
+  socket.on('postUpdate', handlePostUpdate);
+  socket.on('postDeleted', handlePostDeleted);
+  socket.on('connect_error', handleConnectError);
+  socket.on('reconnect', handleReconnect);
+
+  return () => {
+    clearTimeout(socketTimeout);
+    socket.off('connect');
+    socket.off('newPost', handleNewPost);
+    socket.off('postUpdate', handlePostUpdate);
+    socket.off('postDeleted', handlePostDeleted);
+    socket.off('connect_error', handleConnectError);
+    socket.off('reconnect', handleReconnect);
+    socket.off('pong');
+    if (socket.connected) {
+      socket.emit('leave', userId);
+    }
+  };
+}, [token, userId, socket, fetchFeed, getTokenExpiration, socketPing, page, saveToCache, onLogout]);
+
+
+
 
   useEffect(() => {
     localStorage.setItem('feedMuted', muted);
@@ -396,65 +398,79 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
     };
   }, [posts, currentIndex, setupIntersectionObserver, handleScroll]);
 
+
+
   const postContent = async () => {
-    if (!userId) {
-      setError('Authentication required. Please log in again.');
-      return;
-    }
-    if (!caption.trim() && !file && contentType !== 'text') {
-      setError('Please provide a caption or file');
-      return;
-    }
-    if ((contentType === 'image' || contentType === 'video' || contentType === 'video+audio') && !file) {
-      setError('Please select a file');
-      return;
-    }
-    if (contentType === 'video+audio' && !audioFile) {
-      setError('Please select an audio file for video+audio post');
-      return;
-    }
+  if (!userId || !token) {
+    setError('Authentication required. Please log in again.');
+    await onLogout();
+    return;
+  }
+  if (!caption.trim() && !file && contentType !== 'text') {
+    setError('Please provide a caption or file');
+    return;
+  }
+  if ((contentType === 'image' || contentType === 'video' || contentType === 'video+audio') && !file) {
+    setError('Please select a file');
+    return;
+  }
+  if (contentType === 'video+audio' && !audioFile) {
+    setError('Please select an audio file for video+audio post');
+    return;
+  }
 
-    const formData = new FormData();
-    formData.append('userId', userId);
-    formData.append('contentType', contentType);
-    formData.append('caption', caption.trim());
-    if (file) formData.append('content', file);
-    if (contentType === 'text') formData.append('content', caption.trim());
-    if (contentType === 'video+audio' && audioFile) formData.append('audio', audioFile);
+  // Validate token expiration
+  const expTime = getTokenExpiration(token);
+  if (expTime && expTime < Date.now() + 60 * 1000) {
+    setError('Session expired. Please log in again.');
+    await onLogout();
+    return;
+  }
 
-    try {
-      setUploadProgress(0);
-      const { data } = await retryOperation(() =>
-        axios.post(`${BASE_URL}/feed`, formData, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            'Content-Type': 'multipart/form-data',
-          },
-          onUploadProgress: (progressEvent) =>
-            setUploadProgress(Math.round((progressEvent.loaded * 100) / progressEvent.total)),
-          timeout: 15000,
-        })
-      );
-      socket.emit('newPost', data);
-      setCaption('');
-      setFile(null);
-      setAudioFile(null);
-      setShowPostModal(false);
-      setUploadProgress(null);
-      setError('');
-      setCurrentIndex(0);
-    } catch (error) {
-      console.error('Post error:', error.message);
-      setError(
-        error.message === 'Offline'
-          ? 'You are offline'
-          : error.message === 'Unauthorized'
-          ? 'Session expired. Please log in again.'
-          : error.response?.data?.error || 'Failed to post content'
-      );
-      setUploadProgress(null);
-    }
-  };
+  const formData = new FormData();
+  formData.append('userId', userId);
+  formData.append('contentType', contentType);
+  formData.append('caption', caption.trim());
+  if (file) formData.append('content', file);
+  if (contentType === 'text') formData.append('content', caption.trim());
+  if (contentType === 'video+audio' && audioFile) formData.append('audio', audioFile);
+
+  try {
+    setUploadProgress(0);
+    const { data } = await retryOperation(() =>
+      axios.post(`${BASE_URL}/feed`, formData, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'multipart/form-data',
+        },
+        onUploadProgress: (progressEvent) =>
+          setUploadProgress(Math.round((progressEvent.loaded * 100) / progressEvent.total)),
+        timeout: 15000,
+      })
+    );
+    socket.emit('newPost', data);
+    setCaption('');
+    setFile(null);
+    setAudioFile(null);
+    setShowPostModal(false);
+    setUploadProgress(null);
+    setError('');
+    setCurrentIndex(0);
+  } catch (error) {
+    console.error('Post error:', error.message);
+    setError(
+      error.message === 'Offline'
+        ? 'You are offline'
+        : error.message === 'Unauthorized'
+        ? 'Session expired. Please log in again.'
+        : error.response?.data?.error || 'Failed to post content'
+    );
+    setUploadProgress(null);
+ 
+  }
+};
+
+
 
   const likePost = async (postId) => {
     if (!playingPostId || postId !== playingPostId) return;

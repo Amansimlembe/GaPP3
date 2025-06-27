@@ -408,19 +408,36 @@ const messageSlice = createSlice({
         console.warn('replaceMessage: Invalid senderId or recipientId', normalizedMsg);
       }
     },
+
+
+
     updateMessageStatus: (state, action) => {
-      const { recipientId, messageId, status, uploadProgress } = action.payload;
-      if (!recipientId || !isValidObjectId(recipientId) || !messageId || !state.chats[recipientId] || !['pending', 'sent', 'delivered', 'read', 'failed'].includes(status)) {
-        console.warn('updateMessageStatus: Invalid payload', { recipientId, messageId, status });
-        return;
-      }
-      state.chats[recipientId] = state.chats[recipientId].map((msg) =>
-        (msg._id === messageId || msg.clientMessageId === messageId)
-          ? { ...msg, status, uploadProgress: uploadProgress !== undefined ? uploadProgress : msg.uploadProgress }
-          : msg
-      );
-      state.messagesTimestamp[recipientId] = Date.now();
-    },
+  const { recipientId, messageId, status, uploadProgress } = action.payload;
+  if (
+    !recipientId ||
+    !isValidObjectId(recipientId) ||
+    !messageId ||
+    !state.chats[recipientId] ||
+    !['pending', 'sent', 'delivered', 'read', 'failed'].includes(status)
+  ) {
+    console.warn('updateMessageStatus: Invalid payload', { recipientId, messageId, status });
+    return;
+  }
+  const messageExists = state.chats[recipientId].some(
+    (msg) => msg._id === messageId || msg.clientMessageId === messageId
+  );
+  if (!messageExists) {
+    console.warn('updateMessageStatus: Message not found', { recipientId, messageId });
+    return;
+  }
+  state.chats[recipientId] = state.chats[recipientId].map((msg) =>
+    (msg._id === messageId || msg.clientMessageId === messageId)
+      ? { ...msg, status, uploadProgress: uploadProgress !== undefined ? uploadProgress : msg.uploadProgress }
+      : msg
+  );
+  state.messagesTimestamp[recipientId] = Date.now();
+},
+
     deleteMessage: (state, action) => {
       const { recipientId, messageId } = action.payload;
       if (!recipientId || !isValidObjectId(recipientId) || !messageId || !state.chats[recipientId]) {

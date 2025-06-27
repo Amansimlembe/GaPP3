@@ -106,10 +106,15 @@ router.get('/', authMiddleware, async (req, res) => {
   }
 });
 
+
+
+
+
 router.post('/', authMiddleware, upload, async (req, res) => {
   try {
     const { userId, contentType, caption } = req.body;
     if (!mongoose.Types.ObjectId.isValid(userId) || userId !== req.user.id) {
+      logger.warn('Invalid or unauthorized user ID', { userId, authUserId: req.user.id });
       return res.status(400).json({ error: 'Invalid or unauthorized user ID' });
     }
 
@@ -117,6 +122,7 @@ router.post('/', authMiddleware, upload, async (req, res) => {
       User.findById(userId).select('username photo').lean()
     );
     if (!user) {
+      logger.warn('User not found', { userId });
       return res.status(404).json({ error: 'User not found' });
     }
 
@@ -151,6 +157,7 @@ router.post('/', authMiddleware, upload, async (req, res) => {
     } else if (contentType === 'text' && caption?.trim()) {
       contentUrl = caption.trim();
     } else {
+      logger.warn('Missing or invalid content', { userId, contentType });
       return res.status(400).json({ error: 'Missing or invalid content' });
     }
 
@@ -171,7 +178,7 @@ router.post('/', authMiddleware, upload, async (req, res) => {
     }
 
     const post = new Post({
-      userId: mongoose.Types.ObjectId(userId),
+      userId: new mongoose.Types.ObjectId(userId), // Use `new` for ObjectId
       contentType,
       content: contentUrl,
       audioContent: audioUrl || undefined,
@@ -210,6 +217,9 @@ router.post('/', authMiddleware, upload, async (req, res) => {
     res.status(400).json({ error: 'Failed to create post', details: err.message });
   }
 });
+
+
+
 
 router.post('/like', authMiddleware, async (req, res) => {
   try {
