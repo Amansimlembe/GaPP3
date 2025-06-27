@@ -54,7 +54,7 @@ class ErrorBoundary extends React.Component {
           return;
         } catch (err) {
           if (i < retries - 1) {
-            await new Promise((resolve) => setTimeout(resolve, Math.pow(2, i) * baseDelay));
+            await new Promise((resolve) => setTimeout(resolve, Math.pow(2, i) * 1000));
             continue;
           }
           console.warn('Failed to log error:', err.message);
@@ -67,7 +67,7 @@ class ErrorBoundary extends React.Component {
   componentDidUpdate(prevProps) {
     if (this.props.location !== prevProps.location && this.state.hasError) {
       this.setState({ hasError: false, error: null, errorInfo: null });
-    }
+  }
   }
 
   handleDismiss = () => {
@@ -186,7 +186,7 @@ const App = () => {
   const maxReconnectAttempts = 5;
   const maxDelay = 30000; // 30 seconds
 
-  // Restore auth state from localStorage on mount
+  // Restore auth state from localStorage on mount without redirecting
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
     const storedUserId = localStorage.getItem('userId');
@@ -196,7 +196,7 @@ const App = () => {
     const storedUsername = localStorage.getItem('username');
     const storedPrivateKey = localStorage.getItem('privateKey');
 
-    if (storedToken && storedUserId && location.pathname !== '/login') {
+    if (storedToken && storedUserId) {
       const expTime = getTokenExpiration(storedToken);
       if (expTime && expTime > Date.now()) {
         dispatch(setAuth({
@@ -209,6 +209,7 @@ const App = () => {
           privateKey: storedPrivateKey || null,
         }));
       } else {
+        // Clear expired token but don't navigate
         localStorage.removeItem('token');
         localStorage.removeItem('userId');
         localStorage.removeItem('role');
@@ -216,11 +217,10 @@ const App = () => {
         localStorage.removeItem('virtualNumber');
         localStorage.removeItem('username');
         localStorage.removeItem('privateKey');
-        setIsNavigating(true);
-        navigate('/login', { replace: true });
+        dispatch(clearAuth());
       }
     }
-  }, [dispatch, navigate, location.pathname]);
+  }, [dispatch]);
 
   const handleLogout = useCallback(async () => {
     try {
@@ -273,7 +273,7 @@ const App = () => {
           throw new Error('Missing token or userId');
         }
         const response = await axios.post(
-          `${BASE_URL}/auth/refresh`, // Changed to /auth/refresh
+          `${BASE_URL}/auth/refresh`,
           { userId },
           {
             headers: { Authorization: `Bearer ${token}` },
@@ -330,15 +330,6 @@ const App = () => {
     }
 
     if (!token || !userId) {
-      if (location.pathname !== '/login' && !isNavigating) {
-        setIsNavigating(true);
-        navigate('/login', { replace: true });
-      }
-      if (socketRef.current) {
-        socketRef.current.disconnect();
-        socketRef.current = null;
-        setSocket(null);
-      }
       return;
     }
 
@@ -463,7 +454,7 @@ const App = () => {
             setError('Server is temporarily unavailable. Retrying...');
             attemptRef.current = attempt + 1;
             const delay = Math.min(Math.pow(2, attempt) * 1000 * (1 + Math.random() * 0.2), maxDelay);
-            setTimeout(() => connectSocket(attempt + 1), delay);
+            setTimeout(() => connectSocket(approach + 1), delay);
           } else {
             setError('Failed to connect to server. Please check your connection.');
             attemptRef.current = attempt + 1;
@@ -612,25 +603,32 @@ const App = () => {
           </button>
         </div>
       )}
-      {token && userId ? (
-        <AuthenticatedApp
-          token={token}
-          userId={userId}
-          role={role}
-          photo={photo}
-          virtualNumber={virtualNumber}
-          username={username}
-          chatNotifications={chatNotifications}
-          socket={socket}
-          handleChatNavigation={handleChatNavigation}
-          handleLogout={handleLogout}
-        />
-      ) : (
-        <Routes>
-          <Route path="/login" element={<LoginScreen />} />
-          <Route path="*" element={<Navigate to="/login" replace />} />
-        </Routes>
-      )}
+      <Routes>
+        {token && userId ? (
+          <Route
+            path="*"
+            element={
+              <AuthenticatedApp
+                token={token}
+                userId={userId}
+                role={role}
+                photo={photo}
+                virtualNumber={virtualNumber}
+                username={username}
+                chatNotifications={chatNotifications}
+                socket={socket}
+                handleChatNavigation={handleChatNavigation}
+                handleLogout={handleLogout}
+              />
+            }
+          />
+        ) : (
+          <>
+            <Route path="/login" element={<LoginScreen />} />
+            <Route path="*" element={<LoginScreen />} />
+          </>
+        )}
+      </Routes>
     </ErrorBoundary>
   );
 };
@@ -713,7 +711,8 @@ const AuthenticatedApp = ({
               />
             }
           />
-          <Route path="*" element={<Navigate to="/login" replace />} />
+          <Route path="/login" element={<LoginScreen />} />
+          <Route path="*" element={<Navigate to="/feed" replace />} />
         </Routes>
       </div>
       <motion.nav
