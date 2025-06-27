@@ -13,8 +13,7 @@ import FeedScreen from './screens/FeedScreen';
 import ChatScreen from './screens/ChatScreen';
 import ProfileScreen from './screens/ProfileScreen';
 import CountrySelector from './components/CountrySelector';
-import { setAuth, clearAuth, setSelectedChat } from './store';
-import { replaceMessage, updateMessageStatus } from './store'; // Added for message handling
+import { setAuth, clearAuth, setSelectedChat, replaceMessage, updateMessageStatus } from './store';
 
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
 
@@ -22,7 +21,7 @@ class ErrorBoundary extends React.Component {
   state = { hasError: false, error: null, errorInfo: null };
 
   static getDerivedStateFromError(error) {
-    return { hasError: true, error};
+    return { hasError: true, error };
   }
 
   componentDidCatch(error, errorInfo) {
@@ -354,6 +353,8 @@ const App = () => {
 
       socketRef.current = newSocket;
 
+      let pingInterval = null; // Define pingInterval in connectSocket scope
+
       const handleConnect = () => {
         console.log('Socket connected successfully');
         newSocket.emit('join', userId);
@@ -403,7 +404,7 @@ const App = () => {
         }
 
         // Start client-side ping
-        const pingInterval = setInterval(() => {
+        pingInterval = setInterval(() => {
           if (newSocket.connected) {
             newSocket.emit('ping', { userId });
             console.log('Ping sent to server');
@@ -503,7 +504,9 @@ const App = () => {
         window.removeEventListener('offline', handleOffline);
         socketRef.current = null;
         setSocket(null);
-        clearInterval(pingInterval); // Clean up ping interval
+        if (pingInterval) {
+          clearInterval(pingInterval); // Safely clear the interval
+        }
       };
     };
 
