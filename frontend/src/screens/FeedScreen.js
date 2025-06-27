@@ -230,31 +230,40 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
     }
   }, [socket, userId]);
 
+
+
   useEffect(() => {
-    if (!token || !userId) {
-      console.error('Missing token or userId');
-      setError('Authentication required. Please log in again.');
-      return;
-    }
+  if (!token || !userId) {
+    console.error('Missing token or userId');
+    setError('Authentication required. Please log in again.');
+    return;
+  }
 
-    const expTime = getTokenExpiration(token);
-    if (expTime && expTime < Date.now()) {
-      console.error('Token expired');
-      setError('Session expired. Please log in again.');
-      return;
-    }
+  const expTime = getTokenExpiration(token);
+  if (expTime && expTime < Date.now()) {
+    console.error('Token expired');
+    setError('Session expired. Please log in again.');
+    return;
+  }
 
-    // Delay to allow socket connection
-    const socketTimeout = setTimeout(() => {
-      if (!socket || !socket.connected) {
-        console.warn('Socket not connected after delay');
-        setError('Connecting to server...');
-      } else {
-        setSocketConnected(true);
-        socket.emit('join', userId);
-        socketPing();
-      }
-    }, 2000);
+  if (!socket) {
+    console.warn('Socket not available, skipping socket setup');
+    setError('Connecting to server...');
+    return;
+  }
+
+  // Rest of the socket setup code
+  const socketTimeout = setTimeout(() => {
+    if (!socket.connected) {
+      console.warn('Socket not connected after delay');
+      setError('Connecting to server...');
+    } else {
+      setSocketConnected(true);
+      socket.emit('join', userId);
+      socketPing();
+    }
+  }, 2000);
+
 
     // Periodic ping every 30 seconds
     const pingInterval = setInterval(socketPing, 30000);

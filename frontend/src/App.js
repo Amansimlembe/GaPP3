@@ -13,7 +13,8 @@ import FeedScreen from './screens/FeedScreen';
 import ChatScreen from './screens/ChatScreen';
 import ProfileScreen from './screens/ProfileScreen';
 import CountrySelector from './components/CountrySelector';
-import { setAuth, clearAuth, setSelectedChat, replaceMessage, updateMessageStatus } from './store';
+import { setAuth, clearAuth, setSelectedChat } from './store';
+import { replaceMessage, updateMessageStatus } from './store';
 
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
 
@@ -27,6 +28,9 @@ class ErrorBoundary extends React.Component {
   componentDidCatch(error, errorInfo) {
     console.error('ErrorBoundary caught:', error, errorInfo);
     this.setState({ errorInfo });
+    if (error.message.includes('IndexedDB')) {
+      this.setState({ error: new Error('Failed to initialize local storage. Some features may be limited.') });
+    }
     const retryLog = async (retries = 3, baseDelay = 1000) => {
       for (let i = 0; i < retries; i++) {
         try {
@@ -178,6 +182,7 @@ const App = () => {
   // Refs for socket management
   const socketRef = useRef(null);
   const attemptRef = useRef(0);
+  const pingIntervalRef = useRef(null); // Added to manage pingInterval
   const maxReconnectAttempts = 5;
   const maxDelay = 30000; // 30 seconds
 
@@ -340,174 +345,181 @@ const App = () => {
         return;
       }
 
-      const newSocket = io(BASE_URL, {
-        auth: { token, userId },
-        transports: ['websocket'],
-        reconnection: true,
-        reconnectionAttempts: maxReconnectAttempts,
-        reconnectionDelay: 1000,
-        reconnectionDelayMax: maxDelay,
-        randomizationFactor: 0.5,
-        timeout: 10000,
-      });
+      // Add initial delay to account for server cold starts
+      setTimeout(() => {
+        const newSocket = io(BASE_URL, {
+          auth: { token, userId },
+          transports: ['websocket', 'polling'], // Allow polling as fallback
+          reconnection: true,
+          reconnectionAttempts: maxReconnectAttempts,
+          reconnectionDelay: 1000,
+          reconnectionDelayMax: maxDelay,
+          randomizationFactor: 0.5,
+          timeout: 10000,
+        });
 
-      socketRef.current = newSocket;
+        socketRef.current = newSocket;
 
-      let pingInterval = null; // Define pingInterval in connectSocket scope
+        const handleConnect = () => {
+          console.log('Socket connected successfully');
+          newSocket.emit('join', userId);
+          attemptRef.current = 0;
+          setError(null);
+          setSocket(newSocket);
 
-      const handleConnect = () => {
-        console.log('Socket connected successfully');
-        newSocket.emit('join', userId);
-        attemptRef.current = 0;
-        setError(null);
-        setSocket(newSocket);
-
-        // Replay queued messages from localStorage
-        const queuedMessages = Object.keys(localStorage)
-          .filter((key) => key.startsWith('queuedMessage:'))
-          .map((key) => JSON.parse(localStorage.getItem(key)));
-        if (queuedMessages.length > 0) {
-          console.log('Replaying queued messages:', queuedMessages.length);
-          queuedMessages.forEach((messageData) => {
-            newSocket.emit('message', {
-              senderId: messageData.senderId,
-              recipientId: messageData.recipientId,
-              content: messageData.content || '',
-              contentType: messageData.contentType || 'text',
-              clientMessageId: messageData.clientMessageId,
-              senderVirtualNumber: messageData.senderVirtualNumber,
-              senderUsername: messageData.senderUsername,
-              senderPhoto: messageData.senderPhoto,
-            }, (ack) => {
-              if (ack?.error) {
-                console.error('Failed to send queued message:', ack.error);
-                dispatch(updateMessageStatus({ 
-                  recipientId: messageData.recipientId, 
-                  messageId: messageData.clientMessageId, 
-                  status: 'failed' 
-                }));
-              } else {
-                dispatch(replaceMessage({ 
-                  recipientId: messageData.recipientId, 
-                  message: { ...ack.message, plaintextContent: messageData.plaintextContent }, 
-                  replaceId: messageData.clientMessageId 
-                }));
-                dispatch(updateMessageStatus({ 
-                  recipientId: messageData.recipientId, 
-                  messageId: ack.message._id, 
-                  status: 'sent' 
-                }));
-                localStorage.removeItem(`queuedMessage:${messageData.clientMessageId}`);
-              }
+          // Replay queued messages from localStorage
+          const queuedMessages = Object.keys(localStorage)
+            .filter((key) => key.startsWith('queuedMessage:'))
+            .map((key) => JSON.parse(localStorage.getItem(key)));
+          if (queuedMessages.length > 0) {
+            console.log('Replaying queued messages:', queuedMessages.length);
+            queuedMessages.forEach((messageData) => {
+              newSocket.emit('message', {
+                senderId: messageData.senderId,
+                recipientId: messageData.recipientId,
+                content: messageData.content || '',
+                contentType: messageData.contentType || 'text',
+                clientMessageId: messageData.clientMessageId,
+                senderVirtualNumber: messageData.senderVirtualNumber,
+                senderUsername: messageData.senderUsername,
+                senderPhoto: messageData.senderPhoto,
+              }, (ack) => {
+                if (ack?.error) {
+                  console.error('Failed to send queued message:', ack.error);
+                  dispatch(updateMessageStatus({ 
+                    recipientId: messageData.recipientId, 
+                    messageId: messageData.clientMessageId, 
+                    status: 'failed' 
+                  }));
+                } else {
+                  dispatch(replaceMessage({ 
+                    recipientId: messageData.recipientId, 
+                    message: { ...ack.message, plaintextContent: messageData.plaintextContent }, 
+                    replaceId: messageData.clientMessageId 
+                  }));
+                  dispatch(updateMessageStatus({ 
+                    recipientId: messageData.recipientId, 
+                    messageId: ack.message._id, 
+                    status: 'sent' 
+                  }));
+                  localStorage.removeItem(`queuedMessage:${messageData.clientMessageId}`);
+                }
+              });
             });
-          });
-        }
-
-        // Start client-side ping
-        pingInterval = setInterval(() => {
-          if (newSocket.connected) {
-            newSocket.emit('ping', { userId });
-            console.log('Ping sent to server');
           }
-        }, 30000); // Emit ping every 30 seconds
-      };
 
-      const handleConnectError = async (error) => {
-        console.error('Socket connect error:', error.message);
-        logClientError('Socket connect error', error, userId);
-        if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
-          setError('Session expired. Attempting to reconnect...');
-          setTimeout(async () => {
-            if (!isNavigating && attemptRef.current <= maxReconnectAttempts) {
-              const newToken = await refreshToken();
-              if (newToken) {
-                connectSocket(attempt + 1); // Retry with new token
-              } else {
-                setError('Authentication error, logging out');
-                await handleLogout();
-              }
+          // Start client-side ping
+          pingIntervalRef.current = setInterval(() => {
+            if (newSocket.connected) {
+              newSocket.emit('ping', { userId });
+              console.log('Ping sent to server');
             }
-          }, 2000);
-        } else {
-          setError('Connecting to server...');
-          attemptRef.current = attempt + 1;
-          const delay = Math.min(Math.pow(2, attempt) * 1000 * (1 + Math.random() * 0.2), maxDelay);
-          setTimeout(() => connectSocket(attempt + 1), delay);
-        }
-      };
+          }, 30000); // Emit ping every 30 seconds
+        };
 
-      const handleDisconnect = (reason) => {
-        console.warn('Socket disconnected:', reason);
-        logClientError(`Socket disconnected: ${reason}`, new Error(reason), userId);
-        if (reason === 'io server disconnect' || reason === 'transport close' || reason === 'ping timeout') {
-          if (navigator.onLine) {
-            console.log(`Attempting to reconnect (attempt ${attemptRef.current + 1}/${maxReconnectAttempts})`);
+        const handleConnectError = async (error) => {
+          console.error('Socket connect error:', error.message);
+          logClientError('Socket connect error', error, userId);
+          if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
+            setError('Session expired. Attempting to reconnect...');
+            setTimeout(async () => {
+              if (!isNavigating && attemptRef.current <= maxReconnectAttempts) {
+                const newToken = await refreshToken();
+                if (newToken) {
+                  connectSocket(attempt + 1); // Retry with new token
+                } else {
+                  setError('Authentication error, logging out');
+                  await handleLogout();
+                }
+              }
+            }, 2000);
+          } else if (error.message.includes('xhr poll error') || error.message.includes('timeout')) {
+            setError('Server is temporarily unavailable. Retrying...');
+            attemptRef.current = attempt + 1;
+            const delay = Math.min(Math.pow(2, attempt) * 1000 * (1 + Math.random() * 0.2), maxDelay);
+            setTimeout(() => connectSocket(attempt + 1), delay);
           } else {
-            setError('Offline: Messages will be sent when reconnected');
+            setError('Failed to connect to server. Please check your connection.');
+            attemptRef.current = attempt + 1;
+            const delay = Math.min(Math.pow(2, attempt) * 1000 * (1 + Math.random() * 0.2), maxDelay);
+            setTimeout(() => connectSocket(attempt + 1), delay);
           }
-        }
-        setSocket(null);
-      };
+        };
 
-      const handleMessage = (msg) => {
-        if (!msg.senderId || !msg.recipientId) {
-          console.warn('Invalid message payload:', msg);
-          return;
-        }
-        if (msg.recipientId === userId && (!selectedChat || selectedChat !== msg.senderId)) {
-          setChatNotifications((prev) => prev + 1);
-        }
-      };
+        const handleDisconnect = (reason) => {
+          console.warn('Socket disconnected:', reason);
+          logClientError(`Socket disconnected: ${reason}`, new Error(reason), userId);
+          if (reason === 'io server disconnect' || reason === 'transport close' || reason === 'ping timeout') {
+            if (navigator.onLine) {
+              console.log(`Attempting to reconnect (attempt ${attemptRef.current + 1}/${maxReconnectAttempts})`);
+            } else {
+              setError('Offline: Messages will be sent when reconnected');
+            }
+          }
+          setSocket(null);
+        };
 
-      const handleNewContact = (contactData) => {
-        if (!contactData?.id) {
-          console.warn('Invalid contact data:', contactData);
-          return;
-        }
-      };
+        const handleMessage = (msg) => {
+          if (!msg.senderId || !msg.recipientId) {
+            console.warn('Invalid message payload:', msg);
+            return;
+          }
+          if (msg.recipientId === userId && (!selectedChat || selectedChat !== msg.senderId)) {
+            setChatNotifications((prev) => prev + 1);
+          }
+        };
 
-      newSocket.on('connect', handleConnect);
-      newSocket.on('connect_error', handleConnectError);
-      newSocket.on('disconnect', handleDisconnect);
-      newSocket.on('message', handleMessage);
-      newSocket.on('newContact', handleNewContact);
+        const handleNewContact = (contactData) => {
+          if (!contactData?.id) {
+            console.warn('Invalid contact data:', contactData);
+            return;
+          }
+        };
 
-      const handleOnline = () => {
-        if (!socketRef.current || !socketRef.current.connected) {
-          console.log('Network online, attempting to reconnect socket');
-          newSocket.connect();
-        }
-      };
+        newSocket.on('connect', handleConnect);
+        newSocket.on('connect_error', handleConnectError);
+        newSocket.on('disconnect', handleDisconnect);
+        newSocket.on('message', handleMessage);
+        newSocket.on('newContact', handleNewContact);
 
-      const handleOffline = () => {
-        console.warn('Offline: Socket disconnected');
-        setError('Offline: Messages will be sent when reconnected');
-        if (socketRef.current) {
-          socketRef.current.disconnect();
+        const handleOnline = () => {
+          if (!socketRef.current || !socketRef.current.connected) {
+            console.log('Network online, attempting to reconnect socket');
+            newSocket.connect();
+          }
+        };
+
+        const handleOffline = () => {
+          console.warn('Offline: Socket disconnected');
+          setError('Offline: Messages will be sent when reconnected');
+          if (socketRef.current) {
+            socketRef.current.disconnect();
+            socketRef.current = null;
+            setSocket(null);
+          }
+        };
+
+        window.addEventListener('online', handleOnline);
+        window.addEventListener('offline', handleOffline);
+
+        return () => {
+          newSocket.emit('leave', userId);
+          newSocket.off('connect', handleConnect);
+          newSocket.off('connect_error', handleConnectError);
+          newSocket.off('disconnect', handleDisconnect);
+          newSocket.off('message', handleMessage);
+          newSocket.off('newContact', handleNewContact);
+          newSocket.disconnect();
+          window.removeEventListener('online', handleOnline);
+          window.removeEventListener('offline', handleOffline);
           socketRef.current = null;
           setSocket(null);
-        }
-      };
-
-      window.addEventListener('online', handleOnline);
-      window.addEventListener('offline', handleOffline);
-
-      return () => {
-        newSocket.emit('leave', userId);
-        newSocket.off('connect', handleConnect);
-        newSocket.off('connect_error', handleConnectError);
-        newSocket.off('disconnect', handleDisconnect);
-        newSocket.off('message', handleMessage);
-        newSocket.off('newContact', handleNewContact);
-        newSocket.disconnect();
-        window.removeEventListener('online', handleOnline);
-        window.removeEventListener('offline', handleOffline);
-        socketRef.current = null;
-        setSocket(null);
-        if (pingInterval) {
-          clearInterval(pingInterval); // Safely clear the interval
-        }
-      };
+          if (pingIntervalRef.current) {
+            clearInterval(pingIntervalRef.current); // Clean up ping interval
+            pingIntervalRef.current = null;
+          }
+        };
+      }, attempt * 1000); // Delay increases with each attempt
     };
 
     const cleanup = connectSocket(0);
@@ -543,7 +555,7 @@ const App = () => {
     };
 
     checkTokenExpiration();
-    const interval = setInterval(checkTokenExpiration, 1 * 60 * 1000);
+    const interval = setInterval(checkTokenExpiration, 2 * 60 * 1000); // Check every 2 minutes
     return () => clearInterval(interval);
   }, [token, userId, refreshToken, handleLogout]);
 

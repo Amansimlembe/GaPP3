@@ -15,8 +15,22 @@ const BASE_URL = 'https://gapp-6yc3.onrender.com';
 // ObjectId validation
 const isValidObjectId = (id) => /^[0-9a-fA-F]{24}$/.test(id);
 
-// Initialize IndexedDB
+// Check IndexedDB support
+const isIndexedDBSupported = () => {
+  if (!window.indexedDB) {
+    console.warn('IndexedDB not supported in this environment');
+    return false;
+  }
+  return true;
+};
+
+// Initialize IndexedDB with fallback
 const initDB = async () => {
+  if (!isIndexedDBSupported()) {
+    console.warn('Falling back to in-memory storage due to lack of IndexedDB support');
+    return null; // Return null to indicate in-memory fallback
+  }
+
   try {
     const db = await openDB(DB_NAME, VERSION, {
       upgrade(db, oldVersion, newVersion) {
@@ -27,12 +41,42 @@ const initDB = async () => {
           console.log('Upgraded IndexedDB from version', oldVersion, 'to', newVersion);
         }
       },
+      blocked() {
+        console.warn('IndexedDB blocked: Another instance is holding an open connection');
+      },
+      blocking() {
+        console.warn('IndexedDB blocking: Closing connection to allow upgrade');
+        db.close();
+      },
+      terminated() {
+        console.warn('IndexedDB connection terminated unexpectedly');
+      },
     });
     return db;
   } catch (error) {
     console.error('Failed to initialize IndexedDB:', error.message);
     await logClientError('IndexedDB initialization failed', error);
-    throw error;
+    // Attempt to clear corrupted database
+    try {
+      await indexedDB.deleteDatabase(DB_NAME);
+      console.log('Cleared corrupted IndexedDB database');
+      // Retry initialization
+      const db = await openDB(DB_NAME, VERSION, {
+        upgrade(db, oldVersion, newVersion) {
+          if (oldVersion < 1) {
+            db.createObjectStore(STORE_NAME, { keyPath: 'key' });
+          }
+          if (oldVersion < 3) {
+            console.log('Upgraded IndexedDB from version', oldVersion, 'to', newVersion);
+          }
+        },
+      });
+      return db;
+    } catch (clearError) {
+      console.error('Failed to clear and reinitialize IndexedDB:', clearError.message);
+      await logClientError('Failed to clear IndexedDB', clearError);
+      return null; // Fallback to in-memory storage
+    }
   }
 };
 
@@ -46,7 +90,7 @@ const logClientError = async (message, error, userId = null) => {
     console.log(`Client error logging skipped for "${message}": rate limit reached`);
     return;
   }
-  const isCritical = message.includes('Unauthorized') || message.includes('failed after max retries') || message.includes('IndexedDB initialization failed');
+  const isCritical = message.includes('Unauthorized') || message.includes('failed after max retries') || message.includes('IndexedDB');
   if (!isCritical) {
     return;
   }
@@ -63,6 +107,12 @@ const logClientError = async (message, error, userId = null) => {
         userId,
         route: window.location.pathname,
         timestamp: new Date().toISOString(),
+        additionalInfo: JSON.stringify({
+          navigatorOnline: navigator.onLine,
+          currentPath: window.location.pathname,
+          errorDetails: error?.stack || error?.message,
+          browser: navigator.userAgent,
+        }),
       },
       { timeout: 5000 }
     );
@@ -71,9 +121,6 @@ const logClientError = async (message, error, userId = null) => {
     console.error('Failed to log critical error:', err.message);
   }
 };
-
-
-// In store.js, update authSlice (lines ~60–80):
 
 const authSlice = createSlice({
   name: 'auth',
@@ -109,11 +156,18 @@ const authSlice = createSlice({
   },
 });
 
-// Update loadPersistedState (lines ~90–150):
-
 const loadPersistedState = async () => {
+  if (!isIndexedDBSupported()) {
+    console.warn('No IndexedDB support, skipping persisted state load');
+    return null;
+  }
+
   try {
     const db = await initDB();
+    if (!db) {
+      console.warn('No database available, using initial state');
+      return null;
+    }
     const persistedState = await db.get(STORE_NAME, 'state');
     if (!persistedState?.value) {
       console.log('No persisted state found');
@@ -214,9 +268,6 @@ const loadPersistedState = async () => {
   }
 };
 
-
-
-
 const messageSlice = createSlice({
   name: 'messages',
   initialState: {
@@ -272,9 +323,6 @@ const messageSlice = createSlice({
       state.messagesTimestamp[recipientId] = now;
       console.log(`setMessages: Updated chats for recipientId ${recipientId} with ${state.chats[recipientId].length} messages`);
     },
-
-
-
     addMessage: (state, action) => {
       const { recipientId, message } = action.payload;
       if (!recipientId || !isValidObjectId(recipientId) || !message || !message.clientMessageId) {
@@ -282,7 +330,6 @@ const messageSlice = createSlice({
         return;
       }
       state.chats[recipientId] = state.chats[recipientId] || [];
-      // Prevent duplicates based on clientMessageId or _id
       if (state.chats[recipientId].some((msg) => msg.clientMessageId === message.clientMessageId || msg._id === message.clientMessageId)) {
         console.log(`addMessage: Message ${message.clientMessageId} already exists for recipientId ${recipientId}`);
         return;
@@ -314,7 +361,6 @@ const messageSlice = createSlice({
         console.warn('addMessage: Invalid senderId or recipientId', normalizedMsg);
       }
     },
-
     replaceMessage: (state, action) => {
       const { recipientId, message, replaceId } = action.payload;
       if (!recipientId || !isValidObjectId(recipientId) || !message || !replaceId || !message.clientMessageId) {
@@ -345,18 +391,16 @@ const messageSlice = createSlice({
       };
       if (isValidObjectId(normalizedMsg.senderId) && isValidObjectId(normalizedMsg.recipientId)) {
         if (index !== -1) {
-          // Only replace if the message isn't already updated with a server _id
           if (!state.chats[recipientId][index]._id || state.chats[recipientId][index]._id === replaceId) {
             state.chats[recipientId][index] = normalizedMsg;
           } else {
             console.log(`replaceMessage: Message ${replaceId} already updated with server ID, skipping`);
           }
         } else {
-          // Prevent duplicates if message was re-sent
           if (!state.chats[recipientId].some((msg) => msg.clientMessageId === normalizedMsg.clientMessageId || msg._id === normalizedMsg._id)) {
             state.chats[recipientId].push(normalizedMsg);
             state.chats[recipientId] = state.chats[recipientId].slice(-MAX_MESSAGES_PER_CHAT);
-            state.chatMessageCount[recipientId] = (state.chatMessageCount[recipientId] || 0) + 1;
+            state.chatMessageCount[recipientId] = (state.chats[recipientId].length || 0);
           }
         }
         state.messagesTimestamp[recipientId] = Date.now();
@@ -364,8 +408,6 @@ const messageSlice = createSlice({
         console.warn('replaceMessage: Invalid senderId or recipientId', normalizedMsg);
       }
     },
-
-
     updateMessageStatus: (state, action) => {
       const { recipientId, messageId, status, uploadProgress } = action.payload;
       if (!recipientId || !isValidObjectId(recipientId) || !messageId || !state.chats[recipientId] || !['pending', 'sent', 'delivered', 'read', 'failed'].includes(status)) {
@@ -495,6 +537,10 @@ const persistenceMiddleware = (store) => {
   const debouncedPersist = debounce(async (state, action) => {
     try {
       const db = await initDB();
+      if (!db) {
+        console.warn('No database available, skipping persistence');
+        return;
+      }
       const serializableState = {
         messages: {
           selectedChat: isValidObjectId(state.messages.selectedChat) ? state.messages.selectedChat : null,
@@ -550,7 +596,7 @@ const persistenceMiddleware = (store) => {
           photo: state.auth.photo,
           virtualNumber: state.auth.virtualNumber,
           username: state.auth.username,
-          privateKey: state.auth.privateKey, // Persist privateKey
+          privateKey: state.auth.privateKey,
         },
       };
       await db.put(STORE_NAME, { key: 'state', value: serializableState });
@@ -581,6 +627,10 @@ const persistenceMiddleware = (store) => {
       requestAnimationFrame(async () => {
         try {
           const db = await initDB();
+          if (!db) {
+            console.warn('No database available, skipping state clear');
+            return;
+          }
           await db.put(STORE_NAME, {
             key: 'state',
             value: {
@@ -598,7 +648,6 @@ const persistenceMiddleware = (store) => {
     return result;
   };
 };
-
 
 // Create store
 export const store = configureStore({
@@ -644,10 +693,11 @@ export const initializeStore = async () => {
       store.dispatch(cleanupMessages());
       console.log('Store initialized with persisted state');
     } else {
-      //console.log('No valid persisted state, using initial state');
+      console.log('No valid persisted state, using initial state');
     }
   } catch (error) {
     await logClientError('Failed to initialize store with persisted state', error);
+    // Continue with in-memory store
   }
 };
 
