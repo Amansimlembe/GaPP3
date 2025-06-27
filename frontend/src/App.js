@@ -13,7 +13,7 @@ import FeedScreen from './screens/FeedScreen';
 import ChatScreen from './screens/ChatScreen';
 import ProfileScreen from './screens/ProfileScreen';
 import CountrySelector from './components/CountrySelector';
-import { setAuth, clearAuth, setSelectedChat, resetState } from './store';
+import { setAuth, clearAuth, setSelectedChat } from './store';
 
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
 
@@ -117,7 +117,11 @@ const getTokenExpiration = (token) => {
         .join('')
     );
     const decoded = JSON.parse(jsonPayload);
-    return decoded.exp ? decoded.exp * 1000 : null;
+    if (!decoded.exp || isNaN(decoded.exp)) {
+      console.warn('Invalid token expiration');
+      return null;
+    }
+    return decoded.exp * 1000;
   } catch (error) {
     console.error('Error decoding token:', error.message);
     return null;
@@ -155,7 +159,7 @@ const logClientError = async (message, error, userId = null) => {
         await new Promise((resolve) => setTimeout(resolve, Math.pow(2, i) * 1000));
         continue;
       }
-     
+      console.warn('Failed to log error:', err.message);
     }
   }
 };
@@ -164,7 +168,7 @@ const App = () => {
   const dispatch = useDispatch();
   const navigate = useNavigate();
   const location = useLocation();
-  const { token, userId, role, photo, virtualNumber, username } = useSelector((state) => state.auth);
+  const { token, userId, role, photo, virtualNumber, username, privateKey } = useSelector((state) => state.auth);
   const { selectedChat } = useSelector((state) => state.messages);
   const [chatNotifications, setChatNotifications] = useState(0);
   const [socket, setSocket] = useState(null);
@@ -185,6 +189,7 @@ const App = () => {
     const storedPhoto = localStorage.getItem('photo');
     const storedVirtualNumber = localStorage.getItem('virtualNumber');
     const storedUsername = localStorage.getItem('username');
+    const storedPrivateKey = localStorage.getItem('privateKey');
 
     if (storedToken && storedUserId && location.pathname !== '/login') {
       const expTime = getTokenExpiration(storedToken);
@@ -196,6 +201,7 @@ const App = () => {
           photo: storedPhoto || 'https://via.placeholder.com/64',
           virtualNumber: storedVirtualNumber || null,
           username: storedUsername || null,
+          privateKey: storedPrivateKey || null,
         }));
       } else {
         localStorage.removeItem('token');
@@ -204,6 +210,7 @@ const App = () => {
         localStorage.removeItem('photo');
         localStorage.removeItem('virtualNumber');
         localStorage.removeItem('username');
+        localStorage.removeItem('privateKey');
         setIsNavigating(true);
         navigate('/login', { replace: true });
       }
@@ -225,19 +232,12 @@ const App = () => {
           timeout: 5000,
         }
       );
-      // Clear all cached public keys
       Object.keys(localStorage).forEach((key) => {
-        if (key.startsWith('publicKey:')) {
+        if (key.startsWith('publicKey:') || ['token', 'userId', 'role', 'photo', 'virtualNumber', 'username', 'privateKey'].includes(key)) {
           localStorage.removeItem(key);
         }
       });
-      localStorage.removeItem('token');
-      localStorage.removeItem('userId');
-      localStorage.removeItem('role');
-      localStorage.removeItem('photo');
-      localStorage.removeItem('virtualNumber');
-      localStorage.removeItem('username');
-      dispatch(clearAuth()); // Clears privateKey in Redux store
+      dispatch(clearAuth());
       setChatNotifications(0);
       setSocket(null);
       setIsNavigating(true);
@@ -245,26 +245,19 @@ const App = () => {
     } catch (err) {
       console.error('Logout failed:', err.message);
       logClientError('Logout failed', err, userId);
-      // Clear all cached public keys
       Object.keys(localStorage).forEach((key) => {
-        if (key.startsWith('publicKey:')) {
+        if (key.startsWith('publicKey:') || ['token', 'userId', 'role', 'photo', 'virtualNumber', 'username', 'privateKey'].includes(key)) {
           localStorage.removeItem(key);
         }
       });
-      localStorage.removeItem('token');
-      localStorage.removeItem('userId');
-      localStorage.removeItem('role');
-      localStorage.removeItem('photo');
-      localStorage.removeItem('virtualNumber');
-      localStorage.removeItem('username');
-      dispatch(clearAuth()); // Clears privateKey in Redux store
+      dispatch(clearAuth());
       setChatNotifications(0);
       setSocket(null);
       setIsNavigating(true);
       navigate('/login', { replace: true });
     }
-  }, [userId, token, navigate, dispatch, logClientError]);
-  
+  }, [userId, token, navigate, dispatch]);
+
   const refreshToken = useCallback(async () => {
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
@@ -282,32 +275,36 @@ const App = () => {
             timeout: 5000,
           }
         );
-        const { token: newToken, userId: newUserId, role: newRole, emailIds, virtualNumber, username, photo, privateKey } = response.data;
+        const { token: newToken, userId: newUserId, role: newRole, virtualNumber, username, photo, privateKey } = response.data;
         dispatch(setAuth({
           token: newToken,
           userId: newUserId,
           role: Number(newRole) || 0,
-          emailIds: emailIds || [],
           photo: photo || 'https://via.placeholder.com/64',
           virtualNumber: virtualNumber || null,
           username: username || null,
           privateKey: privateKey || null,
         }));
-        // Persist new auth state to localStorage
         localStorage.setItem('token', newToken);
         localStorage.setItem('userId', newUserId);
         localStorage.setItem('role', newRole || '0');
         localStorage.setItem('photo', photo || 'https://via.placeholder.com/64');
         localStorage.setItem('virtualNumber', virtualNumber || '');
         localStorage.setItem('username', username || '');
-        
+        localStorage.setItem('privateKey', privateKey || '');
+        console.log('Token refresh successful:', response.data);
         return newToken;
       } catch (error) {
-        console.error(`Token refresh attempt ${attempt} failed: ${error.message}`);
+        console.error(`Token refresh attempt ${attempt} failed: ${error.message}`, error.response?.data);
         logClientError(`Token refresh failed: ${attempt}`, error, userId);
         if (attempt < 3 && (error.response?.status === 429 || error.response?.status >= 500 || error.code === 'ECONNABORTED' || !navigator.onLine)) {
           await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * 1000));
           continue;
+        }
+        const expTime = getTokenExpiration(token);
+        if (expTime && expTime > Date.now() + 60 * 1000) {
+          console.warn('Token still valid, skipping logout');
+          return token;
         }
         await handleLogout();
         return null;
@@ -315,151 +312,155 @@ const App = () => {
     }
   }, [dispatch, token, userId, handleLogout]);
 
-
-  
-
   useEffect(() => {
-  if (isNavigating && location.pathname === '/login') {
-    setIsNavigating(false);
-    return;
-  }
-
-  if (!token || !userId) {
-    if (location.pathname !== '/login' && !isNavigating) {
-      setIsNavigating(true);
-      navigate('/login', { replace: true });
-    }
-    if (socketRef.current) {
-      socketRef.current.disconnect();
-      socketRef.current = null;
-      setSocket(null);
-    }
-    return;
-  }
-
-  const connectSocket = (attempt = 0) => {
-    if (socketRef.current || !navigator.onLine || attempt > maxReconnectAttempts) {
-      if (attempt > maxReconnectAttempts) {
-        setError('Failed to connect to server after retries');
-        logClientError('Max socket reconnect attempts reached', new Error('Socket connection failed'), userId);
-      }
+    if (isNavigating && location.pathname === '/login') {
+      setIsNavigating(false);
       return;
     }
 
-    const newSocket = io(BASE_URL, {
-      auth: { token, userId },
-      transports: ['websocket'],
-      reconnection: true,
-      reconnectionAttempts: maxReconnectAttempts,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: maxDelay,
-      randomizationFactor: 0.5,
-      timeout: 10000,
-    });
-
-    socketRef.current = newSocket;
-
-    const handleConnect = () => {
-      console.log('Socket connected successfully');
-      newSocket.emit('join', userId);
-      attemptRef.current = 0;
-      setError(null);
-      setSocket(newSocket); // Update socket state
-    };
-
-    const handleConnectError = async (error) => {
-      console.error('Socket connect error:', error.message);
-      logClientError('Socket connect error', error, userId);
-      if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
-        setError('Authentication error, logging out');
-        await handleLogout();
-      } else {
-        setError('Connecting to server...');
+    if (!token || !userId) {
+      if (location.pathname !== '/login' && !isNavigating) {
+        setIsNavigating(true);
+        navigate('/login', { replace: true });
       }
-    };
-
-    const handleDisconnect = (reason) => {
-      console.warn('Socket disconnected:', reason);
-      logClientError(`Socket disconnected: ${reason}`, new Error(reason), userId);
-      if (reason === 'io server disconnect' || reason === 'transport close' || reason === 'ping timeout') {
-        if (navigator.onLine) {
-          console.log(`Attempting to reconnect (attempt ${attemptRef.current + 1}/${maxReconnectAttempts})`);
-        } else {
-          setError('Offline: Messages will be sent when reconnected');
-        }
-      }
-      setSocket(null); // Ensure socket is null during disconnection
-    };
-
-    const handleMessage = (msg) => {
-      if (!msg.senderId || !msg.recipientId) {
-        console.warn('Invalid message payload:', msg);
-        return;
-      }
-      if (msg.recipientId === userId && (!selectedChat || selectedChat !== msg.senderId)) {
-        setChatNotifications((prev) => prev + 1);
-      }
-    };
-
-    const handleNewContact = (contactData) => {
-      if (!contactData?.id) {
-        console.warn('Invalid contact data:', contactData);
-        return;
-      }
-    };
-
-    newSocket.on('connect', handleConnect);
-    newSocket.on('connect_error', handleConnectError);
-    newSocket.on('disconnect', handleDisconnect);
-    newSocket.on('message', handleMessage);
-    newSocket.on('newContact', handleNewContact);
-
-    const handleOnline = () => {
-      if (!socketRef.current || !socketRef.current.connected) {
-        console.log('Network online, attempting to reconnect socket');
-        newSocket.connect();
-      }
-    };
-
-    const handleOffline = () => {
-      console.warn('Offline: Socket disconnected');
-      setError('Offline: Messages will be sent when reconnected');
       if (socketRef.current) {
         socketRef.current.disconnect();
         socketRef.current = null;
         setSocket(null);
       }
+      return;
+    }
+
+    const connectSocket = (attempt = 0) => {
+      if (socketRef.current || !navigator.onLine || attempt > maxReconnectAttempts) {
+        if (attempt > maxReconnectAttempts) {
+          setError('Failed to connect to server after retries');
+          logClientError('Max socket reconnect attempts reached', new Error('Socket connection failed'), userId);
+        }
+        return;
+      }
+
+      const newSocket = io(BASE_URL, {
+        auth: { token, userId },
+        transports: ['websocket'],
+        reconnection: true,
+        reconnectionAttempts: maxReconnectAttempts,
+        reconnectionDelay: 1000,
+        reconnectionDelayMax: maxDelay,
+        randomizationFactor: 0.5,
+        timeout: 10000,
+      });
+
+      socketRef.current = newSocket;
+
+      const handleConnect = () => {
+        console.log('Socket connected successfully');
+        newSocket.emit('join', userId);
+        attemptRef.current = 0;
+        setError(null);
+        setSocket(newSocket);
+      };
+
+      const handleConnectError = async (error) => {
+        console.error('Socket connect error:', error.message);
+        logClientError('Socket connect error', error, userId);
+        if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
+          setError('Session expired. Attempting to reconnect...');
+          setTimeout(async () => {
+            if (!isNavigating && attemptRef.current <= maxReconnectAttempts) {
+              const newToken = await refreshToken();
+              if (newToken) {
+                connectSocket(attempt + 1); // Retry with new token
+              } else {
+                setError('Authentication error, logging out');
+                await handleLogout();
+              }
+            }
+          }, 2000);
+        } else {
+          setError('Connecting to server...');
+          attemptRef.current = attempt + 1;
+          setTimeout(() => connectSocket(attempt + 1), Math.pow(2, attempt) * 1000);
+        }
+      };
+
+      const handleDisconnect = (reason) => {
+        console.warn('Socket disconnected:', reason);
+        logClientError(`Socket disconnected: ${reason}`, new Error(reason), userId);
+        if (reason === 'io server disconnect' || reason === 'transport close' || reason === 'ping timeout') {
+          if (navigator.onLine) {
+            console.log(`Attempting to reconnect (attempt ${attemptRef.current + 1}/${maxReconnectAttempts})`);
+          } else {
+            setError('Offline: Messages will be sent when reconnected');
+          }
+        }
+        setSocket(null);
+      };
+
+      const handleMessage = (msg) => {
+        if (!msg.senderId || !msg.recipientId) {
+          console.warn('Invalid message payload:', msg);
+          return;
+        }
+        if (msg.recipientId === userId && (!selectedChat || selectedChat !== msg.senderId)) {
+          setChatNotifications((prev) => prev + 1);
+        }
+      };
+
+      const handleNewContact = (contactData) => {
+        if (!contactData?.id) {
+          console.warn('Invalid contact data:', contactData);
+          return;
+        }
+      };
+
+      newSocket.on('connect', handleConnect);
+      newSocket.on('connect_error', handleConnectError);
+      newSocket.on('disconnect', handleDisconnect);
+      newSocket.on('message', handleMessage);
+      newSocket.on('newContact', handleNewContact);
+
+      const handleOnline = () => {
+        if (!socketRef.current || !socketRef.current.connected) {
+          console.log('Network online, attempting to reconnect socket');
+          newSocket.connect();
+        }
+      };
+
+      const handleOffline = () => {
+        console.warn('Offline: Socket disconnected');
+        setError('Offline: Messages will be sent when reconnected');
+        if (socketRef.current) {
+          socketRef.current.disconnect();
+          socketRef.current = null;
+          setSocket(null);
+        }
+      };
+
+      window.addEventListener('online', handleOnline);
+      window.addEventListener('offline', handleOffline);
+
+      return () => {
+        newSocket.emit('leave', userId);
+        newSocket.off('connect', handleConnect);
+        newSocket.off('connect_error', handleConnectError);
+        newSocket.off('disconnect', handleDisconnect);
+        newSocket.off('message', handleMessage);
+        newSocket.off('newContact', handleNewContact);
+        newSocket.disconnect();
+        window.removeEventListener('online', handleOnline);
+        window.removeEventListener('offline', handleOffline);
+        socketRef.current = null;
+        setSocket(null);
+      };
     };
 
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
+    const cleanup = connectSocket(0);
 
     return () => {
-      newSocket.emit('leave', userId);
-      newSocket.off('connect', handleConnect);
-      newSocket.off('connect_error', handleConnectError);
-      newSocket.off('disconnect', handleDisconnect);
-      newSocket.off('message', handleMessage);
-      newSocket.off('newContact', handleNewContact);
-      newSocket.disconnect();
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
-      socketRef.current = null;
-      setSocket(null);
+      if (cleanup) cleanup();
     };
-  };
-
-  const cleanup = connectSocket(0);
-
-  return () => {
-    if (cleanup) cleanup();
-  };
-}, [token, userId, location.pathname, handleLogout, navigate, logClientError, selectedChat]);
-
-
-
-
-
+  }, [token, userId, location.pathname, handleLogout, navigate, selectedChat, refreshToken]);
 
   useEffect(() => {
     if (!token || !userId) return;
@@ -471,13 +472,16 @@ const App = () => {
       try {
         const expTime = getTokenExpiration(token);
         if (expTime && expTime - Date.now() < 5 * 60 * 1000) {
-          await refreshToken();
+          const newToken = await refreshToken();
+          if (!newToken) {
+            setError('Session expired. Please log in again.');
+          }
         }
       } catch (err) {
         console.error('Token expiration check failed:', err.message);
         logClientError('Token expiration check failed', err, userId);
         setError('Authentication error, please log in again');
-        await handleLogout();
+        setTimeout(() => handleLogout(), 2000);
       } finally {
         isRefreshing = false;
       }
@@ -489,11 +493,9 @@ const App = () => {
   }, [token, userId, refreshToken, handleLogout]);
 
   const handleChatNavigation = useCallback(() => {
-    
     setChatNotifications(0);
     dispatch(setSelectedChat(null));
   }, [dispatch]);
-
 
   return (
     <ErrorBoundary userId={userId} location={location}>
@@ -548,10 +550,6 @@ const AuthenticatedApp = ({
   const dispatch = useDispatch();
   const { selectedChat } = useSelector((state) => state.messages);
   const isChatRouteWithSelectedChat = location.pathname === '/chat' && selectedChat;
-
-  useEffect(() => {
-   
-  }, [location.pathname]);
 
   if (!location || !dispatch) {
     console.error('AuthenticatedApp: Missing location or dispatch');
@@ -690,7 +688,7 @@ AuthenticatedApp.propTypes = {
   virtualNumber: PropTypes.string,
   username: PropTypes.string,
   chatNotifications: PropTypes.number.isRequired,
-  socket: PropTypes.object, // Remove .isRequired
+  socket: PropTypes.object,
   handleChatNavigation: PropTypes.func.isRequired,
   handleLogout: PropTypes.func.isRequired,
 };
