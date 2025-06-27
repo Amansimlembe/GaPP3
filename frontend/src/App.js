@@ -67,7 +67,7 @@ class ErrorBoundary extends React.Component {
   componentDidUpdate(prevProps) {
     if (this.props.location !== prevProps.location && this.state.hasError) {
       this.setState({ hasError: false, error: null, errorInfo: null });
-  }
+    }
   }
 
   handleDismiss = () => {
@@ -178,6 +178,7 @@ const App = () => {
   const [socket, setSocket] = useState(null);
   const [error, setError] = useState(null);
   const [isNavigating, setIsNavigating] = useState(false);
+  const [isAuthLoaded, setIsAuthLoaded] = useState(false);
 
   // Refs for socket management
   const socketRef = useRef(null);
@@ -186,7 +187,7 @@ const App = () => {
   const maxReconnectAttempts = 5;
   const maxDelay = 30000; // 30 seconds
 
-  // Restore auth state from localStorage on mount without redirecting
+  // Restore auth state from localStorage on mount without clearing token
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
     const storedUserId = localStorage.getItem('userId');
@@ -197,29 +198,17 @@ const App = () => {
     const storedPrivateKey = localStorage.getItem('privateKey');
 
     if (storedToken && storedUserId) {
-      const expTime = getTokenExpiration(storedToken);
-      if (expTime && expTime > Date.now()) {
-        dispatch(setAuth({
-          token: storedToken,
-          userId: storedUserId,
-          role: Number(storedRole) || 0,
-          photo: storedPhoto || 'https://via.placeholder.com/64',
-          virtualNumber: storedVirtualNumber || null,
-          username: storedUsername || null,
-          privateKey: storedPrivateKey || null,
-        }));
-      } else {
-        // Clear expired token but don't navigate
-        localStorage.removeItem('token');
-        localStorage.removeItem('userId');
-        localStorage.removeItem('role');
-        localStorage.removeItem('photo');
-        localStorage.removeItem('virtualNumber');
-        localStorage.removeItem('username');
-        localStorage.removeItem('privateKey');
-        dispatch(clearAuth());
-      }
+      dispatch(setAuth({
+        token: storedToken,
+        userId: storedUserId,
+        role: Number(storedRole) || 0,
+        photo: storedPhoto || 'https://via.placeholder.com/64',
+        virtualNumber: storedVirtualNumber || null,
+        username: storedUsername || null,
+        privateKey: storedPrivateKey || null,
+      }));
     }
+    setIsAuthLoaded(true);
   }, [dispatch]);
 
   const handleLogout = useCallback(async () => {
@@ -312,13 +301,7 @@ const App = () => {
           await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * 1000));
           continue;
         }
-        const expTime = getTokenExpiration(token);
-        if (expTime && expTime > Date.now() + 60 * 1000) {
-          console.warn('Token still valid, skipping logout');
-          return token;
-        }
-        await handleLogout();
-        return null;
+        return null; // Don't trigger logout unless explicitly requested
       }
     }
   }, [dispatch, token, userId, handleLogout]);
@@ -347,8 +330,7 @@ const App = () => {
         if (expTime && expTime < Date.now() + 60 * 1000) {
           const newToken = await refreshToken();
           if (!newToken) {
-            setError('Authentication error, logging out');
-            await handleLogout();
+            setError('Authentication error, please try again later');
             return () => {};
           }
         }
@@ -397,8 +379,7 @@ const App = () => {
                   if (ack.error.includes('Unauthorized') && attempt < maxMessageRetries) {
                     const newToken = await refreshToken();
                     if (!newToken) {
-                      setError('Authentication error, logging out');
-                      await handleLogout();
+                      setError('Authentication error, please try again later');
                       return;
                     }
                     setTimeout(() => sendMessageWithRetry(messageData, attempt + 1), 1000 * attempt);
@@ -447,14 +428,13 @@ const App = () => {
             if (newToken) {
               connectSocket(attempt + 1);
             } else {
-              setError('Authentication error, logging out');
-              await handleLogout();
+              setError('Authentication error, please try again later');
             }
           } else if (error.message.includes('xhr poll error') || error.message.includes('timeout')) {
             setError('Server is temporarily unavailable. Retrying...');
             attemptRef.current = attempt + 1;
             const delay = Math.min(Math.pow(2, attempt) * 1000 * (1 + Math.random() * 0.2), maxDelay);
-            setTimeout(() => connectSocket(approach + 1), delay);
+            setTimeout(() => connectSocket(attempt + 1), delay);
           } else {
             setError('Failed to connect to server. Please check your connection.');
             attemptRef.current = attempt + 1;
@@ -566,14 +546,13 @@ const App = () => {
         if (expTime && expTime - Date.now() < 5 * 60 * 1000) {
           const newToken = await refreshToken();
           if (!newToken) {
-            setError('Session expired. Please log in again.');
+            setError('Authentication error, please try again later');
           }
         }
       } catch (err) {
         console.error('Token expiration check failed:', err.message);
         logClientError('Token expiration check failed', err, userId);
-        setError('Authentication error, please log in again');
-        setTimeout(() => handleLogout(), 2000);
+        setError('Authentication error, please try again later');
       } finally {
         isRefreshing = false;
       }
@@ -603,32 +582,38 @@ const App = () => {
           </button>
         </div>
       )}
-      <Routes>
-        {token && userId ? (
-          <Route
-            path="*"
-            element={
-              <AuthenticatedApp
-                token={token}
-                userId={userId}
-                role={role}
-                photo={photo}
-                virtualNumber={virtualNumber}
-                username={username}
-                chatNotifications={chatNotifications}
-                socket={socket}
-                handleChatNavigation={handleChatNavigation}
-                handleLogout={handleLogout}
-              />
-            }
-          />
-        ) : (
-          <>
-            <Route path="/login" element={<LoginScreen />} />
-            <Route path="*" element={<LoginScreen />} />
-          </>
-        )}
-      </Routes>
+      {!isAuthLoaded ? (
+        <div className="min-h-screen flex items-center justify-center text-gray-700 dark:text-gray-300">
+          <p>Loading...</p>
+        </div>
+      ) : (
+        <Routes>
+          {token && userId ? (
+            <Route
+              path="*"
+              element={
+                <AuthenticatedApp
+                  token={token}
+                  userId={userId}
+                  role={role}
+                  photo={photo}
+                  virtualNumber={virtualNumber}
+                  username={username}
+                  chatNotifications={chatNotifications}
+                  socket={socket}
+                  handleChatNavigation={handleChatNavigation}
+                  handleLogout={handleLogout}
+                />
+              }
+            />
+          ) : (
+            <>
+              <Route path="/login" element={<LoginScreen />} />
+              <Route path="*" element={<LoginScreen />} />
+            </>
+          )}
+        </Routes>
+      )}
     </ErrorBoundary>
   );
 };

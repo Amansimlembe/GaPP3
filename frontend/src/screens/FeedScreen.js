@@ -29,6 +29,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [socketConnected, setSocketConnected] = useState(false);
+  const [isAuthLoaded, setIsAuthLoaded] = useState(false);
   const feedRef = useRef(null);
   const mediaRefs = useRef({});
   const isFetchingFeedRef = useRef(false);
@@ -42,9 +43,15 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
       } catch (err) {
         console.error(`Retry attempt ${attempt} failed:`, err.response?.data || err.message);
         if (err.response?.status === 401 || err.message === 'Unauthorized') {
-          console.error('Authentication error: Session expired.');
-          setError('Session expired. Please log in again.');
-          throw new Error('Unauthorized');
+          console.error('Authentication error: Attempting to refresh token...');
+          setError('Session may be invalid. Attempting to refresh token...');
+          const newToken = await refreshToken();
+          if (newToken) {
+            continue; // Retry with new token
+          } else {
+            setError('Authentication error, please try again later');
+            return null;
+          }
         }
         if (err.response?.status === 429) {
           setError(err.response.data.message || 'Too many requests, please try again later');
@@ -54,6 +61,36 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
         const delay = Math.pow(2, attempt) * baseDelay;
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
+    }
+  };
+
+  const refreshToken = async () => {
+    try {
+      const storedToken = localStorage.getItem('token');
+      const storedUserId = localStorage.getItem('userId');
+      if (!storedToken || !storedUserId) {
+        throw new Error('Missing token or userId');
+      }
+      const response = await axios.post(
+        `${BASE_URL}/auth/refresh`,
+        { userId: storedUserId },
+        {
+          headers: { Authorization: `Bearer ${storedToken}` },
+          timeout: 5000,
+        }
+      );
+      const { token: newToken, userId: newUserId, role, virtualNumber, username, photo, privateKey } = response.data;
+      localStorage.setItem('token', newToken);
+      localStorage.setItem('userId', newUserId);
+      localStorage.setItem('role', role || '0');
+      localStorage.setItem('photo', photo || 'https://via.placeholder.com/64');
+      localStorage.setItem('virtualNumber', virtualNumber || '');
+      localStorage.setItem('username', username || '');
+      localStorage.setItem('privateKey', privateKey || '');
+      return newToken;
+    } catch (error) {
+      console.error('Token refresh failed:', error.message);
+      return null;
     }
   };
 
@@ -176,8 +213,6 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
         setError(
           error.message === 'Offline'
             ? 'You are offline'
-            : error.message === 'Unauthorized'
-            ? 'Session expired. Please log in again.'
             : 'Failed to load feed'
         );
       } finally {
@@ -205,7 +240,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
         atob(base64)
           .split('')
           .map((c) => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
-          .join('')
+        .join('')
       );
       const decoded = JSON.parse(jsonPayload);
       if (!decoded.exp || isNaN(decoded.exp)) {
@@ -230,141 +265,141 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
     }
   }, [socket, userId]);
 
-
-
-
-
-
-
   useEffect(() => {
-  if (!token || !userId) {
-    console.error('Missing token or userId');
-    setError('Authentication required. Please log in again.');
-    return;
-  }
-
-  const expTime = getTokenExpiration(token);
-  if (expTime && expTime < Date.now()) {
-    console.error('Token expired');
-    setError('Session expired. Please log in again.');
-    return;
-  }
-
-  if (!socket) {
-    console.warn('Socket not available, skipping socket setup');
-    setError('Connecting to server...');
-    return;
-  }
-
-  const socketTimeout = setTimeout(() => {
-    if (!socket.connected) {
-      console.warn('Socket not connected after delay');
-      setError('Connecting to server...');
-    } else {
-      setSocketConnected(true);
-      socket.emit('join', userId);
-      socketPing();
+    // Check if token and userId are available
+    if (!token || !userId) {
+      console.error('Missing token or userId');
+      setError('Authentication required. Please log in again.');
+      setIsAuthLoaded(true);
+      return;
     }
-  }, 2000);
 
-  fetchFeed(1);
-
-  const handleNewPost = (post) => {
-    if (!post?.isStory && post?._id) {
-      setPosts((prev) => {
-        const newPosts = [post, ...prev];
-        const uniquePosts = Array.from(new Map(newPosts.map((p) => [p._id.toString(), p])).values());
-        saveToCache(uniquePosts, 1);
-        return uniquePosts;
-      });
-      setCurrentIndex(0);
-    }
-  };
-
-  const handlePostUpdate = (updatedPost) => {
-    if (updatedPost?._id) {
-      setPosts((prev) => {
-        const newPosts = prev.map((p) => (p._id.toString() === updatedPost._id.toString() ? { ...p, ...updatedPost } : p));
-        saveToCache(newPosts, page);
-        return newPosts;
-      });
-    }
-  };
-
-  const handlePostDeleted = (postId) => {
-    if (postId) {
-      setPosts((prev) => {
-        const newPosts = prev.filter((p) => p._id.toString() !== postId.toString());
-        if (newPosts.length === 0) {
-          setCurrentIndex(0);
-          setPlayingPostId(null);
-        } else if (currentIndex >= newPosts.length) {
-          setCurrentIndex(newPosts.length - 1);
-          setPlayingPostId(newPosts[newPosts.length - 1]?._id?.toString() || null);
-        } else if (playingPostId === postId.toString()) {
-          setPlayingPostId(newPosts[currentIndex]?._id?.toString() || null);
+    // Check token expiration but don't clear token
+    const expTime = getTokenExpiration(token);
+    if (expTime && expTime < Date.now()) {
+      console.warn('Token appears expired, attempting to refresh');
+      refreshToken().then((newToken) => {
+        if (!newToken) {
+          setError('Authentication error, please try again later');
         }
-        saveToCache(newPosts, page);
-        return newPosts;
+        setIsAuthLoaded(true);
+        fetchFeed(1);
       });
+      return;
     }
-  };
 
-  const handleConnectError = async (error) => {
-    console.error('Socket connect error:', error.message);
-    setSocketConnected(false);
-    setError('Connection lost. Trying to reconnect...');
-    if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
-      const expTime = getTokenExpiration(token);
-      if (expTime && expTime > Date.now() + 60 * 1000) {
-        console.warn('Token still valid, delaying action');
-        return;
+    setIsAuthLoaded(true);
+    fetchFeed(1);
+
+    if (!socket) {
+      console.warn('Socket not available, skipping socket setup');
+      setError('Connecting to server...');
+      return;
+    }
+
+    const socketTimeout = setTimeout(() => {
+      if (!socket.connected) {
+        console.warn('Socket not connected after delay');
+        setError('Connecting to server...');
+      } else {
+        setSocketConnected(true);
+        socket.emit('join', userId);
+        socketPing();
       }
-      console.error('Invalid or missing token');
-      setError('Session expired. Please log in again.');
-     
-    }
-  };
+    }, 2000);
 
-  const handleReconnect = () => {
-    console.log('Socket reconnected');
-    setSocketConnected(true);
-    setError('');
-    if (socket.connected) {
+    const handleNewPost = (post) => {
+      if (!post?.isStory && post?._id) {
+        setPosts((prev) => {
+          const newPosts = [post, ...prev];
+          const uniquePosts = Array.from(new Map(newPosts.map((p) => [p._id.toString(), p])).values());
+          saveToCache(uniquePosts, 1);
+          return uniquePosts;
+        });
+        setCurrentIndex(0);
+      }
+    };
+
+    const handlePostUpdate = (updatedPost) => {
+      if (updatedPost?._id) {
+        setPosts((prev) => {
+          const newPosts = prev.map((p) => (p._id.toString() === updatedPost._id.toString() ? { ...p, ...updatedPost } : p));
+          saveToCache(newPosts, page);
+          return newPosts;
+        });
+      }
+    };
+
+    const handlePostDeleted = (postId) => {
+      if (postId) {
+        setPosts((prev) => {
+          const newPosts = prev.filter((p) => p._id.toString() !== postId.toString());
+          if (newPosts.length === 0) {
+            setCurrentIndex(0);
+            setPlayingPostId(null);
+          } else if (currentIndex >= newPosts.length) {
+            setCurrentIndex(newPosts.length - 1);
+            setPlayingPostId(newPosts[newPosts.length - 1]?._id?.toString() || null);
+          } else if (playingPostId === postId.toString()) {
+            setPlayingPostId(newPosts[currentIndex]?._id?.toString() || null);
+          }
+          saveToCache(newPosts, page);
+          return newPosts;
+        });
+      }
+    };
+
+    const handleConnectError = async (error) => {
+      console.error('Socket connect error:', error.message);
+      setSocketConnected(false);
+      setError('Connection lost. Trying to reconnect...');
+      if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
+        const newToken = await refreshToken();
+        if (newToken) {
+          socket.auth.token = newToken;
+          socket.connect();
+        } else {
+          setError('Authentication error, please try again later');
+        }
+      }
+    };
+
+    const handleReconnect = () => {
+      console.log('Socket reconnected');
+      setSocketConnected(true);
+      setError('');
+      if (socket.connected) {
+        socket.emit('join', userId);
+        socketPing();
+      }
+    };
+
+    socket.on('connect', () => {
+      setSocketConnected(true);
+      setError('');
       socket.emit('join', userId);
       socketPing();
-    }
-  };
+    });
+    socket.on('newPost', handleNewPost);
+    socket.on('postUpdate', handlePostUpdate);
+    socket.on('postDeleted', handlePostDeleted);
+    socket.on('connect_error', handleConnectError);
+    socket.on('reconnect', handleReconnect);
 
-  socket.on('connect', () => {
-    setSocketConnected(true);
-    setError('');
-    socket.emit('join', userId);
-    socketPing();
-  });
-  socket.on('newPost', handleNewPost);
-  socket.on('postUpdate', handlePostUpdate);
-  socket.on('postDeleted', handlePostDeleted);
-  socket.on('connect_error', handleConnectError);
-  socket.on('reconnect', handleReconnect);
-
-  return () => {
-    clearTimeout(socketTimeout);
-    socket.off('connect');
-    socket.off('newPost', handleNewPost);
-    socket.off('postUpdate', handlePostUpdate);
-    socket.off('postDeleted', handlePostDeleted);
-    socket.off('connect_error', handleConnectError);
-    socket.off('reconnect', handleReconnect);
-    socket.off('pong');
-    if (socket.connected) {
-      socket.emit('leave', userId);
-    }
-  };
-}, [token, userId, socket, fetchFeed, getTokenExpiration, socketPing, page, saveToCache, onLogout]);
-
-
-
+    return () => {
+      clearTimeout(socketTimeout);
+      socket.off('connect');
+      socket.off('newPost', handleNewPost);
+      socket.off('postUpdate', handlePostUpdate);
+      socket.off('postDeleted', handlePostDeleted);
+      socket.off('connect_error', handleConnectError);
+      socket.off('reconnect', handleReconnect);
+      socket.off('pong');
+      if (socket.connected) {
+        socket.emit('leave', userId);
+      }
+    };
+  }, [token, userId, socket, fetchFeed, socketPing, page, saveToCache]);
 
   useEffect(() => {
     localStorage.setItem('feedMuted', muted);
@@ -398,78 +433,63 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
     };
   }, [posts, currentIndex, setupIntersectionObserver, handleScroll]);
 
-
-
   const postContent = async () => {
-  if (!userId || !token) {
-    setError('Authentication required. Please log in again.');
-    await onLogout();
-    return;
-  }
-  if (!caption.trim() && !file && contentType !== 'text') {
-    setError('Please provide a caption or file');
-    return;
-  }
-  if ((contentType === 'image' || contentType === 'video' || contentType === 'video+audio') && !file) {
-    setError('Please select a file');
-    return;
-  }
-  if (contentType === 'video+audio' && !audioFile) {
-    setError('Please select an audio file for video+audio post');
-    return;
-  }
+    if (!userId || !token) {
+      setError('Authentication required. Please log in again.');
+      return;
+    }
+    if (!caption.trim() && !file && contentType !== 'text') {
+      setError('Please provide a caption or file');
+      return;
+    }
+    if ((contentType === 'image' || contentType === 'video' || contentType === 'video+audio') && !file) {
+      setError('Please select a file');
+      return;
+    }
+    if (contentType === 'video+audio' && !audioFile) {
+      setError('Please select an audio file for video+audio post');
+      return;
+    }
 
-  // Validate token expiration
-  const expTime = getTokenExpiration(token);
-  if (expTime && expTime < Date.now() + 60 * 1000) {
-    setError('Session expired. Please log in again.');
-    return;
-  }
+    const formData = new FormData();
+    formData.append('userId', userId);
+    formData.append('contentType', contentType);
+    formData.append('caption', caption.trim());
+    if (file) formData.append('content', file);
+    if (contentType === 'text') formData.append('content', caption.trim());
+    if (contentType === 'video+audio' && audioFile) formData.append('audio', audioFile);
 
-  const formData = new FormData();
-  formData.append('userId', userId);
-  formData.append('contentType', contentType);
-  formData.append('caption', caption.trim());
-  if (file) formData.append('content', file);
-  if (contentType === 'text') formData.append('content', caption.trim());
-  if (contentType === 'video+audio' && audioFile) formData.append('audio', audioFile);
-
-  try {
-    setUploadProgress(0);
-    const { data } = await retryOperation(() =>
-      axios.post(`${BASE_URL}/feed`, formData, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'multipart/form-data',
-        },
-        onUploadProgress: (progressEvent) =>
-          setUploadProgress(Math.round((progressEvent.loaded * 100) / progressEvent.total)),
-        timeout: 15000,
-      })
-    );
-    socket.emit('newPost', data);
-    setCaption('');
-    setFile(null);
-    setAudioFile(null);
-    setShowPostModal(false);
-    setUploadProgress(null);
-    setError('');
-    setCurrentIndex(0);
-  } catch (error) {
-    console.error('Post error:', error.message);
-    setError(
-      error.message === 'Offline'
-        ? 'You are offline'
-        : error.message === 'Unauthorized'
-        ? 'Session expired. Please log in again.'
-        : error.response?.data?.error || 'Failed to post content'
-    );
-    setUploadProgress(null);
- 
-  }
-};
-
-
+    try {
+      setUploadProgress(0);
+      const { data } = await retryOperation(() =>
+        axios.post(`${BASE_URL}/feed`, formData, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'multipart/form-data',
+          },
+          onUploadProgress: (progressEvent) =>
+            setUploadProgress(Math.round((progressEvent.loaded * 100) / progressEvent.total)),
+          timeout: 15000,
+        })
+      );
+      socket.emit('newPost', data);
+      setCaption('');
+      setFile(null);
+      setAudioFile(null);
+      setShowPostModal(false);
+      setUploadProgress(null);
+      setError('');
+      setCurrentIndex(0);
+    } catch (error) {
+      console.error('Post error:', error.message);
+      setError(
+        error.message === 'Offline'
+          ? 'You are offline'
+          : 'Failed to post content'
+      );
+      setUploadProgress(null);
+    }
+  };
 
   const likePost = async (postId) => {
     if (!playingPostId || postId !== playingPostId) return;
@@ -495,8 +515,6 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
       setError(
         error.message === 'Offline'
           ? 'You are offline'
-          : error.message === 'Unauthorized'
-          ? 'Session expired. Please log in again.'
           : 'Failed to like post'
       );
     }
@@ -526,8 +544,6 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
       setError(
         error.message === 'Offline'
           ? 'You are offline'
-          : error.message === 'Unauthorized'
-          ? 'Session expired. Please log in again.'
           : 'Failed to comment'
       );
     }
@@ -612,6 +628,23 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
       className={`h-screen overflow-y-auto bg-gray-100 dark:bg-gray-900 snap-y snap-mandatory md:max-w-[600px] md:mx-auto md:rounded-lg md:shadow-lg overscroll-y-contain ${theme === 'dark' ? 'dark' : ''}`}
       style={{ scrollSnapType: 'y mandatory', overscrollBehaviorY: 'contain' }}
     >
+      {!isAuthLoaded && (
+        <div className="h-screen flex items-center justify-center text-gray-700 dark:text-gray-300">
+          <p>Loading authentication...</p>
+        </div>
+      )}
+      {error && (
+        <div className="fixed top-4 left-1/2 transform -translate-x-1/2 bg-red-500 text-white p-4 rounded-lg shadow-lg z-50 max-w-md w-full">
+          <p className="text-sm">{error}</p>
+          <button
+            className="bg-white text-red-500 px-3 py-1 mt-2 rounded hover:bg-gray-200 focus:outline-none focus:ring-2 focus:ring-white"
+            onClick={() => setError('')}
+            aria-label="Dismiss error"
+          >
+            OK
+          </button>
+        </div>
+      )}
       <div className="fixed bottom-20 right-4 z-20">
         <motion.button
           whileHover={{ scale: 1.1, rotate: 90 }}
@@ -756,8 +789,6 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
           </motion.div>
         )}
       </AnimatePresence>
-
-    
 
       {refreshing && (
         <div className="fixed top-4 left-0 right-0 text-center text-gray-900 dark:text-gray-100 z-10">
