@@ -310,21 +310,6 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
     }
   };
 
-  const handleConnectError = async (error) => {
-    console.error('Socket connect error:', error.message);
-    setSocketConnected(false);
-    setError('Connection lost. Trying to reconnect...');
-    if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
-      const expTime = getTokenExpiration(token);
-      if (expTime && expTime > Date.now() + 60 * 1000) {
-        console.warn('Token still valid, delaying action');
-        return;
-      }
-      console.error('Invalid or missing token');
-      setError('Session expired. Please log in again.');
-     
-    }
-  };
 
   const handleReconnect = () => {
     console.log('Socket reconnected');
@@ -745,7 +730,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
                   setCaption('');
                   setFile(null);
                   setAudioFile(null);
-                  setError('');
+                  
                 }}
                 className="mt-4 w-full bg-gray-300 dark:bg-gray-600 text-gray-900 dark:text-gray-100 p-3 rounded-lg hover:bg-gray-400 dark:hover:bg-gray-500 transition duration-200 focus:outline-none focus:ring-2 focus:ring-gray-500"
                 aria-label="Cancel post"
