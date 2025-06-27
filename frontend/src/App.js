@@ -187,29 +187,55 @@ const App = () => {
   const maxReconnectAttempts = 5;
   const maxDelay = 30000; // 30 seconds
 
-  // Restore auth state from localStorage on mount without clearing token
+  // Initialize and validate auth state from localStorage
   useEffect(() => {
-    const storedToken = localStorage.getItem('token');
-    const storedUserId = localStorage.getItem('userId');
-    const storedRole = localStorage.getItem('role');
-    const storedPhoto = localStorage.getItem('photo');
-    const storedVirtualNumber = localStorage.getItem('virtualNumber');
-    const storedUsername = localStorage.getItem('username');
-    const storedPrivateKey = localStorage.getItem('privateKey');
+    const initializeAuth = async () => {
+      const storedToken = localStorage.getItem('token');
+      const storedUserId = localStorage.getItem('userId');
+      const storedRole = localStorage.getItem('role');
+      const storedPhoto = localStorage.getItem('photo');
+      const storedVirtualNumber = localStorage.getItem('virtualNumber');
+      const storedUsername = localStorage.getItem('username');
+      const storedPrivateKey = localStorage.getItem('privateKey');
 
-    if (storedToken && storedUserId) {
-      dispatch(setAuth({
-        token: storedToken,
-        userId: storedUserId,
-        role: Number(storedRole) || 0,
-        photo: storedPhoto || 'https://via.placeholder.com/64',
-        virtualNumber: storedVirtualNumber || null,
-        username: storedUsername || null,
-        privateKey: storedPrivateKey || null,
-      }));
-    }
-    setIsAuthLoaded(true);
-  }, [dispatch]);
+      if (storedToken && storedUserId) {
+        const expTime = getTokenExpiration(storedToken);
+        if (expTime && expTime < Date.now()) {
+          console.warn('Stored token is expired, attempting refresh');
+          const newToken = await refreshToken(storedToken, storedUserId);
+          if (!newToken) {
+            clearLocalStorage();
+            dispatch(clearAuth());
+            setIsAuthLoaded(true);
+            navigate('/login', { replace: true });
+            return;
+          }
+        } else {
+          dispatch(setAuth({
+            token: storedToken,
+            userId: storedUserId,
+            role: Number(storedRole) || 0,
+            photo: storedPhoto || 'https://via.placeholder.com/64',
+            virtualNumber: storedVirtualNumber || null,
+            username: storedUsername || null,
+            privateKey: storedPrivateKey || null,
+          }));
+        }
+      }
+      setIsAuthLoaded(true);
+    };
+
+    initializeAuth();
+  }, [dispatch, navigate]);
+
+  // Clear sensitive data from localStorage
+  const clearLocalStorage = useCallback(() => {
+    const sensitiveKeys = [
+      'token', 'userId', 'role', 'photo', 'virtualNumber', 'username', 'privateKey',
+      ...Object.keys(localStorage).filter((key) => key.startsWith('publicKey:') || key.startsWith('queuedMessage:'))
+    ];
+    sensitiveKeys.forEach((key) => localStorage.removeItem(key));
+  }, []);
 
   const handleLogout = useCallback(async () => {
     try {
@@ -218,19 +244,17 @@ const App = () => {
         socketRef.current.disconnect();
         socketRef.current = null;
       }
-      await axios.post(
-        `${BASE_URL}/auth/logout`,
-        {},
-        {
-          headers: { Authorization: `Bearer ${token}` },
-          timeout: 5000,
-        }
-      );
-      Object.keys(localStorage).forEach((key) => {
-        if (key.startsWith('publicKey:') || key.startsWith('queuedMessage:') || ['token', 'userId', 'role', 'photo', 'virtualNumber', 'username', 'privateKey'].includes(key)) {
-          localStorage.removeItem(key);
-        }
-      });
+      if (token) {
+        await axios.post(
+          `${BASE_URL}/auth/logout`,
+          { userId },
+          {
+            headers: { Authorization: `Bearer ${token}` },
+            timeout: 5000,
+          }
+        );
+      }
+      clearLocalStorage();
       dispatch(clearAuth());
       setChatNotifications(0);
       setSocket(null);
@@ -239,33 +263,29 @@ const App = () => {
     } catch (err) {
       console.error('Logout failed:', err.message);
       logClientError('Logout failed', err, userId);
-      Object.keys(localStorage).forEach((key) => {
-        if (key.startsWith('publicKey:') || key.startsWith('queuedMessage:') || ['token', 'userId', 'role', 'photo', 'virtualNumber', 'username', 'privateKey'].includes(key)) {
-          localStorage.removeItem(key);
-        }
-      });
+      clearLocalStorage();
       dispatch(clearAuth());
       setChatNotifications(0);
       setSocket(null);
       setIsNavigating(true);
       navigate('/login', { replace: true });
     }
-  }, [userId, token, navigate, dispatch]);
+  }, [userId, token, navigate, dispatch, clearLocalStorage]);
 
-  const refreshToken = useCallback(async () => {
+  const refreshToken = useCallback(async (currentToken, currentUserId) => {
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
         if (!navigator.onLine) {
           throw new Error('Offline: Cannot refresh token');
         }
-        if (!token || !userId) {
+        if (!currentToken || !currentUserId) {
           throw new Error('Missing token or userId');
         }
         const response = await axios.post(
           `${BASE_URL}/auth/refresh`,
-          { userId },
+          { userId: currentUserId },
           {
-            headers: { Authorization: `Bearer ${token}` },
+            headers: { Authorization: `Bearer ${currentToken}` },
             timeout: 5000,
           }
         );
@@ -290,21 +310,20 @@ const App = () => {
         return newToken;
       } catch (error) {
         console.error(`Token refresh attempt ${attempt} failed: ${error.message}`, error.response?.data);
-        logClientError(`Token refresh failed: ${attempt}`, error, userId);
+        logClientError(`Token refresh failed: ${attempt}`, error, currentUserId);
         if (error.response?.status === 404) {
           console.error('Token refresh endpoint not found. Please check server configuration.');
           setError('Authentication service unavailable. Please log in again.');
-          await handleLogout();
           return null;
         }
         if (attempt < 3 && (error.response?.status === 429 || error.response?.status >= 500 || error.code === 'ECONNABORTED' || !navigator.onLine)) {
           await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * 1000));
           continue;
         }
-        return null; // Don't trigger logout unless explicitly requested
+        return null;
       }
     }
-  }, [dispatch, token, userId, handleLogout]);
+  }, [dispatch]);
 
   useEffect(() => {
     if (isNavigating && location.pathname === '/login') {
@@ -328,9 +347,10 @@ const App = () => {
       const connect = async () => {
         const expTime = getTokenExpiration(token);
         if (expTime && expTime < Date.now() + 60 * 1000) {
-          const newToken = await refreshToken();
+          const newToken = await refreshToken(token, userId);
           if (!newToken) {
             setError('Authentication error, please try again later');
+            await handleLogout();
             return () => {};
           }
         }
@@ -377,9 +397,10 @@ const App = () => {
                 if (ack?.error) {
                   console.error(`Failed to send queued message (attempt ${attempt}): ${ack.error}`);
                   if (ack.error.includes('Unauthorized') && attempt < maxMessageRetries) {
-                    const newToken = await refreshToken();
+                    const newToken = await refreshToken(token, userId);
                     if (!newToken) {
                       setError('Authentication error, please try again later');
+                      await handleLogout();
                       return;
                     }
                     setTimeout(() => sendMessageWithRetry(messageData, attempt + 1), 1000 * attempt);
@@ -424,11 +445,12 @@ const App = () => {
           logClientError('Socket connect error', error, userId);
           if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
             setError('Session expired. Attempting to reconnect...');
-            const newToken = await refreshToken();
-            if (newToken) {
-              connectSocket(attempt + 1);
-            } else {
+            const newToken = await refreshToken(token, userId);
+            if (!newToken) {
               setError('Authentication error, please try again later');
+              await handleLogout();
+            } else {
+              connectSocket(attempt + 1);
             }
           } else if (error.message.includes('xhr poll error') || error.message.includes('timeout')) {
             setError('Server is temporarily unavailable. Retrying...');
@@ -544,15 +566,17 @@ const App = () => {
       try {
         const expTime = getTokenExpiration(token);
         if (expTime && expTime - Date.now() < 5 * 60 * 1000) {
-          const newToken = await refreshToken();
+          const newToken = await refreshToken(token, userId);
           if (!newToken) {
             setError('Authentication error, please try again later');
+            await handleLogout();
           }
         }
       } catch (err) {
         console.error('Token expiration check failed:', err.message);
         logClientError('Token expiration check failed', err, userId);
         setError('Authentication error, please try again later');
+        await handleLogout();
       } finally {
         isRefreshing = false;
       }
@@ -609,7 +633,7 @@ const App = () => {
           ) : (
             <>
               <Route path="/login" element={<LoginScreen />} />
-              <Route path="*" element={<LoginScreen />} />
+              <Route path="*" element={<Navigate to="/login" replace />} />
             </>
           )}
         </Routes>
@@ -696,7 +720,7 @@ const AuthenticatedApp = ({
               />
             }
           />
-          <Route path="/login" element={<LoginScreen />} />
+          <Route path="/login" element={<Navigate to="/feed" replace />} />
           <Route path="*" element={<Navigate to="/feed" replace />} />
         </Routes>
       </div>
