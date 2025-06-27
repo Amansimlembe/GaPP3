@@ -129,7 +129,7 @@ const logClientError = async (message, error, userId = null) => {
         await new Promise((resolve) => setTimeout(resolve, Math.pow(2, i) * 1000));
         continue;
       }
-     
+      console.warn('Failed to log error:', err.message);
     }
   }
 };
@@ -138,7 +138,7 @@ const App = () => {
   const dispatch = useDispatch();
   const navigate = useNavigate();
   const location = useLocation();
-  const { token, userId, role, photo, virtualNumber, username } = useSelector((state) => state.auth);
+  const { token, userId, role, photo, virtualNumber, username, privateKey } = useSelector((state) => state.auth);
   const { selectedChat } = useSelector((state) => state.messages);
   const [chatNotifications, setChatNotifications] = useState(0);
   const [socket, setSocket] = useState(null);
@@ -151,38 +151,89 @@ const App = () => {
   const maxReconnectAttempts = 5;
   const maxDelay = 30000; // 30 seconds
 
-  // Restore auth state from localStorage on mount
-  useEffect(() => {
-    const storedToken = localStorage.getItem('token');
-    const storedUserId = localStorage.getItem('userId');
-    const storedRole = localStorage.getItem('role');
-    const storedPhoto = localStorage.getItem('photo');
-    const storedVirtualNumber = localStorage.getItem('virtualNumber');
-    const storedUsername = localStorage.getItem('username');
+  const getTokenExpiration = useCallback((token) => {
+    try {
+      if (!token || typeof token !== 'string' || !token.includes('.')) {
+        console.warn('Invalid token format');
+        return null;
+      }
+      const base64Url = token.split('.')[1];
+      if (!base64Url) {
+        console.warn('Invalid JWT payload');
+        return null;
+      }
+      const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+      const jsonPayload = decodeURIComponent(
+        atob(base64)
+          .split('')
+          .map((c) => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
+          .join('')
+      );
+      const decoded = JSON.parse(jsonPayload);
+      if (!decoded.exp || isNaN(decoded.exp)) {
+        console.warn('Invalid token expiration');
+        return null;
+      }
+      return decoded.exp * 1000;
+    } catch (error) {
+      console.error('Error decoding token:', error.message);
+      return null;
+    }
+  }, []);
 
-    if (storedToken && storedUserId && location.pathname !== '/login') {
-      const expTime = getTokenExpiration(storedToken);
-      if (expTime && expTime > Date.now()) {
+  const refreshToken = useCallback(async () => {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        if (!navigator.onLine) {
+          throw new Error('Offline: Cannot refresh token');
+        }
+        if (!token || !userId) {
+          throw new Error('Missing token or userId');
+        }
+        const response = await axios.post(
+          `${BASE_URL}/auth/token`,
+          { userId },
+          {
+            headers: { Authorization: `Bearer ${token}` },
+            timeout: 5000,
+          }
+        );
+        console.log('Token refresh response:', response.data); // Debug logging
+        const { token: newToken, userId: newUserId, role: newRole, virtualNumber, username, photo, privateKey } = response.data;
         dispatch(setAuth({
-          token: storedToken,
-          userId: storedUserId,
-          role: Number(storedRole) || 0,
-          photo: storedPhoto || 'https://via.placeholder.com/64',
-          virtualNumber: storedVirtualNumber || null,
-          username: storedUsername || null,
+          token: newToken,
+          userId: newUserId,
+          role: Number(newRole) || 0,
+          photo: photo || 'https://via.placeholder.com/64',
+          virtualNumber: virtualNumber || null,
+          username: username || null,
+          privateKey: privateKey || null,
         }));
-      } else {
-        localStorage.removeItem('token');
-        localStorage.removeItem('userId');
-        localStorage.removeItem('role');
-        localStorage.removeItem('photo');
-        localStorage.removeItem('virtualNumber');
-        localStorage.removeItem('username');
-        setIsNavigating(true);
-        navigate('/login', { replace: true });
+        localStorage.setItem('token', newToken);
+        localStorage.setItem('userId', newUserId);
+        localStorage.setItem('role', newRole || '0');
+        localStorage.setItem('photo', photo || 'https://via.placeholder.com/64');
+        localStorage.setItem('virtualNumber', virtualNumber || '');
+        localStorage.setItem('username', username || '');
+        localStorage.setItem('privateKey', privateKey || '');
+        return newToken;
+      } catch (error) {
+        console.error(`Token refresh attempt ${attempt} failed: ${error.message}`);
+        logClientError(`Token refresh failed: ${attempt}`, error, userId);
+        if (attempt < 3 && (error.response?.status === 429 || error.response?.status >= 500 || error.code === 'ECONNABORTED' || !navigator.onLine)) {
+          await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * 1000));
+          continue;
+        }
+        const expTime = getTokenExpiration(token);
+        if (expTime && expTime > Date.now() + 60 * 1000) {
+          console.warn('Token still valid, skipping logout');
+          return token;
+        }
+        await handleLogout();
+        return null;
       }
     }
-  }, [dispatch, navigate, location.pathname]);
+  }, [dispatch, token, userId, handleLogout]);
 
   const handleLogout = useCallback(async () => {
     try {
@@ -199,19 +250,13 @@ const App = () => {
           timeout: 5000,
         }
       );
-      // Clear all cached public keys
       Object.keys(localStorage).forEach((key) => {
-        if (key.startsWith('publicKey:')) {
+        if (key.startsWith('publicKey:') || ['token', 'userId', 'role', 'photo', 'virtualNumber', 'username', 'privateKey'].includes(key)) {
           localStorage.removeItem(key);
         }
       });
-      localStorage.removeItem('token');
-      localStorage.removeItem('userId');
-      localStorage.removeItem('role');
-      localStorage.removeItem('photo');
-      localStorage.removeItem('virtualNumber');
-      localStorage.removeItem('username');
-      dispatch(clearAuth()); // Clears privateKey in Redux store
+      dispatch(clearAuth());
+      dispatch(resetState());
       setChatNotifications(0);
       setSocket(null);
       setIsNavigating(true);
@@ -219,278 +264,203 @@ const App = () => {
     } catch (err) {
       console.error('Logout failed:', err.message);
       logClientError('Logout failed', err, userId);
-      // Clear all cached public keys
       Object.keys(localStorage).forEach((key) => {
-        if (key.startsWith('publicKey:')) {
+        if (key.startsWith('publicKey:') || ['token', 'userId', 'role', 'photo', 'virtualNumber', 'username', 'privateKey'].includes(key)) {
           localStorage.removeItem(key);
         }
       });
-      localStorage.removeItem('token');
-      localStorage.removeItem('userId');
-      localStorage.removeItem('role');
-      localStorage.removeItem('photo');
-      localStorage.removeItem('virtualNumber');
-      localStorage.removeItem('username');
-      dispatch(clearAuth()); // Clears privateKey in Redux store
+      dispatch(clearAuth());
+      dispatch(resetState());
       setChatNotifications(0);
       setSocket(null);
       setIsNavigating(true);
       navigate('/login', { replace: true });
     }
-  }, [userId, token, navigate, dispatch, logClientError]);
-  
- 
+  }, [userId, token, navigate, dispatch]);
 
-  
+  useEffect(() => {
+    const storedToken = localStorage.getItem('token');
+    const storedUserId = localStorage.getItem('userId');
+    const storedRole = localStorage.getItem('role');
+    const storedPhoto = localStorage.getItem('photo');
+    const storedVirtualNumber = localStorage.getItem('virtualNumber');
+    const storedUsername = localStorage.getItem('username');
+    const storedPrivateKey = localStorage.getItem('privateKey');
 
-
-
-  // In App.js, replace the socket connection useEffect (lines 287–360) with:
-
-useEffect(() => {
-  if (isNavigating && location.pathname === '/login') {
-    setIsNavigating(false);
-    return;
-  }
-
-  if (!token || !userId) {
-    if (location.pathname !== '/login' && !isNavigating) {
-      setIsNavigating(true);
-      navigate('/login', { replace: true });
-    }
-    if (socketRef.current) {
-      socketRef.current.disconnect();
-      socketRef.current = null;
-      setSocket(null);
-    }
-    return;
-  }
-
-  const connectSocket = (attempt = 0) => {
-    if (socketRef.current || !navigator.onLine || attempt > maxReconnectAttempts) {
-      if (attempt > maxReconnectAttempts) {
-        setError('Failed to connect to server after retries');
-        logClientError('Max socket reconnect attempts reached', new Error('Socket connection failed'), userId);
+    if (storedToken && storedUserId && location.pathname !== '/login') {
+      const expTime = getTokenExpiration(storedToken);
+      if (expTime && expTime > Date.now()) {
+        dispatch(setAuth({
+          token: storedToken,
+          userId: storedUserId,
+          role: Number(storedRole) || 0,
+          photo: storedPhoto || 'https://via.placeholder.com/64',
+          virtualNumber: storedVirtualNumber || null,
+          username: storedUsername || null,
+          privateKey: storedPrivateKey || null,
+        }));
+      } else {
+        localStorage.removeItem('token');
+        localStorage.removeItem('userId');
+        localStorage.removeItem('role');
+        localStorage.removeItem('photo');
+        localStorage.removeItem('virtualNumber');
+        localStorage.removeItem('username');
+        localStorage.removeItem('privateKey');
+        setIsNavigating(true);
+        navigate('/login', { replace: true });
       }
+    }
+  }, [dispatch, navigate, location.pathname]);
+
+  useEffect(() => {
+    if (isNavigating && location.pathname === '/login') {
+      setIsNavigating(false);
       return;
     }
 
-    const newSocket = io(BASE_URL, {
-      auth: { token, userId },
-      transports: ['websocket'],
-      reconnection: true,
-      reconnectionAttempts: maxReconnectAttempts,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: maxDelay,
-      randomizationFactor: 0.5,
-      timeout: 10000,
-    });
-
-    socketRef.current = newSocket;
-
-    const handleConnect = () => {
-      console.log('Socket connected successfully');
-      newSocket.emit('join', userId);
-      attemptRef.current = 0;
-      setError(null);
-      setSocket(newSocket);
-    };
-
-    const handleConnectError = async (error) => {
-      console.error('Socket connect error:', error.message);
-      logClientError('Socket connect error', error, userId);
-      if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
-        // Delay logout to allow token refresh
-        setTimeout(async () => {
-          if (!isNavigating && attemptRef.current <= maxReconnectAttempts) {
-            const newToken = await refreshToken();
-            if (newToken) {
-              connectSocket(attempt + 1); // Retry with new token
-            } else {
-              setError('Authentication error, logging out');
-              await handleLogout();
-            }
-          }
-        }, 2000);
-      } else {
-        setError('Connecting to server...');
-        attemptRef.current = attempt + 1;
-        setTimeout(() => connectSocket(attempt + 1), Math.pow(2, attempt) * 1000);
+    if (!token || !userId) {
+      if (location.pathname !== '/login' && !isNavigating) {
+        setIsNavigating(true);
+        navigate('/login', { replace: true });
       }
-    };
-
-    const handleDisconnect = (reason) => {
-      console.warn('Socket disconnected:', reason);
-      logClientError(`Socket disconnected: ${reason}`, new Error(reason), userId);
-      if (reason === 'io server disconnect' || reason === 'transport close' || reason === 'ping timeout') {
-        if (navigator.onLine) {
-          console.log(`Attempting to reconnect (attempt ${attemptRef.current + 1}/${maxReconnectAttempts})`);
-        } else {
-          setError('Offline: Messages will be sent when reconnected');
-        }
-      }
-      setSocket(null);
-    };
-
-    const handleMessage = (msg) => {
-      if (!msg.senderId || !msg.recipientId) {
-        console.warn('Invalid message payload:', msg);
-        return;
-      }
-      if (msg.recipientId === userId && (!selectedChat || selectedChat !== msg.senderId)) {
-        setChatNotifications((prev) => prev + 1);
-      }
-    };
-
-    const handleNewContact = (contactData) => {
-      if (!contactData?.id) {
-        console.warn('Invalid contact data:', contactData);
-        return;
-      }
-    };
-
-    newSocket.on('connect', handleConnect);
-    newSocket.on('connect_error', handleConnectError);
-    newSocket.on('disconnect', handleDisconnect);
-    newSocket.on('message', handleMessage);
-    newSocket.on('newContact', handleNewContact);
-
-    const handleOnline = () => {
-      if (!socketRef.current || !socketRef.current.connected) {
-        console.log('Network online, attempting to reconnect socket');
-        newSocket.connect();
-      }
-    };
-
-    const handleOffline = () => {
-      console.warn('Offline: Socket disconnected');
-      setError('Offline: Messages will be sent when reconnected');
       if (socketRef.current) {
         socketRef.current.disconnect();
         socketRef.current = null;
         setSocket(null);
       }
-    };
+      return;
+    }
 
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-
-    return () => {
-      newSocket.emit('leave', userId);
-      newSocket.off('connect', handleConnect);
-      newSocket.off('connect_error', handleConnectError);
-      newSocket.off('disconnect', handleDisconnect);
-      newSocket.off('message', handleMessage);
-      newSocket.off('newContact', handleNewContact);
-      newSocket.disconnect();
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
-      socketRef.current = null;
-      setSocket(null);
-    };
-  };
-
-  const cleanup = connectSocket(0);
-
-  return () => {
-    if (cleanup) cleanup();
-  };
-}, [token, userId, location.pathname, handleLogout, navigate, logClientError, selectedChat, refreshToken]);
-
-// Modify refreshToken function (lines 254–286) to improve reliability:
-
-const refreshToken = useCallback(async () => {
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      if (!navigator.onLine) {
-        throw new Error('Offline: Cannot refresh token');
-      }
-      if (!token || !userId) {
-        throw new Error('Missing token or userId');
-      }
-      const response = await axios.post(
-        `${BASE_URL}/auth/token`,
-        { userId },
-        {
-          headers: { Authorization: `Bearer ${token}` },
-          timeout: 5000,
+    const connectSocket = (attempt = 0) => {
+      if (socketRef.current || !navigator.onLine || attempt > maxReconnectAttempts) {
+        if (attempt > maxReconnectAttempts) {
+          setError('Failed to connect to server after retries');
+          logClientError('Max socket reconnect attempts reached', new Error('Socket connection failed'), userId);
         }
-      );
-      const { token: newToken, userId: newUserId, role: newRole, virtualNumber, username, photo, privateKey } = response.data;
-      dispatch(setAuth({
-        token: newToken,
-        userId: newUserId,
-        role: Number(newRole) || 0,
-        photo: photo || 'https://via.placeholder.com/64',
-        virtualNumber: virtualNumber || null,
-        username: username || null,
-        privateKey: privateKey || null,
-      }));
-      localStorage.setItem('token', newToken);
-      localStorage.setItem('userId', newUserId);
-      localStorage.setItem('role', newRole || '0');
-      localStorage.setItem('photo', photo || 'https://via.placeholder.com/64');
-      localStorage.setItem('virtualNumber', virtualNumber || '');
-      localStorage.setItem('username', username || '');
-      return newToken;
-    } catch (error) {
-      console.error(`Token refresh attempt ${attempt} failed: ${error.message}`);
-      logClientError(`Token refresh failed: ${attempt}`, error, userId);
-      if (attempt < 3 && (error.response?.status === 429 || error.response?.status >= 500 || error.code === 'ECONNABORTED' || !navigator.onLine)) {
-        await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * 1000));
-        continue;
+        return;
       }
-      // Avoid immediate logout if token is still valid
-      const expTime = getTokenExpiration(token);
-      if (expTime && expTime > Date.now() + 60 * 1000) {
-        console.warn('Token still valid, skipping logout');
-        return token;
-      }
-      await handleLogout();
-      return null;
-    }
-  }
-}, [dispatch, token, userId, handleLogout]);
 
-// Modify getTokenExpiration (lines 104–123) to add stricter validation:
+      const newSocket = io(BASE_URL, {
+        auth: { token, userId },
+        transports: ['websocket'],
+        reconnection: true,
+        reconnectionAttempts: maxReconnectAttempts,
+        reconnectionDelay: 1000,
+        reconnectionDelayMax: maxDelay,
+        randomizationFactor: 0.5,
+        timeout: 10000,
+      });
 
-const getTokenExpiration = (token) => {
-  try {
-    if (!token || typeof token !== 'string' || !token.includes('.')) {
-      console.warn('Invalid token format');
-      return null;
-    }
-    const base64Url = token.split('.')[1];
-    if (!base64Url) {
-      console.warn('Invalid JWT payload');
-      return null;
-    }
-    const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
-    const jsonPayload = decodeURIComponent(
-      atob(base64)
-        .split('')
-        .map((c) => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
-        .join('')
-    );
-    const decoded = JSON.parse(jsonPayload);
-    if (!decoded.exp || isNaN(decoded.exp)) {
-      console.warn('Invalid token expiration');
-      return null;
-    }
-    return decoded.exp * 1000;
-  } catch (error) {
-    console.error('Error decoding token:', error.message);
-    return null;
-  }
-};
+      socketRef.current = newSocket;
 
+      const handleConnect = () => {
+        console.log('Socket connected successfully');
+        newSocket.emit('join', userId);
+        attemptRef.current = 0;
+        setError(null);
+        setSocket(newSocket);
+      };
 
+      const handleConnectError = async (error) => {
+        console.error('Socket connect error:', error.message);
+        logClientError('Socket connect error', error, userId);
+        if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
+          setTimeout(async () => {
+            if (!isNavigating && attemptRef.current <= maxReconnectAttempts) {
+              const newToken = await refreshToken();
+              if (newToken) {
+                connectSocket(attempt + 1);
+              } else {
+                setError('Authentication error, logging out');
+                await handleLogout();
+              }
+            }
+          }, 2000);
+        } else {
+          setError('Connecting to server...');
+          attemptRef.current = attempt + 1;
+          setTimeout(() => connectSocket(attempt + 1), Math.pow(2, attempt) * 1000);
+        }
+      };
 
+      const handleDisconnect = (reason) => {
+        console.warn('Socket disconnected:', reason);
+        logClientError(`Socket disconnected: ${reason}`, new Error(reason), userId);
+        if (reason === 'io server disconnect' || reason === 'transport close' || reason === 'ping timeout') {
+          if (navigator.onLine) {
+            console.log(`Attempting to reconnect (attempt ${attemptRef.current + 1}/${maxReconnectAttempts})`);
+          } else {
+            setError('Offline: Messages will be sent when reconnected');
+          }
+        }
+        setSocket(null);
+      };
 
+      const handleMessage = (msg) => {
+        if (!msg.senderId || !msg.recipientId) {
+          console.warn('Invalid message payload:', msg);
+          return;
+        }
+        if (msg.recipientId === userId && (!selectedChat || selectedChat !== msg.senderId)) {
+          setChatNotifications((prev) => prev + 1);
+        }
+      };
 
+      const handleNewContact = (contactData) => {
+        if (!contactData?.id) {
+          console.warn('Invalid contact data:', contactData);
+          return;
+        }
+        // Dispatch action to update chatList if needed
+      };
 
+      newSocket.on('connect', handleConnect);
+      newSocket.on('connect_error', handleConnectError);
+      newSocket.on('disconnect', handleDisconnect);
+      newSocket.on('message', handleMessage);
+      newSocket.on('newContact', handleNewContact);
 
+      const handleOnline = () => {
+        if (!socketRef.current || !socketRef.current.connected) {
+          console.log('Network online, attempting to reconnect socket');
+          newSocket.connect();
+        }
+      };
 
+      const handleOffline = () => {
+        console.warn('Offline: Socket disconnected');
+        setError('Offline: Messages will be sent when reconnected');
+        if (socketRef.current) {
+          socketRef.current.disconnect();
+          socketRef.current = null;
+          setSocket(null);
+        }
+      };
+
+      window.addEventListener('online', handleOnline);
+      window.addEventListener('offline', handleOffline);
+
+      return () => {
+        newSocket.emit('leave', userId);
+        newSocket.off('connect', handleConnect);
+        newSocket.off('connect_error', handleConnectError);
+        newSocket.off('disconnect', handleDisconnect);
+        newSocket.off('message', handleMessage);
+        newSocket.off('newContact', handleNewContact);
+        newSocket.disconnect();
+        window.removeEventListener('online', handleOnline);
+        window.removeEventListener('offline', handleOffline);
+        socketRef.current = null;
+        setSocket(null);
+      };
+    };
+
+    const cleanup = connectSocket(0);
+    return () => {
+      if (cleanup) cleanup();
+    };
+  }, [token, userId, location.pathname, navigate, dispatch]);
 
   useEffect(() => {
     if (!token || !userId) return;
@@ -517,14 +487,12 @@ const getTokenExpiration = (token) => {
     checkTokenExpiration();
     const interval = setInterval(checkTokenExpiration, 1 * 60 * 1000);
     return () => clearInterval(interval);
-  }, [token, userId, refreshToken, handleLogout]);
+  }, [token, userId, refreshToken, handleLogout, dispatch]);
 
   const handleChatNavigation = useCallback(() => {
-    
     setChatNotifications(0);
     dispatch(setSelectedChat(null));
   }, [dispatch]);
-
 
   return (
     <ErrorBoundary userId={userId} location={location}>
@@ -579,15 +547,6 @@ const AuthenticatedApp = ({
   const dispatch = useDispatch();
   const { selectedChat } = useSelector((state) => state.messages);
   const isChatRouteWithSelectedChat = location.pathname === '/chat' && selectedChat;
-
-  useEffect(() => {
-   
-  }, [location.pathname]);
-
-  if (!location || !dispatch) {
-    console.error('AuthenticatedApp: Missing location or dispatch');
-    return null;
-  }
 
   return (
     <div className="min-h-screen flex flex-col h-screen bg-gray-100">
@@ -721,7 +680,7 @@ AuthenticatedApp.propTypes = {
   virtualNumber: PropTypes.string,
   username: PropTypes.string,
   chatNotifications: PropTypes.number.isRequired,
-  socket: PropTypes.object, // Remove .isRequired
+  socket: PropTypes.object,
   handleChatNavigation: PropTypes.func.isRequired,
   handleLogout: PropTypes.func.isRequired,
 };
