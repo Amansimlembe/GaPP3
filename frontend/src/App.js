@@ -600,7 +600,18 @@ const App = () => {
 
   return (
     <ErrorBoundary userId={userId} location={location}>
-    
+      {error && (
+        <div className="fixed top-4 left-1/2 transform -translate-x-1/2 bg-red-500 text-white p-4 rounded-lg shadow-lg z-50 max-w-md w-full">
+          <p className="text-sm">{error}</p>
+          <button
+            className="bg-white text-red-500 px-3 py-1 mt-2 rounded hover:bg-gray-200 focus:outline-none focus:ring-2 focus:ring-white"
+            onClick={() => setError(null)}
+            aria-label="Dismiss error"
+          >
+            OK
+          </button>
+        </div>
+      )}
       {token && userId ? (
         <AuthenticatedApp
           token={token}
