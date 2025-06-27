@@ -34,20 +34,27 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
   const isFetchingFeedRef = useRef(false);
   const [likeAnimation, setLikeAnimation] = useState(null);
 
- const retryOperation = async (operation, maxRetries = 3, baseDelay = 1000) => {
+  const retryOperation = async (operation, maxRetries = 3, baseDelay = 1000) => {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      if (!navigator.onLine) {
-        console.warn('Offline, cannot perform operation');
-        return null;
-      }
-      const result = await operation();
-      if (result) return result;
-      if (attempt < maxRetries) {
+      try {
+        if (!navigator.onLine) throw new Error('Offline');
+        return await operation();
+      } catch (err) {
+        console.error(`Retry attempt ${attempt} failed:`, err.response?.data || err.message);
+        if (err.response?.status === 401 || err.message === 'Unauthorized') {
+          console.error('Authentication error: Session expired.');
+          setError('Session expired. Please log in again.');
+          throw new Error('Unauthorized');
+        }
+        if (err.response?.status === 429) {
+          setError(err.response.data.message || 'Too many requests, please try again later');
+          return null;
+        }
+        if (attempt === maxRetries) throw err;
         const delay = Math.pow(2, attempt) * baseDelay;
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
     }
-    return null;
   };
 
   const loadFromCache = useCallback(() => {
@@ -416,7 +423,6 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
   const expTime = getTokenExpiration(token);
   if (expTime && expTime < Date.now() + 60 * 1000) {
     setError('Session expired. Please log in again.');
-    await onLogout();
     return;
   }
 
@@ -751,17 +757,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
         )}
       </AnimatePresence>
 
-      {error && (
-        <motion.div
-          initial={{ opacity: 0, y: -20 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0 }}
-          className="text-red-500 text-center py-3 z-10 fixed top-0 w-full bg-gray-100 dark:bg-gray-900 bg-opacity-75 md:max-w-[600px] md:mx-auto"
-          role="alert"
-        >
-          {error}
-        </motion.div>
-      )}
+    
 
       {refreshing && (
         <div className="fixed top-4 left-0 right-0 text-center text-gray-900 dark:text-gray-100 z-10">
