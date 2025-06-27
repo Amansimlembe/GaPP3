@@ -378,7 +378,10 @@ const fetchContactPublicKeys = useCallback(async () => {
   );
   fetchChatList.cancel = () => debounce.cancel();
 
-// Update useEffect for initialization
+
+
+// In ChatScreen.js, modify useEffect for initialization (lines ~400–450):
+
 useEffect(() => {
   isMountedRef.current = true;
   if (!token || !userId) {
@@ -395,7 +398,6 @@ useEffect(() => {
     fetchChatList();
   }
 
-  // Fetch public keys for all contacts after login
   fetchContactPublicKeys();
 
   const handleSocketConnect = () => {
@@ -406,16 +408,22 @@ useEffect(() => {
 
   const handleSocketDisconnect = (reason) => {
     console.warn('Socket disconnected:', reason);
-    setTimeout(() => {
-      if (isMountedRef.current && socket && !socket.connected) {
-        socket.connect();
-      }
-    }, 1000);
+    setFetchError('Connection lost. Trying to reconnect...');
+  };
+
+  const handleSocketConnectError = (err) => {
+    console.error('Socket connect error:', err.message);
+    if (err.message.includes('invalid token') || err.message.includes('No token provided')) {
+      setTimeout(() => onLogout(), 3000); // Delay logout to allow token refresh
+    } else {
+      setFetchError('Connection lost. Trying to reconnect...');
+    }
   };
 
   if (socket) {
     socket.on('connect', handleSocketConnect);
     socket.on('disconnect', handleSocketDisconnect);
+    socket.on('connect_error', handleSocketConnectError);
     if (socket.connected) {
       socket.emit('join', userId);
     }
@@ -437,10 +445,14 @@ useEffect(() => {
     if (socket) {
       socket.off('connect', handleSocketConnect);
       socket.off('disconnect', handleSocketDisconnect);
+      socket.off('connect_error', handleSocketConnectError);
     }
     window.removeEventListener('offline', handleOffline);
   };
 }, [token, userId, socket, navigate, fetchChatList, chatList, chatListTimestamp, fetchContactPublicKeys]);
+
+
+
 
 
 

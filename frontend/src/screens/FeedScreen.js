@@ -37,9 +37,12 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
       } catch (err) {
         console.error(`Retry attempt ${attempt} failed:`, err.response?.data || err.message);
         if (err.response?.status === 401 || err.message === 'Unauthorized') {
-          setError('Unauthorized. Please log in again.');
-          onLogout();
-          throw new Error('Unauthorized');
+          setError('Session expired. Attempting to reconnect...');
+          // Delay logout to allow token refresh
+          if (attempt === maxRetries) {
+            setTimeout(() => onLogout(), 3000);
+            throw new Error('Unauthorized');
+          }
         }
         if (err.response?.status === 429) {
           setError(err.response.data.message || 'Too many requests, please try again later');
@@ -129,7 +132,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
           error.message === 'Offline'
             ? 'You are offline'
             : error.message === 'Unauthorized'
-            ? 'Unauthorized. Please log in again.'
+            ? 'Session expired. Attempting to reconnect...'
             : 'Failed to load feed'
         );
       } finally {
@@ -138,17 +141,60 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
         setRefreshing(false);
       }
     }, 300),
-    [token, userId, hasMore, onLogout]
+    [token, userId, hasMore]
   );
+
+  const getTokenExpiration = useCallback((token) => {
+    try {
+      if (!token || typeof token !== 'string' || !token.includes('.')) {
+        console.warn('Invalid token format');
+        return null;
+      }
+      const base64Url = token.split('.')[1];
+      if (!base64Url) {
+        console.warn('Invalid JWT payload');
+        return null;
+      }
+      const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+      const jsonPayload = decodeURIComponent(
+        atob(base64)
+          .split('')
+          .map((c) => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
+          .join('')
+      );
+      const decoded = JSON.parse(jsonPayload);
+      if (!decoded.exp || isNaN(decoded.exp)) {
+        console.warn('Invalid token expiration');
+        return null;
+      }
+      return decoded.exp * 1000;
+    } catch (error) {
+      console.error('Error decoding token:', error.message);
+      return null;
+    }
+  }, []);
 
   useEffect(() => {
     if (!token || !userId || !socket) {
+      setError('Authentication required. Please log in again.');
       onLogout();
       return;
     }
 
+    // Check token validity
+    const expTime = getTokenExpiration(token);
+    if (expTime && expTime < Date.now()) {
+      setError('Session expired. Please log in again.');
+      setTimeout(() => onLogout(), 3000);
+      return;
+    }
+
     fetchFeed(1);
-    socket.emit('join', userId);
+
+    // Only emit 'join' if socket is connected
+    if (socket.connected) {
+      socket.emit('join', userId);
+    }
 
     const handleNewPost = (post) => {
       if (!post?.isStory && post?._id) {
@@ -189,16 +235,23 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
     const handleConnectError = (error) => {
       console.error('Socket connect error:', error.message);
       setError('Connection lost. Trying to reconnect...');
-      if (error.message.includes('invalid token')) {
+      if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
+        const expTime = getTokenExpiration(token);
+        if (expTime && expTime > Date.now() + 60 * 1000) {
+          console.warn('Token still valid, delaying logout');
+          return;
+        }
         setError('Session expired. Please log in again.');
-        onLogout();
+        setTimeout(() => onLogout(), 3000); // Delay logout to allow token refresh
       }
     };
 
     const handleReconnect = () => {
       console.log('Socket reconnected');
       setError('');
-      socket.emit('join', userId);
+      if (socket.connected) {
+        socket.emit('join', userId);
+      }
     };
 
     socket.on('newPost', handleNewPost);
@@ -213,9 +266,11 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
       socket.off('postDeleted', handlePostDeleted);
       socket.off('connect_error', handleConnectError);
       socket.off('reconnect', handleReconnect);
-      socket.emit('leave', userId);
+      if (socket.connected) {
+        socket.emit('leave', userId);
+      }
     };
-  }, [token, userId, socket, currentIndex, playingPostId, onLogout, fetchFeed]);
+  }, [token, userId, socket, fetchFeed, getTokenExpiration]);
 
   useEffect(() => {
     localStorage.setItem('feedMuted', muted);
@@ -287,7 +342,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
         error.message === 'Offline'
           ? 'You are offline'
           : error.message === 'Unauthorized'
-          ? 'Unauthorized. Please log in again.'
+          ? 'Session expired. Attempting to reconnect...'
           : error.response?.data?.error || 'Failed to post'
       );
       setUploadProgress(null);
@@ -317,7 +372,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
         error.message === 'Offline'
           ? 'You are offline'
           : error.message === 'Unauthorized'
-          ? 'Unauthorized. Please log in again.'
+          ? 'Session expired. Attempting to reconnect...'
           : 'Failed to like post'
       );
     }
@@ -348,7 +403,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
         error.message === 'Offline'
           ? 'You are offline'
           : error.message === 'Unauthorized'
-          ? 'Unauthorized. Please log in again.'
+          ? 'Session expired. Attempting to reconnect...'
           : 'Failed to comment'
       );
     }
@@ -570,7 +625,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
           role="alert"
         >
           {error}
-          {error.includes('Unauthorized') && (
+          {error.includes('Session expired') && (
             <button
               onClick={onLogout}
               className="ml-2 text-blue-500 underline focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -753,7 +808,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
                   aria-modal="true"
                   aria-labelledby={`comments-${post._id}`}
                 >
-                  <h3 id={`Comments-${post._id}`} className="text-lg font-bold text-blue-600 dark:text-blue-400 mb-2">Comments</h3>
+                  <h3 id={`comments-${post._id}`} className="text-lg font-bold text-blue-600 dark:text-blue-400 mb-2">Comments</h3>
                   {post.comments?.length === 0 ? (
                     <p className="text-gray-500 dark:text-gray-400">No comments yet</p>
                   ) : (
@@ -767,7 +822,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
                         />
                         <p className="text-sm text-gray-700 dark:text-gray-300">
                           <span className="font-semibold text-gray-900 dark:text-gray-100">{c.username || 'Guest'}</span>
-                          <span className="ms-2">{c.comment}</span>
+                          <span className="ml-2">{c.comment}</span>
                         </p>
                       </div>
                     ))
@@ -814,6 +869,7 @@ FeedScreen.propTypes = {
   userId: PropTypes.string.isRequired,
   socket: PropTypes.object.isRequired,
   onLogout: PropTypes.func.isRequired,
+  theme: PropTypes.string,
 };
 
 export default FeedScreen;

@@ -140,69 +140,82 @@ const LoginScreen = () => {
     }
   };
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    setError('');
-    if (!validateForm()) return;
 
-    if (!isLogin) {
-      const locationValid = await checkLocation(selectedCountry);
-      if (!locationValid) return;
-    }
 
-    setLoading(true);
-    try {
-      const data = isLogin
-        ? { email, password }
-        : (() => {
-            const formData = new FormData();
-            formData.append('email', email);
-            formData.append('password', password);
-            formData.append('username', username);
-            formData.append('country', selectedCountry);
-            formData.append('role', '0'); // Changed: Add default role
-            return formData;
-          })();
+  // In LoginScreen.js, modify handleSubmit (lines ~100–150):
 
-      const config = isLogin
-        ? { headers: { 'Content-Type': 'application/json' } }
-        : { headers: { 'Content-Type': 'multipart/form-data' } };
+const handleSubmit = async (e) => {
+  e.preventDefault();
+  setError('');
+  if (!validateForm()) return;
 
-      const response = await retryRequest(data, config);
+  if (!isLogin) {
+    const locationValid = await checkLocation(selectedCountry);
+    if (!locationValid) return;
+  }
 
-      // Changed: Dispatch auth state and navigate
-      await dispatch(setAuth({
-        token: response.token,
-        userId: response.userId,
-        role: response.role,
-        photo: response.photo || 'https://placehold.co/40x40',
-        virtualNumber: response.virtualNumber || '',
-        username: response.username,
-        privateKey: response.privateKey || '',
-      }));
+  setLoading(true);
+  try {
+    const data = isLogin
+      ? { email, password }
+      : (() => {
+          const formData = new FormData();
+          formData.append('email', email);
+          formData.append('password', password);
+          formData.append('username', username);
+          formData.append('country', selectedCountry);
+          formData.append('role', '0');
+          return formData;
+        })();
 
-      navigate('/feed'); // Changed: Navigate to main app
-    } catch (error) {
-      console.error(`${isLogin ? 'Login' : 'Register'} error:`, {
-        status: error.response?.status,
-        data: error.response?.data,
-        message: error.message,
-        stack: error.stack,
-      });
-      const errorMessage =
-        error.message === 'You are offline. Please check your internet connection.'
-          ? 'You are offline. Please check your internet connection.'
-          : error.response?.status === 429
-          ? 'Too many requests, please try again later'
-          : error.response?.data?.error || // Changed: Prioritize backend error
-            error.response?.data?.details ||
-            error.message ||
-            (isLogin ? 'Login failed' : 'Registration failed. Please try again.');
-      setError(errorMessage);
-    } finally {
-      setLoading(false);
-    }
-  };
+    const config = isLogin
+      ? { headers: { 'Content-Type': 'application/json' } }
+      : { headers: { 'Content-Type': 'multipart/form-data' } };
+
+    const response = await retryRequest(data, config);
+
+    // Persist auth data to localStorage
+    localStorage.setItem('token', response.token);
+    localStorage.setItem('userId', response.userId);
+    localStorage.setItem('role', response.role || '0');
+    localStorage.setItem('photo', response.photo || 'https://placehold.co/40x40');
+    localStorage.setItem('virtualNumber', response.virtualNumber || '');
+    localStorage.setItem('username', response.username || '');
+
+    await dispatch(setAuth({
+      token: response.token,
+      userId: response.userId,
+      role: response.role,
+      photo: response.photo || 'https://placehold.co/40x40',
+      virtualNumber: response.virtualNumber || '',
+      username: response.username,
+      privateKey: response.privateKey || '',
+    }));
+
+    navigate('/feed');
+  } catch (error) {
+    console.error(`${isLogin ? 'Login' : 'Register'} error:`, {
+      status: error.response?.status,
+      data: error.response?.data,
+      message: error.message,
+      stack: error.stack,
+    });
+    const errorMessage =
+      error.message === 'You are offline. Please check your internet connection.'
+        ? 'You are offline. Please check your internet connection.'
+        : error.response?.status === 429
+        ? 'Too many requests, please try again later'
+        : error.response?.data?.error ||
+          error.response?.data?.details ||
+          error.message ||
+          (isLogin ? 'Login failed' : 'Registration failed. Please try again.');
+    setError(errorMessage);
+  } finally {
+    setLoading(false);
+  }
+};
+
+
 
   const resetInputs = useCallback(() => {
     setEmail('');

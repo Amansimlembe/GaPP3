@@ -41,19 +41,15 @@ const ProfileScreen = ({ token, userId, socket, username: initialUsername, virtu
   };
 
 
-  useEffect(() => {
+
+useEffect(() => {
   if (!token || !userId) {
     setError('Authentication required. Please log in again.');
     onLogout();
     return;
   }
 
-  if (!socket) {
-    setError('Socket connection not available. Some features may be limited.');
-    return;
-  }
-
-  socket.emit('join', userId);
+  socket?.emit('join', userId);
 
   const fetchMyPosts = async () => {
     setLoading(true);
@@ -66,7 +62,7 @@ const ProfileScreen = ({ token, userId, socket, username: initialUsername, virtu
     } catch (error) {
       setError(`Failed to load posts: ${error.response?.data?.error || error.message}`);
       if (error.response?.status === 401) {
-        onLogout();
+        setTimeout(() => onLogout(), 3000); // Delay logout
       }
     } finally {
       setLoading(false);
@@ -75,29 +71,36 @@ const ProfileScreen = ({ token, userId, socket, username: initialUsername, virtu
 
   fetchMyPosts();
 
-  socket.on('postDeleted', (postId) => {
+  const handlePostDeleted = (postId) => {
     setMyPosts((prev) => prev.filter((p) => p._id !== postId));
-  });
+  };
 
-  socket.on('onlineStatus', ({ userId: updatedUserId, status, lastSeen }) => {
+  const handleOnlineStatus = ({ userId: updatedUserId, status, lastSeen }) => {
     if (updatedUserId === userId) {
       console.log(`User ${userId} is now ${status}, last seen: ${lastSeen}`);
     }
-  });
+  };
 
-  socket.on('connect_error', (err) => {
+  const handleConnectError = (err) => {
     console.error('Socket connection error:', err.message);
     setError('Connection lost. Trying to reconnect...');
-  });
+  };
+
+  if (socket) {
+    socket.on('postDeleted', handlePostDeleted);
+    socket.on('onlineStatus', handleOnlineStatus);
+    socket.on('connect_error', handleConnectError);
+  }
 
   return () => {
-    socket.off('postDeleted');
-    socket.off('onlineStatus');
-    socket.off('connect_error');
-    socket.emit('leave', userId);
+    if (socket) {
+      socket.off('postDeleted', handlePostDeleted);
+      socket.off('onlineStatus', handleOnlineStatus);
+      socket.off('connect_error', handleConnectError);
+      socket.emit('leave', userId);
+    }
   };
 }, [token, userId, socket, onLogout]);
-
 
 
 

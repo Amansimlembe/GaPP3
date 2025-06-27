@@ -98,32 +98,6 @@ ErrorBoundary.propTypes = {
   children: PropTypes.node.isRequired,
 };
 
-const getTokenExpiration = (token) => {
-  try {
-    if (!token || typeof token !== 'string' || !token.includes('.')) {
-      console.warn('Invalid token format');
-      return null;
-    }
-    const base64Url = token.split('.')[1];
-    if (!base64Url) {
-      console.warn('Invalid JWT payload');
-      return null;
-    }
-    const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
-    const jsonPayload = decodeURIComponent(
-      atob(base64)
-        .split('')
-        .map((c) => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
-        .join('')
-    );
-    const decoded = JSON.parse(jsonPayload);
-    return decoded.exp ? decoded.exp * 1000 : null;
-  } catch (error) {
-    console.error('Error decoding token:', error.message);
-    return null;
-  }
-};
-
 const errorLogTimestamps = [];
 const maxLogsPerMinute = 5;
 const logClientError = async (message, error, userId = null) => {
@@ -265,60 +239,15 @@ const App = () => {
     }
   }, [userId, token, navigate, dispatch, logClientError]);
   
-  const refreshToken = useCallback(async () => {
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        if (!navigator.onLine) {
-          throw new Error('Offline: Cannot refresh token');
-        }
-        if (!token || !userId) {
-          throw new Error('Missing token or userId');
-        }
-        const response = await axios.post(
-          `${BASE_URL}/auth/token`,
-          { userId },
-          {
-            headers: { Authorization: `Bearer ${token}` },
-            timeout: 5000,
-          }
-        );
-        const { token: newToken, userId: newUserId, role: newRole, emailIds, virtualNumber, username, photo, privateKey } = response.data;
-        dispatch(setAuth({
-          token: newToken,
-          userId: newUserId,
-          role: Number(newRole) || 0,
-          emailIds: emailIds || [],
-          photo: photo || 'https://via.placeholder.com/64',
-          virtualNumber: virtualNumber || null,
-          username: username || null,
-          privateKey: privateKey || null,
-        }));
-        // Persist new auth state to localStorage
-        localStorage.setItem('token', newToken);
-        localStorage.setItem('userId', newUserId);
-        localStorage.setItem('role', newRole || '0');
-        localStorage.setItem('photo', photo || 'https://via.placeholder.com/64');
-        localStorage.setItem('virtualNumber', virtualNumber || '');
-        localStorage.setItem('username', username || '');
-        
-        return newToken;
-      } catch (error) {
-        console.error(`Token refresh attempt ${attempt} failed: ${error.message}`);
-        logClientError(`Token refresh failed: ${attempt}`, error, userId);
-        if (attempt < 3 && (error.response?.status === 429 || error.response?.status >= 500 || error.code === 'ECONNABORTED' || !navigator.onLine)) {
-          await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * 1000));
-          continue;
-        }
-        await handleLogout();
-        return null;
-      }
-    }
-  }, [dispatch, token, userId, handleLogout]);
-
+ 
 
   
 
-  useEffect(() => {
+
+
+  // In App.js, replace the socket connection useEffect (lines 287–360) with:
+
+useEffect(() => {
   if (isNavigating && location.pathname === '/login') {
     setIsNavigating(false);
     return;
@@ -364,17 +293,29 @@ const App = () => {
       newSocket.emit('join', userId);
       attemptRef.current = 0;
       setError(null);
-      setSocket(newSocket); // Update socket state
+      setSocket(newSocket);
     };
 
     const handleConnectError = async (error) => {
       console.error('Socket connect error:', error.message);
       logClientError('Socket connect error', error, userId);
       if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
-        setError('Authentication error, logging out');
-        await handleLogout();
+        // Delay logout to allow token refresh
+        setTimeout(async () => {
+          if (!isNavigating && attemptRef.current <= maxReconnectAttempts) {
+            const newToken = await refreshToken();
+            if (newToken) {
+              connectSocket(attempt + 1); // Retry with new token
+            } else {
+              setError('Authentication error, logging out');
+              await handleLogout();
+            }
+          }
+        }, 2000);
       } else {
         setError('Connecting to server...');
+        attemptRef.current = attempt + 1;
+        setTimeout(() => connectSocket(attempt + 1), Math.pow(2, attempt) * 1000);
       }
     };
 
@@ -388,7 +329,7 @@ const App = () => {
           setError('Offline: Messages will be sent when reconnected');
         }
       }
-      setSocket(null); // Ensure socket is null during disconnection
+      setSocket(null);
     };
 
     const handleMessage = (msg) => {
@@ -454,7 +395,97 @@ const App = () => {
   return () => {
     if (cleanup) cleanup();
   };
-}, [token, userId, location.pathname, handleLogout, navigate, logClientError, selectedChat]);
+}, [token, userId, location.pathname, handleLogout, navigate, logClientError, selectedChat, refreshToken]);
+
+// Modify refreshToken function (lines 254–286) to improve reliability:
+
+const refreshToken = useCallback(async () => {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      if (!navigator.onLine) {
+        throw new Error('Offline: Cannot refresh token');
+      }
+      if (!token || !userId) {
+        throw new Error('Missing token or userId');
+      }
+      const response = await axios.post(
+        `${BASE_URL}/auth/token`,
+        { userId },
+        {
+          headers: { Authorization: `Bearer ${token}` },
+          timeout: 5000,
+        }
+      );
+      const { token: newToken, userId: newUserId, role: newRole, virtualNumber, username, photo, privateKey } = response.data;
+      dispatch(setAuth({
+        token: newToken,
+        userId: newUserId,
+        role: Number(newRole) || 0,
+        photo: photo || 'https://via.placeholder.com/64',
+        virtualNumber: virtualNumber || null,
+        username: username || null,
+        privateKey: privateKey || null,
+      }));
+      localStorage.setItem('token', newToken);
+      localStorage.setItem('userId', newUserId);
+      localStorage.setItem('role', newRole || '0');
+      localStorage.setItem('photo', photo || 'https://via.placeholder.com/64');
+      localStorage.setItem('virtualNumber', virtualNumber || '');
+      localStorage.setItem('username', username || '');
+      return newToken;
+    } catch (error) {
+      console.error(`Token refresh attempt ${attempt} failed: ${error.message}`);
+      logClientError(`Token refresh failed: ${attempt}`, error, userId);
+      if (attempt < 3 && (error.response?.status === 429 || error.response?.status >= 500 || error.code === 'ECONNABORTED' || !navigator.onLine)) {
+        await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * 1000));
+        continue;
+      }
+      // Avoid immediate logout if token is still valid
+      const expTime = getTokenExpiration(token);
+      if (expTime && expTime > Date.now() + 60 * 1000) {
+        console.warn('Token still valid, skipping logout');
+        return token;
+      }
+      await handleLogout();
+      return null;
+    }
+  }
+}, [dispatch, token, userId, handleLogout]);
+
+// Modify getTokenExpiration (lines 104–123) to add stricter validation:
+
+const getTokenExpiration = (token) => {
+  try {
+    if (!token || typeof token !== 'string' || !token.includes('.')) {
+      console.warn('Invalid token format');
+      return null;
+    }
+    const base64Url = token.split('.')[1];
+    if (!base64Url) {
+      console.warn('Invalid JWT payload');
+      return null;
+    }
+    const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+    const jsonPayload = decodeURIComponent(
+      atob(base64)
+        .split('')
+        .map((c) => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
+        .join('')
+    );
+    const decoded = JSON.parse(jsonPayload);
+    if (!decoded.exp || isNaN(decoded.exp)) {
+      console.warn('Invalid token expiration');
+      return null;
+    }
+    return decoded.exp * 1000;
+  } catch (error) {
+    console.error('Error decoding token:', error.message);
+    return null;
+  }
+};
+
+
+
 
 
 

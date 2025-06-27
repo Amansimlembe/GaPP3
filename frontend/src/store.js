@@ -73,10 +73,8 @@ const logClientError = async (message, error, userId = null) => {
 };
 
 
+// In store.js, update authSlice (lines ~60–80):
 
-// In store.js
-
-// Update authSlice to ensure privateKey is cleared
 const authSlice = createSlice({
   name: 'auth',
   initialState: {
@@ -93,7 +91,7 @@ const authSlice = createSlice({
       const { token, userId, role, photo, virtualNumber, username, privateKey } = action.payload;
       state.token = typeof token === 'string' && token ? token : null;
       state.userId = isValidObjectId(userId) ? userId : null;
-      state.role = typeof role === 'string' ? role : null;
+      state.role = typeof role === 'number' || (typeof role === 'string' && !isNaN(role)) ? Number(role) : null;
       state.photo = typeof photo === 'string' ? photo : null;
       state.virtualNumber = typeof virtualNumber === 'string' ? virtualNumber : null;
       state.username = typeof username === 'string' ? username : null;
@@ -111,7 +109,8 @@ const authSlice = createSlice({
   },
 });
 
-// Update loadPersistedState to validate privateKey
+// Update loadPersistedState (lines ~90–150):
+
 const loadPersistedState = async () => {
   try {
     const db = await initDB();
@@ -201,7 +200,7 @@ const loadPersistedState = async () => {
       auth: {
         token: typeof auth.token === 'string' && auth.token ? auth.token : null,
         userId: isValidObjectId(auth.userId) ? auth.userId : null,
-        role: typeof auth.role === 'string' ? auth.role : null,
+        role: typeof auth.role === 'string' || typeof auth.role === 'number' ? Number(auth.role) : null,
         photo: typeof auth.photo === 'string' ? auth.photo : null,
         virtualNumber: typeof auth.virtualNumber === 'string' ? auth.virtualNumber : null,
         username: typeof auth.username === 'string' ? auth.username : null,
@@ -214,9 +213,6 @@ const loadPersistedState = async () => {
     return null;
   }
 };
-
-
-
 
 
 
