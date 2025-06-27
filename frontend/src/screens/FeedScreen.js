@@ -7,8 +7,10 @@ import debounce from 'lodash/debounce';
 import PropTypes from 'prop-types';
 
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
+const CACHE_KEY = 'feed_cache';
+const CACHE_EXPIRY = 5 * 60 * 1000; // 5 minutes
 
-const FeedScreen = ({ token, userId, socket, onAuthError, theme }) => {
+const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
   const [posts, setPosts] = useState([]);
   const [contentType, setContentType] = useState('video');
   const [caption, setCaption] = useState('');
@@ -28,6 +30,7 @@ const FeedScreen = ({ token, userId, socket, onAuthError, theme }) => {
   const feedRef = useRef(null);
   const mediaRefs = useRef({});
   const isFetchingFeedRef = useRef(false);
+  const [likeAnimation, setLikeAnimation] = useState(null);
 
   const retryOperation = async (operation, maxRetries = 3, baseDelay = 1000) => {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -37,8 +40,8 @@ const FeedScreen = ({ token, userId, socket, onAuthError, theme }) => {
       } catch (err) {
         console.error(`Retry attempt ${attempt} failed:`, err.response?.data || err.message);
         if (err.response?.status === 401 || err.message === 'Unauthorized') {
+          console.error('Authentication error: Session expired. Please log in again.');
           setError('Session expired. Please log in again.');
-          onAuthError(); // Notify parent component (App.js) of auth error
           throw new Error('Unauthorized');
         }
         if (err.response?.status === 429) {
@@ -51,6 +54,34 @@ const FeedScreen = ({ token, userId, socket, onAuthError, theme }) => {
       }
     }
   };
+
+  const loadFromCache = useCallback(() => {
+    try {
+      const cached = localStorage.getItem(CACHE_KEY);
+      if (!cached) return null;
+      const { posts, timestamp, page } = JSON.parse(cached);
+      if (!posts || !Array.isArray(posts) || Date.now() - timestamp > CACHE_EXPIRY) {
+        localStorage.removeItem(CACHE_KEY);
+        return null;
+      }
+      return { posts, page };
+    } catch (err) {
+      console.error('Cache load error:', err.message);
+      return null;
+    }
+  }, []);
+
+  const saveToCache = useCallback((posts, page) => {
+    try {
+      localStorage.setItem(CACHE_KEY, JSON.stringify({
+        posts,
+        timestamp: Date.now(),
+        page,
+      }));
+    } catch (err) {
+      console.error('Cache save error:', err.message);
+    }
+  }, []);
 
   const setupIntersectionObserver = useCallback(
     () => {
@@ -71,7 +102,7 @@ const FeedScreen = ({ token, userId, socket, onAuthError, theme }) => {
             }
           });
         },
-        { threshold: 0.6 }
+        { threshold: 0.8 } // Increased for TikTok-like precision
       );
 
       Object.values(mediaRefs.current).forEach((media) => {
@@ -100,9 +131,24 @@ const FeedScreen = ({ token, userId, socket, onAuthError, theme }) => {
       setLoading(true);
       if (isRefresh) setRefreshing(true);
 
+      // Check cache for non-refresh requests
+      if (!isRefresh && pageNum === 1) {
+        const cachedData = loadFromCache();
+        if (cachedData) {
+          setPosts(cachedData.posts);
+          setPage(cachedData.page);
+          setHasMore(true);
+          setLoading(false);
+          setRefreshing(false);
+          isFetchingFeedRef.current = false;
+          setPlayingPostId(cachedData.posts[0]?._id?.toString() || null);
+          return;
+        }
+      }
+
       try {
         const { data } = await retryOperation(() =>
-          axios.get(`${BASE_URL}/social/feed?page=${pageNum}&limit=10`, {
+          axios.get(`${BASE_URL}/feed?page=${pageNum}&limit=10`, {
             headers: { Authorization: `Bearer ${token}` },
             timeout: 5000,
           })
@@ -115,6 +161,7 @@ const FeedScreen = ({ token, userId, socket, onAuthError, theme }) => {
           const uniquePosts = Array.from(
             new Map(newPosts.map((post) => [post._id.toString(), post])).values()
           );
+          if (pageNum === 1 || isRefresh) saveToCache(uniquePosts, pageNum);
           return uniquePosts;
         });
         setHasMore(data.hasMore ?? false);
@@ -138,7 +185,7 @@ const FeedScreen = ({ token, userId, socket, onAuthError, theme }) => {
         setRefreshing(false);
       }
     }, 300),
-    [token, userId, hasMore]
+    [token, userId, hasMore, loadFromCache, saveToCache]
   );
 
   const getTokenExpiration = useCallback((token) => {
@@ -173,22 +220,20 @@ const FeedScreen = ({ token, userId, socket, onAuthError, theme }) => {
 
   useEffect(() => {
     if (!token || !userId || !socket) {
+      console.error('Authentication error: Missing token, userId, or socket');
       setError('Authentication required. Please log in again.');
-      onAuthError(); // Notify parent component instead of calling onLogout
       return;
     }
 
-    // Check token validity
     const expTime = getTokenExpiration(token);
     if (expTime && expTime < Date.now()) {
+      console.error('Authentication error: Token expired');
       setError('Session expired. Please log in again.');
-      onAuthError(); // Notify parent component instead of calling onLogout
       return;
     }
 
     fetchFeed(1);
 
-    // Only emit 'join' if socket is connected
     if (socket.connected) {
       socket.emit('join', userId);
     }
@@ -197,7 +242,9 @@ const FeedScreen = ({ token, userId, socket, onAuthError, theme }) => {
       if (!post?.isStory && post?._id) {
         setPosts((prev) => {
           const newPosts = [post, ...prev];
-          return Array.from(new Map(newPosts.map((p) => [p._id.toString(), p])).values());
+          const uniquePosts = Array.from(new Map(newPosts.map((p) => [p._id.toString(), p])).values());
+          saveToCache(uniquePosts, 1);
+          return uniquePosts;
         });
         setCurrentIndex(0);
       }
@@ -205,9 +252,11 @@ const FeedScreen = ({ token, userId, socket, onAuthError, theme }) => {
 
     const handlePostUpdate = (updatedPost) => {
       if (updatedPost?._id) {
-        setPosts((prev) =>
-          prev.map((p) => (p._id.toString() === updatedPost._id.toString() ? { ...p, ...updatedPost } : p))
-        );
+        setPosts((prev) => {
+          const newPosts = prev.map((p) => (p._id.toString() === updatedPost._id.toString() ? { ...p, ...updatedPost } : p));
+          saveToCache(newPosts, page);
+          return newPosts;
+        });
       }
     };
 
@@ -224,6 +273,7 @@ const FeedScreen = ({ token, userId, socket, onAuthError, theme }) => {
           } else if (playingPostId === postId.toString()) {
             setPlayingPostId(newPosts[currentIndex]?._id?.toString() || null);
           }
+          saveToCache(newPosts, page);
           return newPosts;
         });
       }
@@ -238,8 +288,8 @@ const FeedScreen = ({ token, userId, socket, onAuthError, theme }) => {
           console.warn('Token still valid, delaying action');
           return;
         }
+        console.error('Authentication error: Invalid or missing token');
         setError('Session expired. Please log in again.');
-        onAuthError(); // Notify parent component instead of calling onLogout
       }
     };
 
@@ -262,12 +312,12 @@ const FeedScreen = ({ token, userId, socket, onAuthError, theme }) => {
       socket.off('postUpdate', handlePostUpdate);
       socket.off('postDeleted', handlePostDeleted);
       socket.off('connect_error', handleConnectError);
-      socket.off('reconnect', handleReconnect);
+      socket.on('reconnect', handleReconnect);
       if (socket.connected) {
         socket.emit('leave', userId);
       }
     };
-  }, [token, userId, socket, fetchFeed, getTokenExpiration, onAuthError]);
+  }, [token, userId, socket, fetchFeed, getTokenExpiration, page, saveToCache]);
 
   useEffect(() => {
     localStorage.setItem('feedMuted', muted);
@@ -316,7 +366,7 @@ const FeedScreen = ({ token, userId, socket, onAuthError, theme }) => {
     try {
       setUploadProgress(0);
       const { data } = await retryOperation(() =>
-        axios.post(`${BASE_URL}/social/post`, formData, {
+        axios.post(`${BASE_URL}/feed`, formData, {
           headers: {
             Authorization: `Bearer ${token}`,
             'Content-Type': 'multipart/form-data',
@@ -343,7 +393,7 @@ const FeedScreen = ({ token, userId, socket, onAuthError, theme }) => {
           : error.response?.data?.error || 'Failed to post'
       );
       if (error.message === 'Unauthorized') {
-        onAuthError(); // Notify parent component instead of calling onLogout
+        console.error('Authentication error: Failed to post due to unauthorized access');
       }
       setUploadProgress(null);
     }
@@ -357,7 +407,7 @@ const FeedScreen = ({ token, userId, socket, onAuthError, theme }) => {
       const action = post.likedBy?.map((id) => id.toString()).includes(userId) ? '/unlike' : '/like';
       const { data } = await retryOperation(() =>
         axios.post(
-          `${BASE_URL}/social/post${action}`,
+          `${BASE_URL}/feed${action}`,
           { postId, userId },
           {
             headers: { Authorization: `Bearer ${token}` },
@@ -366,6 +416,8 @@ const FeedScreen = ({ token, userId, socket, onAuthError, theme }) => {
         )
       );
       socket.emit('postUpdate', data);
+      setLikeAnimation(postId);
+      setTimeout(() => setLikeAnimation(null), 1000);
     } catch (error) {
       console.error('Like error:', error.message);
       setError(
@@ -376,7 +428,7 @@ const FeedScreen = ({ token, userId, socket, onAuthError, theme }) => {
           : 'Failed to like post'
       );
       if (error.message === 'Unauthorized') {
-        onAuthError(); // Notify parent component instead of calling onLogout
+        console.error('Authentication error: Failed to like post due to unauthorized access');
       }
     }
   };
@@ -386,7 +438,7 @@ const FeedScreen = ({ token, userId, socket, onAuthError, theme }) => {
     try {
       const { data } = await retryOperation(() =>
         axios.post(
-          `${BASE_URL}/social/post/comment`,
+          `${BASE_URL}/feed/comment`,
           { postId, comment: comment.trim(), userId },
           {
             headers: { Authorization: `Bearer ${token}` },
@@ -410,7 +462,7 @@ const FeedScreen = ({ token, userId, socket, onAuthError, theme }) => {
           : 'Failed to comment'
       );
       if (error.message === 'Unauthorized') {
-        onAuthError(); // Notify parent component instead of calling onLogout
+        console.error('Authentication error: Failed to comment due to unauthorized access');
       }
     }
   };
@@ -455,7 +507,7 @@ const FeedScreen = ({ token, userId, socket, onAuthError, theme }) => {
       if (!showComments && playingPostId) setShowComments(playingPostId);
     },
     trackMouse: false,
-    delta: 50,
+    delta: 30, // Reduced for snappier swipes
     preventScrollOnSwipe: true,
   });
 
@@ -491,7 +543,8 @@ const FeedScreen = ({ token, userId, socket, onAuthError, theme }) => {
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       transition={{ duration: 0.5 }}
-      className={`h-screen overflow-y-auto bg-gray-100 dark:bg-gray-900 snap-y snap-mandatory md:max-w-[600px] md:mx-auto md:rounded-lg md:shadow-lg ${theme === 'dark' ? 'dark' : ''}`}
+      className={`h-screen overflow-y-auto bg-gray-100 dark:bg-gray-900 snap-y snap-mandatory md:max-w-[600px] md:mx-auto md:rounded-lg md:shadow-lg overscroll-y-contain ${theme === 'dark' ? 'dark' : ''}`}
+      style={{ scrollSnapType: 'y mandatory', overscrollBehaviorY: 'contain' }}
     >
       <div className="fixed bottom-20 right-4 z-20">
         <motion.button
@@ -663,6 +716,7 @@ const FeedScreen = ({ token, userId, socket, onAuthError, theme }) => {
             onDoubleClick={() => handleDoubleTap(post._id.toString())}
             role="article"
             aria-labelledby={`post-${post._id}`}
+            style={{ scrollSnapAlign: 'start' }}
           >
             <div className="absolute top-4 left-4 z-10 flex items-center">
               <img
@@ -690,6 +744,7 @@ const FeedScreen = ({ token, userId, socket, onAuthError, theme }) => {
                 data-post-id={post._id.toString()}
                 ref={(el) => (mediaRefs.current[post._id.toString()] = el)}
                 onError={(e) => (e.target.src = 'https://placehold.co/600x400?text=Image+Error')}
+                preload="auto"
               />
             )}
             {post.contentType === 'video' && (
@@ -701,7 +756,7 @@ const FeedScreen = ({ token, userId, socket, onAuthError, theme }) => {
                 loop
                 src={post.content}
                 className="w-full h-full object-cover rounded-md"
-                preload="metadata"
+                preload="auto"
                 poster="https://placehold.co/600x400?text=Video+Loading"
                 onError={() => console.warn('Video load error')}
               />
@@ -713,7 +768,7 @@ const FeedScreen = ({ token, userId, socket, onAuthError, theme }) => {
                 controls
                 src={post.content}
                 className="w-full mt-2 bg-gray-300 dark:bg-gray-700 rounded-full p-2"
-                preload="metadata"
+                preload="auto"
                 onError={() => console.warn('Audio load error')}
               />
             )}
@@ -729,8 +784,22 @@ const FeedScreen = ({ token, userId, socket, onAuthError, theme }) => {
               </a>
             )}
 
+            <AnimatePresence>
+              {likeAnimation === post._id.toString() && (
+                <motion.div
+                  initial={{ scale: 0, opacity: 0 }}
+                  animate={{ scale: 2, opacity: 1 }}
+                  exit={{ scale: 0, opacity: 0 }}
+                  transition={{ duration: 0.5 }}
+                  className="absolute inset-0 flex items-center justify-center"
+                >
+                  <FaHeart className="text-red-500 text-6xl" />
+                </motion.div>
+              )}
+            </AnimatePresence>
+
             <div className="absolute right-4 bottom-20 flex flex-col items-center space-y-6 z-10">
-              <div whileHovering={{ scale: 1.2 }} className="motion-button">
+              <div className="motion-button">
                 <button
                   onClick={() => likePost(post._id.toString())}
                   className="flex flex-col items-center focus:outline-none focus:ring-2 focus:ring-red-400"
@@ -742,7 +811,7 @@ const FeedScreen = ({ token, userId, socket, onAuthError, theme }) => {
                   <span className="text-sm text-gray-900 dark:text-gray-100">{post.likes || 0}</span>
                 </button>
               </div>
-              <div whileHovering={{ scale: 1.2 }} className="motion-button">
+              <div className="motion-button">
                 <button
                   onClick={() => setShowComments(post._id.toString())}
                   className="flex flex-col items-center focus:outline-none focus:ring-2 focus:ring-blue-400"
@@ -752,7 +821,7 @@ const FeedScreen = ({ token, userId, socket, onAuthError, theme }) => {
                   <span className="text-sm text-gray-900 dark:text-gray-100">{post.comments?.length || 0}</span>
                 </button>
               </div>
-              <div whileHovering={{ scale: 1.2 }} className="motion-button">
+              <div className="motion-button">
                 <button
                   onClick={() =>
                     navigator.clipboard
@@ -767,7 +836,7 @@ const FeedScreen = ({ token, userId, socket, onAuthError, theme }) => {
                 </button>
               </div>
               {post.contentType === 'video' && (
-                <div whileHovering={{ scale: 1.2 }} className="motion-button">
+                <div className="motion-button">
                   <button
                     onClick={() => setMuted((prev) => !prev)}
                     className="flex flex-col items-center focus:outline-none focus:ring-2 focus:ring-blue-400"
@@ -865,7 +934,7 @@ FeedScreen.propTypes = {
   token: PropTypes.string.isRequired,
   userId: PropTypes.string.isRequired,
   socket: PropTypes.object.isRequired,
-  onAuthError: PropTypes.func.isRequired,
+  onLogout: PropTypes.func.isRequired,
   theme: PropTypes.string,
 };
 
