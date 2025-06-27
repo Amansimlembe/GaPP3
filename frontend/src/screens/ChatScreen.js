@@ -380,6 +380,8 @@ const fetchContactPublicKeys = useCallback(async () => {
 
 
 
+
+
 // In ChatScreen.js, modify useEffect for initialization (lines ~400–450):
 
 useEffect(() => {
@@ -413,11 +415,7 @@ useEffect(() => {
 
   const handleSocketConnectError = (err) => {
     console.error('Socket connect error:', err.message);
-    if (err.message.includes('invalid token') || err.message.includes('No token provided')) {
-      setTimeout(() => onLogout(), 3000); // Delay logout to allow token refresh
-    } else {
-      setFetchError('Connection lost. Trying to reconnect...');
-    }
+    setFetchError('Connection lost. Trying to reconnect...');
   };
 
   if (socket) {
@@ -450,10 +448,6 @@ useEffect(() => {
     window.removeEventListener('offline', handleOffline);
   };
 }, [token, userId, socket, navigate, fetchChatList, chatList, chatListTimestamp, fetchContactPublicKeys]);
-
-
-
-
 
 
 

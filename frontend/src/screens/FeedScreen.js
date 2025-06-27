@@ -8,7 +8,7 @@ import PropTypes from 'prop-types';
 
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
 
-const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
+const FeedScreen = ({ token, userId, socket, onAuthError, theme }) => {
   const [posts, setPosts] = useState([]);
   const [contentType, setContentType] = useState('video');
   const [caption, setCaption] = useState('');
@@ -37,12 +37,9 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
       } catch (err) {
         console.error(`Retry attempt ${attempt} failed:`, err.response?.data || err.message);
         if (err.response?.status === 401 || err.message === 'Unauthorized') {
-          setError('Session expired. Attempting to reconnect...');
-          // Delay logout to allow token refresh
-          if (attempt === maxRetries) {
-            setTimeout(() => onLogout(), 3000);
-            throw new Error('Unauthorized');
-          }
+          setError('Session expired. Please log in again.');
+          onAuthError(); // Notify parent component (App.js) of auth error
+          throw new Error('Unauthorized');
         }
         if (err.response?.status === 429) {
           setError(err.response.data.message || 'Too many requests, please try again later');
@@ -132,7 +129,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
           error.message === 'Offline'
             ? 'You are offline'
             : error.message === 'Unauthorized'
-            ? 'Session expired. Attempting to reconnect...'
+            ? 'Session expired. Please log in again.'
             : 'Failed to load feed'
         );
       } finally {
@@ -177,7 +174,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
   useEffect(() => {
     if (!token || !userId || !socket) {
       setError('Authentication required. Please log in again.');
-      onLogout();
+      onAuthError(); // Notify parent component instead of calling onLogout
       return;
     }
 
@@ -185,7 +182,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
     const expTime = getTokenExpiration(token);
     if (expTime && expTime < Date.now()) {
       setError('Session expired. Please log in again.');
-      setTimeout(() => onLogout(), 3000);
+      onAuthError(); // Notify parent component instead of calling onLogout
       return;
     }
 
@@ -238,11 +235,11 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
       if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
         const expTime = getTokenExpiration(token);
         if (expTime && expTime > Date.now() + 60 * 1000) {
-          console.warn('Token still valid, delaying logout');
+          console.warn('Token still valid, delaying action');
           return;
         }
         setError('Session expired. Please log in again.');
-        setTimeout(() => onLogout(), 3000); // Delay logout to allow token refresh
+        onAuthError(); // Notify parent component instead of calling onLogout
       }
     };
 
@@ -270,7 +267,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
         socket.emit('leave', userId);
       }
     };
-  }, [token, userId, socket, fetchFeed, getTokenExpiration]);
+  }, [token, userId, socket, fetchFeed, getTokenExpiration, onAuthError]);
 
   useEffect(() => {
     localStorage.setItem('feedMuted', muted);
@@ -342,9 +339,12 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
         error.message === 'Offline'
           ? 'You are offline'
           : error.message === 'Unauthorized'
-          ? 'Session expired. Attempting to reconnect...'
+          ? 'Session expired. Please log in again.'
           : error.response?.data?.error || 'Failed to post'
       );
+      if (error.message === 'Unauthorized') {
+        onAuthError(); // Notify parent component instead of calling onLogout
+      }
       setUploadProgress(null);
     }
   };
@@ -372,9 +372,12 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
         error.message === 'Offline'
           ? 'You are offline'
           : error.message === 'Unauthorized'
-          ? 'Session expired. Attempting to reconnect...'
+          ? 'Session expired. Please log in again.'
           : 'Failed to like post'
       );
+      if (error.message === 'Unauthorized') {
+        onAuthError(); // Notify parent component instead of calling onLogout
+      }
     }
   };
 
@@ -403,9 +406,12 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
         error.message === 'Offline'
           ? 'You are offline'
           : error.message === 'Unauthorized'
-          ? 'Session expired. Attempting to reconnect...'
+          ? 'Session expired. Please log in again.'
           : 'Failed to comment'
       );
+      if (error.message === 'Unauthorized') {
+        onAuthError(); // Notify parent component instead of calling onLogout
+      }
     }
   };
 
@@ -625,15 +631,6 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
           role="alert"
         >
           {error}
-          {error.includes('Session expired') && (
-            <button
-              onClick={onLogout}
-              className="ml-2 text-blue-500 underline focus:outline-none focus:ring-2 focus:ring-blue-500"
-              aria-label="Log in"
-            >
-              Log In
-            </button>
-          )}
         </motion.div>
       )}
 
@@ -868,7 +865,7 @@ FeedScreen.propTypes = {
   token: PropTypes.string.isRequired,
   userId: PropTypes.string.isRequired,
   socket: PropTypes.object.isRequired,
-  onLogout: PropTypes.func.isRequired,
+  onAuthError: PropTypes.func.isRequired,
   theme: PropTypes.string,
 };
 

@@ -61,9 +61,6 @@ useEffect(() => {
       setError('');
     } catch (error) {
       setError(`Failed to load posts: ${error.response?.data?.error || error.message}`);
-      if (error.response?.status === 401) {
-        setTimeout(() => onLogout(), 3000); // Delay logout
-      }
     } finally {
       setLoading(false);
     }
@@ -101,8 +98,6 @@ useEffect(() => {
     }
   };
 }, [token, userId, socket, onLogout]);
-
-
 
 
   
