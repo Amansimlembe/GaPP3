@@ -577,8 +577,7 @@ useEffect(() => {
   );
 
 
-
-// In ChatScreen.js, replace the sendMessage function (lines ~500-550) with:
+// In ChatScreen.js, replace the sendMessage function (lines ~500–550) with:
 
 const sendMessage = useCallback(
   async (retryCount = 0) => {
@@ -638,6 +637,7 @@ const sendMessage = useCallback(
             console.error('Socket message failed:', ack.error);
             dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: clientMessageId, status: 'failed' }));
             logClientError(`Socket message failed: ${ack.error}`, new Error(ack.error));
+            localStorage.setItem(`queuedMessage:${clientMessageId}`, JSON.stringify(messageData)); // Re-queue on failure
             return;
           }
           dispatch(replaceMessage({ recipientId: selectedChat, message: { ...ack.message, plaintextContent }, replaceId: clientMessageId }));
@@ -654,7 +654,7 @@ const sendMessage = useCallback(
         if (isNonTransient || retryCount >= maxMessageRetries) {
           dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: clientMessageId, status: 'failed' }));
           logClientError(`Send message failed after ${retryCount} retries`, err);
-          localStorage.removeItem(`queuedMessage:${clientMessageId}`);
+          localStorage.setItem(`queuedMessage:${clientMessageId}`, JSON.stringify(messageData)); // Re-queue on failure
           return;
         }
         const delay = Math.pow(2, retryCount) * 1000 * (1 + Math.random() * 0.1);

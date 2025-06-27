@@ -14,6 +14,7 @@ import ChatScreen from './screens/ChatScreen';
 import ProfileScreen from './screens/ProfileScreen';
 import CountrySelector from './components/CountrySelector';
 import { setAuth, clearAuth, setSelectedChat } from './store';
+import { replaceMessage, updateMessageStatus } from './store'; // Added for message handling
 
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
 
@@ -21,7 +22,7 @@ class ErrorBoundary extends React.Component {
   state = { hasError: false, error: null, errorInfo: null };
 
   static getDerivedStateFromError(error) {
-    return { hasError: true, error };
+    return { hasError: true, error};
   }
 
   componentDidCatch(error, errorInfo) {
@@ -233,7 +234,7 @@ const App = () => {
         }
       );
       Object.keys(localStorage).forEach((key) => {
-        if (key.startsWith('publicKey:') || ['token', 'userId', 'role', 'photo', 'virtualNumber', 'username', 'privateKey'].includes(key)) {
+        if (key.startsWith('publicKey:') || key.startsWith('queuedMessage:') || ['token', 'userId', 'role', 'photo', 'virtualNumber', 'username', 'privateKey'].includes(key)) {
           localStorage.removeItem(key);
         }
       });
@@ -246,7 +247,7 @@ const App = () => {
       console.error('Logout failed:', err.message);
       logClientError('Logout failed', err, userId);
       Object.keys(localStorage).forEach((key) => {
-        if (key.startsWith('publicKey:') || ['token', 'userId', 'role', 'photo', 'virtualNumber', 'username', 'privateKey'].includes(key)) {
+        if (key.startsWith('publicKey:') || key.startsWith('queuedMessage:') || ['token', 'userId', 'role', 'photo', 'virtualNumber', 'username', 'privateKey'].includes(key)) {
           localStorage.removeItem(key);
         }
       });
@@ -359,6 +360,55 @@ const App = () => {
         attemptRef.current = 0;
         setError(null);
         setSocket(newSocket);
+
+        // Replay queued messages from localStorage
+        const queuedMessages = Object.keys(localStorage)
+          .filter((key) => key.startsWith('queuedMessage:'))
+          .map((key) => JSON.parse(localStorage.getItem(key)));
+        if (queuedMessages.length > 0) {
+          console.log('Replaying queued messages:', queuedMessages.length);
+          queuedMessages.forEach((messageData) => {
+            newSocket.emit('message', {
+              senderId: messageData.senderId,
+              recipientId: messageData.recipientId,
+              content: messageData.content || '',
+              contentType: messageData.contentType || 'text',
+              clientMessageId: messageData.clientMessageId,
+              senderVirtualNumber: messageData.senderVirtualNumber,
+              senderUsername: messageData.senderUsername,
+              senderPhoto: messageData.senderPhoto,
+            }, (ack) => {
+              if (ack?.error) {
+                console.error('Failed to send queued message:', ack.error);
+                dispatch(updateMessageStatus({ 
+                  recipientId: messageData.recipientId, 
+                  messageId: messageData.clientMessageId, 
+                  status: 'failed' 
+                }));
+              } else {
+                dispatch(replaceMessage({ 
+                  recipientId: messageData.recipientId, 
+                  message: { ...ack.message, plaintextContent: messageData.plaintextContent }, 
+                  replaceId: messageData.clientMessageId 
+                }));
+                dispatch(updateMessageStatus({ 
+                  recipientId: messageData.recipientId, 
+                  messageId: ack.message._id, 
+                  status: 'sent' 
+                }));
+                localStorage.removeItem(`queuedMessage:${messageData.clientMessageId}`);
+              }
+            });
+          });
+        }
+
+        // Start client-side ping
+        const pingInterval = setInterval(() => {
+          if (newSocket.connected) {
+            newSocket.emit('ping', { userId });
+            console.log('Ping sent to server');
+          }
+        }, 30000); // Emit ping every 30 seconds
       };
 
       const handleConnectError = async (error) => {
@@ -380,7 +430,6 @@ const App = () => {
         } else {
           setError('Connecting to server...');
           attemptRef.current = attempt + 1;
-          // Increase delay for subsequent retries to avoid rapid attempts
           const delay = Math.min(Math.pow(2, attempt) * 1000 * (1 + Math.random() * 0.2), maxDelay);
           setTimeout(() => connectSocket(attempt + 1), delay);
         }
@@ -454,6 +503,7 @@ const App = () => {
         window.removeEventListener('offline', handleOffline);
         socketRef.current = null;
         setSocket(null);
+        clearInterval(pingInterval); // Clean up ping interval
       };
     };
 

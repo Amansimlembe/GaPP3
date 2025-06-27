@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
-import { FaPlus, FaPaperPlane, FaHeart, FaComment, FaShare, FaVolumeMute, FaVolumeUp, FaSyncAlt } from 'react-icons/fa';
+import { FaPlus, FaPaperPlane, FaHeart, FaComment, FaShare, FaVolumeMute, FaVolumeUp, FaSyncAlt, FaTextHeight, FaImage, FaVideo, FaMusic, FaFilm } from 'react-icons/fa';
 import { useSwipeable } from 'react-swipeable';
 import debounce from 'lodash/debounce';
 import PropTypes from 'prop-types';
@@ -15,6 +15,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
   const [contentType, setContentType] = useState('video');
   const [caption, setCaption] = useState('');
   const [file, setFile] = useState(null);
+  const [audioFile, setAudioFile] = useState(null);
   const [showPostModal, setShowPostModal] = useState(false);
   const [error, setError] = useState('');
   const [comment, setComment] = useState('');
@@ -27,6 +28,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
   const [hasMore, setHasMore] = useState(true);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [socketConnected, setSocketConnected] = useState(false);
   const feedRef = useRef(null);
   const mediaRefs = useRef({});
   const isFetchingFeedRef = useRef(false);
@@ -40,7 +42,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
       } catch (err) {
         console.error(`Retry attempt ${attempt} failed:`, err.response?.data || err.message);
         if (err.response?.status === 401 || err.message === 'Unauthorized') {
-          console.error('Authentication error: Session expired. Please log in again.');
+          console.error('Authentication error: Session expired.');
           setError('Session expired. Please log in again.');
           throw new Error('Unauthorized');
         }
@@ -102,7 +104,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
             }
           });
         },
-        { threshold: 0.8 } // Increased for TikTok-like precision
+        { threshold: 0.8 }
       );
 
       Object.values(mediaRefs.current).forEach((media) => {
@@ -131,7 +133,6 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
       setLoading(true);
       if (isRefresh) setRefreshing(true);
 
-      // Check cache for non-refresh requests
       if (!isRefresh && pageNum === 1) {
         const cachedData = loadFromCache();
         if (cachedData) {
@@ -218,25 +219,47 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
     }
   }, []);
 
+  // Socket ping to maintain connection
+  const socketPing = useCallback(() => {
+    if (socket && socket.connected) {
+      socket.emit('ping', { userId });
+      socket.on('pong', () => {
+        setSocketConnected(true);
+        setError('');
+      });
+    }
+  }, [socket, userId]);
+
   useEffect(() => {
-    if (!token || !userId || !socket) {
-      console.error('Authentication error: Missing token, userId, or socket');
+    if (!token || !userId) {
+      console.error('Missing token or userId');
       setError('Authentication required. Please log in again.');
       return;
     }
 
     const expTime = getTokenExpiration(token);
     if (expTime && expTime < Date.now()) {
-      console.error('Authentication error: Token expired');
+      console.error('Token expired');
       setError('Session expired. Please log in again.');
       return;
     }
 
-    fetchFeed(1);
+    // Delay to allow socket connection
+    const socketTimeout = setTimeout(() => {
+      if (!socket || !socket.connected) {
+        console.warn('Socket not connected after delay');
+        setError('Connecting to server...');
+      } else {
+        setSocketConnected(true);
+        socket.emit('join', userId);
+        socketPing();
+      }
+    }, 2000);
 
-    if (socket.connected) {
-      socket.emit('join', userId);
-    }
+    // Periodic ping every 30 seconds
+    const pingInterval = setInterval(socketPing, 30000);
+
+    fetchFeed(1);
 
     const handleNewPost = (post) => {
       if (!post?.isStory && post?._id) {
@@ -281,6 +304,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
 
     const handleConnectError = (error) => {
       console.error('Socket connect error:', error.message);
+      setSocketConnected(false);
       setError('Connection lost. Trying to reconnect...');
       if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
         const expTime = getTokenExpiration(token);
@@ -288,19 +312,27 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
           console.warn('Token still valid, delaying action');
           return;
         }
-        console.error('Authentication error: Invalid or missing token');
+        console.error('Invalid or missing token');
         setError('Session expired. Please log in again.');
       }
     };
 
     const handleReconnect = () => {
       console.log('Socket reconnected');
+      setSocketConnected(true);
       setError('');
       if (socket.connected) {
         socket.emit('join', userId);
+        socketPing();
       }
     };
 
+    socket.on('connect', () => {
+      setSocketConnected(true);
+      setError('');
+      socket.emit('join', userId);
+      socketPing();
+    });
     socket.on('newPost', handleNewPost);
     socket.on('postUpdate', handlePostUpdate);
     socket.on('postDeleted', handlePostDeleted);
@@ -308,16 +340,20 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
     socket.on('reconnect', handleReconnect);
 
     return () => {
+      clearTimeout(socketTimeout);
+      clearInterval(pingInterval);
+      socket.off('connect');
       socket.off('newPost', handleNewPost);
       socket.off('postUpdate', handlePostUpdate);
       socket.off('postDeleted', handlePostDeleted);
       socket.off('connect_error', handleConnectError);
-      socket.on('reconnect', handleReconnect);
+      socket.off('reconnect', handleReconnect);
+      socket.off('pong');
       if (socket.connected) {
         socket.emit('leave', userId);
       }
     };
-  }, [token, userId, socket, fetchFeed, getTokenExpiration, page, saveToCache]);
+  }, [token, userId, socket, fetchFeed, getTokenExpiration, socketPing, page, saveToCache]);
 
   useEffect(() => {
     localStorage.setItem('feedMuted', muted);
@@ -352,16 +388,30 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
   }, [posts, currentIndex, setupIntersectionObserver, handleScroll]);
 
   const postContent = async () => {
-    if (!userId || (!caption.trim() && !file && contentType !== 'text')) {
-      setError('Please provide content');
+    if (!userId) {
+      setError('Authentication required. Please log in again.');
       return;
     }
+    if (!caption.trim() && !file && contentType !== 'text') {
+      setError('Please provide a caption or file');
+      return;
+    }
+    if ((contentType === 'image' || contentType === 'video' || contentType === 'video+audio') && !file) {
+      setError('Please select a file');
+      return;
+    }
+    if (contentType === 'video+audio' && !audioFile) {
+      setError('Please select an audio file for video+audio post');
+      return;
+    }
+
     const formData = new FormData();
     formData.append('userId', userId);
     formData.append('contentType', contentType);
     formData.append('caption', caption.trim());
     if (file) formData.append('content', file);
-    else if (contentType === 'text') formData.append('content', caption.trim());
+    if (contentType === 'text') formData.append('content', caption.trim());
+    if (contentType === 'video+audio' && audioFile) formData.append('audio', audioFile);
 
     try {
       setUploadProgress(0);
@@ -379,6 +429,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
       socket.emit('newPost', data);
       setCaption('');
       setFile(null);
+      setAudioFile(null);
       setShowPostModal(false);
       setUploadProgress(null);
       setError('');
@@ -390,11 +441,8 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
           ? 'You are offline'
           : error.message === 'Unauthorized'
           ? 'Session expired. Please log in again.'
-          : error.response?.data?.error || 'Failed to post'
+          : error.response?.data?.error || 'Failed to post content'
       );
-      if (error.message === 'Unauthorized') {
-        console.error('Authentication error: Failed to post due to unauthorized access');
-      }
       setUploadProgress(null);
     }
   };
@@ -403,7 +451,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
     if (!playingPostId || postId !== playingPostId) return;
     try {
       const post = posts.find((p) => p._id.toString() === postId);
-      if (!post) return;
+      if (!post) throw new Error('Post not found');
       const action = post.likedBy?.map((id) => id.toString()).includes(userId) ? '/unlike' : '/like';
       const { data } = await retryOperation(() =>
         axios.post(
@@ -427,9 +475,6 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
           ? 'Session expired. Please log in again.'
           : 'Failed to like post'
       );
-      if (error.message === 'Unauthorized') {
-        console.error('Authentication error: Failed to like post due to unauthorized access');
-      }
     }
   };
 
@@ -461,9 +506,6 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
           ? 'Session expired. Please log in again.'
           : 'Failed to comment'
       );
-      if (error.message === 'Unauthorized') {
-        console.error('Authentication error: Failed to comment due to unauthorized access');
-      }
     }
   };
 
@@ -507,7 +549,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
       if (!showComments && playingPostId) setShowComments(playingPostId);
     },
     trackMouse: false,
-    delta: 30, // Reduced for snappier swipes
+    delta: 30,
     preventScrollOnSwipe: true,
   });
 
@@ -568,7 +610,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
             role="dialog"
             aria-modal="true"
           >
-            <div className="bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 p-6 rounded-2xl shadow-2xl w-full max-w-md relative">
+            <div className="bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 p-6 rounded-2xl shadow-2xl w-full max-w-md relative border border-gray-200 dark:border-gray-700">
               {uploadProgress !== null && (
                 <div className="absolute inset-0 flex items-center justify-center bg-gray-900 bg-opacity-75">
                   <div className="relative w-20 h-20">
@@ -596,66 +638,81 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
                 </div>
               )}
               <div className="relative mb-4">
-                <select
-                  value={contentType}
-                  onChange={(e) => setContentType(e.target.value)}
-                  className="w-full p-3 bg-gray-100 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:outline-none transition duration-200"
-                  aria-label="Select content type"
-                >
-                  <option value="text">Text</option>
-                  <option value="image">Image</option>
-                  <option value="video">Video</option>
-                  <option value="audio">Audio</option>
-                  <option value="raw">Document</option>
-                </select>
+                <div className="flex justify-around mb-4 bg-gray-100 dark:bg-gray-700 p-2 rounded-lg">
+                  {[
+                    { type: 'text', icon: <FaTextHeight /> },
+                    { type: 'image', icon: <FaImage /> },
+                    { type: 'video', icon: <FaVideo /> },
+                    { type: 'audio', icon: <FaMusic /> },
+                    { type: 'video+audio', icon: <FaFilm /> },
+                  ].map(({ type, icon }) => (
+                    <motion.button
+                      key={type}
+                      whileHover={{ scale: 1.1 }}
+                      whileTap={{ scale: 0.9 }}
+                      onClick={() => setContentType(type)}
+                      className={`p-2 rounded-full ${contentType === type ? 'bg-blue-500 text-white' : 'bg-gray-200 dark:bg-gray-600 text-gray-900 dark:text-gray-100'}`}
+                      aria-label={`Select ${type} content`}
+                    >
+                      {icon}
+                    </motion.button>
+                  ))}
+                </div>
+                <div className="flex flex-col space-y-4">
+                  {contentType === 'text' ? (
+                    <textarea
+                      value={caption}
+                      onChange={(e) => setCaption(e.target.value.slice(0, 500))}
+                      className="flex-1 p-3 bg-gray-100 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:outline-none transition duration-200 resize-none"
+                      placeholder="What's on your mind? (max 500 chars)"
+                      rows="4"
+                      aria-label="Text post content"
+                    />
+                  ) : (
+                    <input
+                      type="file"
+                      accept={
+                        contentType === 'image'
+                          ? 'image/jpeg,image/png'
+                          : contentType === 'video' || contentType === 'video+audio'
+                          ? 'video/mp4,video/webm'
+                          : 'audio/mpeg,audio/wav'
+                      }
+                      onChange={(e) => setFile(e.target.files[0])}
+                      className="flex-1 p-3 bg-gray-100 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-gray-100 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:bg-blue-500 file:text-white file:cursor-pointer"
+                      aria-label="Upload main file"
+                    />
+                  )}
+                  {contentType === 'video+audio' && (
+                    <input
+                      type="file"
+                      accept="audio/mpeg,audio/wav"
+                      onChange={(e) => setAudioFile(e.target.files[0])}
+                      className="flex-1 p-3 bg-gray-100 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-gray-100 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:bg-blue-500 file:text-white file:cursor-pointer"
+                      aria-label="Upload audio file"
+                    />
+                  )}
+                  {contentType !== 'text' && (
+                    <input
+                      type="text"
+                      value={caption}
+                      onChange={(e) => setCaption(e.target.value.slice(0, 500))}
+                      className="w-full p-3 bg-gray-100 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:outline-none transition duration-200"
+                      placeholder="Add a caption... (max 500 chars)"
+                      aria-label="Post caption"
+                    />
+                  )}
+                  <motion.button
+                    whileHover={{ scale: 1.1 }}
+                    whileTap={{ scale: 0.9 }}
+                    onClick={postContent}
+                    className="p-3 bg-blue-500 rounded-full text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    aria-label="Submit post"
+                  >
+                    <FaPaperPlane className="text-xl" />
+                  </motion.button>
+                </div>
               </div>
-              <div className="flex items-center mb-4">
-                {contentType === 'text' ? (
-                  <textarea
-                    value={caption}
-                    onChange={(e) => setCaption(e.target.value.slice(0, 500))}
-                    className="flex-1 p-3 bg-gray-100 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:outline-none transition duration-200 resize-none"
-                    placeholder="What's on your mind? (max 500 chars)"
-                    rows="4"
-                    aria-label="Text post content"
-                  />
-                ) : (
-                  <input
-                    type="file"
-                    accept={
-                      contentType === 'image'
-                        ? 'image/jpeg,image/png'
-                        : contentType === 'video'
-                        ? 'video/mp4,video/webm'
-                        : contentType === 'audio'
-                        ? 'audio/mpeg,audio/wav'
-                        : 'application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-                    }
-                    onChange={(e) => setFile(e.target.files[0])}
-                    className="flex-1 p-3 bg-gray-100 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-gray-100 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:bg-blue-500 file:text-white file:cursor-pointer"
-                    aria-label="Upload file"
-                  />
-                )}
-                <motion.button
-                  whileHover={{ scale: 1.1 }}
-                  whileTap={{ scale: 0.9 }}
-                  onClick={postContent}
-                  className="ml-3 p-3 bg-blue-500 rounded-full focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  aria-label="Submit post"
-                >
-                  <FaPaperPlane className="text-xl text-white" />
-                </motion.button>
-              </div>
-              {contentType !== 'text' && (
-                <input
-                  type="text"
-                  value={caption}
-                  onChange={(e) => setCaption(e.target.value.slice(0, 500))}
-                  className="w-full p-3 bg-gray-100 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:outline-none transition duration-200"
-                  placeholder="Add a caption... (max 500 chars)"
-                  aria-label="Post caption"
-                />
-              )}
               <motion.button
                 whileHover={{ scale: 1.05 }}
                 whileTap={{ scale: 0.95 }}
@@ -663,6 +720,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
                   setShowPostModal(false);
                   setCaption('');
                   setFile(null);
+                  setAudioFile(null);
                   setError('');
                 }}
                 className="mt-4 w-full bg-gray-300 dark:bg-gray-600 text-gray-900 dark:text-gray-100 p-3 rounded-lg hover:bg-gray-400 dark:hover:bg-gray-500 transition duration-200 focus:outline-none focus:ring-2 focus:ring-gray-500"
@@ -748,29 +806,84 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
               />
             )}
             {post.contentType === 'video' && (
-              <video
-                ref={(el) => (mediaRefs.current[post._id.toString()] = el)}
-                data-post-id={post._id.toString()}
-                playsInline
-                muted={muted}
-                loop
-                src={post.content}
-                className="w-full h-full object-cover rounded-md"
-                preload="auto"
-                poster="https://placehold.co/600x400?text=Video+Loading"
-                onError={() => console.warn('Video load error')}
-              />
+              <div className="relative w-full h-full">
+                <video
+                  ref={(el) => (mediaRefs.current[post._id.toString()] = el)}
+                  data-post-id={post._id.toString()}
+                  playsInline
+                  muted={muted}
+                  loop
+                  src={post.content}
+                  className="w-full h-full object-cover rounded-md"
+                  preload="auto"
+                  poster="https://placehold.co/600x400?text=Video+Loading"
+                  onError={() => console.warn('Video load error')}
+                />
+                {post.audioContent && (
+                  <motion.div
+                    animate={{ opacity: [0.5, 1, 0.5] }}
+                    transition={{ repeat: Infinity, duration: 1.5 }}
+                    className="absolute bottom-4 right-4 flex items-center space-x-2 text-white bg-black bg-opacity-50 p-2 rounded-full"
+                  >
+                    <FaMusic className="text-lg" />
+                    <span className="text-sm">Audio Playing</span>
+                  </motion.div>
+                )}
+              </div>
+            )}
+            {post.contentType === 'video+audio' && (
+              <div className="relative w-full h-full">
+                <video
+                  ref={(el) => (mediaRefs.current[post._id.toString()] = el)}
+                  data-post-id={post._id.toString()}
+                  playsInline
+                  muted={muted}
+                  loop
+                  src={post.content}
+                  className="w-full h-full object-cover rounded-md"
+                  preload="auto"
+                  poster="https://placehold.co/600x400?text=Video+Loading"
+                  onError={() => console.warn('Video load error')}
+                />
+                <audio
+                  ref={(el) => (mediaRefs.current[`audio-${post._id.toString()}`] = el)}
+                  data-post-id={post._id.toString()}
+                  src={post.audioContent}
+                  loop
+                  muted={muted}
+                  preload="auto"
+                  onError={() => console.warn('Audio load error')}
+                />
+                <motion.div
+                  animate={{ opacity: [0.5, 1, 0.5] }}
+                  transition={{ repeat: Infinity, duration: 1.5 }}
+                  className="absolute bottom-4 right-4 flex items-center space-x-2 text-white bg-black bg-opacity-50 p-2 rounded-full"
+                >
+                  <FaMusic className="text-lg" />
+                  <span className="text-sm">Audio Playing</span>
+                </motion.div>
+              </div>
             )}
             {post.contentType === 'audio' && (
-              <audio
-                ref={(el) => (mediaRefs.current[post._id.toString()] = el)}
-                data-post-id={post._id.toString()}
-                controls
-                src={post.content}
-                className="w-full mt-2 bg-gray-300 dark:bg-gray-700 rounded-full p-2"
-                preload="auto"
-                onError={() => console.warn('Audio load error')}
-              />
+              <div className="relative w-full h-full flex items-center justify-center">
+                <audio
+                  ref={(el) => (mediaRefs.current[post._id.toString()] = el)}
+                  data-post-id={post._id.toString()}
+                  controls
+                  src={post.content}
+                  className="w-full mt-2 bg-gray-300 dark:bg-gray-700 rounded-full p-2"
+                  preload="auto"
+                  onError={() => console.warn('Audio load error')}
+                />
+                <motion.div
+                  animate={{ opacity: [0.5, 1, 0.5] }}
+                  transition={{ repeat: Infinity, duration: 1.5 }}
+                  className="absolute bottom-4 right-4 flex items-center space-x-2 text-white bg-black bg-opacity-50 p-2 rounded-full"
+                >
+                  <FaMusic className="text-lg" />
+                  <span className="text-sm">Audio Playing</span>
+                </motion.div>
+              </div>
             )}
             {post.contentType === 'raw' && (
               <a
@@ -835,7 +948,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
                   <FaShare className="text-3xl text-gray-900 dark:text-gray-100 hover:text-blue-500" />
                 </button>
               </div>
-              {post.contentType === 'video' && (
+              {(post.contentType === 'video' || post.contentType === 'video+audio') && (
                 <div className="motion-button">
                   <button
                     onClick={() => setMuted((prev) => !prev)}

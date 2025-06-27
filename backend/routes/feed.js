@@ -28,16 +28,27 @@ const upload = multer({
       video: ['video/mp4', 'video/webm'],
       audio: ['audio/mpeg', 'audio/wav'],
       raw: ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+      'video+audio': ['video/mp4', 'video/webm', 'audio/mpeg', 'audio/wav'],
     };
     const contentType = req.body.contentType;
-    if (!file || (contentType && allowedTypes[contentType]?.includes(file.mimetype))) {
+    if (!file) {
+      if (contentType === 'text') {
+        cb(null, true);
+      } else {
+        logger.warn('Missing file for non-text content', { contentType, userId: req.body.userId });
+        cb(new Error(`File required for ${contentType}`));
+      }
+    } else if (contentType && allowedTypes[contentType]?.includes(file.mimetype)) {
       cb(null, true);
     } else {
       logger.warn('Invalid file type', { contentType, mimetype: file?.mimetype, userId: req.body.userId });
       cb(new Error(`Invalid file type for ${contentType}`));
     }
   },
-});
+}).fields([
+  { name: 'content', maxCount: 1 },
+  { name: 'audio', maxCount: 1 },
+]);
 
 const retryOperation = async (operation, maxRetries = 3, baseDelay = 1000) => {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -55,7 +66,6 @@ const retryOperation = async (operation, maxRetries = 3, baseDelay = 1000) => {
   }
 };
 
-// Changed: Optimized GET /feed with indexing and user-specific data
 router.get('/', authMiddleware, async (req, res) => {
   try {
     const page = Math.max(1, parseInt(req.query.page) || 1);
@@ -65,7 +75,7 @@ router.get('/', authMiddleware, async (req, res) => {
     const [posts, totalPosts] = await Promise.all([
       retryOperation(() =>
         Post.find({ isStory: false })
-          .select('userId username photo contentType content caption likes likedBy comments createdAt') // Changed: Explicit fields
+          .select('userId username photo contentType content audioContent caption likes likedBy comments createdAt')
           .sort({ createdAt: -1 })
           .skip(skip)
           .limit(limit)
@@ -74,7 +84,6 @@ router.get('/', authMiddleware, async (req, res) => {
       retryOperation(() => Post.countDocuments({ isStory: false })),
     ]);
 
-    // Changed: Ensure userId and likedBy are strings, limit comments
     const processedPosts = posts.map((post) => ({
       ...post,
       _id: post._id.toString(),
@@ -97,8 +106,7 @@ router.get('/', authMiddleware, async (req, res) => {
   }
 });
 
-// Changed: Enhanced POST /feed with validation and socket room targeting
-router.post('/', authMiddleware, upload.single('content'), async (req, res) => {
+router.post('/', authMiddleware, upload, async (req, res) => {
   try {
     const { userId, contentType, caption } = req.body;
     if (!mongoose.Types.ObjectId.isValid(userId) || userId !== req.user.id) {
@@ -113,12 +121,13 @@ router.post('/', authMiddleware, upload.single('content'), async (req, res) => {
     }
 
     let contentUrl = '';
-    if (contentType !== 'text' && req.file) {
+    let audioUrl = '';
+    if (contentType !== 'text' && req.files?.content?.[0]) {
       const uploadOptions = {
-        resource_type: contentType,
+        resource_type: contentType === 'video+audio' ? 'video' : contentType,
         folder: 'feed',
         timeout: 30000,
-        transformation: contentType === 'video' ? [
+        transformation: contentType === 'video' || contentType === 'video+audio' ? [
           { width: 720, height: 1280, crop: 'fill', quality: 'auto' },
           { format: 'mp4', video_codec: 'h264' }
         ] : contentType === 'image' ? [
@@ -135,10 +144,9 @@ router.post('/', authMiddleware, upload.single('content'), async (req, res) => {
               else resolve(result);
             }
           );
-          req.file.stream.pipe(uploadStream);
+          uploadStream.end(req.files.content[0].buffer);
         })
       );
-
       contentUrl = result.secure_url;
     } else if (contentType === 'text' && caption?.trim()) {
       contentUrl = caption.trim();
@@ -146,10 +154,27 @@ router.post('/', authMiddleware, upload.single('content'), async (req, res) => {
       return res.status(400).json({ error: 'Missing or invalid content' });
     }
 
+    if (contentType === 'video+audio' && req.files?.audio?.[0]) {
+      const audioResult = await retryOperation(() =>
+        new Promise((resolve, reject) => {
+          const uploadStream = cloudinary.uploader.upload_stream(
+            { resource_type: 'video', folder: 'feed', timeout: 30000 },
+            (error, result) => {
+              if (error) reject(error);
+              else resolve(result);
+            }
+          );
+          uploadStream.end(req.files.audio[0].buffer);
+        })
+      );
+      audioUrl = audioResult.secure_url;
+    }
+
     const post = new Post({
       userId: mongoose.Types.ObjectId(userId),
       contentType,
       content: contentUrl,
+      audioContent: audioUrl || undefined,
       caption: contentType !== 'text' ? caption?.trim() || '' : '',
       username: user.username,
       photo: user.photo,
@@ -173,7 +198,7 @@ router.post('/', authMiddleware, upload.single('content'), async (req, res) => {
 
     const io = req.app.get('io');
     if (io) {
-      io.to(userId).emit('newPost', postObject); // Changed: Emit to user's room
+      io.to(userId).emit('newPost', postObject);
       logger.info('Emitted newPost', { userId, postId: post._id });
     } else {
       logger.warn('Socket.IO instance not found', { userId });
@@ -186,7 +211,6 @@ router.post('/', authMiddleware, upload.single('content'), async (req, res) => {
   }
 });
 
-// Changed: Optimized POST /like with socket room targeting
 router.post('/like', authMiddleware, async (req, res) => {
   try {
     const { postId, userId } = req.body;
@@ -222,7 +246,7 @@ router.post('/like', authMiddleware, async (req, res) => {
 
     const io = req.app.get('io');
     if (io) {
-      io.to(post.userId.toString()).emit('postUpdate', postObject); // Changed: Emit to post owner's room
+      io.to(post.userId.toString()).emit('postUpdate', postObject);
       logger.info('Emitted postUpdate for like', { userId, postId });
     }
     logger.info('Liked post', { userId, postId });
@@ -233,7 +257,6 @@ router.post('/like', authMiddleware, async (req, res) => {
   }
 });
 
-// Changed: Optimized POST /unlike with socket room targeting
 router.post('/unlike', authMiddleware, async (req, res) => {
   try {
     const { postId, userId } = req.body;
@@ -266,7 +289,7 @@ router.post('/unlike', authMiddleware, async (req, res) => {
 
     const io = req.app.get('io');
     if (io) {
-      io.to(post.userId.toString()).emit('postUpdate', postObject); // Changed: Emit to post owner's room
+      io.to(post.userId.toString()).emit('postUpdate', postObject);
       logger.info('Emitted postUpdate for unlike', { userId, postId });
     }
     logger.info('Unliked post', { userId, postId });
@@ -277,7 +300,6 @@ router.post('/unlike', authMiddleware, async (req, res) => {
   }
 });
 
-// Changed: Enhanced POST /comment with socket room targeting
 router.post('/comment', authMiddleware, async (req, res) => {
   try {
     const { postId, userId, comment } = req.body;
@@ -328,7 +350,7 @@ router.post('/comment', authMiddleware, async (req, res) => {
 
     const io = req.app.get('io');
     if (io) {
-      io.to(post.userId.toString()).emit('postUpdate', postObject); // Changed: Emit to post owner's room
+      io.to(post.userId.toString()).emit('postUpdate', postObject);
       logger.info('Emitted postUpdate for comment', { userId, postId });
     }
     logger.info('Commented on post', { userId, postId, commentLength: comment.length });
