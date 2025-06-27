@@ -380,7 +380,9 @@ const App = () => {
         } else {
           setError('Connecting to server...');
           attemptRef.current = attempt + 1;
-          setTimeout(() => connectSocket(attempt + 1), Math.pow(2, attempt) * 1000);
+          // Increase delay for subsequent retries to avoid rapid attempts
+          const delay = Math.min(Math.pow(2, attempt) * 1000 * (1 + Math.random() * 0.2), maxDelay);
+          setTimeout(() => connectSocket(attempt + 1), delay);
         }
       };
 
