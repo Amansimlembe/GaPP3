@@ -1,13 +1,16 @@
-const natural = require('natural');
-
-const matchJobs = (skills, jobs) => {
-  const tokenizer = new natural.WordTokenizer();
-  return jobs.map(job => {
-    const skillTokens = tokenizer.tokenize(skills.join(' '));
-    const reqTokens = tokenizer.tokenize(job.requirements || '');
-    const matchScore = skillTokens.filter(token => reqTokens.includes(token)).length * 10;
-    return { ...job._doc, matchScore };
-  }).sort((a, b) => b.matchScore - a.matchScore);
+// In jobMatcher.js
+const pdfParse = require('pdf-parse');
+const jobMatcher = async (user, job) => {
+  if (!user.cv) return 0;
+  const response = await axios.get(user.cv, { responseType: 'arraybuffer' });
+  const pdfData = await pdfParse(response.data);
+  const cvText = pdfData.text.toLowerCase();
+  const jobText = `${job.title} ${job.description} ${job.requirements}`.toLowerCase();
+  const skills = ['javascript', 'python', 'react', 'node', 'sql']; // Example skills
+  let score = 0;
+  skills.forEach(skill => {
+    if (cvText.includes(skill) && jobText.includes(skill)) score += 20;
+  });
+  return Math.min(score, 100);
 };
-
-module.exports = { matchJobs };
+module.exports = { jobMatcher };

@@ -185,6 +185,7 @@ const App = () => {
   const [error, setError] = useState(null);
   const [isNavigating, setIsNavigating] = useState(false);
   const [isAuthLoaded, setIsAuthLoaded] = useState(false);
+const [isEmployerView, setIsEmployerView] = useState(role === 1);
 
   // Refs for socket management
   const socketRef = useRef(null);
@@ -712,17 +713,30 @@ const AuthenticatedApp = ({
         />
       )}
       <div className="flex-1 p-0 relative">
+        
         <Routes>
-          <Route
-            path="/jobs"
-            element={
-              role === 0 ? (
-                <JobSeekerScreen token={token} userId={userId} onLogout={handleLogout} />
-              ) : (
-                <EmployerScreen token={token} userId={userId} onLogout={handleLogout} />
-              )
-            }
-          />
+
+
+<Route
+  path="/jobs"
+  element={
+    isEmployerView ? (
+      <EmployerScreen
+        token={token}
+        userId={userId}
+        onToggleRole={() => setIsEmployerView(false)}
+        onLogout={handleLogout}
+      />
+    ) : (
+      <JobSeekerScreen
+        token={token}
+        userId={userId}
+        onToggleRole={() => setIsEmployerView(true)}
+        onLogout={handleLogout}
+      />
+    )
+  }
+/>
           <Route
             path="/feed"
             element={<FeedScreen token={token} userId={userId} socket={socket} onLogout={handleLogout} />}

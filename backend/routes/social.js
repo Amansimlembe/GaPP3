@@ -218,8 +218,6 @@ const retryOperation = async (operation, maxRetries = 3) => {
 
 
 
-
-
 const emitUpdatedChatList = async (io, userId, page = 0, limit = 50) => {
   try {
     if (!mongoose.isValidObjectId(userId)) {
@@ -239,8 +237,13 @@ const emitUpdatedChatList = async (io, userId, page = 0, limit = 50) => {
         .populate({
           path: 'contacts',
           select: 'username virtualNumber photo status lastSeen',
-          match: { _id: { $in: '$contacts' } },
-          options: { skip: page * limit, limit, sort: { lastSeen: -1 } },
+          options: { 
+            skip: page * limit, 
+            limit, 
+            sort: { lastSeen: -1 },
+            // Add match to ensure valid contacts only
+            match: { _id: { $exists: true, $ne: null } },
+          },
         })
         .lean();
       if (!user) {
@@ -248,18 +251,26 @@ const emitUpdatedChatList = async (io, userId, page = 0, limit = 50) => {
       }
       return user;
     });
-    if (!user?.contacts || !Array.isArray(user.contacts)) {
+    
+    // Fallback for invalid or empty contacts
+    if (!user?.contacts || !Array.isArray(user.contacts) || user.contacts.length === 0) {
       logger.warn('User contacts field is invalid or empty', { userId, contacts: user.contacts, ip: 'socket' });
       chatListCache.set(cacheKey, [], 15 * 60);
       io.to(userId).emit('chatListUpdated', { userId, users: [], page, limit });
       return;
     }
-    const contactIds = user.contacts.map((c) => c._id).filter((id) => mongoose.isValidObjectId(id));
+    
+    const contactIds = user.contacts
+      .map((c) => c._id)
+      .filter((id) => mongoose.isValidObjectId(id));
+    
     if (!contactIds.length) {
+      logger.info('No valid contacts found', { userId, ip: 'socket' });
       chatListCache.set(cacheKey, [], 15 * 60);
       io.to(userId).emit('chatListUpdated', { userId, users: [], page, limit });
       return;
     }
+    
     const latestMessages = await retryOperation(async () => {
       return await Message.aggregate([
         {
@@ -294,8 +305,9 @@ const emitUpdatedChatList = async (io, userId, page = 0, limit = 50) => {
             },
           },
         },
-      ]).option({ hint: { senderId: 1, recipientId: 1, createdAt: -1 } });
+      ]).option({ maxTimeMS: 20000, hint: { senderId: 1, recipientId: 1, createdAt: -1 } });
     });
+    
     const chatList = user.contacts.map((contact) => {
       const messageData = latestMessages.find((m) => m._id.toString() === contact._id.toString());
       return {
@@ -304,7 +316,7 @@ const emitUpdatedChatList = async (io, userId, page = 0, limit = 50) => {
         virtualNumber: contact.virtualNumber || '',
         photo: contact.photo || 'https://placehold.co/40x40',
         status: contact.status || 'offline',
-        lastSeen: contact.lastSeen || null,
+        lastSeen: contact.lastSeen ? new Date(contact.lastSeen).toISOString() : null,
         latestMessage: messageData?.latestMessage
           ? {
               ...messageData.latestMessage,
@@ -317,12 +329,13 @@ const emitUpdatedChatList = async (io, userId, page = 0, limit = 50) => {
                     recipientId: messageData.latestMessage.replyTo.recipientId.toString(),
                   }
                 : null,
-          }
+            }
           : null,
         unreadCount: messageData?.unreadCount || 0,
         ownerId: userId,
       };
     }).filter((chat) => mongoose.isValidObjectId(chat.id));
+    
     chatListCache.set(cacheKey, chatList, 15 * 60);
     io.to(userId).emit('chatListUpdated', { userId, users: chatList, page, limit });
     logger.info('Emitted updated chat list', { userId, page, count: chatList.length, ip: 'socket' });
@@ -335,10 +348,10 @@ const emitUpdatedChatList = async (io, userId, page = 0, limit = 50) => {
       mongoErrorCode: error.code,
       mongoErrorName: error.name,
     });
+    // Emit empty list on error to prevent client hang
+    io.to(userId).emit('chatListUpdated', { userId, users: [], page, limit });
   }
 };
-
-
 
 
 
@@ -813,6 +826,7 @@ module.exports = (app) => {
 
 
 
+
   router.get('/chat-list', authMiddleware, async (req, res) => {
   const { userId, page = 0, limit = 50 } = req.query;
   try {
@@ -820,11 +834,17 @@ module.exports = (app) => {
       await logError('Invalid or unauthorized chat list request', { userId, reqUserId: req.user._id, ip: req.ip, queryParams: { userId, page, limit } });
       return res.status(400).json({ error: 'Invalid or unauthorized userId' });
     }
-    logger.info('Fetching chat list', { userId, page, limit, ip: req.ip });
-    const cacheKey = `chatList:${userId}:${page}:${limit}`;
+    const parsedPage = parseInt(page);
+    const parsedLimit = Math.min(parseInt(limit), 100); // Cap limit to prevent abuse
+    if (isNaN(parsedPage) || isNaN(parsedLimit) || parsedPage < 0 || parsedLimit <= 0) {
+      await logError('Invalid pagination parameters', { userId, page, limit, ip: req.ip });
+      return res.status(400).json({ error: 'Invalid pagination parameters' });
+    }
+    logger.info('Fetching chat list', { userId, page: parsedPage, limit: parsedLimit, ip: req.ip });
+    const cacheKey = `chatList:${userId}:${parsedPage}:${parsedLimit}`;
     const cached = chatListCache.get(cacheKey);
     if (cached) {
-      logger.info('Served cached chat list (HTTP)', { userId, page, count: cached.length, ip: req.ip });
+      logger.info('Served cached chat list (HTTP)', { userId, page: parsedPage, count: cached.length, ip: req.ip });
       return res.status(200).json(cached);
     }
     const user = await retryOperation(async () => {
@@ -833,26 +853,33 @@ module.exports = (app) => {
         .populate({
           path: 'contacts',
           select: 'username virtualNumber photo status lastSeen',
-          match: { _id: { $in: '$contacts' } },
-          options: { skip: parseInt(page) * parseInt(limit), limit: parseInt(limit), sort: { lastSeen: -1 } },
+          match: { _id: { $exists: true, $ne: null } }, // Ensure valid contacts
+          options: { skip: parsedPage * parsedLimit, limit: parsedLimit, sort: { lastSeen: -1 } },
         })
-        .lean();
+        .lean()
+        .maxTimeMS(20000); // Set query timeout
       if (!user) {
         throw new Error(`User not found for ID: ${userId}`);
       }
       return user;
     });
-    if (!user.contacts || !Array.isArray(user.contacts)) {
+    
+    if (!user?.contacts || !Array.isArray(user.contacts)) {
       logger.warn('User contacts field is invalid or empty', { userId, contacts: user.contacts, ip: req.ip });
       chatListCache.set(cacheKey, [], 15 * 60);
       return res.status(200).json([]);
     }
-    const contactIds = user.contacts.map((c) => c._id).filter((id) => mongoose.isValidObjectId(id));
+    
+    const contactIds = user.contacts
+      .map((c) => c._id)
+      .filter((id) => mongoose.isValidObjectId(id));
+    
     if (!contactIds.length) {
       logger.info('No valid contacts found', { userId, ip: req.ip });
       chatListCache.set(cacheKey, [], 15 * 60);
       return res.status(200).json([]);
     }
+    
     const latestMessages = await retryOperation(async () => {
       return await Message.aggregate([
         {
@@ -887,8 +914,9 @@ module.exports = (app) => {
             },
           },
         },
-      ]).option({ hint: { senderId: 1, recipientId: 1, createdAt: -1 } });
+      ]).option({ maxTimeMS: 20000, hint: { senderId: 1, recipientId: 1, createdAt: -1 } });
     });
+    
     const chatList = user.contacts.map((contact) => {
       const messageData = latestMessages.find((m) => m._id.toString() === contact._id.toString());
       return {
@@ -897,7 +925,7 @@ module.exports = (app) => {
         virtualNumber: contact.virtualNumber || '',
         photo: contact.photo || 'https://placehold.co/40x40',
         status: contact.status || 'offline',
-        lastSeen: contact.lastSeen || null,
+        lastSeen: contact.lastSeen ? new Date(contact.lastSeen).toISOString() : null,
         latestMessage: messageData?.latestMessage
           ? {
               ...messageData.latestMessage,
@@ -910,14 +938,15 @@ module.exports = (app) => {
                     recipientId: messageData.latestMessage.replyTo.recipientId.toString(),
                   }
                 : null,
-          }
+            }
           : null,
         unreadCount: messageData?.unreadCount || 0,
         ownerId: userId,
       };
     }).filter((chat) => mongoose.isValidObjectId(chat.id));
+    
     chatListCache.set(cacheKey, chatList, 15 * 60);
-    logger.info('Fetched chat list (HTTP)', { userId, page, count: chatList.length, ip: req.ip });
+    logger.info('Fetched chat list (HTTP)', { userId, page: parsedPage, count: chatList.length, ip: req.ip });
     res.status(200).json(chatList);
   } catch (error) {
     await logError('Chat list fetch failed', {
@@ -926,12 +955,16 @@ module.exports = (app) => {
       stack: error.stack,
       ip: req.ip,
       queryParams: { userId, page, limit },
-      mongoErrorCode: error.code, // Log MongoDB-specific error code if available
-      mongoErrorName: error.name, // Log MongoDB error name
+      mongoErrorCode: error.code,
+      mongoErrorName: error.name,
     });
-    res.status(500).json({ error: 'Failed to fetch chat list', details: error.message });
+    // Return empty list on error to prevent client hang
+    res.status(200).json([]);
   }
 });
+
+
+
 
 
 
