@@ -197,7 +197,7 @@ const deleteMessageSchema = Joi.object({
 });
 
 // Cache configuration
-const chatListCache = new NodeCache({ stdTTL: 15 * 60, checkperiod: 60 }); // Increased to 15-minute TTL
+const chatListCache = new NodeCache({ stdTTL: 15 * 60, checkperiod: 60 });
 
 // Retry with exponential backoff
 const retryOperation = async (operation, maxRetries = 3) => {
@@ -231,7 +231,7 @@ const emitUpdatedChatList = async (io, userId, page = 0, limit = 50) => {
       return;
     }
     const user = await retryOperation(async () => {
-      return await User.findById(userId)
+      const user = await User.findById(userId)
         .select('contacts')
         .populate({
           path: 'contacts',
@@ -240,13 +240,23 @@ const emitUpdatedChatList = async (io, userId, page = 0, limit = 50) => {
           options: { skip: page * limit, limit, sort: { lastSeen: -1 } },
         })
         .lean();
+      if (!user) {
+        throw new Error(`User not found for ID: ${userId}`);
+      }
+      return user;
     });
-    if (!user?.contacts?.length) {
-      chatListCache.set(cacheKey, []);
+    if (!user?.contacts || !Array.isArray(user.contacts)) {
+      logger.warn('User contacts field is invalid or empty', { userId, contacts: user.contacts, ip: 'socket' });
+      chatListCache.set(cacheKey, [], 15 * 60);
       io.to(userId).emit('chatListUpdated', { userId, users: [], page, limit });
       return;
     }
-    const contactIds = user.contacts.map((c) => c._id);
+    const contactIds = user.contacts.map((c) => c._id).filter((id) => mongoose.isValidObjectId(id));
+    if (!contactIds.length) {
+      chatListCache.set(cacheKey, [], 15 * 60);
+      io.to(userId).emit('chatListUpdated', { userId, users: [], page, limit });
+      return;
+    }
     const latestMessages = await retryOperation(async () => {
       return await Message.aggregate([
         {
@@ -255,6 +265,7 @@ const emitUpdatedChatList = async (io, userId, page = 0, limit = 50) => {
               { senderId: new mongoose.Types.ObjectId(userId), recipientId: { $in: contactIds } },
               { recipientId: new mongoose.Types.ObjectId(userId), senderId: { $in: contactIds } },
             ],
+            createdAt: { $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) }, // Limit to last 7 days
           },
         },
         { $sort: { createdAt: -1 } },
@@ -263,7 +274,7 @@ const emitUpdatedChatList = async (io, userId, page = 0, limit = 50) => {
             _id: {
               $cond: [
                 { $eq: ['$senderId', new mongoose.Types.ObjectId(userId)] },
-                '$recipient',
+                '$recipientId',
                 '$senderId',
               ],
             },
@@ -279,7 +290,7 @@ const emitUpdatedChatList = async (io, userId, page = 0, limit = 50) => {
             },
           },
         },
-      ]).option({ hint: { senderId: 1, recipientId: 1, createdAt: -1 } }); // Add index hint
+      ]).option({ hint: { senderId: 1, recipientId: 1, createdAt: -1 } });
     });
     const chatList = user.contacts.map((contact) => {
       const messageData = latestMessages.find((m) => m._id.toString() === contact._id.toString());
@@ -307,8 +318,8 @@ const emitUpdatedChatList = async (io, userId, page = 0, limit = 50) => {
         unreadCount: messageData?.unreadCount || 0,
         ownerId: userId,
       };
-    });
-    chatListCache.set(cacheKey, chatList, 15 * 60); // Cache for 15 minutes
+    }).filter((chat) => mongoose.isValidObjectId(chat.id));
+    chatListCache.set(cacheKey, chatList, 15 * 60);
     io.to(userId).emit('chatListUpdated', { userId, users: chatList, page, limit });
     logger.info('Emitted updated chat list', { userId, page, count: chatList.length, ip: 'socket' });
   } catch (error) {
@@ -581,7 +592,7 @@ module.exports = (app) => {
                 ? {
                     ...populatedMessage.replyTo,
                     senderId: populatedMessage.replyTo.senderId.toString(),
-                    recipientId: populatedMessage.replyTo.recipientId.toString(),
+                    recipientId: populatingMessage.replyTo.recipientId.toString(),
                   }
                 : null,
             });
@@ -791,6 +802,7 @@ module.exports = (app) => {
         await logError('Invalid or unauthorized chat list request', { userId, reqUserId: req.user._id, ip: req.ip });
         return res.status(400).json({ error: 'Invalid or unauthorized userId' });
       }
+      logger.info('Fetching chat list', { userId, page, limit, ip: req.ip });
       const cacheKey = `chatList:${userId}:${page}:${limit}`;
       const cached = chatListCache.get(cacheKey);
       if (cached) {
@@ -808,17 +820,18 @@ module.exports = (app) => {
           })
           .lean();
         if (!user) {
-          throw new Error('User not found');
+          throw new Error(`User not found for ID: ${userId}`);
         }
         return user;
       });
-      if (!user.contacts) {
-        logger.warn('User contacts field is null or undefined', { userId, ip: req.ip });
+      if (!user.contacts || !Array.isArray(user.contacts)) {
+        logger.warn('User contacts field is invalid or empty', { userId, contacts: user.contacts, ip: req.ip });
         chatListCache.set(cacheKey, [], 15 * 60);
         return res.status(200).json([]);
       }
       const contactIds = user.contacts.map((c) => c._id).filter((id) => mongoose.isValidObjectId(id));
       if (!contactIds.length) {
+        logger.info('No valid contacts found', { userId, ip: req.ip });
         chatListCache.set(cacheKey, [], 15 * 60);
         return res.status(200).json([]);
       }
@@ -830,6 +843,7 @@ module.exports = (app) => {
                 { senderId: new mongoose.Types.ObjectId(userId), recipientId: { $in: contactIds } },
                 { recipientId: new mongoose.Types.ObjectId(userId), senderId: { $in: contactIds } },
               ],
+              createdAt: { $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) }, // Limit to last 7 days
             },
           },
           { $sort: { createdAt: -1 } },
@@ -971,7 +985,7 @@ module.exports = (app) => {
           ...populatedMessage,
           senderId: populatedMessage.senderId.toString(),
           recipientId: populatedMessage.recipientId.toString(),
-          replyTo: populatingMessage.replyTo
+          replyTo: populatedMessage.replyTo
             ? {
                 ...populatedMessage.replyTo,
                 senderId: populatedMessage.replyTo.senderId.toString(),
