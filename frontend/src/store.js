@@ -8,7 +8,7 @@ const STORE_NAME = 'reduxState';
 const VERSION = 3;
 const MAX_MESSAGES_PER_CHAT = 100;
 const MESSAGE_TTL = 30 * 24 * 60 * 60 * 1000; // 30 days
-const PERSISTENCE_DEBOUNCE_MS = 300;
+const PERSISTENCE_DEBOUNCE_MS = 100; // Reduced for faster chat list updates
 const CACHE_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 const BASE_URL = 'https://gapp-6yc3.onrender.com';
 
@@ -84,7 +84,7 @@ const logClientError = async (message, error, userId = null) => {
   const now = Date.now();
   const errorEntry = errorLogTimestamps.get(message) || { count: 0, timestamps: [] };
   errorEntry.timestamps = errorEntry.timestamps.filter((ts) => now - ts < 60 * 1000);
-  if (errorEntry.count >= 1 || errorEntry.timestamps.length >= 1) {
+  if (errorEntry.count >= 5 || errorEntry.timestamps.length >= 5) {
     console.log(`Client error logging skipped for "${message}": rate limit reached`);
     return;
   }
@@ -115,6 +115,7 @@ const logClientError = async (message, error, userId = null) => {
           currentPath: window.location.pathname,
           errorDetails: sanitizedError.message,
           browser: navigator.userAgent,
+          payloadSize: error?.payloadSize || 0, // Add payload size for debugging
         }),
       },
       { timeout: 5000 }
@@ -229,7 +230,7 @@ const loadPersistedState = async () => {
             (contact) =>
               isValidObjectId(contact.id) &&
               contact.virtualNumber &&
-              contact.ownerId === auth.userId // Ensure contacts belong to the user
+              contact.ownerId === auth.userId
           )
           .map((contact) => ({
             id: contact.id,
@@ -268,7 +269,7 @@ const loadPersistedState = async () => {
         photo: typeof auth.photo === 'string' ? auth.photo : null,
         virtualNumber: typeof auth.virtualNumber === 'string' ? auth.virtualNumber : null,
         username: typeof auth.username === 'string' ? auth.username : null,
-        privateKey: typeof auth.privateKey === 'string' && auth.privateKey ? auth.privateKey : null,
+        privateKey: null, // Do not persist privateKey
       },
     };
     return result;
@@ -502,7 +503,7 @@ const messageSlice = createSlice({
         (contact) =>
           isValidObjectId(contact.id) &&
           contact.virtualNumber &&
-          contact.ownerId === state.auth?.userId // Ensure contacts belong to the user
+          contact.ownerId === state.auth?.userId
       );
       if (validContacts.length > 0) {
         const existingChatMap = new Map(state.chatList.map((chat) => [chat.id, chat]));
@@ -534,8 +535,13 @@ const messageSlice = createSlice({
         state.chatList = Array.from(existingChatMap.values());
         state.chatListTimestamp = now;
       } else {
-        console.warn('setChatList: No valid contacts in payload, retaining existing chatList', payload);
+        console.warn('setChatList: No valid contacts in payload, updating timestamp only', { payloadSize: payload.length });
+        state.chatListTimestamp = now; // Force cache invalidation
       }
+    },
+    forceUpdateChatList: (state) => {
+      state.chatListTimestamp = 0; // Force fetchChatList to bypass cache
+      console.log('forceUpdateChatList: Cleared chatListTimestamp to trigger fresh fetch');
     },
     resetState: (state) => {
       Object.assign(state, messageSlice.getInitialState());
@@ -574,6 +580,7 @@ export const {
   deleteMessage,
   setSelectedChat,
   setChatList,
+  forceUpdateChatList,
   resetState,
   cleanupMessages,
 } = messageSlice.actions;
@@ -685,6 +692,7 @@ const persistenceMiddleware = (store) => {
       deleteMessage.type,
       setChatList.type,
       cleanupMessages.type,
+      forceUpdateChatList.type,
     ];
 
     if (actionsToPersist.includes(action.type)) {
@@ -698,7 +706,7 @@ const persistenceMiddleware = (store) => {
             console.warn('No database available, skipping state clear');
             return;
           }
-          await db.delete(STORE_NAME, 'state'); // Clear all persisted state
+          await db.delete(STORE_NAME, 'state');
           console.log('Persisted state cleared');
         } catch (error) {
           await logClientError('Failed to clear persisted state', error);
@@ -733,6 +741,7 @@ export const store = configureStore({
           deleteMessage.type,
           setSelectedChat.type,
           setChatList.type,
+          forceUpdateChatList.type,
           cleanupMessages.type,
         ],
         ignoredPaths: ['messages.chats', 'messages.chatList', 'auth'],

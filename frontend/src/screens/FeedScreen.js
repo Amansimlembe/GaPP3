@@ -1117,7 +1117,7 @@ FeedScreen.propTypes = {
   userId: PropTypes.string.isRequired,
   socket: PropTypes.object.isRequired,
   onLogout: PropTypes.func.isRequired,
-  theme: PropTypes.string,
+  
 };
 
 export default FeedScreen;
