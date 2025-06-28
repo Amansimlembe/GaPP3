@@ -263,7 +263,7 @@ const emitUpdatedChatList = async (io, userId, page = 0, limit = 50) => {
             _id: {
               $cond: [
                 { $eq: ['$senderId', new mongoose.Types.ObjectId(userId)] },
-                '$recipient'ndenId',
+                '$recipient',
                 '$senderId',
               ],
             },
@@ -371,7 +371,7 @@ module.exports = (app) => {
       socket.user = { ...decoded, contacts: user.contacts };
       next();
     } catch (error) {
-      await logError('Socket.IO auth error', { error: error.message, stack hardships: socket.handshake.address });
+      await logError('Socket.IO auth error', { error: error.message, stack: socket.handshake.address });
       next(new Error('Invalid token'));
     }
   });
