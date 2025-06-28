@@ -106,9 +106,51 @@ router.get('/', authMiddleware, async (req, res) => {
   }
 });
 
+router.get('/user/:userId', authMiddleware, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(userId) || userId !== req.user.id) {
+      logger.warn('Invalid or unauthorized user ID', { userId, authUserId: req.user.id });
+      return res.status(400).json({ error: 'Invalid or unauthorized user ID' });
+    }
 
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.max(1, Math.min(20, parseInt(req.query.limit) || 10));
+    const skip = (page - 1) * limit;
 
+    const [posts, totalPosts] = await Promise.all([
+      retryOperation(() =>
+        Post.find({ userId: mongoose.Types.ObjectId(userId), isStory: false })
+          .select('userId username photo contentType content audioContent caption likes likedBy comments createdAt')
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(limit)
+          .lean()
+      ),
+      retryOperation(() => Post.countDocuments({ userId: mongoose.Types.ObjectId(userId), isStory: false })),
+    ]);
 
+    const processedPosts = posts.map((post) => ({
+      ...post,
+      _id: post._id.toString(),
+      userId: post.userId.toString(),
+      likedBy: post.likedBy.map((id) => id.toString()),
+      comments: post.comments.slice(-5).map((comment) => ({
+        ...comment,
+        userId: comment.userId.toString(),
+        createdAt: comment.createdAt.toISOString(),
+      })),
+      createdAt: post.createdAt.toISOString(),
+    }));
+
+    const hasMore = skip + posts.length < totalPosts;
+    logger.info('Fetched user posts', { userId, page, limit, postCount: processedPosts.length });
+    res.json({ posts: processedPosts, hasMore });
+  } catch (err) {
+    logger.error('Failed to fetch user posts', { error: err.message, userId: req.params.userId });
+    res.status(500).json({ error: 'Failed to fetch user posts', details: err.message });
+  }
+});
 
 router.post('/', authMiddleware, upload, async (req, res) => {
   try {
@@ -178,7 +220,7 @@ router.post('/', authMiddleware, upload, async (req, res) => {
     }
 
     const post = new Post({
-      userId: new mongoose.Types.ObjectId(userId), // Use `new` for ObjectId
+      userId: new mongoose.Types.ObjectId(userId),
       contentType,
       content: contentUrl,
       audioContent: audioUrl || undefined,
@@ -217,9 +259,6 @@ router.post('/', authMiddleware, upload, async (req, res) => {
     res.status(400).json({ error: 'Failed to create post', details: err.message });
   }
 });
-
-
-
 
 router.post('/like', authMiddleware, async (req, res) => {
   try {
