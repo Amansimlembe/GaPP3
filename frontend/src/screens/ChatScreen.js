@@ -799,37 +799,45 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
       }));
     };
 
+
+
+
     const handleChatListUpdated = ({ users, page = 0, limit = 50 }) => {
-      if (!isMountedRef.current) return;
-      if (!Array.isArray(users) || users.length === 0) {
-        console.warn('chatListUpdated received empty or invalid users data:', users);
-        return;
-      }
-      const validUsers = users.filter((chat) => isValidObjectId(chat.id) && chat.ownerId === userId);
-      if (validUsers.length > 0) {
-        const updatedChatList = validUsers.map((chat) => ({
-          ...chat,
-          _id: chat.id,
-          ownerId: chat.ownerId,
-          unreadCount: unreadMessages[chat.id] || chat.unreadCount || 0,
-          lastSeen: chat.lastSeen ? new Date(chat.lastSeen).toISOString() : null,
-          latestMessage: chat.latestMessage
-            ? {
-                ...chat.latestMessage,
-                createdAt: chat.latestMessage.createdAt
-                  ? new Date(chat.latestMessage.createdAt).toISOString()
-                  : new Date().toISOString(),
-                updatedAt: chat.latestMessage.updatedAt
-                  ? new Date(chat.latestMessage.updatedAt).toISOString()
-                  : undefined,
-              }
-            : null,
-        }));
-        dispatch(setChatList(updatedChatList));
-      } else {
-        console.warn('chatListUpdated: No valid users to update');
-      }
-    };
+  console.log('Received chatListUpdated event:', { users, page, limit }); // Add this log
+  if (!isMountedRef.current) return;
+  if (!Array.isArray(users) || users.length === 0) {
+    console.warn('chatListUpdated received empty or invalid users data:', users);
+    return;
+  }
+  const validUsers = users.filter((chat) => isValidObjectId(chat.id) && chat.ownerId === userId);
+  if (validUsers.length > 0) {
+    const updatedChatList = validUsers.map((chat) => ({
+      ...chat,
+      _id: chat.id,
+      ownerId: chat.ownerId,
+      unreadCount: unreadMessages[chat.id] || chat.unreadCount || 0,
+      lastSeen: chat.lastSeen ? new Date(chat.lastSeen).toISOString() : null,
+      latestMessage: chat.latestMessage
+        ? {
+            ...chat.latestMessage,
+            createdAt: chat.latestMessage.createdAt
+              ? new Date(chat.latestMessage.createdAt).toISOString()
+              : new Date().toISOString(),
+            updatedAt: chat.latestMessage.updatedAt
+              ? new Date(chat.latestMessage.updatedAt).toISOString()
+              : undefined,
+          }
+        : null,
+    }));
+    dispatch(setChatList(updatedChatList));
+  } else {
+    console.warn('chatListUpdated: No valid users to update');
+  }
+};
+
+
+
+  
 
     const handleMessage = async (msg) => {
       if (!isMountedRef.current) return;
