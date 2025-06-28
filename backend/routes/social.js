@@ -37,18 +37,13 @@ const logError = async (message, metadata = {}) => {
   const now = Date.now();
   const errorEntry = errorLogTimestamps.get(message) || { count: 0, timestamps: [] };
   errorEntry.timestamps = errorEntry.timestamps.filter((ts) => now - ts < 60 * 1000);
-  if (errorEntry.count >= 1 || errorEntry.timestamps.length >= maxLogsPerMinute) {
+  if (errorEntry.count >= maxLogsPerMinute || errorEntry.timestamps.length >= maxLogsPerMinute) {
     logger.info(`Error logging skipped for "${message}": rate limit reached`, metadata);
-    return;
-  }
-  const isCritical = message.includes('Unauthorized') || message.includes('failed after max retries') || message.includes('Invalid');
-  if (!isCritical) {
     return;
   }
   errorEntry.count += 1;
   errorEntry.timestamps.push(now);
   errorLogTimestamps.set(message, errorEntry);
-  // Sanitize sensitive data in metadata
   const sanitizedMetadata = {
     ...metadata,
     stack: metadata.stack ? metadata.stack.replace(/publicKey[^;]+|privateKey[^;]+|token[^;]+/gi, '[REDACTED]') : metadata.stack,
@@ -202,7 +197,7 @@ const deleteMessageSchema = Joi.object({
 });
 
 // Cache configuration
-const chatListCache = new NodeCache({ stdTTL: 5 * 60, checkperiod: 60 }); // 5-minute TTL
+const chatListCache = new NodeCache({ stdTTL: 15 * 60, checkperiod: 60 }); // Increased to 15-minute TTL
 
 // Retry with exponential backoff
 const retryOperation = async (operation, maxRetries = 3) => {
@@ -240,8 +235,8 @@ const emitUpdatedChatList = async (io, userId, page = 0, limit = 50) => {
         .select('contacts')
         .populate({
           path: 'contacts',
-          select: 'username virtualNumber photo status lastSeen', // Exclude publicKey
-          match: { _id: { $in: '$contacts' } }, // Ensure only valid contacts are populated
+          select: 'username virtualNumber photo status lastSeen',
+          match: { _id: { $in: '$contacts' } },
           options: { skip: page * limit, limit, sort: { lastSeen: -1 } },
         })
         .lean();
@@ -268,7 +263,7 @@ const emitUpdatedChatList = async (io, userId, page = 0, limit = 50) => {
             _id: {
               $cond: [
                 { $eq: ['$senderId', new mongoose.Types.ObjectId(userId)] },
-                '$recipientId',
+                '$recipient'ndenId',
                 '$senderId',
               ],
             },
@@ -284,7 +279,7 @@ const emitUpdatedChatList = async (io, userId, page = 0, limit = 50) => {
             },
           },
         },
-      ]);
+      ]).option({ hint: { senderId: 1, recipientId: 1, createdAt: -1 } }); // Add index hint
     });
     const chatList = user.contacts.map((contact) => {
       const messageData = latestMessages.find((m) => m._id.toString() === contact._id.toString());
@@ -310,10 +305,10 @@ const emitUpdatedChatList = async (io, userId, page = 0, limit = 50) => {
             }
           : null,
         unreadCount: messageData?.unreadCount || 0,
-        ownerId: userId, // Include ownerId for client-side validation
+        ownerId: userId,
       };
     });
-    chatListCache.set(cacheKey, chatList);
+    chatListCache.set(cacheKey, chatList, 15 * 60); // Cache for 15 minutes
     io.to(userId).emit('chatListUpdated', { userId, users: chatList, page, limit });
     logger.info('Emitted updated chat list', { userId, page, count: chatList.length, ip: 'socket' });
   } catch (error) {
@@ -349,7 +344,6 @@ module.exports = (app) => {
     throw new Error('Socket.IO initialization failed');
   }
 
-  // Track connected users
   const connectedUsers = new Map();
 
   io.use(async (socket, next) => {
@@ -374,10 +368,10 @@ module.exports = (app) => {
         await logError('Blacklisted token used for Socket.IO', { token: token.substring(0, 10) + '...', ip: socket.handshake.address });
         return next(new Error('Token invalidated'));
       }
-      socket.user = { ...decoded, contacts: user.contacts }; // Include contacts for validation
+      socket.user = { ...decoded, contacts: user.contacts };
       next();
     } catch (error) {
-      await logError('Socket.IO auth error', { error: error.message, stack: error.stack, ip: socket.handshake.address });
+      await logError('Socket.IO auth error', { error: error.message, stack hardships: socket.handshake.address });
       next(new Error('Invalid token'));
     }
   });
@@ -385,7 +379,6 @@ module.exports = (app) => {
   io.on('connection', (socket) => {
     logger.info('Socket.IO connection', { socketId: socket.id, userId: socket.user?.id, ip: socket.handshake.address });
 
-    // Track connected user
     connectedUsers.set(socket.user.id, socket.id);
 
     socket.on('join', async (userId) => {
@@ -406,7 +399,7 @@ module.exports = (app) => {
         const pendingMessages = await Message.find({
           recipientId: userId,
           status: { $in: ['pending', 'sent'] },
-          senderId: { $in: socket.user.contacts }, // Only process messages from contacts
+          senderId: { $in: socket.user.contacts },
         })
           .select('senderId recipientId content contentType plaintextContent status caption replyTo originalFilename clientMessageId senderVirtualNumber senderUsername senderPhoto createdAt updatedAt')
           .lean();
@@ -448,7 +441,7 @@ module.exports = (app) => {
         const pendingMessages = await Message.find({
           recipientId: userId,
           status: { $in: ['pending', 'sent'] },
-          senderId: { $in: socket.user.contacts }, // Only process messages from contacts
+          senderId: { $in: socket.user.contacts },
         })
           .select('senderId recipientId content contentType plaintextContent status caption replyTo originalFilename clientMessageId senderVirtualNumber senderUsername senderPhoto createdAt updatedAt')
           .lean();
@@ -657,7 +650,7 @@ module.exports = (app) => {
           replyTo: populatedMessage.replyTo
             ? {
                 ...populatedMessage.replyTo,
-                senderId: populatingMessage.replyTo.senderId.toString(),
+                senderId: populatedMessage.replyTo.senderId.toString(),
                 recipientId: populatedMessage.replyTo.recipientId.toString(),
               }
             : null,
@@ -805,21 +798,30 @@ module.exports = (app) => {
         return res.status(200).json(cached);
       }
       const user = await retryOperation(async () => {
-        return await User.findById(userId)
+        const user = await User.findById(userId)
           .select('contacts')
           .populate({
             path: 'contacts',
-            select: 'username virtualNumber photo status lastSeen', // Exclude publicKey
-            match: { _id: { $in: '$contacts' } }, // Ensure only valid contacts
+            select: 'username virtualNumber photo status lastSeen',
+            match: { _id: { $in: '$contacts' } },
             options: { skip: parseInt(page) * parseInt(limit), limit: parseInt(limit), sort: { lastSeen: -1 } },
           })
           .lean();
+        if (!user) {
+          throw new Error('User not found');
+        }
+        return user;
       });
-      if (!user?.contacts?.length) {
-        chatListCache.set(cacheKey, []);
+      if (!user.contacts) {
+        logger.warn('User contacts field is null or undefined', { userId, ip: req.ip });
+        chatListCache.set(cacheKey, [], 15 * 60);
         return res.status(200).json([]);
       }
-      const contactIds = user.contacts.map((c) => c._id);
+      const contactIds = user.contacts.map((c) => c._id).filter((id) => mongoose.isValidObjectId(id));
+      if (!contactIds.length) {
+        chatListCache.set(cacheKey, [], 15 * 60);
+        return res.status(200).json([]);
+      }
       const latestMessages = await retryOperation(async () => {
         return await Message.aggregate([
           {
@@ -852,7 +854,7 @@ module.exports = (app) => {
               },
             },
           },
-        ]);
+        ]).option({ hint: { senderId: 1, recipientId: 1, createdAt: -1 } });
       });
       const chatList = user.contacts.map((contact) => {
         const messageData = latestMessages.find((m) => m._id.toString() === contact._id.toString());
@@ -878,15 +880,15 @@ module.exports = (app) => {
             }
           : null,
           unreadCount: messageData?.unreadCount || 0,
-          ownerId: userId, // Include ownerId for client-side validation
+          ownerId: userId,
         };
-      });
-      chatListCache.set(cacheKey, chatList);
+      }).filter((chat) => mongoose.isValidObjectId(chat.id));
+      chatListCache.set(cacheKey, chatList, 15 * 60);
       logger.info('Fetched chat list (HTTP)', { userId, page, count: chatList.length, ip: req.ip });
       res.status(200).json(chatList);
     } catch (error) {
       await logError('Chat list fetch failed', { userId, error: error.message, stack: error.stack, ip: req.ip });
-      res.status(500).json({ error: 'Failed to fetch chat list' });
+      res.status(500).json({ error: 'Failed to fetch chat list', details: error.message });
     }
   });
 
@@ -969,7 +971,7 @@ module.exports = (app) => {
           ...populatedMessage,
           senderId: populatedMessage.senderId.toString(),
           recipientId: populatedMessage.recipientId.toString(),
-          replyTo: populatedMessage.replyTo
+          replyTo: populatingMessage.replyTo
             ? {
                 ...populatedMessage.replyTo,
                 senderId: populatedMessage.replyTo.senderId.toString(),
@@ -983,7 +985,7 @@ module.exports = (app) => {
       });
     } catch (error) {
       await logError('Save message error (HTTP)', { error: error.message, senderId: req.body.senderId, clientMessageId: req.body.clientMessageId, stack: error.stack, ip: req.ip });
-      res.status(500).json({ error: 'Failed to save message' });
+      res.status(500).json({ error: 'Failed to save message', details: error.message });
     }
   });
 
@@ -1038,7 +1040,7 @@ module.exports = (app) => {
       res.status(200).json({ message: populatedMessage });
     } catch (err) {
       await logError('Edit message failed (HTTP)', { error: err.message, messageId: req.body.messageId, stack: err.stack, ip: req.ip });
-      res.status(500).json({ error: 'Failed to edit message' });
+      res.status(500).json({ error: 'Failed to edit message', details: err.message });
     }
   });
 
@@ -1071,7 +1073,7 @@ module.exports = (app) => {
       res.status(200).json({ status: 'success' });
     } catch (err) {
       await logError('Delete message failed (HTTP)', { error: err.message, messageId: req.body.messageId, stack: err.stack, ip: req.ip });
-      res.status(500).json({ error: 'Failed to delete message' });
+      res.status(500).json({ error: 'Failed to delete message', details: err.message });
     }
   });
 
@@ -1102,7 +1104,8 @@ module.exports = (app) => {
           .skip(parseInt(skip))
           .limit(parseInt(limit))
           .select('senderId recipientId content contentType plaintextContent status caption replyTo originalFilename clientMessageId senderVirtualNumber senderUsername senderPhoto createdAt updatedAt')
-          .lean();
+          .lean()
+          .hint({ senderId: 1, recipientId: 1, createdAt: 1 });
       });
       const deliveredMessageIds = messages
         .filter((msg) => msg.recipientId.toString() === userId && msg.status === 'delivered')
@@ -1129,7 +1132,7 @@ module.exports = (app) => {
       res.status(200).json({ messages, total });
     } catch (error) {
       await logError('Messages fetch failed', { userId, recipientId, error: error.message, stack: error.stack, ip: req.ip });
-      res.status(500).json({ error: 'Failed to fetch messages' });
+      res.status(500).json({ error: 'Failed to fetch messages', details: error.message });
     }
   });
 
@@ -1161,7 +1164,6 @@ module.exports = (app) => {
         if (!user.contacts.some((id) => id.toString() === contact._id.toString())) {
           await User.updateOne({ _id: userId }, { $addToSet: { contacts: contact._id } });
         }
-        // Only add user to contact's contacts if they have already added the user
         if (contact.contacts.some((id) => id.toString() === userId)) {
           await User.updateOne({ _id: contact._id }, { $addToSet: { contacts: userId } });
         }
@@ -1174,7 +1176,7 @@ module.exports = (app) => {
           lastSeen: contact.lastSeen || null,
           latestMessage: null,
           unreadCount: 0,
-          ownerId: userId, // Include ownerId for client-side validation
+          ownerId: userId,
         };
         const userData = {
           id: user._id.toString(),
@@ -1185,7 +1187,7 @@ module.exports = (app) => {
           lastSeen: user.lastSeen || null,
           latestMessage: null,
           unreadCount: 0,
-          ownerId: contact._id.toString(), // Include ownerId for contact
+          ownerId: contact._id.toString(),
         };
         chatListCache.del(`chatList:${userId}`);
         chatListCache.del(`chatList:${contact._id.toString()}`);
@@ -1200,7 +1202,7 @@ module.exports = (app) => {
       });
     } catch (error) {
       await logError('Add contact failed', { userId: req.body.userId, virtualNumber: req.body.virtualNumber, error: error.message, stack: error.stack, ip: req.ip });
-      res.status(500).json({ error: 'Failed to add contact' });
+      res.status(500).json({ error: 'Failed to add contact', details: error.message });
     }
   });
 
@@ -1291,7 +1293,7 @@ module.exports = (app) => {
       });
     } catch (err) {
       await logError('Media upload failed', { error: err.message, userId: req.body.userId, clientMessageId: req.body.clientMessageId, stack: err.stack, ip: req.ip });
-      res.status(500).json({ error: 'Failed to upload media' });
+      res.status(500).json({ error: 'Failed to upload media', details: err.message });
     }
   });
 
@@ -1304,7 +1306,6 @@ module.exports = (app) => {
       }
       await retryOperation(async () => {
         await TokenBlacklist.create({ token });
-        // Invalidate all tokens for the user
         await TokenBlacklist.deleteMany({ userId: req.user._id });
         await TokenBlacklist.create({ token, userId: req.user._id });
         const sockets = await io.in(req.user.id).fetchSockets();
@@ -1312,7 +1313,6 @@ module.exports = (app) => {
         await User.findByIdAndUpdate(req.user.id, { status: 'offline', lastSeen: new Date() });
         io.to(req.user.id).emit('userStatus', { userId: req.user.id, status: 'offline', lastSeen: new Date() });
         connectedUsers.delete(req.user.id);
-        // Clear cache for the user
         chatListCache.del(`chatList:${req.user.id}`);
       });
       logger.info('Logout successful', { userId: req.user.id, ip: req.ip });
@@ -1324,7 +1324,7 @@ module.exports = (app) => {
       } catch (blacklistErr) {
         await logError('Failed to blacklist token during logout', { error: blacklistErr.message, userId: req.user?.id, ip: req.ip });
       }
-      res.status(500).json({ error: 'Failed to logout, please try again' });
+      res.status(500).json({ error: 'Failed to logout, please try again', details: error.message });
     }
   });
 
@@ -1335,7 +1335,7 @@ module.exports = (app) => {
       res.status(200).json({ message: 'Error logged successfully' });
     } catch (err) {
       await logError('Failed to log client error', { error: err.message, stack: err.stack, ip: req.ip });
-      res.status(500).json({ error: 'Failed to log error' });
+      res.status(500).json({ error: 'Failed to log error', details: err.message });
     }
   });
 
