@@ -19,6 +19,7 @@ const PUBLIC_KEY_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours for public key cac
 const isValidObjectId = (id) => /^[0-9a-fA-F]{24}$/.test(id);
 const isValidVirtualNumber = (number) => /^\+\d{7,15}$/.test(number.trim());
 const generateClientMessageId = () => `${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
+const sanitizeInput = (input) => input.replace(/[<>]/g, '');
 
 const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber, photo, onLogout, theme }) => {
   const navigate = useNavigate();
@@ -186,90 +187,86 @@ const ChatScreen = React.memo(({ token, userId, socket, username, virtualNumber,
     [isForgeReady, logClientError]
   );
 
-  
-
-
-
-
-  // In ChatScreen.js
-
-const getPublicKey = useCallback(
-  async (recipientId) => {
-    if (!isValidObjectId(recipientId)) throw new Error('Invalid recipientId');
-    const cacheKey = `publicKey:${recipientId}`;
-    const cachedData = localStorage.getItem(cacheKey);
-    if (cachedData) {
-      const { publicKey, timestamp } = JSON.parse(cachedData);
-      if (Date.now() - timestamp < PUBLIC_KEY_CACHE_TTL) {
-        return publicKey;
-      }
-      localStorage.removeItem(cacheKey); // Remove expired key
-    }
-
-    try {
-      const { data } = await axios.get(`${BASE_URL}/auth/public_key/${recipientId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-        timeout: 5000,
-      });
-      if (!data.publicKey) throw new Error('No public key returned');
-      localStorage.setItem(cacheKey, JSON.stringify({ publicKey: data.publicKey, timestamp: Date.now() }));
-      return data.publicKey;
-    } catch (err) {
-      console.error(`Public key fetch failed: ${err.message}`);
-      logClientError(`Public key fetch failed for recipient ${recipientId}`, err);
-      if (err.response?.status === 401) {
-        setTimeout(() => onLogout(), 1000);
+  const getPublicKey = useCallback(
+    async (recipientId) => {
+      if (!isValidObjectId(recipientId)) {
+        const err = new Error('Invalid recipientId');
+        logClientError('Invalid recipientId in getPublicKey', err);
         throw err;
       }
-      throw new Error('Failed to fetch public key');
-    }
-  },
-  [token, onLogout, logClientError]
-);
-
-// New function to fetch public keys for all contacts after login
-const fetchContactPublicKeys = useCallback(async () => {
-  if (!chatList.length || !isForgeReady) return;
-  try {
-    const promises = chatList.map(async (chat) => {
-      if (!isValidObjectId(chat.id)) return;
-      const cacheKey = `publicKey:${chat.id}`;
+      const cacheKey = `publicKey:${recipientId}`;
       const cachedData = localStorage.getItem(cacheKey);
       if (cachedData) {
-        const { timestamp } = JSON.parse(cachedData);
-        if (Date.now() - timestamp < PUBLIC_KEY_CACHE_TTL) return;
+        const { publicKey, timestamp } = JSON.parse(cachedData);
+        if (Date.now() - timestamp < PUBLIC_KEY_CACHE_TTL) {
+          return publicKey;
+        }
         localStorage.removeItem(cacheKey);
       }
+
       try {
-        const { data } = await axios.get(`${BASE_URL}/auth/public_key/${chat.id}`, {
+        const { data } = await axios.get(`${BASE_URL}/auth/public_key/${recipientId}`, {
           headers: { Authorization: `Bearer ${token}` },
           timeout: 5000,
         });
-        if (data.publicKey) {
-          localStorage.setItem(cacheKey, JSON.stringify({ publicKey: data.publicKey, timestamp: Date.now() }));
+        if (!data.publicKey) {
+          throw new Error('No public key returned');
         }
+        localStorage.setItem(cacheKey, JSON.stringify({ publicKey: data.publicKey, timestamp: Date.now() }));
+        return data.publicKey;
       } catch (err) {
-        console.warn(`Failed to fetch public key for contact ${chat.id}: ${err.message}`);
-        logClientError(`Failed to fetch public key for contact ${chat.id}`, err);
+        console.error(`Public key fetch failed for recipient ${recipientId}: ${err.message}`);
+        logClientError(`Public key fetch failed for recipient ${recipientId}`, err);
+        if (err.response?.status === 401) {
+          setTimeout(() => onLogout(), 1000);
+        }
+        throw new Error('Failed to fetch public key');
       }
-    });
-    await Promise.all(promises);
-  } catch (err) {
-    logClientError('Failed to fetch contact public keys', err);
-  }
-}, [chatList, isForgeReady, token, logClientError]);
+    },
+    [token, onLogout, logClientError]
+  );
 
-
-
-
-
+  const fetchContactPublicKeys = useCallback(
+    async () => {
+      if (!chatList.length || !isForgeReady) return;
+      try {
+        const promises = chatList.map(async (chat) => {
+          if (!isValidObjectId(chat.id)) {
+            console.warn(`Invalid chat ID ${chat.id}, skipping public key fetch`);
+            return;
+          }
+          const cacheKey = `publicKey:${chat.id}`;
+          const cachedData = localStorage.getItem(cacheKey);
+          if (cachedData) {
+            const { timestamp } = JSON.parse(cachedData);
+            if (Date.now() - timestamp < PUBLIC_KEY_CACHE_TTL) return;
+            localStorage.removeItem(cacheKey);
+          }
+          try {
+            const { data } = await axios.get(`${BASE_URL}/auth/public_key/${chat.id}`, {
+              headers: { Authorization: `Bearer ${token}` },
+              timeout: 5000,
+            });
+            if (data.publicKey) {
+              localStorage.setItem(cacheKey, JSON.stringify({ publicKey: data.publicKey, timestamp: Date.now() }));
+            }
+          } catch (err) {
+            console.warn(`Failed to fetch public key for contact ${chat.id}: ${err.message}`);
+            logClientError(`Failed to fetch public key for contact ${chat.id}`, err);
+          }
+        });
+        await Promise.all(promises);
+      } catch (err) {
+        logClientError('Failed to fetch contact public keys', err);
+      }
+    },
+    [chatList, isForgeReady, token, logClientError]
+  );
 
   const fetchChatList = useCallback(
     debounce(
       async (force = false) => {
-        if (!isMountedRef.current) {
-          return;
-        }
+        if (!isMountedRef.current) return;
         if (!force && chatList.length && chatListTimestamp && Date.now() - chatListTimestamp < CACHE_TIMEOUT) {
           setFetchStatus('cached');
           setFetchError(null);
@@ -306,11 +303,12 @@ const fetchContactPublicKeys = useCallback(async () => {
               throw new Error('Invalid chat list data: not an array');
             }
             if (isMountedRef.current && fetchId === fetchChatList.currentFetchId) {
-              const validChats = data.filter((chat) => isValidObjectId(chat.id));
+              const validChats = data.filter((chat) => isValidObjectId(chat.id) && chat.ownerId === userId);
               if (validChats.length > 0) {
                 const updatedChatList = validChats.map((chat) => ({
                   ...chat,
                   _id: chat.id,
+                  ownerId: chat.ownerId,
                   unreadCount: unreadMessages[chat.id] || chat.unreadCount || 0,
                   lastSeen: chat.lastSeen ? new Date(chat.lastSeen).toISOString() : null,
                   latestMessage: chat.latestMessage
@@ -337,9 +335,7 @@ const fetchContactPublicKeys = useCallback(async () => {
               clearTimeout(retryTimeoutRef.current.chatList);
             }
           } catch (err) {
-            if (!isMountedRef.current || fetchId !== fetchChatList.currentFetchId) {
-              return;
-            }
+            if (!isMountedRef.current || fetchId !== fetchChatList.currentFetchId) return;
             if (err.response?.status === 401) {
               console.error('fetchChatList unauthorized:', err.message);
               logClientError('Chat list fetch failed: Unauthorized', err);
@@ -378,87 +374,86 @@ const fetchContactPublicKeys = useCallback(async () => {
   );
   fetchChatList.cancel = () => debounce.cancel();
 
-
-
-
-
-// In ChatScreen.js, modify useEffect for initialization (lines ~400–450):
-
-useEffect(() => {
-  isMountedRef.current = true;
-  if (!token || !userId) {
-    console.error('Missing token or userId, redirecting to login');
-    navigate('/login', { replace: true });
-    return () => {};
-  }
-
-  if (chatList.length && chatListTimestamp && Date.now() - chatListTimestamp < CACHE_TIMEOUT) {
-    setFetchStatus('cached');
-    setFetchError(null);
-    setIsLoadingChatList(false);
-  } else {
-    fetchChatList();
-  }
-
-  fetchContactPublicKeys();
-
-  const handleSocketConnect = () => {
-    if (socket && isMountedRef.current) {
-      socket.emit('join', userId);
+  useEffect(() => {
+    isMountedRef.current = true;
+    if (!token || !userId || !isValidObjectId(userId)) {
+      console.error('Missing or invalid token or userId, redirecting to login');
+      logClientError('Invalid authentication data on ChatScreen mount', new Error('Missing or invalid token/userId'));
+      navigate('/login', { replace: true });
+      return () => {};
     }
-  };
 
-  const handleSocketDisconnect = (reason) => {
-    console.warn('Socket disconnected:', reason);
-    setFetchError('Connection lost. Trying to reconnect...');
-  };
-
-  const handleSocketConnectError = (err) => {
-    console.error('Socket connect error:', err.message);
-    setFetchError('Connection lost. Trying to reconnect...');
-  };
-
-  if (socket) {
-    socket.on('connect', handleSocketConnect);
-    socket.on('disconnect', handleSocketDisconnect);
-    socket.on('connect_error', handleSocketConnectError);
-    if (socket.connected) {
-      socket.emit('join', userId);
+    if (chatList.length && chatListTimestamp && Date.now() - chatListTimestamp < CACHE_TIMEOUT) {
+      setFetchStatus('cached');
+      setFetchError(null);
+      setIsLoadingChatList(false);
+    } else {
+      fetchChatList();
     }
-  }
 
-  const handleOffline = () => {
-    setFetchError('You are offline. Displaying cached contacts.');
-    setFetchStatus('cached');
-    setIsLoadingChatList(false);
-  };
+    fetchContactPublicKeys();
 
-  window.addEventListener('offline', handleOffline);
-  return () => {
-    isMountedRef.current = false;
-    clearTimeout(retryTimeoutRef.current.chatList);
-    clearTimeout(retryTimeoutRef.current.addContact);
-    sentStatusesRef.current.clear();
-    errorLogTimestamps.current.clear();
+    const handleSocketConnect = () => {
+      if (socket && isMountedRef.current) {
+        socket.emit('join', userId);
+      }
+    };
+
+    const handleSocketDisconnect = (reason) => {
+      console.warn('Socket disconnected:', reason);
+      setFetchError('Connection lost. Trying to reconnect...');
+    };
+
+    const handleSocketConnectError = (err) => {
+      console.error('Socket connect error:', err.message);
+      setFetchError('Connection lost. Trying to reconnect...');
+      if (err.message.includes('invalid token') || err.message.includes('No token provided')) {
+        logClientError('Socket connect failed: Unauthorized', err);
+        setTimeout(() => onLogout(), 1000);
+      }
+    };
+
     if (socket) {
-      socket.off('connect', handleSocketConnect);
-      socket.off('disconnect', handleSocketDisconnect);
-      socket.off('connect_error', handleSocketConnectError);
+      socket.on('connect', handleSocketConnect);
+      socket.on('disconnect', handleSocketDisconnect);
+      socket.on('connect_error', handleSocketConnectError);
+      if (socket.connected) {
+        socket.emit('join', userId);
+      }
     }
-    window.removeEventListener('offline', handleOffline);
-  };
-}, [token, userId, socket, navigate, fetchChatList, chatList, chatListTimestamp, fetchContactPublicKeys]);
 
+    const handleOffline = () => {
+      setFetchError('You are offline. Displaying cached contacts.');
+      setFetchStatus('cached');
+      setIsLoadingChatList(false);
+    };
 
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      isMountedRef.current = false;
+      clearTimeout(retryTimeoutRef.current.chatList);
+      clearTimeout(retryTimeoutRef.current.addContact);
+      sentStatusesRef.current.clear();
+      errorLogTimestamps.current.clear();
+      if (socket) {
+        socket.off('connect', handleSocketConnect);
+        socket.off('disconnect', handleSocketDisconnect);
+        socket.off('connect_error', handleSocketConnectError);
+        socket.emit('leave', userId);
+      }
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [token, userId, socket, navigate, fetchChatList, chatList, chatListTimestamp, fetchContactPublicKeys, logClientError]);
 
   const handleAddContact = useCallback(
     async () => {
       const maxRetries = 3;
-      if (!contactInput.trim()) {
+      const sanitizedContactInput = sanitizeInput(contactInput.trim());
+      if (!sanitizedContactInput) {
         setContactError('Please enter a virtual number');
         return;
       }
-      if (!isValidVirtualNumber(contactInput)) {
+      if (!isValidVirtualNumber(sanitizedContactInput)) {
         setContactError('Invalid virtual number format (e.g., +1234567890)');
         return;
       }
@@ -473,13 +468,17 @@ useEffect(() => {
       try {
         const response = await axios.post(
           `${BASE_URL}/social/add_contact`,
-          { userId, virtualNumber: contactInput.trim() },
+          { userId, virtualNumber: sanitizedContactInput },
           { headers: { Authorization: `Bearer ${token}` }, timeout: 5000 }
         );
         if (!isMountedRef.current) return;
+        if (!isValidObjectId(response.data.id)) {
+          throw new Error('Invalid contact ID returned');
+        }
         const newChat = {
           id: response.data.id,
           _id: response.data.id,
+          ownerId: userId,
           username: response.data.username || 'Unknown',
           virtualNumber: response.data.virtualNumber || '',
           photo: response.data.photo || 'https://placehold.co/40x40',
@@ -488,11 +487,7 @@ useEffect(() => {
           latestMessage: null,
           unreadCount: 0,
         };
-        dispatch(setChatList((prev) => {
-          if (prev.find((chat) => chat.id === newChat.id)) return prev;
-          const updatedChatList = [...prev, newChat];
-          return updatedChatList;
-        }));
+        dispatch(setChatList([...chatList, newChat]));
         setContactInput('');
         setContactError('');
         setShowAddContact(false);
@@ -521,12 +516,12 @@ useEffect(() => {
         if (isMountedRef.current) setIsLoadingAddContact(false);
       }
     },
-    [contactInput, token, userId, onLogout, logClientError, dispatch]
+    [contactInput, token, userId, onLogout, logClientError, dispatch, chatList]
   );
 
   const fetchMessages = useCallback(
     async (chatId) => {
-      if (!isForgeReady || !isValidObjectId(chatId) || !isMountedRef.current) return;
+      if (!isForgeReady || !isValidObjectId(chatId) || !isMountedRef.current || !isValidObjectId(userId)) return;
       try {
         const { data } = await axios.get(`${BASE_URL}/social/messages`, {
           headers: { Authorization: `Bearer ${token}` },
@@ -539,6 +534,10 @@ useEffect(() => {
         if (isMountedRef.current) {
           const decryptedMessages = await Promise.all(
             data.messages.map(async (msg) => {
+              if (!isValidObjectId(msg.senderId) || !isValidObjectId(msg.recipientId)) {
+                console.warn(`Invalid message senderId or recipientId: ${msg._id || msg.clientMessageId}`);
+                return null;
+              }
               let plaintextContent = msg.plaintextContent || '[Message not decrypted]';
               if (msg.contentType === 'text' && msg.content && auth.privateKey) {
                 try {
@@ -550,7 +549,8 @@ useEffect(() => {
               return { ...msg, plaintextContent };
             })
           );
-          dispatch(setMessages({ recipientId: chatId, messages: decryptedMessages }));
+          const validMessages = decryptedMessages.filter((msg) => msg !== null);
+          dispatch(setMessages({ recipientId: chatId, messages: validMessages }));
           setUnreadMessages((prev) => ({ ...prev, [chatId]: 0 }));
         }
         const unreadMessageIds = data.messages
@@ -576,107 +576,111 @@ useEffect(() => {
     [isForgeReady, token, userId, socket, dispatch, logClientError, onLogout, auth.privateKey, decryptMessage]
   );
 
+  const sendMessage = useCallback(
+    async (retryCount = 0) => {
+      if (!isForgeReady || !message.trim() || !selectedChat || !isValidObjectId(selectedChat) || !isValidObjectId(userId)) {
+        console.warn('sendMessage: Invalid state', { isForgeReady, message, selectedChat, userId });
+        logClientError('Invalid state in sendMessage', new Error('Invalid message parameters'));
+        return;
+      }
+      const clientMessageId = generateClientMessageId();
+      const sanitizedMessage = sanitizeInput(message.trim());
+      const maxMessageRetries = 3;
 
-// In ChatScreen.js, replace the sendMessage function (lines ~500–550) with:
-
-const sendMessage = useCallback(
-  async (retryCount = 0) => {
-    if (!isForgeReady || !message.trim() || !selectedChat || !isValidObjectId(selectedChat)) return;
-    const clientMessageId = generateClientMessageId();
-    const plaintextContent = message.trim();
-    const maxMessageRetries = 3;
-
-    // Check for duplicate message
-    if (chats[selectedChat]?.some((msg) => msg.clientMessageId === clientMessageId)) {
-      console.warn('Duplicate message detected, aborting send:', clientMessageId);
-      return;
-    }
-
-    const messageData = {
-      senderId: userId,
-      recipientId: selectedChat,
-      contentType: 'text',
-      plaintextContent,
-      clientMessageId,
-      senderVirtualNumber: virtualNumber,
-      senderUsername: username,
-      senderPhoto: photo,
-      status: 'pending',
-      createdAt: new Date().toISOString(),
-    };
-
-    // Add to Redux store immediately
-    dispatch(addMessage({ recipientId: selectedChat, message: { ...messageData, _id: clientMessageId } }));
-
-    const attemptSend = async () => {
-      if (!socket?.connected) {
-        console.warn('Socket not connected, queuing message');
-        localStorage.setItem(`queuedMessage:${clientMessageId}`, JSON.stringify(messageData));
-        setMessage('');
-        inputRef.current?.focus();
+      if (chats[selectedChat]?.some((msg) => msg.clientMessageId === clientMessageId)) {
+        console.warn('Duplicate message detected, aborting send:', clientMessageId);
         return;
       }
 
-      try {
-        const recipientPublicKey = await getPublicKey(selectedChat);
-        const encryptedContent = await encryptMessage(plaintextContent, recipientPublicKey);
-        const messagePayload = {
-          senderId: userId,
-          recipientId: selectedChat,
-          content: encryptedContent,
-          contentType: 'text',
-          clientMessageId,
-          senderVirtualNumber: virtualNumber,
-          senderUsername: username,
-          senderPhoto: photo,
-        };
+      const messageData = {
+        senderId: userId,
+        recipientId: selectedChat,
+        contentType: 'text',
+        plaintextContent: sanitizedMessage,
+        clientMessageId,
+        senderVirtualNumber: virtualNumber,
+        senderUsername: username,
+        senderPhoto: photo,
+        status: 'pending',
+        createdAt: new Date().toISOString(),
+      };
 
-        socket.emit('message', messagePayload, (ack) => {
-          if (!isMountedRef.current) return;
-          if (ack?.error) {
-            console.error('Socket message failed:', ack.error);
-            dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: clientMessageId, status: 'failed' }));
-            logClientError(`Socket message failed: ${ack.error}`, new Error(ack.error));
-            localStorage.setItem(`queuedMessage:${clientMessageId}`, JSON.stringify(messageData)); // Re-queue on failure
-            return;
-          }
-          dispatch(replaceMessage({ recipientId: selectedChat, message: { ...ack.message, plaintextContent }, replaceId: clientMessageId }));
-          dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: ack.message._id, status: 'sent' }));
-          localStorage.removeItem(`queuedMessage:${clientMessageId}`);
-        });
+      dispatch(addMessage({ recipientId: selectedChat, message: { ...messageData, _id: clientMessageId } }));
 
-        setMessage('');
-        inputRef.current?.focus();
-        listRef.current?.scrollToItem((chats[selectedChat]?.length || 0) + 1, 'end');
-      } catch (err) {
-        console.error('Send message failed:', err.message);
-        const isNonTransient = err.response?.status >= 400 && err.response?.status < 500 && err.response?.status !== 429;
-        if (isNonTransient || retryCount >= maxMessageRetries) {
-          dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: clientMessageId, status: 'failed' }));
-          logClientError(`Send message failed after ${retryCount} retries`, err);
-          localStorage.setItem(`queuedMessage:${clientMessageId}`, JSON.stringify(messageData)); // Re-queue on failure
+      const attemptSend = async () => {
+        if (!socket?.connected) {
+          console.warn('Socket not connected, queuing message');
+          localStorage.setItem(`queuedMessage:${clientMessageId}`, JSON.stringify(messageData));
+          setMessage('');
+          inputRef.current?.focus();
           return;
         }
-        const delay = Math.pow(2, retryCount) * 1000 * (1 + Math.random() * 0.1);
-        console.warn(`Retrying message send in ${delay}ms (attempt ${retryCount + 1})`);
-        setTimeout(() => sendMessage(retryCount + 1), delay);
-      }
-    };
 
-    await attemptSend();
-  },
-  [isForgeReady, message, selectedChat, userId, virtualNumber, username, photo, socket, getPublicKey, encryptMessage, dispatch, chats, logClientError]
-);
+        try {
+          const recipientPublicKey = await getPublicKey(selectedChat);
+          const encryptedContent = await encryptMessage(sanitizedMessage, recipientPublicKey);
+          const messagePayload = {
+            senderId: userId,
+            recipientId: selectedChat,
+            content: encryptedContent,
+            contentType: 'text',
+            clientMessageId,
+            senderVirtualNumber: virtualNumber,
+            senderUsername: username,
+            senderPhoto: photo,
+          };
 
+          socket.emit('message', messagePayload, (ack) => {
+            if (!isMountedRef.current) return;
+            if (ack?.error) {
+              console.error('Socket message failed:', ack.error);
+              dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: clientMessageId, status: 'failed' }));
+              logClientError(`Socket message failed: ${ack.error}`, new Error(ack.error));
+              localStorage.setItem(`queuedMessage:${clientMessageId}`, JSON.stringify(messageData));
+              return;
+            }
+            if (!isValidObjectId(ack.message.recipientId) || ack.message.recipientId !== selectedChat) {
+              console.warn('Received message with invalid or mismatched recipientId', ack.message);
+              return;
+            }
+            dispatch(replaceMessage({ recipientId: selectedChat, message: { ...ack.message, plaintextContent: sanitizedMessage }, replaceId: clientMessageId }));
+            dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: ack.message._id, status: 'sent' }));
+            localStorage.removeItem(`queuedMessage:${clientMessageId}`);
+          });
 
+          setMessage('');
+          inputRef.current?.focus();
+          listRef.current?.scrollToItem((chats[selectedChat]?.length || 0) + 1, 'end');
+        } catch (err) {
+          console.error('Send message failed:', err.message);
+          const isNonTransient = err.response?.status >= 400 && err.response?.status < 500 && err.response?.status !== 429;
+          if (isNonTransient || retryCount >= maxMessageRetries) {
+            dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: clientMessageId, status: 'failed' }));
+            logClientError(`Send message failed after ${retryCount} retries`, err);
+            localStorage.setItem(`queuedMessage:${clientMessageId}`, JSON.stringify(messageData));
+            return;
+          }
+          const delay = Math.pow(2, retryCount) * 1000 * (1 + Math.random() * 0.1);
+          console.warn(`Retrying message send in ${delay}ms (attempt ${retryCount + 1})`);
+          setTimeout(() => sendMessage(retryCount + 1), delay);
+        }
+      };
 
+      await attemptSend();
+    },
+    [isForgeReady, message, selectedChat, userId, virtualNumber, username, photo, socket, getPublicKey, encryptMessage, dispatch, chats, logClientError]
+  );
 
   const handleAttachment = useCallback(
     async (e) => {
       const selectedFile = e.target.files[0];
-      if (!selectedFile || !selectedChat || !isValidObjectId(selectedChat)) return;
+      if (!selectedFile || !selectedChat || !isValidObjectId(selectedChat) || !isValidObjectId(userId)) {
+        console.warn('Invalid attachment parameters', { selectedFile, selectedChat, userId });
+        return;
+      }
       if (selectedFile.size > 50 * 1024 * 1024) {
         console.error('File size exceeds 50MB limit');
+        setFetchError('File size exceeds 50MB limit');
         return;
       }
       setFile(selectedFile);
@@ -708,6 +712,9 @@ const sendMessage = useCallback(
           headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'multipart/form-data' },
           timeout: 30000,
         });
+        if (!isValidObjectId(data.message.recipientId) || data.message.recipientId !== selectedChat) {
+          throw new Error('Invalid or mismatched recipientId in upload response');
+        }
         dispatch(replaceMessage({ recipientId: selectedChat, message: data.message, replaceId: clientMessageId }));
         dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: data.message._id, status: 'sent' }));
         setFile(null);
@@ -715,9 +722,10 @@ const sendMessage = useCallback(
       } catch (err) {
         console.error('File upload failed:', err.message);
         dispatch(updateMessageStatus({ recipientId: selectedChat, messageId: clientMessageId, status: 'failed' }));
+        logClientError('File upload failed', err);
       }
     },
-    [selectedChat, userId, virtualNumber, username, photo, token, dispatch, chats]
+    [selectedChat, userId, virtualNumber, username, photo, token, dispatch, chats, logClientError]
   );
 
   useEffect(() => {
@@ -740,7 +748,7 @@ const sendMessage = useCallback(
   }, []);
 
   useEffect(() => {
-    if (!socket || !isForgeReady || !userId || !auth.privateKey) return () => {};
+    if (!socket || !isForgeReady || !userId || !auth.privateKey || !isValidObjectId(userId)) return () => {};
 
     let statusUpdateQueue = [];
     let statusUpdateTimeout = null;
@@ -759,8 +767,8 @@ const sendMessage = useCallback(
     };
 
     const handleNewContact = ({ contactData }) => {
-      if (!contactData?.id || !isValidObjectId(contactData.id) || !contactData.virtualNumber) {
-        console.error('Invalid contactData received:', contactData);
+      if (!contactData?.id || !isValidObjectId(contactData.id) || !contactData.virtualNumber || contactData.ownerId !== userId) {
+        console.error('Invalid or unauthorized contactData received:', contactData);
         return;
       }
       dispatch(setChatList((prev) => {
@@ -770,6 +778,7 @@ const sendMessage = useCallback(
         const newContact = {
           id: contactData.id,
           _id: contactData.id,
+          ownerId: userId,
           username: contactData.username || 'Unknown',
           virtualNumber: contactData.virtualNumber || '',
           photo: contactData.photo || 'https://placehold.co/40x40',
@@ -778,8 +787,7 @@ const sendMessage = useCallback(
           latestMessage: null,
           unreadCount: 0,
         };
-        const updatedChatList = [...prev, newContact];
-        return updatedChatList;
+        return [...prev, newContact];
       }));
     };
 
@@ -793,7 +801,7 @@ const sendMessage = useCallback(
         console.warn('chatListUpdated received empty or invalid users data:', users);
         return;
       }
-      const validUsers = users.filter((chat) => isValidObjectId(chat.id));
+      const validUsers = users.filter((chat) => isValidObjectId(chat.id) && chat.ownerId === userId);
       if (validUsers.length > 0) {
         dispatch(setChatList(validUsers));
       } else {
@@ -805,7 +813,19 @@ const sendMessage = useCallback(
       if (!isMountedRef.current) return;
       const senderId = typeof msg.senderId === 'object' ? msg.senderId._id.toString() : msg.senderId.toString();
       const recipientId = typeof msg.recipientId === 'object' ? msg.recipientId._id.toString() : msg.recipientId.toString();
+      if (!isValidObjectId(senderId) || !isValidObjectId(recipientId)) {
+        console.warn('Invalid senderId or recipientId in message:', msg);
+        return;
+      }
+      if (recipientId !== userId && senderId !== userId) {
+        console.warn('Message not intended for this user:', { senderId, recipientId, userId });
+        return;
+      }
       const targetId = senderId === userId ? recipientId : senderId;
+      if (!chatList.some((chat) => chat.id === targetId)) {
+        console.warn(`Message received for unknown contact ${targetId}`);
+        return;
+      }
       let plaintextContent = msg.plaintextContent || '[Message not decrypted]';
       if (msg.contentType === 'text' && msg.content && auth.privateKey) {
         try {
@@ -830,6 +850,7 @@ const sendMessage = useCallback(
     };
 
     const handleTyping = ({ userId: typingUserId }) => {
+      if (!isValidObjectId(typingUserId)) return;
       if (typingUserId === selectedChat && isMountedRef.current) {
         setIsTyping((prev) => ({ ...prev, [typingUserId]: true }));
         clearTimeout(typingTimeoutRef.current);
@@ -840,14 +861,16 @@ const sendMessage = useCallback(
     };
 
     const handleStopTyping = ({ userId: typingUserId }) => {
+      if (!isValidObjectId(typingUserId)) return;
       if (typingUserId === selectedChat && isMountedRef.current) {
         setIsTyping((prev) => ({ ...prev, [typingUserId]: false }));
       }
     };
 
     const handleMessageStatus = ({ messageIds, status }) => {
-      if (!isMountedRef.current) return;
+      if (!isMountedRef.current || !Array.isArray(messageIds)) return;
       messageIds.forEach((messageId) => {
+        if (!isValidObjectId(messageId)) return;
         Object.keys(chats).forEach((chatId) => {
           if (chats[chatId].some((msg) => msg._id === messageId && msg.senderId.toString() === userId)) {
             dispatch(updateMessageStatus({ recipientId: chatId, messageId, status }));
@@ -879,7 +902,7 @@ const sendMessage = useCallback(
       setUnreadMessages({});
       setIsTyping({});
     };
-  }, [socket, isForgeReady, selectedChat, userId, chats, dispatch, unreadMessages, auth.privateKey, decryptMessage]);
+  }, [socket, isForgeReady, selectedChat, userId, chats, dispatch, unreadMessages, auth.privateKey, decryptMessage, chatList]);
 
   useEffect(() => {
     if (selectedChat && !chats[selectedChat]) {
@@ -910,7 +933,7 @@ const sendMessage = useCallback(
 
   const handleTyping = useCallback(
     () => {
-      if (!socket || !selectedChat) return;
+      if (!socket || !selectedChat || !isValidObjectId(selectedChat)) return;
       clearTimeout(typingDebounceRef.current);
       typingDebounceRef.current = setTimeout(() => {
         throttledEmit('typing', { userId, recipientId: selectedChat });
@@ -925,6 +948,14 @@ const sendMessage = useCallback(
 
   const selectChat = useCallback(
     (chatId) => {
+      if (chatId && !isValidObjectId(chatId)) {
+        console.warn('Invalid chatId:', chatId);
+        return;
+      }
+      if (chatId && !chatList.some((chat) => chat.id === chatId)) {
+        console.warn('ChatId not in chatList:', chatId);
+        return;
+      }
       dispatch(setSelectedChat(chatId));
       setShowMenu(false);
       if (chatId && socket) {
@@ -943,7 +974,7 @@ const sendMessage = useCallback(
       }
       inputRef.current?.focus();
     },
-    [socket, chats, userId, dispatch]
+    [socket, chats, userId, dispatch, chatList]
   );
 
   const getItemSize = (index) => {
@@ -1065,7 +1096,7 @@ const sendMessage = useCallback(
                           contactError ? 'border-red-500' : 'border-gray-300 dark:border-gray-600'
                         } bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100`}
                         value={contactInput}
-                        onChange={(e) => setContactInput(e.target.value)}
+                        onChange={(e) => setContactInput(sanitizeInput(e.target.value))}
                         placeholder="Enter virtual number (e.g., +1234567890)"
                         disabled={isLoadingAddContact}
                       />
@@ -1109,7 +1140,7 @@ const sendMessage = useCallback(
           )}
           {!isLoadingChatList && (fetchStatus === 'success' || fetchStatus === 'cached') && chatList.length > 0 && (
             chatList
-              .filter((chat) => isValidObjectId(chat.id))
+              .filter((chat) => isValidObjectId(chat.id) && chat.ownerId === userId)
               .map((chat) => (
                 <div
                   key={chat.id}
@@ -1264,7 +1295,7 @@ const sendMessage = useCallback(
                     type="text"
                     className="flex-1 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-gray-300 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100"
                     value={message}
-                    onChange={(e) => setMessage(e.target.value)}
+                    onChange={(e) => setMessage(sanitizeInput(e.target.value))}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' && !e.shiftKey) {
                         e.preventDefault();

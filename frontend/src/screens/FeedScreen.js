@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
-import { FaPlus, FaPaperPlane, FaHeart, FaComment, FaShare, FaVolumeMute, FaVolumeUp, FaSyncAlt, FaTextHeight, FaImage, FaVideo, FaMusic, FaFilm } from 'react-icons/fa';
+import { FaPlus, FaPaperPlane, FaHeart, FaComment, FaShare, FaVolumeMute, FaVolumeUp, FaSyncAlt, FaTextHeight, FaImage, FaVideo, FaMusic, FaFilm, FaUser } from 'react-icons/fa';
 import { useSwipeable } from 'react-swipeable';
 import debounce from 'lodash/debounce';
 import PropTypes from 'prop-types';
@@ -30,6 +30,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
   const [refreshing, setRefreshing] = useState(false);
   const [socketConnected, setSocketConnected] = useState(false);
   const [isAuthLoaded, setIsAuthLoaded] = useState(false);
+  const [showUserPosts, setShowUserPosts] = useState(false); // New state for toggling user posts
   const feedRef = useRef(null);
   const mediaRefs = useRef({});
   const isFetchingFeedRef = useRef(false);
@@ -132,10 +133,10 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
             if (!postId) return;
             if (entry.isIntersecting && !showComments) {
               setPlayingPostId(postId);
-              if (media.tagName === 'VIDEO') {
-                media.play().catch((err) => console.warn('Video play error:', err.message));
+              if (media.tagName === 'VIDEO' || media.tagName === 'AUDIO') {
+                media.play().catch((err) => console.warn('Media play error:', err.message));
               }
-            } else if (media.tagName === 'VIDEO') {
+            } else if (media.tagName === 'VIDEO' || media.tagName === 'AUDIO') {
               media.pause();
               media.currentTime = 0;
             }
@@ -151,7 +152,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
       return () => {
         observer.disconnect();
         Object.values(mediaRefs.current).forEach((media) => {
-          if (media?.tagName === 'VIDEO') {
+          if (media?.tagName === 'VIDEO' || media?.tagName === 'AUDIO') {
             media.pause();
             media.src = '';
             media.load();
@@ -185,8 +186,11 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
       }
 
       try {
+        const url = showUserPosts
+          ? `${BASE_URL}/feed/user/${userId}?page=${pageNum}&limit=10`
+          : `${BASE_URL}/feed?page=${pageNum}&limit=10`;
         const { data } = await retryOperation(() =>
-          axios.get(`${BASE_URL}/feed?page=${pageNum}&limit=10`, {
+          axios.get(url, {
             headers: { Authorization: `Bearer ${token}` },
             timeout: 5000,
           })
@@ -213,7 +217,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
         setError(
           error.message === 'Offline'
             ? 'You are offline'
-            : 'Failed to load feed'
+            : `Failed to load ${showUserPosts ? 'your posts' : 'feed'}`
         );
       } finally {
         isFetchingFeedRef.current = false;
@@ -221,7 +225,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
         setRefreshing(false);
       }
     }, 300),
-    [token, userId, hasMore, loadFromCache, saveToCache]
+    [token, userId, hasMore, loadFromCache, saveToCache, showUserPosts]
   );
 
   const getTokenExpiration = useCallback((token) => {
@@ -240,7 +244,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
         atob(base64)
           .split('')
           .map((c) => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
-        .join('')
+          .join('')
       );
       const decoded = JSON.parse(jsonPayload);
       if (!decoded.exp || isNaN(decoded.exp)) {
@@ -254,7 +258,6 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
     }
   }, []);
 
-  // Socket ping to maintain connection
   const socketPing = useCallback(() => {
     if (socket && socket.connected) {
       socket.emit('ping', { userId });
@@ -266,7 +269,6 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
   }, [socket, userId]);
 
   useEffect(() => {
-    // Check if token and userId are available
     if (!token || !userId) {
       console.error('Missing token or userId');
       setError('Authentication required. Please log in again.');
@@ -274,7 +276,6 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
       return;
     }
 
-    // Check token expiration but don't clear token
     const expTime = getTokenExpiration(token);
     if (expTime && expTime < Date.now()) {
       console.warn('Token appears expired, attempting to refresh');
@@ -309,7 +310,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
     }, 2000);
 
     const handleNewPost = (post) => {
-      if (!post?.isStory && post?._id) {
+      if (!post?.isStory && post?._id && (!showUserPosts || post.userId.toString() === userId)) {
         setPosts((prev) => {
           const newPosts = [post, ...prev];
           const uniquePosts = Array.from(new Map(newPosts.map((p) => [p._id.toString(), p])).values());
@@ -321,7 +322,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
     };
 
     const handlePostUpdate = (updatedPost) => {
-      if (updatedPost?._id) {
+      if (updatedPost?._id && (!showUserPosts || updatedPost.userId.toString() === userId)) {
         setPosts((prev) => {
           const newPosts = prev.map((p) => (p._id.toString() === updatedPost._id.toString() ? { ...p, ...updatedPost } : p));
           saveToCache(newPosts, page);
@@ -399,7 +400,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
         socket.emit('leave', userId);
       }
     };
-  }, [token, userId, socket, fetchFeed, socketPing, page, saveToCache]);
+  }, [token, userId, socket, fetchFeed, socketPing, page, saveToCache, showUserPosts]);
 
   useEffect(() => {
     localStorage.setItem('feedMuted', muted);
@@ -424,7 +425,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
     if (feedElement) {
       feedElement.addEventListener('scroll', handleScroll);
       if (posts.length > 0 && currentIndex < posts.length) {
-        feedElement.scrollTo({ top: currentIndex * window.innerHeight, behavior: 'smooth' });
+        feedElement.scrollTo({ top: currentIndex * (window.innerHeight - 80), behavior: 'smooth' });
       }
     }
     return () => {
@@ -569,6 +570,15 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
     fetchFeed(1, true);
   }, [fetchFeed]);
 
+  const handleToggleUserPosts = useCallback(() => {
+    setShowUserPosts((prev) => !prev);
+    setPage(1);
+    setCurrentIndex(0);
+    setHasMore(true);
+    setPosts([]);
+    fetchFeed(1, true);
+  }, [fetchFeed]);
+
   const swipeHandlers = useSwipeable({
     onSwipedUp: () => {
       if (showComments) return;
@@ -601,7 +611,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
   );
 
   const LoadingSkeleton = () => (
-    <div className="h-screen w-full bg-gray-200 dark:bg-gray-700 animate-pulse relative snap-start md:max-w-[600px] md:h-[800px] md:rounded-lg">
+    <div className="h-[calc(100vh-80px)] w-full bg-gray-200 dark:bg-gray-700 animate-pulse relative snap-start md:max-w-[600px] md:h-[800px] md:rounded-lg">
       <div className="absolute top-4 left-4 flex items-center">
         <div className="w-10 h-10 rounded-full bg-gray-300 dark:bg-gray-600"></div>
         <div className="ml-2">
@@ -610,7 +620,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
         </div>
       </div>
       <div className="w-full h-full bg-gray-300 dark:bg-gray-600"></div>
-      <div className="absolute right-4 bottom-20 flex flex-col space-y-4">
+      <div className="absolute right-4 bottom-4 flex flex-col space-y-4">
         {[...Array(3)].map((_, i) => (
           <div key={i} className="w-8 h-8 bg-gray-300 dark:bg-gray-600 rounded-full"></div>
         ))}
@@ -625,11 +635,11 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       transition={{ duration: 0.5 }}
-      className={`h-screen overflow-y-auto bg-gray-100 dark:bg-gray-900 snap-y snap-mandatory md:max-w-[600px] md:mx-auto md:rounded-lg md:shadow-lg overscroll-y-contain ${theme === 'dark' ? 'dark' : ''}`}
+      className={`max-h-[calc(100vh-80px)] overflow-y-auto bg-gray-100 dark:bg-gray-900 snap-y snap-mandatory md:max-w-[600px] md:mx-auto md:rounded-lg md:shadow-lg overscroll-y-contain ${theme === 'dark' ? 'dark' : ''}`}
       style={{ scrollSnapType: 'y mandatory', overscrollBehaviorY: 'contain' }}
     >
       {!isAuthLoaded && (
-        <div className="h-screen flex items-center justify-center text-gray-700 dark:text-gray-300">
+        <div className="h-[calc(100vh-80px)] flex items-center justify-center text-gray-700 dark:text-gray-300">
           <p>Loading authentication...</p>
         </div>
       )}
@@ -645,6 +655,20 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
           </button>
         </div>
       )}
+      <div className="fixed top-4 right-4 z-20">
+        <motion.button
+          whileHover={{ scale: 1.1 }}
+          whileTap={{ scale: 0.9 }}
+          onClick={handleToggleUserPosts}
+          className={`p-3 rounded-full shadow-lg focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+            showUserPosts ? 'bg-gradient-to-r from-blue-500 to-purple-600 text-white' : 'bg-gray-200 dark:bg-gray-600 text-gray-900 dark:text-gray-100'
+          }`}
+          aria-label={showUserPosts ? 'Show all posts' : 'Show my posts'}
+          title={showUserPosts ? 'Show all posts' : 'Show my posts'}
+        >
+          <FaUser className="text-xl" />
+        </motion.button>
+      </div>
       <div className="fixed bottom-20 right-4 z-20">
         <motion.button
           whileHover={{ scale: 1.1, rotate: 90 }}
@@ -803,8 +827,8 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
       )}
 
       {posts.length === 0 && !loading && !refreshing ? (
-        <div className="h-screen flex items-center justify-center text-center text-gray-700 dark:text-gray-300" role="status">
-          <p className="text-lg">No posts available</p>
+        <div className="h-[calc(100vh-80px)] flex items-center justify-center text-center text-gray-700 dark:text-gray-300" role="status">
+          <p className="text-lg">{showUserPosts ? 'You have no posts yet' : 'No posts available'}</p>
         </div>
       ) : posts.length === 0 && loading ? (
         [...Array(3)].map((_, i) => <LoadingSkeleton key={i} />)
@@ -815,7 +839,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
             initial={{ opacity: 0 }}
             animate={{ opacity: index === currentIndex ? 1 : 0.5 }}
             transition={{ duration: 0.3 }}
-            className="h-screen w-full flex flex-col items-center justify-center text-gray-900 dark:text-gray-100 relative snap-start md:max-w-[600px] md:mx-auto md:h-[800px] md:rounded-lg md:shadow-lg md:bg-gray-100 dark:md:bg-gray-900"
+            className="h-[calc(100vh-80px)] w-full flex flex-col items-center justify-center text-gray-900 dark:text-gray-100 relative snap-start md:max-w-[600px] md:h-[800px] md:rounded-lg md:shadow-lg md:bg-gray-100 dark:md:bg-gray-900 px-4"
             onDoubleClick={() => handleDoubleTap(post._id.toString())}
             role="article"
             aria-labelledby={`post-${post._id}`}
@@ -843,7 +867,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
               <img
                 src={post.content}
                 alt="Post image"
-                className="w-full h-full object-cover rounded-md"
+                className="w-full max-h-[calc(100vh-200px)] object-contain rounded-md"
                 data-post-id={post._id.toString()}
                 ref={(el) => (mediaRefs.current[post._id.toString()] = el)}
                 onError={(e) => (e.target.src = 'https://placehold.co/600x400?text=Image+Error')}
@@ -851,7 +875,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
               />
             )}
             {post.contentType === 'video' && (
-              <div className="relative w-full h-full">
+              <div className="relative w-full max-h-[calc(100vh-200px)]">
                 <video
                   ref={(el) => (mediaRefs.current[post._id.toString()] = el)}
                   data-post-id={post._id.toString()}
@@ -859,7 +883,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
                   muted={muted}
                   loop
                   src={post.content}
-                  className="w-full h-full object-cover rounded-md"
+                  className="w-full max-h-[calc(100vh-200px)] object-contain rounded-md"
                   preload="auto"
                   poster="https://placehold.co/600x400?text=Video+Loading"
                   onError={() => console.warn('Video load error')}
@@ -877,7 +901,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
               </div>
             )}
             {post.contentType === 'video+audio' && (
-              <div className="relative w-full h-full">
+              <div className="relative w-full max-h-[calc(100vh-200px)]">
                 <video
                   ref={(el) => (mediaRefs.current[post._id.toString()] = el)}
                   data-post-id={post._id.toString()}
@@ -885,7 +909,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
                   muted={muted}
                   loop
                   src={post.content}
-                  className="w-full h-full object-cover rounded-md"
+                  className="w-full max-h-[calc(100vh-200px)] object-contain rounded-md"
                   preload="auto"
                   poster="https://placehold.co/600x400?text=Video+Loading"
                   onError={() => console.warn('Video load error')}
@@ -910,13 +934,13 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
               </div>
             )}
             {post.contentType === 'audio' && (
-              <div className="relative w-full h-full flex items-center justify-center">
+              <div className="relative w-full max-h-[calc(100vh-200px)] flex items-center justify-center">
                 <audio
                   ref={(el) => (mediaRefs.current[post._id.toString()] = el)}
                   data-post-id={post._id.toString()}
                   controls
                   src={post.content}
-                  className="w-full mt-2 bg-gray-300 dark:bg-gray-700 rounded-full p-2"
+                  className="w-full max-w-[80%] mt-2 bg-gray-300 dark:bg-gray-700 rounded-full p-2"
                   preload="auto"
                   onError={() => console.warn('Audio load error')}
                 />
@@ -956,7 +980,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
               )}
             </AnimatePresence>
 
-            <div className="absolute right-4 bottom-20 flex flex-col items-center space-y-6 z-10">
+            <div className="absolute right-4 bottom-4 flex flex-col items-center space-y-6 z-10">
               <div className="motion-button">
                 <button
                   onClick={() => likePost(post._id.toString())}
@@ -1027,7 +1051,7 @@ const FeedScreen = ({ token, userId, socket, onLogout, theme }) => {
                   initial={{ opacity: 0, y: 100 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: 100 }}
-                  className="fixed bottom-0 left-0 right-0 bg-white dark:bg-gray-800 p-4 rounded-t-lg shadow-lg h-1/2 overflow-y-auto z-10 md:max-w-[600px] md:mx-auto"
+                  className="fixed bottom-0 left-0 right-0 bg-white dark:bg-gray-800 p-4 rounded-t-lg shadow-lg max-h-[calc(50vh-80px)] overflow-y-auto z-10 md:max-w-[600px] md:mx-auto"
                   role="dialog"
                   aria-modal="true"
                   aria-labelledby={`comments-${post._id}`}

@@ -48,7 +48,12 @@ const logError = async (message, metadata = {}) => {
   errorEntry.count += 1;
   errorEntry.timestamps.push(now);
   errorLogTimestamps.set(message, errorEntry);
-  logger.error(message, { ...metadata, timestamp: new Date().toISOString() });
+  // Sanitize sensitive data in metadata
+  const sanitizedMetadata = {
+    ...metadata,
+    stack: metadata.stack ? metadata.stack.replace(/publicKey[^;]+|privateKey[^;]+|token[^;]+/gi, '[REDACTED]') : metadata.stack,
+  };
+  logger.error(message, { ...sanitizedMetadata, timestamp: new Date().toISOString() });
 };
 
 // Configure Cloudinary
@@ -235,7 +240,8 @@ const emitUpdatedChatList = async (io, userId, page = 0, limit = 50) => {
         .select('contacts')
         .populate({
           path: 'contacts',
-          select: 'username virtualNumber photo status lastSeen publicKey',
+          select: 'username virtualNumber photo status lastSeen', // Exclude publicKey
+          match: { _id: { $in: '$contacts' } }, // Ensure only valid contacts are populated
           options: { skip: page * limit, limit, sort: { lastSeen: -1 } },
         })
         .lean();
@@ -304,6 +310,7 @@ const emitUpdatedChatList = async (io, userId, page = 0, limit = 50) => {
             }
           : null,
         unreadCount: messageData?.unreadCount || 0,
+        ownerId: userId, // Include ownerId for client-side validation
       };
     });
     chatListCache.set(cacheKey, chatList);
@@ -354,7 +361,7 @@ module.exports = (app) => {
     try {
       const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
       const user = await retryOperation(async () => {
-        return await User.findById(decoded.id).select('_id').lean();
+        return await User.findById(decoded.id).select('_id contacts').lean();
       });
       if (!user) {
         await logError('User not found for Socket.IO', { userId: decoded.id, ip: socket.handshake.address });
@@ -367,7 +374,7 @@ module.exports = (app) => {
         await logError('Blacklisted token used for Socket.IO', { token: token.substring(0, 10) + '...', ip: socket.handshake.address });
         return next(new Error('Token invalidated'));
       }
-      socket.user = decoded;
+      socket.user = { ...decoded, contacts: user.contacts }; // Include contacts for validation
       next();
     } catch (error) {
       await logError('Socket.IO auth error', { error: error.message, stack: error.stack, ip: socket.handshake.address });
@@ -399,6 +406,7 @@ module.exports = (app) => {
         const pendingMessages = await Message.find({
           recipientId: userId,
           status: { $in: ['pending', 'sent'] },
+          senderId: { $in: socket.user.contacts }, // Only process messages from contacts
         })
           .select('senderId recipientId content contentType plaintextContent status caption replyTo originalFilename clientMessageId senderVirtualNumber senderUsername senderPhoto createdAt updatedAt')
           .lean();
@@ -437,10 +445,10 @@ module.exports = (app) => {
         await User.findByIdAndUpdate(userId, { status: 'online', lastSeen: new Date() }, { new: true }).lean();
         io.to(userId).emit('userStatus', { userId, status: 'online', lastSeen: new Date() });
         await emitUpdatedChatList(io, userId);
-        // Process queued messages
         const pendingMessages = await Message.find({
           recipientId: userId,
           status: { $in: ['pending', 'sent'] },
+          senderId: { $in: socket.user.contacts }, // Only process messages from contacts
         })
           .select('senderId recipientId content contentType plaintextContent status caption replyTo originalFilename clientMessageId senderVirtualNumber senderUsername senderPhoto createdAt updatedAt')
           .lean();
@@ -483,8 +491,13 @@ module.exports = (app) => {
     });
 
     socket.on('typing', ({ userId, recipientId }) => {
-      if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId) || userId !== socket.user.id) {
-        socket.emit('error', { message: 'Invalid typing event' });
+      if (
+        !mongoose.isValidObjectId(userId) ||
+        !mongoose.isValidObjectId(recipientId) ||
+        userId !== socket.user.id ||
+        !socket.user.contacts.some((id) => id.toString() === recipientId)
+      ) {
+        socket.emit('error', { message: 'Invalid typing event or recipient not in contacts' });
         return;
       }
       if (connectedUsers.has(recipientId)) {
@@ -493,8 +506,13 @@ module.exports = (app) => {
     });
 
     socket.on('stopTyping', ({ userId, recipientId }) => {
-      if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(recipientId) || userId !== socket.user.id) {
-        socket.emit('error', { message: 'Invalid stopTyping event' });
+      if (
+        !mongoose.isValidObjectId(userId) ||
+        !mongoose.isValidObjectId(recipientId) ||
+        userId !== socket.user.id ||
+        !socket.user.contacts.some((id) => id.toString() === recipientId)
+      ) {
+        socket.emit('error', { message: 'Invalid stopTyping event or recipient not in contacts' });
         return;
       }
       if (connectedUsers.has(recipientId)) {
@@ -522,15 +540,15 @@ module.exports = (app) => {
           senderUsername,
           senderPhoto,
         } = messageData;
-        if (senderId !== socket.user.id) {
-          await logError('Unauthorized sender', { senderId, socketUserId: socket.user.id, ip: socket.handshake.address });
-          return callback({ error: 'Unauthorized sender' });
+        if (senderId !== socket.user.id || !socket.user.contacts.some((id) => id.toString() === recipientId)) {
+          await logError('Unauthorized sender or recipient not in contacts', { senderId, socketUserId: socket.user.id, recipientId, ip: socket.handshake.address });
+          return callback({ error: 'Unauthorized sender or recipient not in contacts' });
         }
         await retryOperation(async () => {
-          const recipient = await User.findById(recipientId).select('status').lean();
-          if (!recipient) {
-            await logError('Recipient not found', { recipientId, senderId, ip: socket.handshake.address });
-            return callback({ error: 'Recipient not found' });
+          const recipient = await User.findById(recipientId).select('status contacts').lean();
+          if (!recipient || !recipient.contacts.some((id) => id.toString() === senderId)) {
+            await logError('Recipient not found or sender not in recipient contacts', { recipientId, senderId, ip: socket.handshake.address });
+            return callback({ error: 'Recipient not found or not in contacts' });
           }
           const existingMessage = await Message.findOne({ clientMessageId })
             .select('senderId recipientId content contentType plaintextContent status caption replyTo originalFilename clientMessageId senderVirtualNumber senderUsername senderPhoto createdAt updatedAt')
@@ -639,7 +657,7 @@ module.exports = (app) => {
           replyTo: populatedMessage.replyTo
             ? {
                 ...populatedMessage.replyTo,
-                senderId: populatedMessage.replyTo.senderId.toString(),
+                senderId: populatingMessage.replyTo.senderId.toString(),
                 recipientId: populatedMessage.replyTo.recipientId.toString(),
               }
             : null,
@@ -661,9 +679,9 @@ module.exports = (app) => {
         const message = await retryOperation(async () => {
           return await Message.findById(messageId);
         });
-        if (!message || message.senderId.toString() !== socket.user.id) {
-          await logError('Unauthorized to delete message', { messageId, socketUserId: socket.user.id, ip: socket.handshake.address });
-          return callback({ error: 'Unauthorized to delete message' });
+        if (!message || message.senderId.toString() !== socket.user.id || !socket.user.contacts.some((id) => id.toString() === recipientId)) {
+          await logError('Unauthorized to delete message or recipient not in contacts', { messageId, socketUserId: socket.user.id, recipientId, ip: socket.handshake.address });
+          return callback({ error: 'Unauthorized to delete message or recipient not in contacts' });
         }
         await Message.findByIdAndDelete(messageId);
         if (connectedUsers.has(recipientId)) {
@@ -688,9 +706,9 @@ module.exports = (app) => {
         const message = await retryOperation(async () => {
           return await Message.findById(messageId);
         });
-        if (!message || message.recipientId.toString() !== socket.user.id) {
-          await logError('Unauthorized status update', { messageId, socketUserId: socket.user.id, ip: socket.handshake.address });
-          socket.emit('error', { message: 'Unauthorized status update' });
+        if (!message || message.recipientId.toString() !== socket.user.id || !socket.user.contacts.some((id) => id.toString() === message.senderId.toString())) {
+          await logError('Unauthorized status update or sender not in contacts', { messageId, socketUserId: socket.user.id, ip: socket.handshake.address });
+          socket.emit('error', { message: 'Unauthorized status update or sender not in contacts' });
           return;
         }
         message.status = status;
@@ -724,8 +742,17 @@ module.exports = (app) => {
           return callback?.({ error: 'Invalid messageIds, recipientId, or status' });
         }
         await retryOperation(async () => {
+          const messages = await Message.find({ _id: { $in: messageIds }, recipientId, senderId: { $in: socket.user.contacts } })
+            .select('senderId')
+            .lean()
+            .hint({ _id: 1 });
+          if (messages.length === 0) {
+            await logError('No matching messages found for batch update', { messageIdsCount: messageIds.length, recipientId, ip: socket.handshake.address });
+            socket.emit('error', { message: 'No matching messages found' });
+            return callback?.({ error: 'No matching messages found' });
+          }
           const updateResult = await Message.updateMany(
-            { _id: { $in: messageIds }, recipientId },
+            { _id: { $in: messageIds }, recipientId, senderId: { $in: socket.user.contacts } },
             { status, updatedAt: new Date(), ...(status === 'read' ? { readAt: new Date() } : {}) },
             { wtimeout: 10000 }
           );
@@ -734,10 +761,6 @@ module.exports = (app) => {
             socket.emit('error', { message: 'No matching messages found' });
             return callback?.({ error: 'No matching messages found' });
           }
-          const messages = await Message.find({ _id: { $in: messageIds }, recipientId })
-            .select('senderId')
-            .lean()
-            .hint({ _id: 1 });
           const senderIds = [...new Set(messages.map((msg) => msg.senderId.toString()))];
           senderIds.forEach((senderId) => {
             if (connectedUsers.has(senderId)) {
@@ -765,7 +788,7 @@ module.exports = (app) => {
     });
   });
 
-  // Routes (unchanged, included for completeness)
+  // Routes
   router.get('/health', (req, res) => res.json({ status: 'healthy' }));
 
   router.get('/chat-list', authMiddleware, async (req, res) => {
@@ -786,7 +809,8 @@ module.exports = (app) => {
           .select('contacts')
           .populate({
             path: 'contacts',
-            select: 'username virtualNumber photo status lastSeen publicKey',
+            select: 'username virtualNumber photo status lastSeen', // Exclude publicKey
+            match: { _id: { $in: '$contacts' } }, // Ensure only valid contacts
             options: { skip: parseInt(page) * parseInt(limit), limit: parseInt(limit), sort: { lastSeen: -1 } },
           })
           .lean();
@@ -854,6 +878,7 @@ module.exports = (app) => {
             }
           : null,
           unreadCount: messageData?.unreadCount || 0,
+          ownerId: userId, // Include ownerId for client-side validation
         };
       });
       chatListCache.set(cacheKey, chatList);
@@ -890,10 +915,15 @@ module.exports = (app) => {
         return res.status(403).json({ error: 'Unauthorized sender' });
       }
       await retryOperation(async () => {
-        const recipient = await User.findById(recipientId).select('status').lean();
-        if (!recipient) {
-          await logError('Recipient not found (HTTP)', { recipientId, senderId, ip: req.ip });
-          return res.status(404).json({ error: 'Recipient not found' });
+        const sender = await User.findById(senderId).select('contacts virtualNumber username photo').lean();
+        if (!sender.contacts.some((id) => id.toString() === recipientId)) {
+          await logError('Recipient not in sender contacts (HTTP)', { recipientId, senderId, ip: req.ip });
+          return res.status(403).json({ error: 'Recipient not in contacts' });
+        }
+        const recipient = await User.findById(recipientId).select('status contacts').lean();
+        if (!recipient || !recipient.contacts.some((id) => id.toString() === senderId)) {
+          await logError('Recipient not found or sender not in recipient contacts (HTTP)', { recipientId, senderId, ip: req.ip });
+          return res.status(404).json({ error: 'Recipient not found or not in contacts' });
         }
         const existingMessage = await Message.findOne({ clientMessageId })
           .select('senderId recipientId content contentType plaintextContent status caption replyTo originalFilename clientMessageId senderVirtualNumber senderUsername senderPhoto createdAt updatedAt')
@@ -902,9 +932,6 @@ module.exports = (app) => {
           logger.info('Duplicate message detected (HTTP)', { clientMessageId, senderId, recipientId });
           return res.status(200).json({ message: existingMessage });
         }
-        const sender = await User.findById(senderId)
-          .select('virtualNumber username photo')
-          .lean();
         const message = new Message({
           senderId,
           recipientId,
@@ -1004,7 +1031,7 @@ module.exports = (app) => {
           ? {
               ...populatedMessage.replyTo,
               senderId: populatedMessage.replyTo.senderId.toString(),
-              recipientId: poppedMessage.replyTo.recipientId.toString(),
+              recipientId: populatedMessage.replyTo.recipientId.toString(),
             }
           : null,
       });
@@ -1030,6 +1057,11 @@ module.exports = (app) => {
         await logError('Unauthorized to delete message (HTTP)', { messageId, reqUserId: req.user._id, ip: req.ip });
         return res.status(403).json({ error: 'Unauthorized to delete message' });
       }
+      const sender = await User.findById(req.user._id).select('contacts').lean();
+      if (!sender.contacts.some((id) => id.toString() === recipientId)) {
+        await logError('Recipient not in sender contacts for delete (HTTP)', { messageId, recipientId, reqUserId: req.user._id, ip: req.ip });
+        return res.status(403).json({ error: 'Recipient not in contacts' });
+      }
       await Message.findByIdAndDelete(messageId);
       if (connectedUsers.has(recipientId)) {
         io.to(recipientId).emit('deleteMessage', { messageId, recipientId });
@@ -1050,10 +1082,15 @@ module.exports = (app) => {
         await logError('Invalid or unauthorized messages request', { userId, recipientId, reqUserId: req.user._id, ip: req.ip });
         return res.status(400).json({ error: 'Invalid or unauthorized request' });
       }
+      const user = await User.findById(userId).select('contacts').lean();
+      if (!user.contacts.some((id) => id.toString() === recipientId)) {
+        await logError('Recipient not in user contacts', { userId, recipientId, ip: req.ip });
+        return res.status(403).json({ error: 'Recipient not in contacts' });
+      }
       let query = {
         $or: [
           { senderId: userId, recipientId },
-          { senderId: recipientId, recipientId: userId },
+          { recipientId: userId, senderId: recipientId },
         ],
       };
       if (since && !isNaN(Date.parse(since))) {
@@ -1110,7 +1147,7 @@ module.exports = (app) => {
       }
       await retryOperation(async () => {
         const contact = await User.findOne({ virtualNumber })
-          .select('_id username virtualNumber photo status lastSeen publicKey')
+          .select('_id username virtualNumber photo status lastSeen contacts')
           .lean();
         if (!contact) {
           await logError('Contact not registered', { virtualNumber, userId, ip: req.ip });
@@ -1120,26 +1157,14 @@ module.exports = (app) => {
           await logError('Cannot add self as contact', { userId, ip: req.ip });
           return res.status(400).json({ error: 'Cannot add self as contact' });
         }
-        const user = await User.findById(userId).select('contacts username virtualNumber photo status lastSeen publicKey');
-        const userHasContact = user.contacts.some((id) => id.toString() === contact._id.toString());
-        const contactHasUser = contact.contacts.some((id) => id.toString() === userId);
-        if (userHasContact && contactHasUser) {
-          const contactData = {
-            id: contact._id.toString(),
-            username: contact.username || 'Unknown',
-            virtualNumber: contact.virtualNumber || '',
-            photo: contact.photo || 'https://placehold.co/40x40',
-            status: contact.status || 'offline',
-            lastSeen: contact.lastSeen || null,
-            latestMessage: null,
-            unreadCount: 0,
-          };
-          return res.status(200).json(contactData);
+        const user = await User.findById(userId).select('contacts username virtualNumber photo status lastSeen');
+        if (!user.contacts.some((id) => id.toString() === contact._id.toString())) {
+          await User.updateOne({ _id: userId }, { $addToSet: { contacts: contact._id } });
         }
-        const updates = [];
-        if (!userHasContact) updates.push(User.updateOne({ _id: userId }, { $addToSet: { contacts: contact._id } }));
-        if (!contactHasUser) updates.push(User.updateOne({ _id: contact._id }, { $addToSet: { contacts: userId } }));
-        await Promise.all(updates);
+        // Only add user to contact's contacts if they have already added the user
+        if (contact.contacts.some((id) => id.toString() === userId)) {
+          await User.updateOne({ _id: contact._id }, { $addToSet: { contacts: userId } });
+        }
         const contactData = {
           id: contact._id.toString(),
           username: contact.username || 'Unknown',
@@ -1149,6 +1174,7 @@ module.exports = (app) => {
           lastSeen: contact.lastSeen || null,
           latestMessage: null,
           unreadCount: 0,
+          ownerId: userId, // Include ownerId for client-side validation
         };
         const userData = {
           id: user._id.toString(),
@@ -1159,13 +1185,14 @@ module.exports = (app) => {
           lastSeen: user.lastSeen || null,
           latestMessage: null,
           unreadCount: 0,
+          ownerId: contact._id.toString(), // Include ownerId for contact
         };
         chatListCache.del(`chatList:${userId}`);
         chatListCache.del(`chatList:${contact._id.toString()}`);
         if (connectedUsers.has(userId)) {
           io.to(userId).emit('contactData', { userId, contactData });
         }
-        if (connectedUsers.has(contact._id.toString())) {
+        if (connectedUsers.has(contact._id.toString()) && contact.contacts.some((id) => id.toString() === userId)) {
           io.to(contact._id.toString()).emit('contactData', { userId: contact._id.toString(), contactData: userData });
         }
         await Promise.all([emitUpdatedChatList(io, userId), emitUpdatedChatList(io, contact._id.toString())]);
@@ -1185,10 +1212,15 @@ module.exports = (app) => {
         return res.status(400).json({ error: 'Invalid or unauthorized parameters' });
       }
       await retryOperation(async () => {
-        const recipient = await User.findById(recipientId).select('status').lean();
-        if (!recipient) {
-          await logError('Recipient not found for upload', { recipientId, userId, ip: req.ip });
-          return res.status(404).json({ error: 'Recipient not found' });
+        const sender = await User.findById(userId).select('contacts virtualNumber username photo').lean();
+        if (!sender.contacts.some((id) => id.toString() === recipientId)) {
+          await logError('Recipient not in sender contacts for upload', { recipientId, userId, ip: req.ip });
+          return res.status(403).json({ error: 'Recipient not in contacts' });
+        }
+        const recipient = await User.findById(recipientId).select('status contacts').lean();
+        if (!recipient || !recipient.contacts.some((id) => id.toString() === userId)) {
+          await logError('Recipient not found or sender not in recipient contacts for upload', { recipientId, userId, ip: req.ip });
+          return res.status(404).json({ error: 'Recipient not found or not in contacts' });
         }
         const existingMessage = await Message.findOne({ clientMessageId })
           .select('senderId recipientId content contentType plaintextContent status caption replyTo originalFilename clientMessageId senderVirtualNumber senderUsername senderPhoto createdAt updatedAt')
@@ -1207,9 +1239,6 @@ module.exports = (app) => {
           );
           require('stream').Readable.from(req.file.buffer).pipe(uploadStream);
         });
-        const sender = await User.findById(userId)
-          .select('virtualNumber username photo')
-          .lean();
         const message = new Message({
           senderId: userId,
           recipientId,
@@ -1234,7 +1263,7 @@ module.exports = (app) => {
           io.to(recipientId).emit('message', {
             ...populatedMessage,
             senderId: populatedMessage.senderId.toString(),
-            recipientId: poppedMessage.recipientId.toString(),
+            recipientId: populatedMessage.recipientId.toString(),
             replyTo: populatedMessage.replyTo
               ? {
                   ...populatedMessage.replyTo,
@@ -1275,18 +1304,23 @@ module.exports = (app) => {
       }
       await retryOperation(async () => {
         await TokenBlacklist.create({ token });
+        // Invalidate all tokens for the user
+        await TokenBlacklist.deleteMany({ userId: req.user._id });
+        await TokenBlacklist.create({ token, userId: req.user._id });
         const sockets = await io.in(req.user.id).fetchSockets();
         sockets.forEach((socket) => socket.disconnect(true));
         await User.findByIdAndUpdate(req.user.id, { status: 'offline', lastSeen: new Date() });
         io.to(req.user.id).emit('userStatus', { userId: req.user.id, status: 'offline', lastSeen: new Date() });
         connectedUsers.delete(req.user.id);
+        // Clear cache for the user
+        chatListCache.del(`chatList:${req.user.id}`);
       });
       logger.info('Logout successful', { userId: req.user.id, ip: req.ip });
       res.status(200).json({ message: 'Logged out successfully' });
     } catch (error) {
       await logError('Logout error', { error: error.message, userId: req.user?.id, stack: error.stack, ip: req.ip });
       try {
-        await TokenBlacklist.create({ token: req.token });
+        await TokenBlacklist.create({ token: req.token, userId: req.user._id });
       } catch (blacklistErr) {
         await logError('Failed to blacklist token during logout', { error: blacklistErr.message, userId: req.user?.id, ip: req.ip });
       }
@@ -1297,7 +1331,7 @@ module.exports = (app) => {
   router.post('/log-error', async (req, res) => {
     try {
       const { error, stack, userId, route, timestamp } = req.body;
-      await logError('Client-side error', { error, stack, userId, route, timestamp, ip: req.ip });
+      await logError('Client-side error', { error, stack: stack.replace(/publicKey[^;]+|privateKey[^;]+|token[^;]+/gi, '[REDACTED]'), userId, route, timestamp, ip: req.ip });
       res.status(200).json({ message: 'Error logged successfully' });
     } catch (err) {
       await logError('Failed to log client error', { error: err.message, stack: err.stack, ip: req.ip });
