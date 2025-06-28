@@ -134,6 +134,8 @@ const getTokenExpiration = (token) => {
 
 const errorLogTimestamps = [];
 const maxLogsPerMinute = 5;
+
+
 const logClientError = async (message, error, userId = null) => {
   const now = Date.now();
   errorLogTimestamps.length = errorLogTimestamps.filter((ts) => now - ts < 60 * 1000).length;
@@ -153,9 +155,11 @@ const logClientError = async (message, error, userId = null) => {
             navigatorOnline: navigator.onLine,
             currentPath: window.location.pathname,
             errorDetails: error?.stack || error?.message,
+            socketConnected: socketRef.current?.connected || false,
+            attempt: i + 1,
           }),
         },
-        { timeout: 5000 }
+        { timeout: 10000 } // Increased timeout for error logging
       );
       return;
     } catch (err) {
@@ -167,6 +171,8 @@ const logClientError = async (message, error, userId = null) => {
     }
   }
 };
+
+
 
 const App = () => {
   const dispatch = useDispatch();
@@ -272,58 +278,66 @@ const App = () => {
     }
   }, [userId, token, navigate, dispatch, clearLocalStorage]);
 
+
+
+
   const refreshToken = useCallback(async (currentToken, currentUserId) => {
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        if (!navigator.onLine) {
-          throw new Error('Offline: Cannot refresh token');
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      if (!navigator.onLine) {
+        throw new Error('Offline: Cannot refresh token');
+      }
+      if (!currentToken || !currentUserId) {
+        throw new Error('Missing token or userId');
+      }
+      const response = await axios.post(
+        `${BASE_URL}/auth/refresh`,
+        { userId: currentUserId },
+        {
+          headers: { Authorization: `Bearer ${currentToken}` },
+          timeout: 10000, // Increased timeout
         }
-        if (!currentToken || !currentUserId) {
-          throw new Error('Missing token or userId');
-        }
-        const response = await axios.post(
-          `${BASE_URL}/auth/refresh`,
-          { userId: currentUserId },
-          {
-            headers: { Authorization: `Bearer ${currentToken}` },
-            timeout: 5000,
-          }
-        );
-        const { token: newToken, userId: newUserId, role: newRole, virtualNumber, username, photo, privateKey } = response.data;
-        dispatch(setAuth({
-          token: newToken,
-          userId: newUserId,
-          role: Number(newRole) || 0,
-          photo: photo || 'https://via.placeholder.com/64',
-          virtualNumber: virtualNumber || null,
-          username: username || null,
-          privateKey: privateKey || null,
-        }));
-        localStorage.setItem('token', newToken);
-        localStorage.setItem('userId', newUserId);
-        localStorage.setItem('role', newRole || '0');
-        localStorage.setItem('photo', photo || 'https://via.placeholder.com/64');
-        localStorage.setItem('virtualNumber', virtualNumber || '');
-        localStorage.setItem('username', username || '');
-        localStorage.setItem('privateKey', privateKey || '');
-        console.log('Token refresh successful:', response.data);
-        return newToken;
-      } catch (error) {
-        console.error(`Token refresh attempt ${attempt} failed: ${error.message}`, error.response?.data);
-        logClientError(`Token refresh failed: ${attempt}`, error, currentUserId);
-        if (error.response?.status === 404) {
-          console.error('Token refresh endpoint not found. Please check server configuration.');
-          setError('Authentication service unavailable. Please log in again.');
-          return null;
-        }
-        if (attempt < 3 && (error.response?.status === 429 || error.response?.status >= 500 || error.code === 'ECONNABORTED' || !navigator.onLine)) {
-          await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * 1000));
-          continue;
-        }
+      );
+      const { token: newToken, userId: newUserId, role: newRole, virtualNumber, username, photo, privateKey } = response.data;
+      dispatch(setAuth({
+        token: newToken,
+        userId: newUserId,
+        role: Number(newRole) || 0,
+        photo: photo || 'https://via.placeholder.com/64',
+        virtualNumber: virtualNumber || null,
+        username: username || null,
+        privateKey: privateKey || null,
+      }));
+      localStorage.setItem('token', newToken);
+      localStorage.setItem('userId', newUserId);
+      localStorage.setItem('role', newRole || '0');
+      localStorage.setItem('photo', photo || 'https://via.placeholder.com/64');
+      localStorage.setItem('virtualNumber', virtualNumber || '');
+      localStorage.setItem('username', username || '');
+      localStorage.setItem('privateKey', privateKey || '');
+      console.log('Token refresh successful:', { userId: newUserId, role: newRole });
+      return newToken;
+    } catch (error) {
+      console.error(`Token refresh attempt ${attempt} failed: ${error.message}`, error.response?.data);
+      logClientError(`Token refresh failed: ${attempt}`, error, currentUserId);
+      if (error.response?.status === 404) {
+        console.error('Token refresh endpoint not found. Please check server configuration.');
+        setError('Authentication service unavailable. Please log in again.');
         return null;
       }
+      if (attempt < 3 && (error.response?.status === 429 || error.response?.status >= 500 || error.code === 'ECONNABORTED' || !navigator.onLine)) {
+        await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * 1000));
+        continue;
+      }
+      return null;
     }
-  }, [dispatch]);
+  }
+}, [dispatch]);
+
+
+
+
+
 
   useEffect(() => {
     if (isNavigating && location.pathname === '/login') {
@@ -335,219 +349,240 @@ const App = () => {
       return;
     }
 
-    const connectSocket = (attempt = 0) => {
-      if (socketRef.current || !navigator.onLine || attempt > maxReconnectAttempts) {
-        if (attempt > maxReconnectAttempts) {
-          setError('Failed to connect to server after retries');
-          logClientError('Max socket reconnect attempts reached', new Error('Socket connection failed'), userId);
-        }
+
+
+
+
+    // Inside the connectSocket function, replace the entire socket event handling section
+const connectSocket = (attempt = 0) => {
+  if (socketRef.current || !navigator.onLine || attempt > maxReconnectAttempts) {
+    if (attempt > maxReconnectAttempts) {
+      setError('Failed to connect to server after retries');
+      logClientError('Max socket reconnect attempts reached', new Error('Socket connection failed'), userId);
+    }
+    return () => {};
+  }
+
+  const connect = async () => {
+    const expTime = getTokenExpiration(token);
+    if (expTime && expTime < Date.now() + 60 * 1000) {
+      const newToken = await refreshToken(token, userId);
+      if (!newToken) {
+        setError('Authentication error, please try again later');
+        await handleLogout();
         return () => {};
       }
+    }
 
-      const connect = async () => {
-        const expTime = getTokenExpiration(token);
-        if (expTime && expTime < Date.now() + 60 * 1000) {
-          const newToken = await refreshToken(token, userId);
-          if (!newToken) {
-            setError('Authentication error, please try again later');
-            await handleLogout();
-            return () => {};
-          }
-        }
+    const newSocket = io(BASE_URL, {
+      auth: { token, userId },
+      transports: ['websocket', 'polling'],
+      reconnection: true,
+      reconnectionAttempts: maxReconnectAttempts,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: maxDelay,
+      randomizationFactor: 0.5,
+      timeout: 10000,
+    });
 
-        const newSocket = io(BASE_URL, {
-          auth: { token, userId },
-          transports: ['websocket', 'polling'],
-          reconnection: true,
-          reconnectionAttempts: maxReconnectAttempts,
-          reconnectionDelay: 1000,
-          reconnectionDelayMax: maxDelay,
-          randomizationFactor: 0.5,
-          timeout: 10000,
-        });
+    socketRef.current = newSocket;
 
-        socketRef.current = newSocket;
+    const handleConnect = () => {
+      console.log('Socket connected successfully');
+      newSocket.emit('join', userId);
+      attemptRef.current = 0;
+      setError(null);
+      setSocket(newSocket);
 
-        const handleConnect = () => {
-          console.log('Socket connected successfully');
-          newSocket.emit('join', userId);
-          attemptRef.current = 0;
-          setError(null);
-          setSocket(newSocket);
-
-          const queuedMessages = Object.keys(localStorage)
-            .filter((key) => key.startsWith('queuedMessage:'))
-            .map((key) => JSON.parse(localStorage.getItem(key)));
-          if (queuedMessages.length > 0) {
-            console.log('Replaying queued messages:', queuedMessages.length);
-            let retryCount = 0;
-            const maxMessageRetries = 3;
-
-            const sendMessageWithRetry = async (messageData, attempt = 1) => {
-              newSocket.emit('message', {
-                senderId: messageData.senderId,
-                recipientId: messageData.recipientId,
-                content: messageData.content || '',
-                contentType: messageData.contentType || 'text',
-                clientMessageId: messageData.clientMessageId,
-                senderVirtualNumber: messageData.senderVirtualNumber,
-                senderUsername: messageData.senderUsername,
-                senderPhoto: messageData.senderPhoto,
-              }, async (ack) => {
-                if (ack?.error) {
-                  console.error(`Failed to send queued message (attempt ${attempt}): ${ack.error}`);
-                  if (ack.error.includes('Unauthorized') && attempt < maxMessageRetries) {
-                    const newToken = await refreshToken(token, userId);
-                    if (!newToken) {
-                      setError('Authentication error, please try again later');
-                      await handleLogout();
-                      return;
-                    }
-                    setTimeout(() => sendMessageWithRetry(messageData, attempt + 1), 1000 * attempt);
-                  } else {
-                    dispatch(updateMessageStatus({ 
-                      recipientId: messageData.recipientId, 
-                      messageId: messageData.clientMessageId, 
-                      status: 'failed' 
-                    }));
-                  }
-                } else {
-                  dispatch(replaceMessage({ 
-                    recipientId: messageData.recipientId, 
-                    message: { ...ack.message, plaintextContent: messageData.plaintextContent }, 
-                    replaceId: messageData.clientMessageId 
-                  }));
-                  dispatch(updateMessageStatus({ 
-                    recipientId: messageData.recipientId, 
-                    messageId: ack.message._id, 
-                    status: 'sent' 
-                  }));
-                  localStorage.removeItem(`queuedMessage:${messageData.clientMessageId}`);
+      // Replay queued messages
+      const queuedMessages = Object.keys(localStorage)
+        .filter((key) => key.startsWith('queuedMessage:'))
+        .map((key) => JSON.parse(localStorage.getItem(key)));
+      if (queuedMessages.length > 0) {
+        console.log('Replaying queued messages:', queuedMessages.length);
+        const sendMessageWithRetry = async (messageData, attempt = 1) => {
+          newSocket.emit('message', {
+            senderId: messageData.senderId,
+            recipientId: messageData.recipientId,
+            content: messageData.content || '',
+            contentType: messageData.contentType || 'text',
+            clientMessageId: messageData.clientMessageId,
+            senderVirtualNumber: messageData.senderVirtualNumber,
+            senderUsername: messageData.senderUsername,
+            senderPhoto: messageData.senderPhoto,
+          }, async (ack) => {
+            if (ack?.error) {
+              console.error(`Failed to send queued message (attempt ${attempt}): ${ack.error}`);
+              if (ack.error.includes('Unauthorized') && attempt < 3) {
+                const newToken = await refreshToken(token, userId);
+                if (!newToken) {
+                  setError('Authentication error, please try again later');
+                  await handleLogout();
+                  return;
                 }
-              });
-            };
-
-            queuedMessages.forEach((messageData, index) => {
-              setTimeout(() => sendMessageWithRetry(messageData), index * 500);
-            });
-          }
-
-          pingIntervalRef.current = setInterval(() => {
-            if (newSocket.connected) {
-              newSocket.emit('ping', { userId });
-              console.log('Ping sent to server');
-            }
-          }, 30000);
-        };
-
-        const handleConnectError = async (error) => {
-          console.error('Socket connect error:', error.message);
-          logClientError('Socket connect error', error, userId);
-          if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
-            setError('Session expired. Attempting to reconnect...');
-            const newToken = await refreshToken(token, userId);
-            if (!newToken) {
-              setError('Authentication error, please try again later');
-              await handleLogout();
+                setTimeout(() => sendMessageWithRetry(messageData, attempt + 1), 1000 * attempt);
+              } else {
+                dispatch(updateMessageStatus({ 
+                  recipientId: messageData.recipientId, 
+                  messageId: messageData.clientMessageId, 
+                  status: 'failed' 
+                }));
+              }
             } else {
-              connectSocket(attempt + 1);
+              dispatch(replaceMessage({ 
+                recipientId: messageData.recipientId, 
+                message: { ...ack.message, plaintextContent: messageData.plaintextContent }, 
+                replaceId: messageData.clientMessageId 
+              }));
+              dispatch(updateMessageStatus({ 
+                recipientId: messageData.recipientId, 
+                messageId: ack.message._id, 
+                status: 'sent' 
+              }));
+              localStorage.removeItem(`queuedMessage:${messageData.clientMessageId}`);
             }
-          } else if (error.message.includes('xhr poll error') || error.message.includes('timeout')) {
-            setError('Server is temporarily unavailable. Retrying...');
-            attemptRef.current = attempt + 1;
-            const delay = Math.min(Math.pow(2, attempt) * 1000 * (1 + Math.random() * 0.2), maxDelay);
-            setTimeout(() => connectSocket(attempt + 1), delay);
-          } else {
-            setError('Failed to connect to server. Please check your connection.');
-            attemptRef.current = attempt + 1;
-            const delay = Math.min(Math.pow(2, attempt) * 1000 * (1 + Math.random() * 0.2), maxDelay);
-            setTimeout(() => connectSocket(attempt + 1), delay);
-          }
+          });
         };
 
-        const handleDisconnect = (reason) => {
-          console.warn('Socket disconnected:', reason);
-          logClientError(`Socket disconnected: ${reason}`, new Error(reason), userId);
-          if (reason === 'io server disconnect' || reason === 'transport close' || reason === 'ping timeout') {
-            if (navigator.onLine) {
-              console.log(`Attempting to reconnect (attempt ${attemptRef.current + 1}/${maxReconnectAttempts})`);
-            } else {
-              setError('Offline: Messages will be sent when reconnected');
-            }
-          }
-          setSocket(null);
-        };
+        queuedMessages.forEach((messageData, index) => {
+          setTimeout(() => sendMessageWithRetry(messageData), index * 500);
+        });
+      }
 
-        const handleMessage = (msg) => {
-          if (!msg.senderId || !msg.recipientId) {
-            console.warn('Invalid message payload:', msg);
-            return;
-          }
-          if (msg.recipientId === userId && (!selectedChat || selectedChat !== msg.senderId)) {
-            setChatNotifications((prev) => prev + 1);
-          }
-        };
+      // Request chat list update on connect
+      newSocket.emit('requestChatList', { userId });
 
-        const handleNewContact = (contactData) => {
-          if (!contactData?.id) {
-            console.warn('Invalid contact data:', contactData);
-            return;
-          }
-        };
-
-        newSocket.on('connect', handleConnect);
-        newSocket.on('connect_error', handleConnectError);
-        newSocket.on('disconnect', handleDisconnect);
-        newSocket.on('message', handleMessage);
-        newSocket.on('newContact', handleNewContact);
-
-        const handleOnline = () => {
-          if (!socketRef.current || !socketRef.current.connected) {
-            console.log('Network online, attempting to reconnect socket');
-            newSocket.connect();
-          }
-        };
-
-        const handleOffline = () => {
-          console.warn('Offline: Socket disconnected');
-          setError('Offline: Messages will be sent when reconnected');
-          if (socketRef.current) {
-            socketRef.current.disconnect();
-            socketRef.current = null;
-            setSocket(null);
-          }
-        };
-
-        window.addEventListener('online', handleOnline);
-        window.addEventListener('offline', handleOffline);
-
-        return () => {
-          newSocket.emit('leave', userId);
-          newSocket.off('connect', handleConnect);
-          newSocket.off('connect_error', handleConnectError);
-          newSocket.off('disconnect', handleDisconnect);
-          newSocket.off('message', handleMessage);
-          newSocket.off('newContact', handleNewContact);
-          newSocket.disconnect();
-          window.removeEventListener('online', handleOnline);
-          window.removeEventListener('offline', handleOffline);
-          socketRef.current = null;
-          setSocket(null);
-          if (pingIntervalRef.current) {
-            clearInterval(pingIntervalRef.current);
-            pingIntervalRef.current = null;
-          }
-        };
-      };
-
-      const timeoutId = setTimeout(() => {
-        connect();
-      }, attempt * 1000);
-
-      return () => {
-        clearTimeout(timeoutId);
-      };
+      pingIntervalRef.current = setInterval(() => {
+        if (newSocket.connected) {
+          newSocket.emit('ping', { userId });
+          console.log('Ping sent to server');
+        }
+      }, 30000);
     };
+
+    const handleConnectError = async (error) => {
+      console.error('Socket connect error:', error.message);
+      logClientError('Socket connect error', error, userId);
+      if (error.message.includes('invalid token') || error.message.includes('No token provided')) {
+        setError('Session expired. Attempting to reconnect...');
+        const newToken = await refreshToken(token, userId);
+        if (!newToken) {
+          setError('Authentication error, please try again later');
+          await handleLogout();
+        } else {
+          connectSocket(attempt + 1);
+        }
+      } else if (error.message.includes('xhr poll error') || error.message.includes('timeout')) {
+        setError('Server is temporarily unavailable. Retrying...');
+        attemptRef.current = attempt + 1;
+        const delay = Math.min(Math.pow(2, attempt) * 1000 * (1 + Math.random() * 0.2), maxDelay);
+        setTimeout(() => connectSocket(attempt + 1), delay);
+      } else {
+        setError('Failed to connect to server. Please check your connection.');
+        attemptRef.current = attempt + 1;
+        const delay = Math.min(Math.pow(2, attempt) * 1000 * (1 + Math.random() * 0.2), maxDelay);
+        setTimeout(() => connectSocket(attempt + 1), delay);
+      }
+    };
+
+    const handleDisconnect = (reason) => {
+      console.warn('Socket disconnected:', reason);
+      logClientError(`Socket disconnected: ${reason}`, new Error(reason), userId);
+      if (reason === 'io server disconnect' || reason === 'transport close' || reason === 'ping timeout') {
+        if (navigator.onLine) {
+          console.log(`Attempting to reconnect (attempt ${attemptRef.current + 1}/${maxReconnectAttempts})`);
+        } else {
+          setError('Offline: Messages and updates will sync when reconnected');
+        }
+      }
+      setSocket(null);
+    };
+
+    const handleMessage = (msg) => {
+      if (!msg.senderId || !msg.recipientId) {
+        console.warn('Invalid message payload:', msg);
+        return;
+      }
+      if (msg.recipientId === userId && (!selectedChat || selectedChat !== msg.senderId)) {
+        setChatNotifications((prev) => prev + 1);
+      }
+    };
+
+    const handleNewContact = (contactData) => {
+      if (!contactData?.id) {
+        console.warn('Invalid contact data:', contactData);
+        return;
+      }
+      console.log('New contact added:', contactData);
+      // Trigger chat list fetch after new contact
+      newSocket.emit('requestChatList', { userId });
+    };
+
+    const handleChatListUpdated = ({ users, page = 0, limit = 50 }) => {
+      console.log('Received chatListUpdated event:', { users, page, limit });
+      if (!Array.isArray(users)) {
+        console.warn('Invalid chat list data:', users);
+        return;
+      }
+      dispatch(setChatList(users));
+    };
+
+    newSocket.on('connect', handleConnect);
+    newSocket.on('connect_error', handleConnectError);
+    newSocket.on('disconnect', handleDisconnect);
+    newSocket.on('message', handleMessage);
+    newSocket.on('newContact', handleNewContact);
+    newSocket.on('chatListUpdated', handleChatListUpdated);
+
+    const handleOnline = () => {
+      if (!socketRef.current || !socketRef.current.connected) {
+        console.log('Network online, attempting to reconnect socket');
+        newSocket.connect();
+      }
+    };
+
+    const handleOffline = () => {
+      console.warn('Offline: Socket disconnected');
+      setError('Offline: Messages and updates will sync when reconnected');
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+        socketRef.current = null;
+        setSocket(null);
+      }
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      newSocket.emit('leave', userId);
+      newSocket.off('connect', handleConnect);
+      newSocket.off('connect_error', handleConnectError);
+      newSocket.off('disconnect', handleDisconnect);
+      newSocket.off('message', handleMessage);
+      newSocket.off('newContact', handleNewContact);
+      newSocket.off('chatListUpdated', handleChatListUpdated);
+      newSocket.disconnect();
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+      socketRef.current = null;
+      setSocket(null);
+      if (pingIntervalRef.current) {
+        clearInterval(pingIntervalRef.current);
+        pingIntervalRef.current = null;
+      }
+    };
+  };
+
+  const timeoutId = setTimeout(() => {
+    connect();
+  }, attempt * 1000);
+
+  return () => {
+    clearTimeout(timeoutId);
+  };
+};
+
 
     const cleanup = connectSocket(0);
 
